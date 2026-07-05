@@ -54,3 +54,20 @@
 {"t": 1783280248.671, "route": "full:SIMPLE.ungrounded", "latency_ms": 77743.1, "query": "how many unicorns are in the stable"}
 {"t": 1783280505.998, "route": "full:SIMPLE.ungrounded", "latency_ms": 92041.6, "query": "how many unicorns are in the stable"}
 {"t": 1783280675.356, "route": "full:SIMPLE", "latency_ms": 86605.2, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783280741.402, "route": "cache", "latency_ms": 11332.2, "query": "how many users are there", "table": "(cached)", "rows": 1}
+{"t": 1783280862.02, "route": "full:SIMPLE", "latency_ms": 120512.8, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783280864.73, "route": "metric.count", "latency_ms": 2565.4, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783280867.822, "route": "metric.count", "latency_ms": 3061.1, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783280872.355, "route": "metric.count", "latency_ms": 4442.8, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783280874.485, "route": "metric.count", "latency_ms": 2066.3, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783280947.974, "route": "full:SIMPLE.ungrounded", "latency_ms": 73461.2, "query": "how many unicorns are in the stable"}
+{"t": 1783281182.598, "route": "full:SIMPLE.ungrounded", "latency_ms": 76662.7, "query": "how many unicorns are in the stable"}
+{"t": 1783281346.291, "route": "full:SIMPLE", "latency_ms": 8731.1, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
+{"t": 1783281353.364, "route": "full:SIMPLE", "latency_ms": 7005.1, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
+{"t": 1783282188.594, "route": "full:SIMPLE", "latency_ms": 120614.0, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783282233.926, "route": "full:SIMPLE", "latency_ms": 44742.5, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783282236.853, "route": "metric.count", "latency_ms": 2842.5, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783282238.446, "route": "metric.count", "latency_ms": 1560.1, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783282241.216, "route": "metric.count", "latency_ms": 2750.4, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783282242.488, "route": "metric.count", "latency_ms": 1235.1, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783282251.656, "route": "full:SIMPLE", "latency_ms": 9154.5, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}

@@ -310,20 +310,27 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
     t_total     = time.time()
     logger.info("=== Ingestion pipeline started: source_id=%s ===", source_id)
 
-    def _biencoder_embeddings_exist() -> bool:
-        """True if the BGE store already has rows — lets a resumed run skip re-embedding."""
+    # Resume (§4.2a/P8-B5): VEDA_RESUME=1 makes each EXPENSIVE stage skip when its persisted
+    # output already exists, while the fast prep stages always re-run to rebuild the in-memory
+    # context. A resumed job thus continues from the first stage whose output is missing.
+    _resume = os.environ.get("VEDA_RESUME") == "1"
+
+    def _table_has_rows(table: str) -> bool:
         try:
-            from config import BIENCODER_COL_TABLE
             from ingestion.db_abstraction import get_internal_connection, release_internal_connection
             conn = get_internal_connection()
             try:
                 with conn.cursor() as cur:
-                    cur.execute(f"SELECT 1 FROM {BIENCODER_COL_TABLE} LIMIT 1")
+                    cur.execute(f"SELECT 1 FROM {table} LIMIT 1")
                     return cur.fetchone() is not None
             finally:
                 release_internal_connection(conn)
         except Exception:
             return False
+
+    def _biencoder_embeddings_exist() -> bool:
+        from config import BIENCODER_COL_TABLE
+        return _table_has_rows(BIENCODER_COL_TABLE)
 
     # --- Step 1: Schema simulation ---
     _step(1, total_steps, "Schema Scanner (real schema)")
@@ -623,10 +630,7 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
     # and the live store falls back to structural strings. Non-fatal: if Qwen/Ollama
     # is unavailable the biencoder still populates _v2 with structural fallback text.
     from config import SEMANTIC_LAYER_V2_ENABLED, SEMANTIC_MODEL_FILE as _SMF
-    # Resume-skip (§4.2a/P8-B5): on a resumed job, skip this expensive LLM stage if its
-    # persisted output (the semantic model file) already exists. The fast prep stages above
-    # always re-run to rebuild the in-memory context; only the costly stages are skipped.
-    _resume = os.environ.get("VEDA_RESUME") == "1"
+    # Resume-skip: skip this expensive LLM stage if its output (the semantic model file) exists.
     if _resume and os.path.exists(_SMF):
         print(f"  [9b/{total_steps}] Semantic Layer v2 — SKIPPED (resume: semantic model exists)")
         context["semantic_model"] = None

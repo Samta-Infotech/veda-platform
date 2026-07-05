@@ -22,14 +22,17 @@ import os
 import sys
 
 # Representative set spanning ladder rungs AND terminal statuses: answered (direct count,
-# aggregate) + likely refusals (nonsense table, ungrounded filter) so parity covers the
-# firewall/refuse path (§17 escalation + firewall parity rows), not just answered.
+# aggregate) + a DETERMINISTIC ungrounded refusal ("mood is turquoise" → 0 rows) so parity
+# covers the firewall/refuse path (§17). NOTE: pure-nonsense queries near real table names
+# (e.g. "unicorns in the stable" → fuzzy-matches "state") are NON-DETERMINISTIC in the engine
+# itself — the same query anchors to different wrong tables run-to-run at the adaptive-cutoff
+# threshold — so they are unsuitable as a parity fixture (parity needs a deterministic
+# reference, same principle as §7.1's unordered-LIMIT carve-out). Excluded deliberately.
 QUERIES = [
     "how many users are there",
     "how many change requests are there",
     "count annotations",
-    "how many unicorns are in the stable",          # no_table / refuse
-    "list customers whose mood is turquoise",        # ungrounded value → refuse
+    "list customers whose mood is turquoise",        # ungrounded value → deterministic 0-row refuse
 ]
 
 
@@ -37,6 +40,32 @@ def _reset_engine_sm():
     import veda_hybrid
     veda_hybrid._SM["sm"] = None
     veda_hybrid._SM["cols"] = None
+
+
+def _clear_caches():
+    """Clear BOTH verified caches so legacy (file) and migrated (Django) start identical —
+    otherwise a stale entry in either makes a query resolve via cache in one mode only,
+    producing a spurious 'rung (cached) != ...' diff. Cache behaviour is tested separately."""
+    import os
+    # file cache (legacy path)
+    try:
+        from veda.cache import VERIFIED_FILE
+        if os.path.exists(VERIFIED_FILE):
+            os.remove(VERIFIED_FILE)
+    except Exception:
+        pass
+    # Django pgvector cache (migrated path)
+    try:
+        import psycopg2
+        c = psycopg2.connect(host=os.environ.get("PGBOUNCER_HOST", "pgbouncer"),
+                             port=int(os.environ.get("PGBOUNCER_PORT", "6432")),
+                             dbname="veda", user=os.environ.get("POSTGRES_USER", "veda"),
+                             password=os.environ.get("POSTGRES_PASSWORD", "change-me"))
+        c.autocommit = True
+        c.cursor().execute("DELETE FROM substrate_verifiedquerycache")
+        c.close()
+    except Exception:
+        pass
 
 
 def _extract(mr):
@@ -115,6 +144,7 @@ def main():
 
     for q in QUERIES:
         print(f"\n=== query: {q!r} ===")
+        _clear_caches()   # both modes start with an empty verified cache (fair diff)
 
         # LEGACY: on-disk sm, engine FK store (no request context set).
         os.environ["VEDA_SM_REDIS"] = "0"

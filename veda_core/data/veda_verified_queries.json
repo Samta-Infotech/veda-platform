@@ -1,6 +1,0 @@
-[
-  {
-    "query": "how many users are there",
-    "sql": "SELECT COUNT(user_id) AS total_users FROM user LIMIT 100"
-  }
-]
