@@ -1,0 +1,23 @@
+# inference/ (ASGI query/retrieval service — warm-loads BGE-M3, reranker, MiniLM,
+# the 5-signal engine, and veda_core) — pip install -r requirements/inference.txt
+#
+# ML deps carried over verbatim from the POC's requirements.txt, plus the ASGI/serving
+# stack needed to run inference as a standalone process (migration_plan.md §1.3, §8).
+
+numpy<2
+torch
+transformers
+torch-geometric
+sentence-transformers
+scikit-learn
+kuzu
+dateparser
+
+fastapi
+uvicorn[standard]
+anyio
+psycopg2-binary
+redis
+langgraph
+langchain-core
+sqlglot

@@ -1,0 +1,261 @@
+{
+  "version": "1.0",
+  "kind": "metrics",
+  "source_hash": "00cc4542aaa22b2a",
+  "count": 8,
+  "items": {
+    "annotation_record_count": {
+      "metric_id": "annotation_record_count",
+      "kind": "COUNT",
+      "labels": [
+        "annotation record count",
+        "number of annotation record",
+        "count of annotation record",
+        "how many annotation record",
+        "total annotation record",
+        "number of annotation",
+        "count of annotation",
+        "how many annotation",
+        "total annotation",
+        "number of record",
+        "count of record",
+        "how many record",
+        "total record"
+      ],
+      "entity_concept": "annotation_record",
+      "expression": "COUNT(*)",
+      "source_table": "annotation_record",
+      "grain": "annotation_record.*",
+      "grain_suspect": false,
+      "entity_key_candidate": null,
+      "soft_delete_filter": "\"deleted_datetime\" IS NULL",
+      "default_filters": [],
+      "allowed_dimensions": [
+        "annotation_record.object_type",
+        "annotation_record.annotation_type",
+        "annotation_record.editor_name"
+      ],
+      "allowed_time_dimension": "annotation_record.created_datetime",
+      "aggregation": "COUNT",
+      "fanout_safe": true
+    },
+    "change_request_count": {
+      "metric_id": "change_request_count",
+      "kind": "COUNT",
+      "labels": [
+        "change request count",
+        "number of change request",
+        "count of change request",
+        "how many change request",
+        "total change request",
+        "number of change",
+        "count of change",
+        "how many change",
+        "total change",
+        "number of request",
+        "count of request",
+        "how many request",
+        "total request"
+      ],
+      "entity_concept": "change_request",
+      "expression": "COUNT(DISTINCT change_request.id)",
+      "source_table": "change_request",
+      "grain": "change_request.id",
+      "grain_suspect": false,
+      "entity_key_candidate": null,
+      "soft_delete_filter": "\"is_deleted\" = false",
+      "default_filters": [],
+      "allowed_dimensions": [
+        "change_request.object_type",
+        "change_request.is_deleted"
+      ],
+      "allowed_time_dimension": "change_request.created_datetime",
+      "aggregation": "COUNT_DISTINCT",
+      "fanout_safe": true
+    },
+    "checklist_count": {
+      "metric_id": "checklist_count",
+      "kind": "COUNT",
+      "labels": [
+        "checklist count",
+        "number of checklist",
+        "count of checklist",
+        "how many checklist",
+        "total checklist"
+      ],
+      "entity_concept": "checklist",
+      "expression": "COUNT(DISTINCT checklist.id)",
+      "source_table": "checklist",
+      "grain": "checklist.id",
+      "grain_suspect": false,
+      "entity_key_candidate": null,
+      "soft_delete_filter": "\"deleted_datetime\" IS NULL",
+      "default_filters": [],
+      "allowed_dimensions": [
+        "checklist.model_name",
+        "checklist.is_completed"
+      ],
+      "allowed_time_dimension": "checklist.created_datetime",
+      "aggregation": "COUNT_DISTINCT",
+      "fanout_safe": true
+    },
+    "checklist_template_count": {
+      "metric_id": "checklist_template_count",
+      "kind": "COUNT",
+      "labels": [
+        "checklist template count",
+        "number of checklist template",
+        "count of checklist template",
+        "how many checklist template",
+        "total checklist template",
+        "number of checklist",
+        "count of checklist",
+        "how many checklist",
+        "total checklist",
+        "number of template",
+        "count of template",
+        "how many template",
+        "total template"
+      ],
+      "entity_concept": "checklist_template",
+      "expression": "COUNT(DISTINCT checklist_template.id)",
+      "source_table": "checklist_template",
+      "grain": "checklist_template.id",
+      "grain_suspect": false,
+      "entity_key_candidate": null,
+      "soft_delete_filter": "\"deleted_datetime\" IS NULL",
+      "default_filters": [],
+      "allowed_dimensions": [
+        "checklist_template.name",
+        "checklist_template.description",
+        "checklist_template.is_mandatory",
+        "checklist_template.is_active"
+      ],
+      "allowed_time_dimension": "checklist_template.created_datetime",
+      "aggregation": "COUNT_DISTINCT",
+      "fanout_safe": true
+    },
+    "comment_count": {
+      "metric_id": "comment_count",
+      "kind": "COUNT",
+      "labels": [
+        "comment count",
+        "number of comment",
+        "count of comment",
+        "how many comment",
+        "total comment"
+      ],
+      "entity_concept": "comment",
+      "expression": "COUNT(DISTINCT comment.id)",
+      "source_table": "comment",
+      "grain": "comment.id",
+      "grain_suspect": false,
+      "entity_key_candidate": null,
+      "soft_delete_filter": null,
+      "default_filters": [],
+      "allowed_dimensions": [
+        "comment.message_type"
+      ],
+      "allowed_time_dimension": "comment.created_at",
+      "aggregation": "COUNT_DISTINCT",
+      "fanout_safe": true
+    },
+    "counterparty_details_count": {
+      "metric_id": "counterparty_details_count",
+      "kind": "COUNT",
+      "labels": [
+        "counterparty details count",
+        "number of counterparty details",
+        "count of counterparty details",
+        "how many counterparty details",
+        "total counterparty details",
+        "number of counterparty",
+        "count of counterparty",
+        "how many counterparty",
+        "total counterparty",
+        "number of detail",
+        "count of detail",
+        "how many detail",
+        "total detail"
+      ],
+      "entity_concept": "counterparty_details",
+      "expression": "COUNT(DISTINCT counterparty_details.id)",
+      "source_table": "counterparty_details",
+      "grain": "counterparty_details.id",
+      "grain_suspect": true,
+      "entity_key_candidate": "counterparty_details.counterparty_id",
+      "soft_delete_filter": null,
+      "default_filters": [],
+      "allowed_dimensions": [
+        "counterparty_details.party_name",
+        "counterparty_details.alias_name",
+        "counterparty_details.first_name",
+        "counterparty_details.middle_name",
+        "counterparty_details.last_name",
+        "counterparty_details.suffix_name",
+        "counterparty_details.title",
+        "counterparty_details.job_title",
+        "counterparty_details.individual_or_entity_type",
+        "counterparty_details.type_of_business",
+        "counterparty_details.source_of_funds",
+        "counterparty_details.website_url",
+        "counterparty_details.offshore_bank_flag",
+        "counterparty_details.pay_through_bank_flag",
+        "counterparty_details.embassy_flag",
+        "counterparty_details.foreign_government_flag",
+        "counterparty_details.foreign_public_official"
+      ],
+      "allowed_time_dimension": null,
+      "aggregation": "COUNT_DISTINCT",
+      "fanout_safe": true
+    },
+    "sum_checklist_template_point": {
+      "metric_id": "sum_checklist_template_point",
+      "kind": "SUM",
+      "labels": [
+        "total point",
+        "total point"
+      ],
+      "entity_concept": "checklist_template",
+      "expression": "SUM(checklist_template.point)",
+      "source_table": "checklist_template",
+      "grain": "checklist_template.id",
+      "grain_suspect": false,
+      "soft_delete_filter": "\"deleted_datetime\" IS NULL",
+      "default_filters": [],
+      "allowed_dimensions": [
+        "checklist_template.name",
+        "checklist_template.description",
+        "checklist_template.is_mandatory",
+        "checklist_template.is_active"
+      ],
+      "allowed_time_dimension": "checklist_template.created_datetime",
+      "aggregation": "SUM",
+      "fanout_safe": true
+    },
+    "avg_checklist_template_point": {
+      "metric_id": "avg_checklist_template_point",
+      "kind": "AVG",
+      "labels": [
+        "average point",
+        "average point"
+      ],
+      "entity_concept": "checklist_template",
+      "expression": "AVG(checklist_template.point)",
+      "source_table": "checklist_template",
+      "grain": "checklist_template.id",
+      "grain_suspect": false,
+      "soft_delete_filter": "\"deleted_datetime\" IS NULL",
+      "default_filters": [],
+      "allowed_dimensions": [
+        "checklist_template.name",
+        "checklist_template.description",
+        "checklist_template.is_mandatory",
+        "checklist_template.is_active"
+      ],
+      "allowed_time_dimension": "checklist_template.created_datetime",
+      "aggregation": "AVG",
+      "fanout_safe": true
+    }
+  }
+}

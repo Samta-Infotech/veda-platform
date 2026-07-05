@@ -1,0 +1,31 @@
+{
+  "tables": [
+    "annotation_record",
+    "change_request",
+    "checklist",
+    "checklist_template",
+    "comment",
+    "counterparty_details"
+  ],
+  "edges": [
+    {
+      "source_table": "checklist",
+      "source_column": "checklist_id",
+      "target_table": "checklist_template",
+      "target_column": "id",
+      "relationship_type": "business_core",
+      "discovery": "declared_fk",
+      "polymorphic": false,
+      "requires_predicate": null,
+      "confidence": 1.0,
+      "cardinality": "N:1",
+      "weight": 1
+    }
+  ],
+  "stats": {
+    "num_tables": 6,
+    "num_edges": 1,
+    "declared": 1,
+    "polymorphic": 0
+  }
+}

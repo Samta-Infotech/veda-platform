@@ -1,0 +1,32 @@
+# api / worker / beat tier — Django + DRF + Celery, NO ML deps (migration_plan.md §1.3).
+# Kept thin on purpose: the whole point of the split is thin API/worker processes and a
+# separate, heavy inference image (Dockerfile.inference). Do not add torch here.
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1000 veda && \
+    useradd --uid 1000 --gid veda --shell /bin/bash --create-home veda
+
+WORKDIR /app
+
+COPY requirements/api.txt /app/requirements/api.txt
+RUN pip install -r /app/requirements/api.txt
+
+COPY . /app
+
+RUN chmod +x /app/docker/entrypoint.api.sh && \
+    chown -R veda:veda /app
+
+USER veda
+
+ENTRYPOINT ["/app/docker/entrypoint.api.sh"]

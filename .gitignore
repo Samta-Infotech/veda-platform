@@ -1,0 +1,39 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+/staticfiles/
+/media/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+docker/userlist.txt
+
+# Model weights & heavy artifacts — belong on a mounted volume (plan §9, §6.5)
+# (kept out of source control; mount at deploy time)
+model_cache/
+*.safetensors
+*.gguf
+veda_core/schema/kuzu_graph
+veda_core/ingestion/client_bge/model.safetensors
+
+# OS
+.DS_Store
+
+# Migration/eval generated output
+evaluation/results/*.html
+evaluation/results/*.json
+
+# AI Related
+.omc

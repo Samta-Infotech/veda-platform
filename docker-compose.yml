@@ -1,0 +1,152 @@
+# VEDA platform — DEV compose (migration_plan.md §3 topology, Phase 1).
+#
+# Nine application services on one internal network (veda_net); ONLY nginx
+# publishes a host port. Two callouts encoded here:
+#   • Split Redis (§3): redis-broker (unbounded, no evict) and redis-cache
+#     (maxmemory + allkeys-lru) are SEPARATE instances even in dev, so the shape
+#     matches prod. Dev may point both Django aliases at one — but the two
+#     instances stay distinct so a cache-eviction storm never touches the broker.
+#   • PgBouncer (§1.1): every app DB pool connects THROUGH pgbouncer:6432, never
+#     postgres:5432 directly, so the fleet cannot exceed Postgres max_connections.
+#
+# SLM: ollama is the dev/ingestion backend (§8b). vLLM is prod-only (see
+# docker-compose.prod.yml).
+
+x-app-env: &app-env
+  env_file: [.env]
+
+networks:
+  veda_net:
+    driver: bridge
+
+volumes:
+  pg_data:
+  model_cache:      # BGE-M3 / reranker / MiniLM weights (§9), mounted into inference
+  ollama_models:
+  kuzu_graph:       # persisted unified KG (§6.5)
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro   # CREATE EXTENSION vector; + internal store DB
+    networks: [veda_net]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  pgbouncer:
+    image: edoburu/pgbouncer:latest
+    depends_on: {postgres: {condition: service_healthy}}
+    volumes:
+      - ./docker/pgbouncer.ini:/etc/pgbouncer/pgbouncer.ini:ro
+      - ./docker/userlist.txt:/etc/pgbouncer/userlist.txt:ro
+    networks: [veda_net]
+
+  redis-broker:                 # Celery broker+backend ONLY; unbounded, never evicts (§3)
+    image: redis:7-alpine
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    networks: [veda_net]
+
+  redis-cache:                  # Django cache + hot indices + rehydrate pub/sub (§3)
+    image: redis:7-alpine
+    command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
+    networks: [veda_net]
+
+  ollama:                       # dev/ingestion SLM backend (§8b)
+    image: ollama/ollama
+    volumes: [ollama_models:/root/.ollama]
+    networks: [veda_net]
+
+  api:
+    build: {context: ., dockerfile: docker/Dockerfile.api}
+    <<: *app-env
+    environment: {ROLE: api}
+    volumes: [".:/app"]   # DEV: live code, no rebuild on edit
+    depends_on:
+      pgbouncer: {condition: service_started}
+      redis-broker: {condition: service_started}
+      redis-cache: {condition: service_started}
+    networks: [veda_net]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  worker:
+    build: {context: ., dockerfile: docker/Dockerfile.api}
+    <<: *app-env
+    environment: {ROLE: worker}
+    volumes: [".:/app"]   # DEV: live code
+    extra_hosts: ["host.docker.internal:host-gateway"]  # reach launchpad DB on host :5433
+    depends_on: [redis-broker, pgbouncer, ollama]
+    networks: [veda_net]
+
+  beat:
+    build: {context: ., dockerfile: docker/Dockerfile.api}
+    <<: *app-env
+    environment: {ROLE: beat}
+    volumes: [".:/app"]   # DEV: live code
+    depends_on: [redis-broker, pgbouncer]
+    networks: [veda_net]
+
+  # ML-capable Celery worker for the `ingestion` queue: uses the inference image
+  # (torch + Django + celery) because L0 ingestion needs both. cwd=/app so `celery -A
+  # config` resolves the Django project; the heavy run_ingestion runs in a subprocess
+  # (cwd=veda_core) to isolate the engine's top-level `config` (§4, ingest worker).
+  ingest-worker:
+    build: {context: ., dockerfile: docker/Dockerfile.inference}
+    <<: *app-env
+    working_dir: /app
+    entrypoint: ["celery", "-A", "config", "worker", "-Q", "ingestion,high", "--concurrency", "1", "--loglevel", "info"]
+    environment:
+      PYTHONPATH: /app
+      HF_HOME: /models/hf_cache
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+      VEDA_APP_DIR: /app
+    volumes:
+      - ".:/app"
+      - model_cache:/models:ro
+      - kuzu_graph:/graph
+    extra_hosts: ["host.docker.internal:host-gateway"]
+    depends_on: [redis-broker, pgbouncer, ollama]
+    networks: [veda_net]
+
+  inference:
+    build: {context: ., dockerfile: docker/Dockerfile.inference}
+    <<: *app-env
+    working_dir: /app/veda_core     # engine cwd-relative paths (data/, schema/, client_bge) resolve here
+    environment:
+      WORKERS: ${INFERENCE_WORKERS:-1}   # dev default; prod sizes from measured RSS (§8.1)
+      PYTHONPATH: /app                    # so `inference.main` imports from the repo root
+      HF_HOME: /models                    # offline model cache (BGE / reranker / MiniLM)
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - ".:/app"           # DEV: live code
+      - model_cache:/models:ro
+      - kuzu_graph:/graph
+    extra_hosts: ["host.docker.internal:host-gateway"]  # reach launchpad DB on host :5433
+    depends_on: [pgbouncer, redis-cache, ollama]
+    networks: [veda_net]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8001/healthz')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  nginx:                        # the ONLY service that maps a host port (§3)
+    image: nginx:alpine
+    volumes: [./docker/nginx.conf:/etc/nginx/nginx.conf:ro]
+    ports: ["8080:80"]
+    depends_on: [api]
+    networks: [veda_net]

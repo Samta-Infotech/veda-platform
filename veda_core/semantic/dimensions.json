@@ -1,0 +1,4243 @@
+{
+  "version": "1.0",
+  "kind": "dimensions",
+  "source_hash": "00cc4542aaa22b2a",
+  "count": 229,
+  "items": {
+    "annotation_record.object_type": {
+      "dimension_id": "annotation_record.object_type",
+      "owner_table": "annotation_record",
+      "column": "annotation_record.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Level 1"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "annotation_record.annotation_type": {
+      "dimension_id": "annotation_record.annotation_type",
+      "owner_table": "annotation_record",
+      "column": "annotation_record.annotation_type",
+      "col_name": "annotation_type",
+      "labels": [
+        "annotation",
+        "annotation type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "incident_key_insights"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "annotation_record.editor_name": {
+      "dimension_id": "annotation_record.editor_name",
+      "owner_table": "annotation_record",
+      "column": "annotation_record.editor_name",
+      "col_name": "editor_name",
+      "labels": [
+        "editor",
+        "editor name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "change_request.object_type": {
+      "dimension_id": "change_request.object_type",
+      "owner_table": "change_request",
+      "column": "change_request.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "change_request.is_deleted": {
+      "dimension_id": "change_request.is_deleted",
+      "owner_table": "change_request",
+      "column": "change_request.is_deleted",
+      "col_name": "is_deleted",
+      "labels": [
+        "deleted",
+        "is deleted"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "checklist.model_name": {
+      "dimension_id": "checklist.model_name",
+      "owner_table": "checklist",
+      "column": "checklist.model_name",
+      "col_name": "model_name",
+      "labels": [
+        "model",
+        "model name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "checklist.is_completed": {
+      "dimension_id": "checklist.is_completed",
+      "owner_table": "checklist",
+      "column": "checklist.is_completed",
+      "col_name": "is_completed",
+      "labels": [
+        "completed",
+        "is completed"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "checklist_template.name": {
+      "dimension_id": "checklist_template.name",
+      "owner_table": "checklist_template",
+      "column": "checklist_template.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "checklist_template.description": {
+      "dimension_id": "checklist_template.description",
+      "owner_table": "checklist_template",
+      "column": "checklist_template.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "checklist_template.is_mandatory": {
+      "dimension_id": "checklist_template.is_mandatory",
+      "owner_table": "checklist_template",
+      "column": "checklist_template.is_mandatory",
+      "col_name": "is_mandatory",
+      "labels": [
+        "is mandatory",
+        "mandatory"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "checklist_template.is_active": {
+      "dimension_id": "checklist_template.is_active",
+      "owner_table": "checklist_template",
+      "column": "checklist_template.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "comment.message_type": {
+      "dimension_id": "comment.message_type",
+      "owner_table": "comment",
+      "column": "comment.message_type",
+      "col_name": "message_type",
+      "labels": [
+        "message",
+        "message type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.party_name": {
+      "dimension_id": "counterparty_details.party_name",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.party_name",
+      "col_name": "party_name",
+      "labels": [
+        "party",
+        "party name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.alias_name": {
+      "dimension_id": "counterparty_details.alias_name",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.alias_name",
+      "col_name": "alias_name",
+      "labels": [
+        "alia",
+        "alias",
+        "alias name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.first_name": {
+      "dimension_id": "counterparty_details.first_name",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.first_name",
+      "col_name": "first_name",
+      "labels": [
+        "first",
+        "first name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.middle_name": {
+      "dimension_id": "counterparty_details.middle_name",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.middle_name",
+      "col_name": "middle_name",
+      "labels": [
+        "middle",
+        "middle name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.last_name": {
+      "dimension_id": "counterparty_details.last_name",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.last_name",
+      "col_name": "last_name",
+      "labels": [
+        "last",
+        "last name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.suffix_name": {
+      "dimension_id": "counterparty_details.suffix_name",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.suffix_name",
+      "col_name": "suffix_name",
+      "labels": [
+        "suffix",
+        "suffix name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.title": {
+      "dimension_id": "counterparty_details.title",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.title",
+      "col_name": "title",
+      "labels": [
+        "title"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.job_title": {
+      "dimension_id": "counterparty_details.job_title",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.job_title",
+      "col_name": "job_title",
+      "labels": [
+        "job",
+        "job title",
+        "title"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.individual_or_entity_type": {
+      "dimension_id": "counterparty_details.individual_or_entity_type",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.individual_or_entity_type",
+      "col_name": "individual_or_entity_type",
+      "labels": [
+        "entity",
+        "individual",
+        "individual or entity type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.type_of_business": {
+      "dimension_id": "counterparty_details.type_of_business",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.type_of_business",
+      "col_name": "type_of_business",
+      "labels": [
+        "business",
+        "type of business"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.source_of_funds": {
+      "dimension_id": "counterparty_details.source_of_funds",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.source_of_funds",
+      "col_name": "source_of_funds",
+      "labels": [
+        "fund",
+        "funds",
+        "source",
+        "source of funds"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.website_url": {
+      "dimension_id": "counterparty_details.website_url",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.website_url",
+      "col_name": "website_url",
+      "labels": [
+        "url",
+        "website",
+        "website url"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.offshore_bank_flag": {
+      "dimension_id": "counterparty_details.offshore_bank_flag",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.offshore_bank_flag",
+      "col_name": "offshore_bank_flag",
+      "labels": [
+        "bank",
+        "offshore",
+        "offshore bank flag"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.pay_through_bank_flag": {
+      "dimension_id": "counterparty_details.pay_through_bank_flag",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.pay_through_bank_flag",
+      "col_name": "pay_through_bank_flag",
+      "labels": [
+        "bank",
+        "pay",
+        "pay through bank flag",
+        "through"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.embassy_flag": {
+      "dimension_id": "counterparty_details.embassy_flag",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.embassy_flag",
+      "col_name": "embassy_flag",
+      "labels": [
+        "embassy",
+        "embassy flag"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.foreign_government_flag": {
+      "dimension_id": "counterparty_details.foreign_government_flag",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.foreign_government_flag",
+      "col_name": "foreign_government_flag",
+      "labels": [
+        "foreign",
+        "foreign government flag",
+        "government"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_details.foreign_public_official": {
+      "dimension_id": "counterparty_details.foreign_public_official",
+      "owner_table": "counterparty_details",
+      "column": "counterparty_details.foreign_public_official",
+      "col_name": "foreign_public_official",
+      "labels": [
+        "foreign",
+        "foreign public official",
+        "official",
+        "public"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_supplementary_info.normalized_name": {
+      "dimension_id": "counterparty_supplementary_info.normalized_name",
+      "owner_table": "counterparty_supplementary_info",
+      "column": "counterparty_supplementary_info.normalized_name",
+      "col_name": "normalized_name",
+      "labels": [
+        "normalized",
+        "normalized name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_supplementary_info.alias_name": {
+      "dimension_id": "counterparty_supplementary_info.alias_name",
+      "owner_table": "counterparty_supplementary_info",
+      "column": "counterparty_supplementary_info.alias_name",
+      "col_name": "alias_name",
+      "labels": [
+        "alia",
+        "alias",
+        "alias name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_supplementary_info.type_of_business": {
+      "dimension_id": "counterparty_supplementary_info.type_of_business",
+      "owner_table": "counterparty_supplementary_info",
+      "column": "counterparty_supplementary_info.type_of_business",
+      "col_name": "type_of_business",
+      "labels": [
+        "business",
+        "type of business"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_supplementary_info.email": {
+      "dimension_id": "counterparty_supplementary_info.email",
+      "owner_table": "counterparty_supplementary_info",
+      "column": "counterparty_supplementary_info.email",
+      "col_name": "email",
+      "labels": [
+        "email"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "counterparty_supplementary_info.website_url": {
+      "dimension_id": "counterparty_supplementary_info.website_url",
+      "owner_table": "counterparty_supplementary_info",
+      "column": "counterparty_supplementary_info.website_url",
+      "col_name": "website_url",
+      "labels": [
+        "url",
+        "website",
+        "website url"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboard_items.kind": {
+      "dimension_id": "dashboard_items.kind",
+      "owner_table": "dashboard_items",
+      "column": "dashboard_items.kind",
+      "col_name": "kind",
+      "labels": [
+        "kind"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "chart"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboard_items.key": {
+      "dimension_id": "dashboard_items.key",
+      "owner_table": "dashboard_items",
+      "column": "dashboard_items.key",
+      "col_name": "key",
+      "labels": [
+        "key"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "rfi_by_case_types",
+        "overview_total_countries",
+        "tile_scenario_count",
+        "country_network_flow",
+        "sla_compliance",
+        "scenario_timeline",
+        "open_closed_rfi_volumes",
+        "tile_transaction_count"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboard_items.title": {
+      "dimension_id": "dashboard_items.title",
+      "owner_table": "dashboard_items",
+      "column": "dashboard_items.title",
+      "col_name": "title",
+      "labels": [
+        "title"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Total Transaction Count",
+        "RFIs by Case Types",
+        "Amount by Timeline",
+        "Total Scenario Count",
+        "Scenario Distribution",
+        "Total Countries",
+        "Transactions by Activity Type",
+        "AML Velocity Chart"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboard_items.visible": {
+      "dimension_id": "dashboard_items.visible",
+      "owner_table": "dashboard_items",
+      "column": "dashboard_items.visible",
+      "col_name": "visible",
+      "labels": [
+        "visible"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true",
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboard_items.function_name": {
+      "dimension_id": "dashboard_items.function_name",
+      "owner_table": "dashboard_items",
+      "column": "dashboard_items.function_name",
+      "col_name": "function_name",
+      "labels": [
+        "function",
+        "function name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "get_overview_total_countries",
+        "get_open_closed_rfi_volumes",
+        "get_transactions_by_activity",
+        "get_scatter_amount_timeline",
+        "get_aml_velocity",
+        "get_tile_scenario_count",
+        "get_scenario_timeline",
+        "get_top_counterparties"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboards.slug": {
+      "dimension_id": "dashboards.slug",
+      "owner_table": "dashboards",
+      "column": "dashboards.slug",
+      "col_name": "slug",
+      "labels": [
+        "slug"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "rfi_dashboard",
+        "incident_workbench"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboards.title": {
+      "dimension_id": "dashboards.title",
+      "owner_table": "dashboards",
+      "column": "dashboards.title",
+      "col_name": "title",
+      "labels": [
+        "title"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "RFI Dashboard",
+        "Incident Workbench Analytics"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboards.model_name": {
+      "dimension_id": "dashboards.model_name",
+      "owner_table": "dashboards",
+      "column": "dashboards.model_name",
+      "col_name": "model_name",
+      "labels": [
+        "model",
+        "model name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Incident",
+        "RFIObject"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboards.is_active": {
+      "dimension_id": "dashboards.is_active",
+      "owner_table": "dashboards",
+      "column": "dashboards.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "dashboards.factory": {
+      "dimension_id": "dashboards.factory",
+      "owner_table": "dashboards",
+      "column": "dashboards.factory",
+      "col_name": "factory",
+      "labels": [
+        "factory"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "RFIDashboardFactory",
+        "IncidentWorkbenchFactory"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_category_master.category_name": {
+      "dimension_id": "document_category_master.category_name",
+      "owner_table": "document_category_master",
+      "column": "document_category_master.category_name",
+      "col_name": "category_name",
+      "labels": [
+        "category",
+        "category name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Other",
+        "Tax Supplement",
+        "AML",
+        "Agreement",
+        "Tax",
+        "rfi",
+        "Restriction/Offboarding Doc",
+        "Due Diligence"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_ingestion_registry.is_active": {
+      "dimension_id": "document_ingestion_registry.is_active",
+      "owner_table": "document_ingestion_registry",
+      "column": "document_ingestion_registry.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_ingestion_registry.entity_name": {
+      "dimension_id": "document_ingestion_registry.entity_name",
+      "owner_table": "document_ingestion_registry",
+      "column": "document_ingestion_registry.entity_name",
+      "col_name": "entity_name",
+      "labels": [
+        "entity",
+        "entity name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_ingestion_registry.file_name": {
+      "dimension_id": "document_ingestion_registry.file_name",
+      "owner_table": "document_ingestion_registry",
+      "column": "document_ingestion_registry.file_name",
+      "col_name": "file_name",
+      "labels": [
+        "file",
+        "file name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_ingestion_registry.file_ext": {
+      "dimension_id": "document_ingestion_registry.file_ext",
+      "owner_table": "document_ingestion_registry",
+      "column": "document_ingestion_registry.file_ext",
+      "col_name": "file_ext",
+      "labels": [
+        "ext",
+        "file",
+        "file ext"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_ingestion_registry.is_deleted": {
+      "dimension_id": "document_ingestion_registry.is_deleted",
+      "owner_table": "document_ingestion_registry",
+      "column": "document_ingestion_registry.is_deleted",
+      "col_name": "is_deleted",
+      "labels": [
+        "deleted",
+        "is deleted"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_ingestion_registry.deleted_by": {
+      "dimension_id": "document_ingestion_registry.deleted_by",
+      "owner_table": "document_ingestion_registry",
+      "column": "document_ingestion_registry.deleted_by",
+      "col_name": "deleted_by",
+      "labels": [
+        "deleted",
+        "deleted by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_tags.tag_name": {
+      "dimension_id": "document_tags.tag_name",
+      "owner_table": "document_tags",
+      "column": "document_tags.tag_name",
+      "col_name": "tag_name",
+      "labels": [
+        "tag",
+        "tag name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "NDA",
+        "VERIFIED",
+        "RFI",
+        "AML",
+        "TAX",
+        "KYC",
+        "KYB",
+        "AGREEMENT"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_type_master.type_name": {
+      "dimension_id": "document_type_master.type_name",
+      "owner_table": "document_type_master",
+      "column": "document_type_master.type_name",
+      "col_name": "type_name",
+      "labels": [
+        "type name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_type_master.filename_prefix": {
+      "dimension_id": "document_type_master.filename_prefix",
+      "owner_table": "document_type_master",
+      "column": "document_type_master.filename_prefix",
+      "col_name": "filename_prefix",
+      "labels": [
+        "filename",
+        "filename prefix",
+        "prefix"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "document_type_master.is_pii": {
+      "dimension_id": "document_type_master.is_pii",
+      "owner_table": "document_type_master",
+      "column": "document_type_master.is_pii",
+      "col_name": "is_pii",
+      "labels": [
+        "identifiable",
+        "information",
+        "is pii personally identifiable information",
+        "personally",
+        "pii",
+        "is pii"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "documents.size": {
+      "dimension_id": "documents.size",
+      "owner_table": "documents",
+      "column": "documents.size",
+      "col_name": "size",
+      "labels": [
+        "size"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "documents.object_type": {
+      "dimension_id": "documents.object_type",
+      "owner_table": "documents",
+      "column": "documents.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "documents.is_temp": {
+      "dimension_id": "documents.is_temp",
+      "owner_table": "documents",
+      "column": "documents.is_temp",
+      "col_name": "is_temp",
+      "labels": [
+        "is temp",
+        "temp"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "documents.is_deleted": {
+      "dimension_id": "documents.is_deleted",
+      "owner_table": "documents",
+      "column": "documents.is_deleted",
+      "col_name": "is_deleted",
+      "labels": [
+        "deleted",
+        "is deleted"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "external_users.user_details": {
+      "dimension_id": "external_users.user_details",
+      "owner_table": "external_users",
+      "column": "external_users.user_details",
+      "col_name": "user_details",
+      "labels": [
+        "user",
+        "user details"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "external_users.auth_method": {
+      "dimension_id": "external_users.auth_method",
+      "owner_table": "external_users",
+      "column": "external_users.auth_method",
+      "col_name": "auth_method",
+      "labels": [
+        "auth",
+        "auth method authentication",
+        "authentication",
+        "method",
+        "auth method"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "OTP"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "external_users.is_active": {
+      "dimension_id": "external_users.is_active",
+      "owner_table": "external_users",
+      "column": "external_users.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "feature.description": {
+      "dimension_id": "feature.description",
+      "owner_table": "feature",
+      "column": "feature.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "feature.name": {
+      "dimension_id": "feature.name",
+      "owner_table": "feature",
+      "column": "feature.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "feature.display_name": {
+      "dimension_id": "feature.display_name",
+      "owner_table": "feature",
+      "column": "feature.display_name",
+      "col_name": "display_name",
+      "labels": [
+        "display",
+        "display name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "group.name": {
+      "dimension_id": "group.name",
+      "owner_table": "group",
+      "column": "group.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "group.description": {
+      "dimension_id": "group.description",
+      "owner_table": "group",
+      "column": "group.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        ""
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "group.is_active": {
+      "dimension_id": "group.is_active",
+      "owner_table": "group",
+      "column": "group.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "group.workflow_state": {
+      "dimension_id": "group.workflow_state",
+      "owner_table": "group",
+      "column": "group.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Group Approved"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "group.owned_by": {
+      "dimension_id": "group.owned_by",
+      "owner_table": "group",
+      "column": "group.owned_by",
+      "col_name": "owned_by",
+      "labels": [
+        "owned",
+        "owned by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "group.owned_by_group": {
+      "dimension_id": "group.owned_by_group",
+      "owner_table": "group",
+      "column": "group.owned_by_group",
+      "col_name": "owned_by_group",
+      "labels": [
+        "group",
+        "owned",
+        "owned by group"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.incident_status": {
+      "dimension_id": "incident.incident_status",
+      "owner_table": "incident",
+      "column": "incident.incident_status",
+      "col_name": "incident_status",
+      "labels": [
+        "incident",
+        "incident status"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "New",
+        "Waive",
+        "Open",
+        "Escalated",
+        "Confirmed"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.is_investigation": {
+      "dimension_id": "incident.is_investigation",
+      "owner_table": "incident",
+      "column": "incident.is_investigation",
+      "col_name": "is_investigation",
+      "labels": [
+        "investigation",
+        "is investigation"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.owned_by": {
+      "dimension_id": "incident.owned_by",
+      "owner_table": "incident",
+      "column": "incident.owned_by",
+      "col_name": "owned_by",
+      "labels": [
+        "owned",
+        "owned by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.workflow_state": {
+      "dimension_id": "incident.workflow_state",
+      "owner_table": "incident",
+      "column": "incident.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Level 1 Added",
+        "Level 1 Waived",
+        "Level 1 Escalated",
+        "Level 1 Confirmed"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.object_type": {
+      "dimension_id": "incident.object_type",
+      "owner_table": "incident",
+      "column": "incident.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Level 1"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.owned_by_group": {
+      "dimension_id": "incident.owned_by_group",
+      "owner_table": "incident",
+      "column": "incident.owned_by_group",
+      "col_name": "owned_by_group",
+      "labels": [
+        "group",
+        "owned",
+        "owned by group"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.is_current_queue": {
+      "dimension_id": "incident.is_current_queue",
+      "owner_table": "incident",
+      "column": "incident.is_current_queue",
+      "col_name": "is_current_queue",
+      "labels": [
+        "current",
+        "is current queue",
+        "queue"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.rfi_step_enabled": {
+      "dimension_id": "incident.rfi_step_enabled",
+      "owner_table": "incident",
+      "column": "incident.rfi_step_enabled",
+      "col_name": "rfi_step_enabled",
+      "labels": [
+        "enabled",
+        "information",
+        "request",
+        "rfi",
+        "rfi step enabled request for information",
+        "step",
+        "rfi step enabled"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.is_backfilled": {
+      "dimension_id": "incident.is_backfilled",
+      "owner_table": "incident",
+      "column": "incident.is_backfilled",
+      "col_name": "is_backfilled",
+      "labels": [
+        "backfilled",
+        "is backfilled"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.is_sampled": {
+      "dimension_id": "incident.is_sampled",
+      "owner_table": "incident",
+      "column": "incident.is_sampled",
+      "col_name": "is_sampled",
+      "labels": [
+        "is sampled",
+        "sampled"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.decision_type": {
+      "dimension_id": "incident.decision_type",
+      "owner_table": "incident",
+      "column": "incident.decision_type",
+      "col_name": "decision_type",
+      "labels": [
+        "decision",
+        "decision type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident.priority": {
+      "dimension_id": "incident.priority",
+      "owner_table": "incident",
+      "column": "incident.priority",
+      "col_name": "priority",
+      "labels": [
+        "priority"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        ""
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "incident_signal_score.risk_level": {
+      "dimension_id": "incident_signal_score.risk_level",
+      "owner_table": "incident_signal_score",
+      "column": "incident_signal_score.risk_level",
+      "col_name": "risk_level",
+      "labels": [
+        "level",
+        "risk",
+        "risk level"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.name": {
+      "dimension_id": "investigation_and_research_counter_party.name",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.workflow_state": {
+      "dimension_id": "investigation_and_research_counter_party.workflow_state",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.counterparty_status": {
+      "dimension_id": "investigation_and_research_counter_party.counterparty_status",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.counterparty_status",
+      "col_name": "counterparty_status",
+      "labels": [
+        "counterparty",
+        "counterparty status"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.owned_by": {
+      "dimension_id": "investigation_and_research_counter_party.owned_by",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.owned_by",
+      "col_name": "owned_by",
+      "labels": [
+        "owned",
+        "owned by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.is_customer": {
+      "dimension_id": "investigation_and_research_counter_party.is_customer",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.is_customer",
+      "col_name": "is_customer",
+      "labels": [
+        "customer",
+        "is customer"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.is_investigation": {
+      "dimension_id": "investigation_and_research_counter_party.is_investigation",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.is_investigation",
+      "col_name": "is_investigation",
+      "labels": [
+        "investigation",
+        "is investigation"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "investigation_and_research_counter_party.owned_by_group": {
+      "dimension_id": "investigation_and_research_counter_party.owned_by_group",
+      "owner_table": "investigation_and_research_counter_party",
+      "column": "investigation_and_research_counter_party.owned_by_group",
+      "col_name": "owned_by_group",
+      "labels": [
+        "group",
+        "owned",
+        "owned by group"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "level.display_name": {
+      "dimension_id": "level.display_name",
+      "owner_table": "level",
+      "column": "level.display_name",
+      "col_name": "display_name",
+      "labels": [
+        "display",
+        "display name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Global Level"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "level.description": {
+      "dimension_id": "level.description",
+      "owner_table": "level",
+      "column": "level.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Default Global Level - Headquarters"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "ml_use_case.name": {
+      "dimension_id": "ml_use_case.name",
+      "owner_table": "ml_use_case",
+      "column": "ml_use_case.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "ml_use_case.is_active": {
+      "dimension_id": "ml_use_case.is_active",
+      "owner_table": "ml_use_case",
+      "column": "ml_use_case.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "module.description": {
+      "dimension_id": "module.description",
+      "owner_table": "module",
+      "column": "module.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "module.code": {
+      "dimension_id": "module.code",
+      "owner_table": "module",
+      "column": "module.code",
+      "col_name": "code",
+      "labels": [
+        "code"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "module.display_name": {
+      "dimension_id": "module.display_name",
+      "owner_table": "module",
+      "column": "module.display_name",
+      "col_name": "display_name",
+      "labels": [
+        "display",
+        "display name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.event": {
+      "dimension_id": "notification.event",
+      "owner_table": "notification",
+      "column": "notification.event",
+      "col_name": "event",
+      "labels": [
+        "event"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.mode": {
+      "dimension_id": "notification.mode",
+      "owner_table": "notification",
+      "column": "notification.mode",
+      "col_name": "mode",
+      "labels": [
+        "mode"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.notification_name": {
+      "dimension_id": "notification.notification_name",
+      "owner_table": "notification",
+      "column": "notification.notification_name",
+      "col_name": "notification_name",
+      "labels": [
+        "notification",
+        "notification name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.notification_type": {
+      "dimension_id": "notification.notification_type",
+      "owner_table": "notification",
+      "column": "notification.notification_type",
+      "col_name": "notification_type",
+      "labels": [
+        "notification",
+        "notification type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.status": {
+      "dimension_id": "notification.status",
+      "owner_table": "notification",
+      "column": "notification.status",
+      "col_name": "status",
+      "labels": [
+        "status"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.is_read": {
+      "dimension_id": "notification.is_read",
+      "owner_table": "notification",
+      "column": "notification.is_read",
+      "col_name": "is_read",
+      "labels": [
+        "is read",
+        "read"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.subject": {
+      "dimension_id": "notification.subject",
+      "owner_table": "notification",
+      "column": "notification.subject",
+      "col_name": "subject",
+      "labels": [
+        "subject"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.critical": {
+      "dimension_id": "notification.critical",
+      "owner_table": "notification",
+      "column": "notification.critical",
+      "col_name": "critical",
+      "labels": [
+        "critical"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "notification.severity": {
+      "dimension_id": "notification.severity",
+      "owner_table": "notification",
+      "column": "notification.severity",
+      "col_name": "severity",
+      "labels": [
+        "severity"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "organizations.name": {
+      "dimension_id": "organizations.name",
+      "owner_table": "organizations",
+      "column": "organizations.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "organizations.description": {
+      "dimension_id": "organizations.description",
+      "owner_table": "organizations",
+      "column": "organizations.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Default launchpad Organization"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "organizations.is_approved": {
+      "dimension_id": "organizations.is_approved",
+      "owner_table": "organizations",
+      "column": "organizations.is_approved",
+      "col_name": "is_approved",
+      "labels": [
+        "approved",
+        "is approved"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "organizations.is_active": {
+      "dimension_id": "organizations.is_active",
+      "owner_table": "organizations",
+      "column": "organizations.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "party_research.link": {
+      "dimension_id": "party_research.link",
+      "owner_table": "party_research",
+      "column": "party_research.link",
+      "col_name": "link",
+      "labels": [
+        "link"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "party_research.title": {
+      "dimension_id": "party_research.title",
+      "owner_table": "party_research",
+      "column": "party_research.title",
+      "col_name": "title",
+      "labels": [
+        "title"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "party_research.sentiment_type": {
+      "dimension_id": "party_research.sentiment_type",
+      "owner_table": "party_research",
+      "column": "party_research.sentiment_type",
+      "col_name": "sentiment_type",
+      "labels": [
+        "sentiment",
+        "sentiment type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_policy.description": {
+      "dimension_id": "password_policy.description",
+      "owner_table": "password_policy",
+      "column": "password_policy.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Default Global Password Policy"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_policy.approved": {
+      "dimension_id": "password_policy.approved",
+      "owner_table": "password_policy",
+      "column": "password_policy.approved",
+      "col_name": "approved",
+      "labels": [
+        "approved"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_policy.created_by": {
+      "dimension_id": "password_policy.created_by",
+      "owner_table": "password_policy",
+      "column": "password_policy.created_by",
+      "col_name": "created_by",
+      "labels": [
+        "created by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_policy.updated_by": {
+      "dimension_id": "password_policy.updated_by",
+      "owner_table": "password_policy",
+      "column": "password_policy.updated_by",
+      "col_name": "updated_by",
+      "labels": [
+        "updated by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_policy.is_deleted": {
+      "dimension_id": "password_policy.is_deleted",
+      "owner_table": "password_policy",
+      "column": "password_policy.is_deleted",
+      "col_name": "is_deleted",
+      "labels": [
+        "deleted",
+        "is deleted"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_rule.rule": {
+      "dimension_id": "password_rule.rule",
+      "owner_table": "password_rule",
+      "column": "password_rule.rule",
+      "col_name": "rule",
+      "labels": [
+        "rule"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "MAX_LENGTH",
+        "COMMON_PASSWORD_ALLOW",
+        "MIN_DIGITS",
+        "ATTEMPT_LIMIT",
+        "GRACE_PERIOD",
+        "PASSWORD_HISTORY",
+        "MIN_UPPERCASE",
+        "MIN_SPECIAL"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_rule.is_active": {
+      "dimension_id": "password_rule.is_active",
+      "owner_table": "password_rule",
+      "column": "password_rule.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_security_questions.question": {
+      "dimension_id": "password_security_questions.question",
+      "owner_table": "password_security_questions",
+      "column": "password_security_questions.question",
+      "col_name": "question",
+      "labels": [
+        "question"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "What is your maternal grandmother's maiden name?",
+        "What is your oldest sibling's birthday month and year? (e.g., January 1900)",
+        "What was your childhood nickname?",
+        "In what city does your nearest sibling live?",
+        "What is your oldest brother's birthday month and year? (e.g., January 1900)",
+        "In what city or town was your first job?",
+        "What is your oldest sibling's middle name?",
+        "What is the name of your favorite childhood friend?"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_security_questions.example_answers": {
+      "dimension_id": "password_security_questions.example_answers",
+      "owner_table": "password_security_questions",
+      "column": "password_security_questions.example_answers",
+      "col_name": "example_answers",
+      "labels": [
+        "answer",
+        "answers",
+        "example",
+        "example answers"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Williams, Brown, Davis",
+        "Alex, Taylor, Jordan",
+        "Chicago, Boston, Miami",
+        "San Francisco, Detroit, Houston",
+        "The Plaza Hotel, Central Park, Sunset Beach",
+        "School dance, The park, Summer camp",
+        "Maple Street, Oak Avenue, Main St",
+        "John Smith, Mary Johnson"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_security_questions.is_active": {
+      "dimension_id": "password_security_questions.is_active",
+      "owner_table": "password_security_questions",
+      "column": "password_security_questions.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "password_security_questions.is_deleted": {
+      "dimension_id": "password_security_questions.is_deleted",
+      "owner_table": "password_security_questions",
+      "column": "password_security_questions.is_deleted",
+      "col_name": "is_deleted",
+      "labels": [
+        "deleted",
+        "is deleted"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "permission.description": {
+      "dimension_id": "permission.description",
+      "owner_table": "permission",
+      "column": "permission.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "permission.perm_name": {
+      "dimension_id": "permission.perm_name",
+      "owner_table": "permission",
+      "column": "permission.perm_name",
+      "col_name": "perm_name",
+      "labels": [
+        "perm",
+        "perm name permission",
+        "permission",
+        "perm name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "permission.is_active": {
+      "dimension_id": "permission.is_active",
+      "owner_table": "permission",
+      "column": "permission.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "permission.workflow_state": {
+      "dimension_id": "permission.workflow_state",
+      "owner_table": "permission",
+      "column": "permission.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Permission Approved"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "permission.owned_by": {
+      "dimension_id": "permission.owned_by",
+      "owner_table": "permission",
+      "column": "permission.owned_by",
+      "col_name": "owned_by",
+      "labels": [
+        "owned",
+        "owned by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "permission.owned_by_group": {
+      "dimension_id": "permission.owned_by_group",
+      "owner_table": "permission",
+      "column": "permission.owned_by_group",
+      "col_name": "owned_by_group",
+      "labels": [
+        "group",
+        "owned",
+        "owned by group"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "research_type.type": {
+      "dimension_id": "research_type.type",
+      "owner_table": "research_type",
+      "column": "research_type.type",
+      "col_name": "type",
+      "labels": [
+        "type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_comments.user": {
+      "dimension_id": "rfi_comments.user",
+      "owner_table": "rfi_comments",
+      "column": "rfi_comments.user",
+      "col_name": "user",
+      "labels": [
+        "user"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_comments.object_type": {
+      "dimension_id": "rfi_comments.object_type",
+      "owner_table": "rfi_comments",
+      "column": "rfi_comments.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_instance_questions.custom_question_type": {
+      "dimension_id": "rfi_instance_questions.custom_question_type",
+      "owner_table": "rfi_instance_questions",
+      "column": "rfi_instance_questions.custom_question_type",
+      "col_name": "custom_question_type",
+      "labels": [
+        "custom",
+        "custom question type",
+        "question"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_instance_questions.is_locked": {
+      "dimension_id": "rfi_instance_questions.is_locked",
+      "owner_table": "rfi_instance_questions",
+      "column": "rfi_instance_questions.is_locked",
+      "col_name": "is_locked",
+      "labels": [
+        "is locked",
+        "locked"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_instance_questions.is_required_override": {
+      "dimension_id": "rfi_instance_questions.is_required_override",
+      "owner_table": "rfi_instance_questions",
+      "column": "rfi_instance_questions.is_required_override",
+      "col_name": "is_required_override",
+      "labels": [
+        "is required override",
+        "override",
+        "required"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_instance_questions.is_answered": {
+      "dimension_id": "rfi_instance_questions.is_answered",
+      "owner_table": "rfi_instance_questions",
+      "column": "rfi_instance_questions.is_answered",
+      "col_name": "is_answered",
+      "labels": [
+        "answered",
+        "is answered"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_objects.initiated_workflow_state": {
+      "dimension_id": "rfi_objects.initiated_workflow_state",
+      "owner_table": "rfi_objects",
+      "column": "rfi_objects.initiated_workflow_state",
+      "col_name": "initiated_workflow_state",
+      "labels": [
+        "initiated",
+        "initiated workflow state",
+        "workflow"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_objects.object_type": {
+      "dimension_id": "rfi_objects.object_type",
+      "owner_table": "rfi_objects",
+      "column": "rfi_objects.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_objects.workflow_state": {
+      "dimension_id": "rfi_objects.workflow_state",
+      "owner_table": "rfi_objects",
+      "column": "rfi_objects.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_objects.submitted_by": {
+      "dimension_id": "rfi_objects.submitted_by",
+      "owner_table": "rfi_objects",
+      "column": "rfi_objects.submitted_by",
+      "col_name": "submitted_by",
+      "labels": [
+        "submitted",
+        "submitted by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_objects.is_overridden": {
+      "dimension_id": "rfi_objects.is_overridden",
+      "owner_table": "rfi_objects",
+      "column": "rfi_objects.is_overridden",
+      "col_name": "is_overridden",
+      "labels": [
+        "is overridden",
+        "overridden"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_objects.summary_generated": {
+      "dimension_id": "rfi_objects.summary_generated",
+      "owner_table": "rfi_objects",
+      "column": "rfi_objects.summary_generated",
+      "col_name": "summary_generated",
+      "labels": [
+        "generated",
+        "summary",
+        "summary generated"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_questions.question_type": {
+      "dimension_id": "rfi_questions.question_type",
+      "owner_table": "rfi_questions",
+      "column": "rfi_questions.question_type",
+      "col_name": "question_type",
+      "labels": [
+        "question",
+        "question type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "TEXT",
+        "FILE",
+        "BOOLEAN",
+        "DATE"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_questions.object_type": {
+      "dimension_id": "rfi_questions.object_type",
+      "owner_table": "rfi_questions",
+      "column": "rfi_questions.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "QA",
+        "QC",
+        "Level2",
+        "Incident",
+        "SAR",
+        "Case",
+        "CounterParty"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_questions.is_required": {
+      "dimension_id": "rfi_questions.is_required",
+      "owner_table": "rfi_questions",
+      "column": "rfi_questions.is_required",
+      "col_name": "is_required",
+      "labels": [
+        "is required",
+        "required"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_questions.category": {
+      "dimension_id": "rfi_questions.category",
+      "owner_table": "rfi_questions",
+      "column": "rfi_questions.category",
+      "col_name": "category",
+      "labels": [
+        "category"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Documentation",
+        "Customer Information",
+        "Counterparty Details",
+        "Signals",
+        "Transaction Details",
+        "Regulatory Compliance",
+        "Source of Funds",
+        "Party Info"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_questions.is_default": {
+      "dimension_id": "rfi_questions.is_default",
+      "owner_table": "rfi_questions",
+      "column": "rfi_questions.is_default",
+      "col_name": "is_default",
+      "labels": [
+        "default",
+        "is default"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_questions.is_active": {
+      "dimension_id": "rfi_questions.is_active",
+      "owner_table": "rfi_questions",
+      "column": "rfi_questions.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_responses.boolean_response": {
+      "dimension_id": "rfi_responses.boolean_response",
+      "owner_table": "rfi_responses",
+      "column": "rfi_responses.boolean_response",
+      "col_name": "boolean_response",
+      "labels": [
+        "boolean",
+        "boolean response",
+        "response"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_responses.responded_by": {
+      "dimension_id": "rfi_responses.responded_by",
+      "owner_table": "rfi_responses",
+      "column": "rfi_responses.responded_by",
+      "col_name": "responded_by",
+      "labels": [
+        "responded",
+        "responded by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_templates.name": {
+      "dimension_id": "rfi_templates.name",
+      "owner_table": "rfi_templates",
+      "column": "rfi_templates.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_templates.object_type": {
+      "dimension_id": "rfi_templates.object_type",
+      "owner_table": "rfi_templates",
+      "column": "rfi_templates.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Incident",
+        "QA",
+        "QC",
+        "Level2",
+        "SAR",
+        "Case",
+        "CounterParty"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_templates.is_default": {
+      "dimension_id": "rfi_templates.is_default",
+      "owner_table": "rfi_templates",
+      "column": "rfi_templates.is_default",
+      "col_name": "is_default",
+      "labels": [
+        "default",
+        "is default"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rfi_templates.is_active": {
+      "dimension_id": "rfi_templates.is_active",
+      "owner_table": "rfi_templates",
+      "column": "rfi_templates.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.role_name": {
+      "dimension_id": "role.role_name",
+      "owner_table": "role",
+      "column": "role.role_name",
+      "col_name": "role_name",
+      "labels": [
+        "role",
+        "role name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Level 2",
+        "RFI Compliance Manager",
+        "QA Manager",
+        "IT Admin",
+        "Level 1",
+        "RFI System Admin",
+        "FIU Manager",
+        "User"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.description": {
+      "dimension_id": "role.description",
+      "owner_table": "role",
+      "column": "role.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "FIU Manager role specifically for all workflow modules",
+        "Level 2 role for investigating cases only",
+        "User role with specific permissions.",
+        "Case Owner role  with create, edit, send, resend RFI; review responses.",
+        "IT Admin role with IT permissions.",
+        "QC Manager responsible for overseeing QC investigations only",
+        "Configure templates; manage RFI settings; view audit logs",
+        "Draft RFI, suggest edits; view responses."
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.is_active": {
+      "dimension_id": "role.is_active",
+      "owner_table": "role",
+      "column": "role.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.workflow_state": {
+      "dimension_id": "role.workflow_state",
+      "owner_table": "role",
+      "column": "role.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Role Approved"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.owned_by": {
+      "dimension_id": "role.owned_by",
+      "owner_table": "role",
+      "column": "role.owned_by",
+      "col_name": "owned_by",
+      "labels": [
+        "owned",
+        "owned by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.owned_by_group": {
+      "dimension_id": "role.owned_by_group",
+      "owner_table": "role",
+      "column": "role.owned_by_group",
+      "col_name": "owned_by_group",
+      "labels": [
+        "group",
+        "owned",
+        "owned by group"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "role.is_system": {
+      "dimension_id": "role.is_system",
+      "owner_table": "role",
+      "column": "role.is_system",
+      "col_name": "is_system",
+      "labels": [
+        "is system",
+        "system"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "rule.is_active": {
+      "dimension_id": "rule.is_active",
+      "owner_table": "rule",
+      "column": "rule.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.name": {
+      "dimension_id": "sampling.name",
+      "owner_table": "sampling",
+      "column": "sampling.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.is_active": {
+      "dimension_id": "sampling.is_active",
+      "owner_table": "sampling",
+      "column": "sampling.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.enabled": {
+      "dimension_id": "sampling.enabled",
+      "owner_table": "sampling",
+      "column": "sampling.enabled",
+      "col_name": "enabled",
+      "labels": [
+        "enabled"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.model_name": {
+      "dimension_id": "sampling.model_name",
+      "owner_table": "sampling",
+      "column": "sampling.model_name",
+      "col_name": "model_name",
+      "labels": [
+        "model",
+        "model name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Incident"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.source_workflow_state": {
+      "dimension_id": "sampling.source_workflow_state",
+      "owner_table": "sampling",
+      "column": "sampling.source_workflow_state",
+      "col_name": "source_workflow_state",
+      "labels": [
+        "source",
+        "source workflow state",
+        "workflow"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        ""
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.target_queue": {
+      "dimension_id": "sampling.target_queue",
+      "owner_table": "sampling",
+      "column": "sampling.target_queue",
+      "col_name": "target_queue",
+      "labels": [
+        "queue",
+        "target",
+        "target queue"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        ""
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.target_workflow_state": {
+      "dimension_id": "sampling.target_workflow_state",
+      "owner_table": "sampling",
+      "column": "sampling.target_workflow_state",
+      "col_name": "target_workflow_state",
+      "labels": [
+        "target",
+        "target workflow state",
+        "workflow"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        ""
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sampling.allow_resampling": {
+      "dimension_id": "sampling.allow_resampling",
+      "owner_table": "sampling",
+      "column": "sampling.allow_resampling",
+      "col_name": "allow_resampling",
+      "labels": [
+        "allow",
+        "allow resampling",
+        "resampling"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_assignments.entity_type": {
+      "dimension_id": "signal_assignments.entity_type",
+      "owner_table": "signal_assignments",
+      "column": "signal_assignments.entity_type",
+      "col_name": "entity_type",
+      "labels": [
+        "entity",
+        "entity type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_assignments.impact": {
+      "dimension_id": "signal_assignments.impact",
+      "owner_table": "signal_assignments",
+      "column": "signal_assignments.impact",
+      "col_name": "impact",
+      "labels": [
+        "impact"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_categories.name": {
+      "dimension_id": "signal_categories.name",
+      "owner_table": "signal_categories",
+      "column": "signal_categories.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_levels.name": {
+      "dimension_id": "signal_levels.name",
+      "owner_table": "signal_levels",
+      "column": "signal_levels.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_levels.target_table": {
+      "dimension_id": "signal_levels.target_table",
+      "owner_table": "signal_levels",
+      "column": "signal_levels.target_table",
+      "col_name": "target_table",
+      "labels": [
+        "table",
+        "target",
+        "target table"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "transactions",
+        "parties",
+        "counter_parties",
+        "incidents"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_levels.target_table_pk": {
+      "dimension_id": "signal_levels.target_table_pk",
+      "owner_table": "signal_levels",
+      "column": "signal_levels.target_table_pk",
+      "col_name": "target_table_pk",
+      "labels": [
+        "pk",
+        "primary",
+        "table",
+        "target",
+        "target table pk primary key",
+        "target table pk"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "party_id",
+        "ocs_transaction_id",
+        "incident_id"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_rules.description": {
+      "dimension_id": "signal_rules.description",
+      "owner_table": "signal_rules",
+      "column": "signal_rules.description",
+      "col_name": "description",
+      "labels": [
+        "description"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Focal party is a PEP, MSB",
+        "Customer falls under reputational risk categories",
+        "Multiple escalations",
+        "New customer",
+        "First-time alert",
+        "Identifies money remitter transactions (casa de cambio, exchange house etc.)",
+        "Identifies transactions involving high risk accounts",
+        "Transactions involving a business aggregating >=$5,000,000"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_rules.impact": {
+      "dimension_id": "signal_rules.impact",
+      "owner_table": "signal_rules",
+      "column": "signal_rules.impact",
+      "col_name": "impact",
+      "labels": [
+        "impact"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Positive",
+        "Neutral"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_rules.priority": {
+      "dimension_id": "signal_rules.priority",
+      "owner_table": "signal_rules",
+      "column": "signal_rules.priority",
+      "col_name": "priority",
+      "labels": [
+        "priority"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "High",
+        "Medium",
+        "Low"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_rules.enabled": {
+      "dimension_id": "signal_rules.enabled",
+      "owner_table": "signal_rules",
+      "column": "signal_rules.enabled",
+      "col_name": "enabled",
+      "labels": [
+        "enabled"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true",
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_rules.is_latest": {
+      "dimension_id": "signal_rules.is_latest",
+      "owner_table": "signal_rules",
+      "column": "signal_rules.is_latest",
+      "col_name": "is_latest",
+      "labels": [
+        "is latest",
+        "latest"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_score_assignments.object_type": {
+      "dimension_id": "signal_score_assignments.object_type",
+      "owner_table": "signal_score_assignments",
+      "column": "signal_score_assignments.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "signal_typologies.name": {
+      "dimension_id": "signal_typologies.name",
+      "owner_table": "signal_typologies",
+      "column": "signal_typologies.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_config.workflow_state": {
+      "dimension_id": "sla_config.workflow_state",
+      "owner_table": "sla_config",
+      "column": "sla_config.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_instance.object_type": {
+      "dimension_id": "sla_instance.object_type",
+      "owner_table": "sla_instance",
+      "column": "sla_instance.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_instance.workflow_state": {
+      "dimension_id": "sla_instance.workflow_state",
+      "owner_table": "sla_instance",
+      "column": "sla_instance.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_instance.is_completed": {
+      "dimension_id": "sla_instance.is_completed",
+      "owner_table": "sla_instance",
+      "column": "sla_instance.is_completed",
+      "col_name": "is_completed",
+      "labels": [
+        "completed",
+        "is completed"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_scheduled_action.db_name": {
+      "dimension_id": "sla_scheduled_action.db_name",
+      "owner_table": "sla_scheduled_action",
+      "column": "sla_scheduled_action.db_name",
+      "col_name": "db_name",
+      "labels": [
+        "db",
+        "db name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_scheduled_action.object_type": {
+      "dimension_id": "sla_scheduled_action.object_type",
+      "owner_table": "sla_scheduled_action",
+      "column": "sla_scheduled_action.object_type",
+      "col_name": "object_type",
+      "labels": [
+        "object type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_scheduled_action.workflow_state": {
+      "dimension_id": "sla_scheduled_action.workflow_state",
+      "owner_table": "sla_scheduled_action",
+      "column": "sla_scheduled_action.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_scheduled_action.task_name": {
+      "dimension_id": "sla_scheduled_action.task_name",
+      "owner_table": "sla_scheduled_action",
+      "column": "sla_scheduled_action.task_name",
+      "col_name": "task_name",
+      "labels": [
+        "task",
+        "task name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "sla_scheduled_action.status": {
+      "dimension_id": "sla_scheduled_action.status",
+      "owner_table": "sla_scheduled_action",
+      "column": "sla_scheduled_action.status",
+      "col_name": "status",
+      "labels": [
+        "status"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.name": {
+      "dimension_id": "state.name",
+      "owner_table": "state",
+      "column": "state.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.is_initial": {
+      "dimension_id": "state.is_initial",
+      "owner_table": "state",
+      "column": "state.is_initial",
+      "col_name": "is_initial",
+      "labels": [
+        "initial",
+        "is initial"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.is_final": {
+      "dimension_id": "state.is_final",
+      "owner_table": "state",
+      "column": "state.is_final",
+      "col_name": "is_final",
+      "labels": [
+        "final",
+        "is final"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.type": {
+      "dimension_id": "state.type",
+      "owner_table": "state",
+      "column": "state.type",
+      "col_name": "type",
+      "labels": [
+        "type"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.display_name": {
+      "dimension_id": "state.display_name",
+      "owner_table": "state",
+      "column": "state.display_name",
+      "col_name": "display_name",
+      "labels": [
+        "display",
+        "display name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "",
+        "Group Assigned",
+        "Approved",
+        "Edit in Progress",
+        "Pending",
+        "Draft",
+        "Rejected",
+        "Tenant Storage Provisioning"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.combinator": {
+      "dimension_id": "state.combinator",
+      "owner_table": "state",
+      "column": "state.combinator",
+      "col_name": "combinator",
+      "labels": [
+        "combinator"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "OR"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "state.allow_bulk_assign": {
+      "dimension_id": "state.allow_bulk_assign",
+      "owner_table": "state",
+      "column": "state.allow_bulk_assign",
+      "col_name": "allow_bulk_assign",
+      "labels": [
+        "allow",
+        "allow bulk assign",
+        "assign",
+        "bulk"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "tenant_info.key": {
+      "dimension_id": "tenant_info.key",
+      "owner_table": "tenant_info",
+      "column": "tenant_info.key",
+      "col_name": "key",
+      "labels": [
+        "key"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "tenant_info.value": {
+      "dimension_id": "tenant_info.value",
+      "owner_table": "tenant_info",
+      "column": "tenant_info.value",
+      "col_name": "value",
+      "labels": [
+        "value"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "transaction.currency": {
+      "dimension_id": "transaction.currency",
+      "owner_table": "transaction",
+      "column": "transaction.currency",
+      "col_name": "currency",
+      "labels": [
+        "currency"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "transaction.is_annotation": {
+      "dimension_id": "transaction.is_annotation",
+      "owner_table": "transaction",
+      "column": "transaction.is_annotation",
+      "col_name": "is_annotation",
+      "labels": [
+        "annotation",
+        "is annotation"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "transition.name": {
+      "dimension_id": "transition.name",
+      "owner_table": "transition",
+      "column": "transition.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "transition.action_label": {
+      "dimension_id": "transition.action_label",
+      "owner_table": "transition",
+      "column": "transition.action_label",
+      "col_name": "action_label",
+      "labels": [
+        "action",
+        "action label",
+        "label"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "",
+        "Start Review",
+        "Start Investigation"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.is_superuser": {
+      "dimension_id": "user.is_superuser",
+      "owner_table": "user",
+      "column": "user.is_superuser",
+      "col_name": "is_superuser",
+      "labels": [
+        "is superuser",
+        "superuser"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.is_staff": {
+      "dimension_id": "user.is_staff",
+      "owner_table": "user",
+      "column": "user.is_staff",
+      "col_name": "is_staff",
+      "labels": [
+        "is staff",
+        "staff"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.first_name": {
+      "dimension_id": "user.first_name",
+      "owner_table": "user",
+      "column": "user.first_name",
+      "col_name": "first_name",
+      "labels": [
+        "first",
+        "first name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.last_name": {
+      "dimension_id": "user.last_name",
+      "owner_table": "user",
+      "column": "user.last_name",
+      "col_name": "last_name",
+      "labels": [
+        "last",
+        "last name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.username": {
+      "dimension_id": "user.username",
+      "owner_table": "user",
+      "column": "user.username",
+      "col_name": "username",
+      "labels": [
+        "username"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.email": {
+      "dimension_id": "user.email",
+      "owner_table": "user",
+      "column": "user.email",
+      "col_name": "email",
+      "labels": [
+        "email"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.is_active": {
+      "dimension_id": "user.is_active",
+      "owner_table": "user",
+      "column": "user.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.is_locked": {
+      "dimension_id": "user.is_locked",
+      "owner_table": "user",
+      "column": "user.is_locked",
+      "col_name": "is_locked",
+      "labels": [
+        "is locked",
+        "locked"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.mfa_enabled": {
+      "dimension_id": "user.mfa_enabled",
+      "owner_table": "user",
+      "column": "user.mfa_enabled",
+      "col_name": "mfa_enabled",
+      "labels": [
+        "enabled",
+        "mfa",
+        "mfa enabled"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true",
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.workflow_state": {
+      "dimension_id": "user.workflow_state",
+      "owner_table": "user",
+      "column": "user.workflow_state",
+      "col_name": "workflow_state",
+      "labels": [
+        "workflow",
+        "workflow state"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "User Approved"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.owned_by": {
+      "dimension_id": "user.owned_by",
+      "owner_table": "user",
+      "column": "user.owned_by",
+      "col_name": "owned_by",
+      "labels": [
+        "owned",
+        "owned by"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.owned_by_group": {
+      "dimension_id": "user.owned_by_group",
+      "owner_table": "user",
+      "column": "user.owned_by_group",
+      "col_name": "owned_by_group",
+      "labels": [
+        "group",
+        "owned",
+        "owned by group"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.is_reset_mail_sent": {
+      "dimension_id": "user.is_reset_mail_sent",
+      "owner_table": "user",
+      "column": "user.is_reset_mail_sent",
+      "col_name": "is_reset_mail_sent",
+      "labels": [
+        "is reset mail sent",
+        "mail",
+        "reset",
+        "sent"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user.is_blacklist": {
+      "dimension_id": "user.is_blacklist",
+      "owner_table": "user",
+      "column": "user.is_blacklist",
+      "col_name": "is_blacklist",
+      "labels": [
+        "blacklist",
+        "is blacklist"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false",
+        "true"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user_permissions.is_overriden": {
+      "dimension_id": "user_permissions.is_overriden",
+      "owner_table": "user_permissions",
+      "column": "user_permissions.is_overriden",
+      "col_name": "is_overriden",
+      "labels": [
+        "is overriden",
+        "overriden"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user_profile.key": {
+      "dimension_id": "user_profile.key",
+      "owner_table": "user_profile",
+      "column": "user_profile.key",
+      "col_name": "key",
+      "labels": [
+        "key"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "grid_data",
+        "mfa_secret",
+        "dashboard_config",
+        "focal_party_info_display"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user_profile.value": {
+      "dimension_id": "user_profile.value",
+      "owner_table": "user_profile",
+      "column": "user_profile.value",
+      "col_name": "value",
+      "labels": [
+        "value"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "alert_transaction_data_OCS_Inc_002102",
+        "counter_parties_data_OCS_Inc_002102",
+        "OCS_Inc_002102",
+        "level_1_list",
+        "incident_dashboard"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "user_prompt.is_active": {
+      "dimension_id": "user_prompt.is_active",
+      "owner_table": "user_prompt",
+      "column": "user_prompt.is_active",
+      "col_name": "is_active",
+      "labels": [
+        "active",
+        "is active"
+      ],
+      "business_definition": "",
+      "semantic_type": "FLAG",
+      "values": [],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "workflow.name": {
+      "dimension_id": "workflow.name",
+      "owner_table": "workflow",
+      "column": "workflow.name",
+      "col_name": "name",
+      "labels": [
+        "name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [],
+      "values_redacted": true,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "workflow.model_name": {
+      "dimension_id": "workflow.model_name",
+      "owner_table": "workflow",
+      "column": "workflow.model_name",
+      "col_name": "model_name",
+      "labels": [
+        "model",
+        "model name"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Level 2",
+        "QA",
+        "QC",
+        "SAR",
+        "Case",
+        "Role",
+        "Permission",
+        "RFIObject"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "workflow.module": {
+      "dimension_id": "workflow.module",
+      "owner_table": "workflow",
+      "column": "workflow.module",
+      "col_name": "module",
+      "labels": [
+        "module"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "Investigation and Research",
+        "Administration",
+        "OCSAdministration",
+        "Source Data Management",
+        "Request for Information"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    },
+    "workflow.rfi_step_enabled": {
+      "dimension_id": "workflow.rfi_step_enabled",
+      "owner_table": "workflow",
+      "column": "workflow.rfi_step_enabled",
+      "col_name": "rfi_step_enabled",
+      "labels": [
+        "enabled",
+        "information",
+        "request",
+        "rfi",
+        "rfi step enabled request for information",
+        "step",
+        "rfi step enabled"
+      ],
+      "business_definition": "",
+      "semantic_type": "CATEGORY",
+      "values": [
+        "false"
+      ],
+      "values_redacted": false,
+      "groupable": true,
+      "filterable": true,
+      "confidence": 0.5
+    }
+  }
+}

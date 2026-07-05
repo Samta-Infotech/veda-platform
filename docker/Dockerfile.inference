@@ -1,0 +1,49 @@
+# inference tier — Uvicorn/ASGI + torch/transformers/sentence-transformers.
+# Warm-loads BGE-M3, bge-reranker-v2-m3, MiniLM, and the 5-signal engine once per worker
+# (migration_plan.md §8.1). Model weights are baked/mounted so startup is offline — no
+# network calls at container start, matching the zero-egress constraint (§9, §2).
+
+FROM python:3.11-slim AS base
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1 \
+    HF_HOME=/models/hf_cache \
+    SENTENCE_TRANSFORMERS_HOME=/models/hf_cache
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        build-essential \
+        libpq-dev \
+        curl \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --gid 1000 veda && \
+    useradd --uid 1000 --gid veda --shell /bin/bash --create-home veda
+
+WORKDIR /app
+
+COPY requirements/inference.txt /app/requirements/inference.txt
+RUN pip install -r /app/requirements/inference.txt
+
+# api/worker stack so this image can ALSO run the Celery ingest worker — ingestion
+# needs Django + celery ALONGSIDE torch, and no other image has both. Kept as a
+# separate, small layer so the heavy torch install above stays cached on rebuild.
+RUN pip install "django>=4.2,<5.1" djangorestframework celery django-environ
+
+COPY . /app
+
+# Model weights (BGE-M3, bge-reranker-v2-m3, MiniLM) are expected under /models — either
+# baked in here via a build-context COPY (uncomment below, pre-pulled at build time) or
+# mounted as the `model_cache` volume in docker-compose (§9 model cache). Either way,
+# HF_HUB_OFFLINE=1 above guarantees no network fetch is attempted at startup.
+# COPY models/ /models/
+
+RUN mkdir -p /models/hf_cache && \
+    chmod +x /app/docker/entrypoint.inference.sh && \
+    chown -R veda:veda /app /models
+
+USER veda
+
+ENTRYPOINT ["/app/docker/entrypoint.inference.sh"]
