@@ -147,9 +147,9 @@ VEDA_SOURCES = [
     {
         "id":      "dmt",
         "type":    "document",
-        "enabled": True,
+        "enabled": False,           # disabled: stale veda-poc CSV doc source, not part of homzhub
         "engine":  "filesystem",    # filesystem | s3 | azure_blob | gcs
-        "path":    "/Users/ekesel/samta/veda-poc",
+        "path":    "",              # was /Users/ekesel/samta/veda-poc — removed (self-contained)
         "formats": ["csv"],
         "role":    "searchable",    # chunk retrieval + LLM synthesis
         # Optional: recursive directory scanning
@@ -569,6 +569,7 @@ AUTO_FINETUNE_BATCH_SIZE     = 16
 BGE_FINETUNE_BATCH_SIZE      = 8    # CPU training — no MPS memory limit
 BGE_FINETUNE_DEVICE          = "cpu"  # BGE-large OOMs on MPS at 6.77 GB; always train on CPU
 BGE_FINETUNE_EPOCHS          = 1    # optional fine-tune step; referenced by main.py step 11
+BGE_FINETUNE_MAX_SEQ_LEN     = 128  # NL/column training pairs are short; matches AUTO_FINETUNE_MAX_SEQ_LEN
 AUTO_FINETUNE_WARMUP_STEPS   = 10
 AUTO_FINETUNE_MAX_SEQ_LEN    = 128
 AUTO_FINETUNE_CHECKPOINT_DIR = "ingestion/client_minilm"

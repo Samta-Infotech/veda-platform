@@ -1,0 +1,15 @@
+# Host (bare-metal) ingestion venv for veda-platform — self-contained, no veda-poc dependency.
+# Used by scripts/fresh_homzhub.sh to run the full L0 pipeline on Apple MPS (24GB unified
+# memory) / CUDA. Versions pinned to the known-good set (torch_geometric must match torch).
+# Create: python3 -m venv .venv && .venv/bin/pip install -r requirements/host-ingest.txt
+numpy==1.26.4
+torch==2.12.0
+torch_geometric==2.8.0
+sentence-transformers==5.5.1
+scikit-learn==1.9.0
+kuzu
+dateparser
+psycopg2-binary
+sqlglot
+langgraph
+langchain-core

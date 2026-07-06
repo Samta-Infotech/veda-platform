@@ -1,427 +1,282 @@
-# ARCHITECTURE.md — VEDA Technical Architecture
+# ARCHITECTURE.md — VEDA Platform
 
-**System**: VEDA — Natural Language → Query engine (SQL-first, multi-modal)
-**Shape**: On-premise / zero-egress. All inference local (Ollama + local BGE/MiniLM). No client data leaves the server.
-**Last updated**: 2026-07-04 · regenerated from the live codebase + code-review knowledge graph (141 files, 1,556 nodes, 18,358 edges, 230 detected flows, 21 communities).
-
-> This document supersedes the earlier "L1–L4 built, L5–L7 planned" description. The engine has since grown into the **hybrid architecture**: a deterministic SQL head with a full validate-execute-audit firewall, plus RAG / hybrid / NoSQL heads behind a router, plus a phase-3 5-signal retrieval spine and a unified knowledge graph. The canonical target design lives in [ARCHITECTURE_HYBRID.md](ARCHITECTURE_HYBRID.md); this file documents **what is actually wired today** and every execution flow.
+**System**: VEDA — Natural Language → Query engine (SQL-first, multi-modal), packaged as a Django platform around a preserved research engine.
+**Shape**: On-premise, zero-egress. All model inference is local; no source-DB data (schema, values, query text) leaves the server.
+**Basis**: Written from a direct read of the source in this repository (`apps/`, `inference/`, `storage_adapters/`, `config/`, `docker/`, `veda_core/`). Everything below is what the code actually does; where a piece is a skeleton or a fallback, it is called out as such. Code comments throughout reference `migration_plan.md` sections (`§N`).
 
 ---
 
-## 0. Thesis
+## 1. The two tiers
 
-> **Neither reasoning engine writes SQL structure.** Reasoning produces *intent*; a deterministic compiler produces *structure*; one firewall proves every result before it executes. Everything schema-specific is **derived at ingestion**, never hardcoded.
-
-Three concrete invariants fall out of this and never bend:
-
-- **Read-only, AST-enforced.** No INSERT/UPDATE/DELETE/DDL ever reaches the DB.
-- **Parameterized only.** Every literal is bound; no f-string/`%`-formatted values into SQL.
-- **Refuse-over-guess.** Ambiguity (two FK paths, an ungrounded value, a dropped qualifier) becomes a clean refusal with a reason — never a silent wrong answer.
-
----
-
-## 1. Two phases + a multi-head front door
+The repository is one Django project (`config/`) with six apps (`apps/`), a separate FastAPI inference service (`inference/`), a storage seam (`storage_adapters/`), and the preserved engine (`veda_core/`). At runtime this is **two process tiers plus stores**:
 
 ```
-                          ┌──────────────────────────────────────────────┐
-   INGESTION (per DB) ───►│  Grounding substrate:                        │
-                          │   FK graph · embeddings · semantic metadata  │
-                          │   · glossary/synonyms · value samples        │
-                          │   · unified knowledge graph · doc chunks     │
-                          └──────────────────────────────────────────────┘
-                                             │  (populated stores)
-                                             ▼
-   NL query ──►  veda_hybrid.run_hybrid_query   (THE FRONT DOOR)
-                       │
-                       ├─ decompose?  (compound → N independent sub-queries)
-                       │
-                       └─ route per sub-query (query/query_router.py):
-                            ├─ sql    → veda/pipeline.run_query      [deterministic, CORRECTNESS]
-                            ├─ rag    → query/rag_layer.run_rag_layer      [doc retrieval + LLM]
-                            ├─ hybrid → query/rag_layer.run_hybrid_layer   [SQL signals + docs, RRF]
-                            └─ nosql  → query/nosql_builder.run_nosql_builder [native Mongo/etc.]
-                       │
-                       ▼
-                 MultiResult  (always — 1 item for a plain query, N for a compound)
+                 nginx  (only published port: 8080→80)
+                   │
+   ┌───────────────┴───────────────┐           HTTP: X-Veda-Source-Id / X-Veda-Tenant / X-Request-Id
+   │  api (Django/DRF)             │ ─────────────────────────────────────────────┐
+   │  worker / beat (Celery)       │                                              │
+   │  ingest-worker (Celery, ML)   │                                              ▼
+   └───────────────────────────────┘                       ┌──────────────────────────────────────┐
+   thin tier — imports NO veda_core                         │ inference (FastAPI/ASGI)             │
+   (api calls inference over HTTP)                          │  → veda_core.veda_hybrid.run_hybrid… │
+                                                            │  warm engine per worker process      │
+                                                            └──────────────────────────────────────┘
+                                                                          │ raw psycopg2 (via PgBouncer) + Redis
+                                                                          ▼
+   Postgres+pgvector:  veda (Django substrate)  ·  veda_engine (engine operational store)  ·  source DB (read-only)
+   redis-cache (assembled sm, rehydrate pub/sub)   redis-broker (Celery only)   Ollama/vLLM (SLM)
 ```
 
-- **`veda_hybrid.py` — `run_hybrid_query(query)`** is the single public entry point. It **always** returns a `MultiResult` (`query/multi_result.py`). Callers branch on `MultiResult`, never on "is this compound", so everything downstream stays single-intent-simple.
-- **Compound handling** (`QUERY_DECOMPOSE_ENABLED`): the deterministic SQL head *self-certifies completeness* (its `qualifier_completeness` gate proves a clean answer covers the whole utterance), so a clean SQL answer skips the decomposer entirely — zero added latency on the hot path. A non-deterministic head (RAG/hybrid/NoSQL) cannot self-certify, so those decompose **first** (silent-drop guard). A deterministic *refusal* also triggers decomposition (maybe it was several questions).
-- **Routing default is `sql`** — the deterministic head is the safe default whenever the router is off or unavailable.
+Verified in the code:
+- **`apps/query/inference_client.py`** talks to the inference service over stdlib `urllib` (no `veda_core` import in the api tier); on timeout/connection failure it raises `InferenceUnavailable`, which **`apps/query/views.py`** turns into a structured `503`, never a 500.
+- **`inference/main.py`** builds the FastAPI app, warms the engine once at ASGI lifespan (`inference/loaders.py::hydrate`), and sets the ambient `(source, tenant)` per request from headers.
+- **`veda_core/veda/execution.py::execute_sql`** connects to the **source DB** from `VEDA_SOURCE_*` env (`veda/runtime.py::DB_CONFIG`), opens the session `readonly=True, autocommit=True`, sets `statement_timeout = 30000`, and `fetchmany(20)`.
 
 ---
 
-## 2. Repository map — every package, every file
+## 2. Repository map (what each file actually is)
 
-### Root
-| File | Purpose |
-|------|---------|
-| `veda_hybrid.py` | **Front door** — `run_hybrid_query`, router dispatch, decompose/fan-out, `MultiResult` assembly |
-| `main.py` | Orchestrator CLI — ingestion pipeline, evaluation pipeline, single-query smoke test, `--report-only` |
-| `config.py` | **All** parameters, feature flags, model names, thresholds, DB config (single source of truth) |
-| `run_hybrid_suite.py` | Drives the full eval suite through `veda_hybrid` |
-| `benchmark_100_queries.py`, `analyze_benchmark.py`, `_sweep_probe.py` | Benchmark harnesses + LoRA sweep probe |
-| `mlflow_orchestrator.py` | MLflow experiment tracking wrapper |
-| `veda_hybrid.py` / `run_hybrid_suite.py` | (see above) |
+### `config/` — Django project
+| File | What it does (verified) |
+|------|-------------------------|
+| `settings/base.py` | Two DB aliases (`default`, `source_registry`) both dial `PGBOUNCER_HOST:PORT`; `DISABLE_SERVER_SIDE_CURSORS=True` (transaction pooling); split Redis (`redis-cache` for `CACHES`, `redis-broker` for Celery); DRF token auth + throttles; `VEDA = build_veda_settings()`. |
+| `celery.py` | `Celery("veda")`, broker/back-end from settings, task queues `ingestion` / `high` / `default`. |
+| `urls.py` | `/admin`, `/api/v1/` (from `apps.query.urls`), `/healthz`, `/readyz`, `/metrics`. |
+| `asgi.py` / `wsgi.py` | Django entrypoints (separate from the FastAPI `inference` app). |
 
-### `veda/` — the deterministic engine + firewall (L1→L9)
-| File | Role (per ARCHITECTURE_HYBRID.md layer) |
-|------|------|
-| `pipeline.py` | **`run_query`** — the L1→L7 orchestrator (subject of §5) |
-| `runtime.py` | Shared warm resources: DB pool, BGE-M3, retrieval engine, FK graph handles + constants |
-| `routing.py` | L2 anchor resolution — `select_primary_table` + `vet_primary` (margin-based confidence) |
-| `planning.py` | L4b/L4c — `existence_mode`, `aggregate_mode`, `try_multitable`, deterministic pre-aggregation & join orchestration |
-| `generation.py` | L5 — LLM SQL generation (single-table + join-skeleton fill only; never authors joins) |
-| `compiler.py` | Graph SQL compiler — join inference from the FK graph |
-| `consensus.py` | L4 Consensus engine — field-weighted IR reconciliation (target/partial) |
-| `verifier.py` | L5 Verifier — substrate-grounded ambiguity check (target/partial) |
-| `ir_emit.py`, `ir_validator.py`, `ir_equivalence.py` | Canonical IR v2 emit / validate / equivalence-gate |
-| `validation.py` | L6 firewall — value grounding, qualifier-completeness, AST validate + parameterize, fan-out |
-| `graph_guard.py` | Firewall — every join is a real FK edge; no cartesian |
-| `execution.py` | L7 — read-only session, `statement_timeout`, bounded fetch |
-| `cache.py` | Verified-query cache (file-based, cosine ≥ 0.85) |
-| `query_enhancement.py` | Recall-only search enrichment (singularization + term expansion) |
-| `explain.py` | Full `EXPLAIN` trace (`new_trace`) — the debugging spine |
-| `feedback.py` | Turns a refusal/error into actionable guidance |
-| `cli.py` | Single-shot + REPL entry point |
+### `apps/` — six bounded contexts
+| App | Files | What it does |
+|-----|-------|--------------|
+| `core` | `models.py`, `middleware.py`, `tenant_task.py`, `settings_bridge.py`, `views.py` | `TenantScopedModel` + `TenantManager` (auto-filter by ambient context); `RequestIdMiddleware` (`X-Request-Id`); `TenantTask` (Celery base that binds context in a copied contextvars context); `build_veda_settings()` (config→settings bridge with env override); `/readyz` + `/metrics`. |
+| `sources` | `models.py` | `Source` (connection on the row: host/port/dbname/db_user/password_env|inline; `resolve_password`/`connection`/`as_engine_env`) + `SourceConnectionProfile`. `ready` flips only on ingestion success. |
+| `substrate` | `models.py` | Every ingestion output as a model + `managed=False` pgvector mirrors. See §4. |
+| `ingestion` | `tasks.py`, `models.py` | `task_ingest_source` (runs the engine pipeline in a subprocess, streams stage markers) + `IngestionJob`/`IngestionStage`. See §7. |
+| `query` | `views.py`, `inference_client.py`, `models.py`, `urls.py` | `QueryView` (POST `/api/v1/query`), `InferenceClient`, `QueryLog` (audit), `IngestTriggerView`/`EvalTriggerView` (staff). |
+| `evaluation` | `tasks.py`, `models.py` | `task_run_eval` runs a query set through inference → `EvalRun`/`EvalCaseResult` + HTML. |
 
-### `query/` — layer plumbing, heads, and legacy pipeline
-| File | Role |
-|------|------|
-| `temporal_parser.py` | L1 — date expression → ISO range (`run_temporal_parser`) |
-| `query_router.py` | Modality classifier — sql / rag / hybrid / nosql |
-| `intent.py`, `intent_envelope.py`, `envelope_slm.py` | Intent detection (`IntentDetector`) + intent-envelope SLM emission + mapper |
-| `fast_path.py` | **T0** deterministic templates (count / exists / aggregate / dimension-list) — no retrieval, no LLM |
-| `retrieval_v2.py`, `retrieval_select.py`, `graph_retriever.py` | Retrieval (v2 two-stage), single-source-of-truth column selection, graph retrieval |
-| `semantic_layer.py`, `schema_linker.py`, `reranker.py` | Legacy MiniLM ensemble retrieval + spaCy schema linking + cross-encoder rerank (fallback shim) |
-| `slm_layer.py` | L3 SLM — IR JSON emit, `_normalize_ir`, `_validate_ir`, `run_slm_layer`, **`run_decomposer`** |
-| `slm_langgraph.py`, `lg_nodes.py`, `lg_prompts.py` | LangGraph SLM pipeline (`classify_intent→select_entity→select_columns→build_filters→assemble_ir`) |
-| `sql_builder.py` | L4/L6 — IR → parameterized SQL compiler (`run_sql_builder`), the `_Ctx` param binder |
-| `sql_generator.py`, `sql_validator.py` | LLM SQL generation helper + supplementary AST/type/join validator (`SQLValidator`) |
-| `join_planner.py`, `fk_path_resolver.py` | FK-graph join planning (`plan_join_tree`) + multi-hop junction-membership resolution |
-| `value_arbiter.py`, `value_resolver.py`, `value_filter.py` | Value-vs-column arbitration, FK value resolution, value-token → filter injection |
-| `answer_entity.py` | WHO-questions → PERSON entity via the concept graph (display name over FK) |
-| `target_selection.py` | Scores/buckets candidate *targets* for multi-entity queries |
-| `nl_simplifier.py`, `nl_answer.py` | Query pre-simplification + result-rows → prose answer |
-| `rag_layer.py` | RAG head (`run_rag_layer`) + hybrid head (`run_hybrid_layer`, `_rrf_fuse_hybrid`) |
-| `nosql_builder.py` | NoSQL head — native Mongo/etc. query builder |
-| `execution_engine.py`, `executor.py` | Multi-source read-only executor (routes by `source_id`) + result dataclass wrapper |
-| `audit_logger.py` | Append-only query log (L9) |
-| `multi_result.py` | `MultiResult` / `SubResult` + `STATUS_OK/REFUSED/ERROR` |
-| `fast_path.py` (`log_route`) | Route/latency logging |
+### `inference/` — warm ASGI service
+| File | What it does |
+|------|--------------|
+| `main.py` | FastAPI app; lifespan `hydrate()`; per-request middleware `set_context` from `x-veda-source-id`/`x-veda-tenant`; starts the redis rehydrate subscriber that clears `veda_hybrid._SM` on broadcast. |
+| `loaders.py` | `hydrate()` — checks the semantic-model file exists, warms `retrieval_engine_phase3.get_engine()`; returns a readiness dict. Best-effort (never crashes startup). |
+| `concurrency.py` | `run_in_threadpool_with_context` — offload `fn` to a thread under `copy_context()`. Raw offload is lint-banned in `inference/`+`veda_core/`. |
+| `routes/hybrid.py` | POST `/v1/run_hybrid_query` → `run_hybrid_query(req.query)` verbatim, serialized, top-level `status` surfaced. |
+| `routes/retrieve.py` | POST `/v1/retrieve` (`get_engine().retrieve`) + POST `/v1/rehydrate` (drop `_SM`, publish fan-out). |
+| `routes/health.py` | `/healthz` + `/readyz`. |
 
-### `retrieval/` — the 5-signal grounding spine (phase 3)
-| File | Role |
-|------|------|
-| `retrieval_engine_phase3.py` | The 5-signal engine (`get_engine().retrieve`) — the spine both heads read |
-| `semantic_search.py` | BGE-M3 dense signal (1024-dim) |
-| `bm25_ranker.py` | Keyword signal |
-| `signal_builder.py` | FK / subgraph structural signals |
-| `rrf_merger.py` | Reciprocal-rank fusion |
-| `intent_boosting.py` | Intent-aware re-weighting |
-| `adaptive_cutoff.py` | Semantic-cliff variable top-k |
-| `query_enrichment.py` | Singularization + high-precision term expansion |
-| `retrieval_cache.py` | Retrieval memoization |
+### `storage_adapters/` — substrate I/O seam
+| File | What it does |
+|------|--------------|
+| `reader.py` | Query-time reads, **Django-free** (raw psycopg2 via PgBouncer + Redis): `get_fk_adjacency`, `glossary`, `synonyms`, `value_samples`, `ann_search` (raw pgvector, `SET LOCAL hnsw.ef_search` inside an explicit txn), `verified_cache_lookup`, `save_verified_query` (INSERT … ON CONFLICT DO NOTHING + rehydrate publish). All read `context.current()` (fail-closed). |
+| `writer.py` | Ingestion-time persistence via the Django ORM: `store_fk_adjacency`, `store_glossary`, `store_semantic_model`, `sync_from_engine` (pull FK/value-samples/glossary/graph from `veda_engine`), `warm`. `store_column_embeddings` raises `NotImplementedError` (routes to the engine's batched writer — not yet extracted). |
+| `assembler.py` | `SemanticModelAssembler` — `assemble(source, tenant)` rebuilds the `sm` dict from `Sm*` rows; `persist` is the inverse; `publish_sm`/`publish_rehydrate` push to redis-cache. |
 
-### `ingestion/` — build the substrate (L0)
-| File | Role |
-|------|------|
-| `schema_scanner.py` | INFORMATION_SCHEMA → `ScanResult` (UUID per table/column; sensitive-column exclusion) |
-| `schema_unifier.py`, `source_dispatcher.py` | Multi-source schema unification + source routing |
-| `data_graph.py` | Undeclared-FK discovery via value overlap (threshold 0.70) |
-| `vector_store.py` | pgvector store (`RetrievalResult`, `store_fk_adjacency`, `resolve_cols_by_exact_names`) |
-| `db_abstraction.py` | Internal + source DB connection pools (`get_internal_connection`) |
-| `semantic_type_inference.py` | 3-layer rule engine → semantic types (MONETARY/TEMPORAL/CATEGORICAL/IDENTIFIER/FLAG/TEXT) |
-| `value_sampler.py`, `data_profiler.py` | Value samples + column profiling (distinct/top-N) |
-| `reg_builder.py`, `relgt_encoder.py` | Relational Entity Graph (PyG `HeteroData`) + RELGT structural encoder (256-dim) |
-| `biencoder.py`, `auto_finetune.py` | BGE bi-encoder + per-schema fine-tune |
-| `graph_embedder.py`, `graph_store.py`, `graph_persist.py`, `kuzu_store.py` | Graph node embeddings + Kùzu/graph persistence |
-| `unified_graph_builder.py`, `relationship_graph.py` | Unified knowledge graph (phase 1) + relationship graph |
-| `chunk_embedder.py`, `chunk_linker.py`, `enrich_retrieval_documents.py` | Doc chunk embeddings + chunk→schema linking (RAG substrate) |
-| `domain_glossary.py`, `glossary_builder.py` | LLM-generated glossary/synonyms (derived, never hardcoded) |
-| `synthetic_query_gen.py`, `column_text.py`, `deterministic_metadata.py` | Synthetic training-pair generation + embed-sentence text + deterministic metadata |
-| `semantic_layer_v2.py`, `semantic_postprocessor.py`, `enhance_semantic_model.py` | Semantic model v2 build + post-processing + enrichment |
-| `build_intermediate_files.py`, `gen_debug_files.py` | Intermediate artifact + debug-file generation |
-
-### `connectors/` — any source → one vocabulary
-`base.py` (`BaseConnector` ABC, `normalise_data_type()`), `relational.py` (Postgres/MySQL/SQLite/Oracle/SQL Server), `datalake.py` (DuckDB over Parquet/Delta/CSV/Iceberg), `nosql.py` (Mongo/Elasticsearch/DynamoDB), `document.py` (PDF/filesystem chunks).
-
-### Other packages
-| Package | Files | Role |
-|---------|-------|------|
-| `graph/` | `api.py`, `query_graph.py` (`suggest_expansions`), `graph_validator.py`, `visualize_graph.py` | Unified knowledge graph: read-only HTTP API, in-memory query engine, integrity checks, visualization |
-| `query_engine/` | `intent_detector.py`, `intent_router.py`, `query_cache.py` | Intent detection/routing + query cache |
-| `semantic/` | `registry.py`, `compile_semantic_layer.py` + JSON (`concepts`, `dimensions`, `metrics`, `overrides`, `MANIFEST`) | Compiled semantic-layer registry |
-| `schema/` | `real_schema.py`, `simulate_schema.py` + `reg_graph.pkl`, `kuzu_graph/` | DB schema introspection + simulated schema + persisted graphs |
-| `evaluation/` | `evaluator.py`, `test_queries.py`, `report.py`, `aggressive_eval.py`, `hard_eval.py`, `auto_ground_truth.py`, `anchor_accuracy.py`, `router_anchor_diag.py`, `run_phase3_tests.py` | Eval harnesses + HTML/JSON reporting |
-| `training/` | `train_relgt.py` | RELGT encoder training |
-| `glossary/` | `domain_glossary*.json`, `static_glossary.json`, `hf_glossary.json`, `slm_glossary.json` | Generated + static glossaries |
-| `demo/backend/` | `main.py` | VEDA demo FastAPI backend |
-| `utils/` | `logger.py` | Logging |
-| `tests/` | `test_nl_simplifier.py` | Unit tests (13 tests tracked in graph) |
+### `veda_core/` — preserved engine + three new seams
+Preserved packages (moved verbatim): `veda/` (deterministic engine + firewall), `query/` (router, heads, IR/SLM, SQL builder, resolvers), `retrieval/` (5-signal spine), `ingestion/` (substrate factory), `connectors/`, `graph/`, `semantic/`, `schema/`, `slm/`, `utils/`, plus `config.py` (engine flags, single source of truth) and `main.py` (L0 orchestrator, run in a subprocess).
+New for the platform: `context.py` (ambient `RequestContext`), `slm/_call_slm.py` (SLM Strategy seam), and the redis `sm` load in `veda_hybrid.py`.
 
 ---
 
-## 3. Structure as seen by the knowledge graph
+## 3. The query flow (`veda_core/veda_hybrid.py`)
 
-The code-review graph clusters the codebase into **21 communities** (Leiden). Largest and their cohesion:
+`run_hybrid_query(query)` is the single front door and **always returns a `MultiResult`** (`query/multi_result.py`: a list of `SubResult`, one item for a plain query, N for a compound). Verified control flow:
 
-| Community | Size | Cohesion | What it is |
-|-----------|------|----------|------------|
-| `ingestion-graph` | 371 | 0.15 | Ingestion + graph building (the substrate factory) |
-| `query-query` | 368 | 0.16 | The query pipeline (heads, layers, builders) |
-| `connectors-schema` | 144 | 0.30 | Connectors + schema introspection |
-| `veda-ir` | 134 | 0.12 | The `veda/` deterministic engine + IR + firewall |
-| `evaluation-compute` | 85 | 0.11 | Eval harnesses + metrics |
-| `retrieval-semantic` | 82 | 0.21 | The 5-signal retrieval spine |
-| `graph-node` | 51 | 0.23 | Unified knowledge graph API/query |
-| `semantic-match` | 26 | 0.12 | Semantic registry / value matching |
-| `query-engine-query` | 23 | 0.23 | Intent detection/routing |
+1. **`QUERY_DECOMPOSE_ENABLED` off (default)** → `_dispatch_single(query)` → wrap one `SubResult` in a `MultiResult`. No decomposer runs on the hot path.
+2. **Decompose on** → `classify(query)`; if the intent is `sql`, run the deterministic head **as a probe first** (stdout captured); if it returns `ok`, replay the trace and return (a clean SQL answer is complete-by-construction, so the decomposer is skipped). Otherwise `_maybe_split` runs `slm_layer.run_decomposer`: `should_split` → `_fan_out` independent sub-queries; `DECOMP_DEPENDENT` (nested) → **refuse** with the ordered parts as guidance; else fall through to the single pipeline.
+3. **`classify`** (`veda_hybrid.classify` → `query/query_router.route_query`): returns `sql` when `QUERY_ROUTER_ENABLED` is false or the router raises — **`sql` is the safe default**.
+4. **`_dispatch_single`** routes by intent:
+   - `sql` → `veda/pipeline.run_query(query, sm, cols, return_result=True)`. If it can't answer (`refuse`/`qualifier_dropped`/`ungrounded`/`no_table`/`clarify`) **and** `TIER2_LLM_FALLBACK` is on → `_tier2_sql` (LLM emits IR → deterministic `sql_builder` → the same firewall gates → execute). The LLM never writes SQL structure even in Tier-2.
+   - `rag` → `query/rag_layer.run_rag_layer`.
+   - `hybrid` → runs the deterministic head first, feeds its executed rows into `query/rag_layer.run_hybrid_layer` (correct-by-construction numbers, not LLM SQL).
+   - `nosql` → `_run_nosql` (resolve source → `connectors.build_connector` → `query/nosql_builder.run_nosql_builder` → execute).
+5. **`_fan_out`** runs sub-queries in query order; sequential + live output when `QUERY_DECOMPOSE_MAX_WORKERS == 1`, otherwise a thread pool with a thread-routing stdout and the parent `(source, tenant)` context carried into each worker (`context.set_context` from `try_current()`).
 
-**Coupling hot-spots** (worth watching in review): `ingestion-graph ↔ query-query` (31 CALLS edges — retrieval reads ingestion stores at query time) and `query-query ↔ tests`/`veda-ir` (12 / 10 edges). These are the seams where a change is most likely to ripple.
+`_load_semantic_model()` prefers the Django-assembled `sm` from redis-cache (`_load_sm_from_redis`, gated on `VEDA_SM_REDIS`), falling back to the on-disk `SEMANTIC_MODEL_FILE`; it caches in-process in `_SM`, which the rehydrate subscriber clears.
 
----
-
-## 4. Ingestion pipeline (L0 — build the substrate)
-
-Runs once per DB (or on schema change) via `python main.py --ingestion-only`. Produces the schema-agnostic grounding substrate every query reads.
-
-1. **Schema scan** (`schema_scanner` ← `schema/real_schema.py`) → tables, columns, PK/FK, UUIDs. Excludes `SENSITIVE_PATTERNS` (password, token, ssn, otp, salt, hash, aadhar, pan_number, cvv).
-2. **FK adjacency store** (`vector_store.store_fk_adjacency`) → `fk_adjacency` table (the join engine's source of truth). Mode-independent.
-3. **Data graph** (`data_graph`) → undeclared FKs via value overlap (`DATA_GRAPH_OVERLAP_THRESHOLD=0.70`, sample 200 rows), merged into `fk_adjacency`. Non-fatal.
-4. **Semantic type inference** (`semantic_type_inference`) → 6 semantic types via a 3-layer rule engine (explicit rules → name/type patterns → sample-data heuristics), with confidence + review flags.
-5. **Value sampling / profiling** (`value_sampler`, `data_profiler`) → categorical value samples (grounding + value-arbitration) and per-column distinct/top-N.
-6. **Embeddings**: `reg_builder` (PyG `HeteroData`) → `relgt_encoder` (256-dim structural); `biencoder` (BGE-large 1024-dim) with optional per-schema `auto_finetune`; legacy MiniLM (384) + TF-IDF/SVD (256) for ensemble.
-7. **Vector store** (`vector_store`) → pgvector tables (see §11).
-8. **Derived language** (`domain_glossary`, `glossary_builder`, `synthetic_query_gen`) → **LLM-generated** glossary, synonyms, and synthetic NL↔IR training pairs. Derived, never hardcoded.
-9. **Unified knowledge graph** (`unified_graph_builder`, `chunk_embedder`, `chunk_linker`, `graph_embedder`, `graph_persist`/`kuzu_store`) → nodes+edges over schema and doc chunks, embedded and persisted for query-time expansion (`graph.query_graph.suggest_expansions`).
+**The router** (`query/query_router.py`) is a keyword-signal classifier: it scores `_SQL_KEYWORDS` / `_RAG_KEYWORDS` / `_NOSQL_KEYWORDS` / `_TEMPORAL_KEYWORDS` (temporal counts double toward SQL), discounts RAG when query tokens match sampled DB values (`_check_value_filter`), and picks `sql`/`rag`/`hybrid`/`nosql` by dominant normalized score against the available source types. With no document/nosql sources it always returns `sql`.
 
 ---
 
-## 5. The deterministic query pipeline — `veda/pipeline.py::run_query`
+## 4. The substrate (`apps/substrate/models.py`)
 
-This is the CORRECTNESS head, the default route, and the single most critical flow in the codebase (graph criticality 0.81 for `main`, 0.71 for `run_sql_builder`). It runs an **escalation ladder** and stops at the first firewall-passing answer. `return_result=True` yields a dict `{status, ok, cols, rows, answer, sql, trace}`; every step is recorded into an `explain` trace.
+Every model inherits `TenantScopedModel` (UUID PK matching ingestion UUIDs + `source` FK + `tenant` + timestamps). `TenantManager.get_queryset` filters by `context.current()` and falls back to unscoped when no context is set; `all_tenants()` is the explicit escape hatch.
 
-### 5.1 Understand the query
-- **L1 Temporal** (`temporal_parser.run_temporal_parser`) → ISO window (or none).
-- **L4 Intent** (`query_engine.intent_detector.IntentDetector`) → SIMPLE / MULTI_TABLE / AGGREGATE (falls back to `SIMPLE`).
-- **L4a Existence** (`planning.existence_mode`) → semi/anti-join operator ("with"/"without"/"how many have"). Existence queries are **never cached** (embeddings can't tell "with" from "without").
+| Group | Models | Backs |
+|-------|--------|-------|
+| Structural | `SchemaTable`, `SchemaColumn`, `FkEdge`, `TableMetadata` | schema scan; `FkEdge` = the join engine's `fk_adjacency` (undeclared FKs from the data graph carry `is_declared=False`, `overlap_score`). |
+| Semantic/language | `SemanticType`, `GlossaryEntry`, `Synonym`, `SyntheticPair`, `SemanticConcept` | semantic-type inference, glossary/synonyms, synthetic pairs, compiled concepts. |
+| Value grounding | `ColumnValueSample`, `ColumnProfile` | value sampler (mirrored to a Redis SET per the docstring) + profiler. |
+| Embeddings (`managed=False`) | `ColumnEmbedding`/`_LT`/`_Hybrid`/`_BGE`, `ChunkEmbedding`, `RelgtStructural`, `GraphNodeEmbedding` | pgvector tables (real tables + HNSW indexes via RunSQL migration); admin visibility only — ANN is raw SQL in `reader.ann_search`. |
+| Graph | `GraphNode`, `GraphEdge`, `GraphArtifact` | unified KG for expansion; artifact registers the KG/relationship-graph file path + version. |
+| Verified cache | `VerifiedQueryCache` | hot-path write via ON CONFLICT; unique on `(source, tenant, query_hash)`. |
+| Semantic-model | `SubstrateVersion`, `SmTable`, `SmColumn`, `SmRetrievalDoc`, `SmSynonym`, `SmConcept` | the normalized `sm` the assembler rebuilds; `SubstrateVersion` drives rehydrate. |
 
-### 5.2 The escalation ladder (first passing answer wins)
+`QueryLog` (`apps/query/models.py`) mirrors the audit log: query text, tenant, route, one of the frozen `TerminalStatus` values, `executed_sql` (parameterized placeholder text only), `refusal_reason`, `latency_ms`, `cache_hit`, `request_id`.
 
-**T0 — Fast path** (`fast_path.try_fast_path`, `FAST_PATH_ENABLED`): count / aggregate / dimension-list questions resolve straight from compiled registries — **no retrieval, no planner, no LLM, no `get_engine()`** (fast even cold). Conservative match; falls through on miss.
+---
 
-**T0 — Verified-query cache** (`veda/cache.verified_cache_lookup`, cosine ≥ 0.85): replay prior verified SQL, skipping retrieval + SLM. Skipped for existence/fast-path/temporal.
+## 5. The deterministic SQL head (`veda_core/veda/pipeline.py::run_query`)
 
-**T1/T2 — Full path** (on cache/fast-path miss):
-1. **L2+ Enhance** (`veda/query_enhancement.enhance_query`, recall-only sidecar — gates always validate the *original* query, asserted in code).
-2. **L2 Retrieval** — `get_engine().retrieve(...)` (the 5-signal spine, §7), then two additive, flag-guarded, fully try/excepted boosters:
-   - **L2g Graph expand** (`graph.query_graph.suggest_expansions`) — add synonym/alias/FK-neighbour columns.
-   - **L2b Primary rerank** (`query.reranker`, cross-encoder BGE-reranker-v2-m3) — re-score so anchor selection reads reranked `final_score`.
-3. **L2/L3 Anchor** — `routing.select_primary_table` → `routing.vet_primary` (word-order/grain vet). No anchor → **refuse `no_table`**.
-4. **Branch by intent/shape** (`planning.try_multitable` for MULTI_TABLE / AGGREGATE / existence):
-   - `clarify` / `refuse` → return with feedback.
-   - **L4b Existence** → deterministic EXISTS / NOT EXISTS (no LLM, no fan-out).
-   - **L4c Aggregate** → deterministic pre-aggregation CTEs (no LLM, fan-out-free by construction).
-   - **L4b Join plan (`sql`)** → planner pins the join skeleton; the LLM fills SELECT/WHERE only, constrained by `join_constraints` (key pairs, predicate cols) + `fanout_guard`. `_llm_sql=True`.
-   - **Single-table** → a sub-ladder of deterministic resolvers, each tried in order and each skipping the LLM when it fires:
-     - **L4e Answer-entity** (`answer_entity.find_answer_entity`) — WHO/handler → display name over FK.
-     - **L4d FK value** (`value_resolver.resolve_value_filter`) — exact value on a related table → `IN (subquery)`.
-     - **L4d Multi-hop FK** (`fk_path_resolver.resolve_fk_path`, off by default) — single unambiguous junction path.
-     - **L4c Value arbiter** (`value_arbiter.arbitrate`) — categorical value / negation → `WHERE` filter on the anchor.
-     - **L4e Temporal-only** — date window on the canonical temporal column.
-     - **Temporal-refuse** — temporal question on a table with no date column → **refuse** (never let the LLM invent `created_at`).
-     - **L5 Single-table LLM** (`veda/generation.generate_sql`) — last resort; seeded with an in-scope column glossary + phrase→column term map so it can't pick a sibling column.
+The correctness head and default route. It runs an escalation ladder and stops at the first firewall-passing answer; with `return_result=True` it returns `{status, ok, cols, rows, answer, sql, trace}`. The stage labels below are exactly what the code prints.
 
-### 5.3 The unified firewall (identical for every route above)
-Order matters — each gate can refuse:
-1. **L6a Value grounding** (`validation.value_grounding`) — every filter literal exists in the sampled data (polymorphic-predicate values skipped). Fail → `ungrounded`.
-2. **L6b Qualifier completeness** (`validation.qualifier_completeness`) — every user-named qualifier is represented in the SQL. Fail → `qualifier_dropped`. (Hard-asserted to run on the *original* query.)
+**Understand**: L1 temporal (`temporal_parser.run_temporal_parser`) → L4 intent (`query_engine.intent_detector.IntentDetector`, falls back to `SIMPLE`) → L4a existence (`planning.existence_mode`).
+
+**Ladder**:
+- **Fast path** (`FAST_PATH_ENABLED`, not existence): `fast_path.try_fast_path` returns SQL straight from compiled registries — no retrieval, no `get_engine()`, no LLM. Falls through on miss.
+- **Verified cache** (skipped for existence and when the fast path fired): `veda/cache.verified_cache_lookup(query)` cosine ≥ 0.85. In the platform this routes through `storage_adapters.reader.verified_cache_lookup` when a context is set (pgvector, tenant-scoped); otherwise it uses the legacy file store. Existence queries are never cached/served from cache (near-identical vectors for "with"/"without").
+- **Full path**: L2+ enhance (recall-only, `QUERY_ENHANCEMENT_ENABLED`) → **L2 retrieve** `get_engine().retrieve(query=_search, intent, top_k=15)` (§6) → additive boosters L2g graph-expand (`graph.query_graph.suggest_expansions`) and L2b primary cross-encoder rerank (`query.reranker`, rewrites `final_score`) → **L3 anchor** `routing.select_primary_table` + `vet_primary` (no primary → refuse `no_table`) → branch:
+  - MULTI_TABLE / AGGREGATE / existence → `planning.try_multitable`: `clarify` / `refuse`; **existence** → deterministic EXISTS/NOT EXISTS (no LLM); **aggregate** → deterministic pre-aggregation CTEs (no LLM); **sql** → planner pins the join skeleton and sets `join_constraints` (key pairs + predicate cols) + `fanout_guard`, the LLM fills SELECT/WHERE only (`_llm_sql=True`).
+  - Single-table sub-ladder, each deterministic and each skipping the LLM when it fires: answer-entity (WHO → display name over FK), FK-value (`value_resolver.resolve_value_filter` → `IN (subquery)`), multi-hop FK (`fk_path_resolver`, off by default), value-arbiter (`value_arbiter.arbitrate` categorical/negation), temporal-only (date window on the canonical temporal column), **temporal-refuse** (temporal question on a table with no date column → refuse, never invent `created_at`), else **single-table LLM** (`veda/generation.generate_sql`, seeded with an in-scope column glossary + phrase→column term map).
+
+**Firewall** (same for every branch; the code asserts the gates run on the *original* query, not the enhanced search string):
+1. **L6a value grounding** (`validation.value_grounding`) — every filter literal exists in sampled data; deterministic polymorphic-predicate literals are skipped. Fail → `ungrounded`.
+2. **L6b qualifier completeness** (`validation.qualifier_completeness`) — every named qualifier is represented. Fail → `qualifier_dropped`.
 3. **L6b+ IR equivalence** (`ir_equivalence.validate_ir_equivalence`, LLM SQL only) — no filters/joins/grouping/ordering/DISTINCT the query never asked for. Fail → `ir_mismatch`.
-4. **L6c Validate + parameterize** (`validation.validate_and_parameterize`) — AST read-only, table/column-hallucination check, bind every literal, ON-integrity + fan-out firewall (`graph_guard`). Fail → `invalid`.
-5. **L7 Execute** (`veda/execution.execute_sql`) — read-only connection, 30s timeout, fetch ≤ 20. Fail → `exec_error`.
-6. **L7b NL answer** (`nl_answer.run_nl_answer`, `NL_ANSWER_ENABLED`) — rows → one-line prose (deterministic row-count fallback if Ollama down).
-7. **Cache-back** — non-temporal, non-existence, non-fast-path answers with rows are saved to the verified-query cache.
+4. **L6c validate + parameterize** (`validation.validate_and_parameterize` + `graph_guard`) — AST check, table/column coverage, bind every literal, join key-pair + fan-out guard. Fail → `invalid`.
+5. **L7 execute** (`execution.execute_sql`) — read-only session, 30 s timeout, fetch ≤ 20. Fail → `exec_error`.
+6. **L7b NL answer** (`nl_answer.run_nl_answer`, `NL_ANSWER_ENABLED`) — rows → one-line prose (row-count fallback if the SLM is down).
+7. **Cache-back**: `save_verified_query(query, sql)` when the answer has rows and is not from-cache, not fast-path, not temporal, not existence.
 
 Terminal statuses: `answered · no_table · clarify · refuse · ungrounded · qualifier_dropped · ir_mismatch · invalid · exec_error`.
 
 ---
 
-## 6. The other heads (breadth)
+## 6. Retrieval spine (`veda_core/retrieval/retrieval_engine_phase3.py`)
 
-- **RAG** (`rag_layer.run_rag_layer`, `RAG_TOP_K=5`) — retrieve doc chunks (`chunk_embedder.retrieve_top_k_chunks`) → LLM synthesis (`_call_ollama`).
-- **Hybrid** (`rag_layer.run_hybrid_layer`) — fuse SQL-schema signals + doc chunks via `_rrf_fuse_hybrid`, cap `HYBRID_MAX_RESULT_ROWS=20`.
-- **NoSQL** (`nosql_builder.run_nosql_builder`, `NOSQL_MAX_NESTING_DEPTH=3`) — native Mongo/etc. query.
-- **Execution** for non-SQL sources routes through `query/execution_engine.py` by `source_id`.
-
-All heads return a `SubResult`; the front door wraps them into the same `MultiResult`.
+`get_engine().retrieve(query, intent, top_k=15)` — one warm engine per process (`veda/runtime.get_engine`, which also shares its BGE-M3 with table-routing and the verified cache so the model loads once). Composed signals (verified from the imports/init): `SemanticSearchEngine` (BGE dense), `BM25Ranker` (fit on the semantic model), `SignalBuilder` (FK/subgraph structural), fused by `RRFMerger(k=60)`, re-weighted by `IntentBooster`, cut by `AdaptiveCutoff`. `RetrievalResult` carries `bm25_score`/`rrf_score`/`final_score`; the pipeline's rerank booster overwrites `final_score` so anchor selection reads reranked order.
 
 ---
 
-## 7. The retrieval spine (5-signal, phase 3)
+## 7. Ingestion at the platform level (`apps/ingestion/tasks.py`)
 
-`retrieval/retrieval_engine_phase3.py::retrieve` is the one retrieval stack both the SQL and hybrid heads read (`veda/runtime.get_engine()` keeps it warm process-wide):
+`task_ingest_source(source_id, tenant, force, skip_llm, resume)` is the real, wired path:
+- Creates an `IngestionJob` + ordered `IngestionStage` rows.
+- **ENCODER_MODE guard**: if the last successful job used a different `encoder_mode` and `force` is not set, it marks the job failed and raises (re-ingestion required).
+- Injects the source's connection into the subprocess via `Source.as_engine_env()` → the engine's `VEDA_SOURCE_*` env, so ingestion targets that source with no global env/code change.
+- **Resume**: if a prior failed job exists or `resume=True`, sets `VEDA_RESUME=1` so the engine skips expensive stages whose output already exists.
+- Runs `python -c "import main; main.run_ingestion(...)"` in a **subprocess** with `cwd=veda_core` (isolates the engine's top-level `config` module from the Django `config` package; lets the engine's relative paths resolve), **streams** stdout, and maps the engine's `[N/NN] StageName` markers to live `IngestionStage` RUNNING/SUCCESS updates.
+- On success: `task_warm_caches` → `writer.warm()`, then flips `Source.ready=True`, `status=READY`. On exception: marks stages/job failed, `Source.status=FAILED`.
 
-1. **BGE-M3 dense** (`semantic_search`, 1024-dim) · 2. **BM25 keyword** (`bm25_ranker`) · 3. **FK / subgraph structural** (`signal_builder`) · 4. **Value signal** (sampled column values) → fused by **RRF** (`rrf_merger`), re-weighted by **intent** (`intent_boosting`), cut by **adaptive cutoff** (`adaptive_cutoff`), memoized (`retrieval_cache`).
+The engine's real L0 order (`veda_core/main.py` `_step` markers): 1 schema scan · 2 FK adjacency · 3 data graph (undeclared FK, overlap 0.70) · 4 semantic-type inference · 5 table-metadata/display columns · 6 value sampler · 7 REG builder · 8 encoder (`ENCODER_MODE`) · 9 vector store · 10 synthetic query gen · 11 BGE fine-tune, plus the LLM semantic-layer-v2 and glossary stages that `VEDA_RESUME` can skip.
 
-A legacy two-stage path (`query/retrieval_v2.py::retrieve_v2` → `first_stage_retrieve` → `graph_expand`) and the MiniLM ensemble (`query/semantic_layer.py`, `query/reranker.py`) remain as fallback shims during migration.
+There is also a **skeleton** ten-task chain (`STAGE_ORDER` + `task_schema_scan…task_unified_graph`) whose bodies raise `NotImplementedError` via `_todo()` — the target decomposition for when the engine's in-memory orchestration is hoisted into importable stage functions. It is not the path that runs today.
 
----
-
-## 8. The IR contracts
-
-### IR v1 (legacy, `slm_layer` ↔ `sql_builder`) — join-carrying, UUID-based
-The contract still honored by `run_sql_builder`. UUID-only references; `_normalize_ir` fixes known hallucinations (`aggregates→aggregations`, `type/function→func`, `field→col_id`, forces `intent`). With `IR_JOIN_FREE_ENABLED=True` the SLM omits `joins[]` and `sql_builder` derives them from `fk_adjacency`.
-
-```json
-{ "version":"1.0", "intent":"SELECT|COUNT|AGGREGATE",
-  "entities":[{"table_id":"<uuid>","alias":"t1","columns":[{"col_id":"<uuid>"}]}],
-  "filter_tree":{"type":"AND|OR|NOT","conditions":[{"type":"EQ|NEQ|GT|GTE|LT|LTE|IN|LIKE|IS_NULL|BETWEEN","col_id":"<uuid>","value":"<scalar|list>"}]},
-  "joins":[{"from_table_id":"<uuid>","from_col_id":"<uuid>","to_table_id":"<uuid>","to_col_id":"<uuid>","join_type":"INNER|LEFT|RIGHT"}],
-  "aggregations":[{"func":"COUNT|SUM|AVG|MIN|MAX","col_id":"<uuid|*>","alias":"count_result"}],
-  "group_by":[{"col_id":"<uuid>"}], "order_by":[{"col_id":"<uuid>","direction":"ASC|DESC"}],
-  "limit":null, "schema_version":1 }
-```
-
-### IR v2 (canonical target, `veda/ir_emit.py` / `ir_validator.py`) — name-based, **join-free**, dialect-free
-The strategic contract (see ARCHITECTURE_HYBRID.md §1). No `joins` key (reasoning *cannot* author a wrong join), no `sql` key, no `raw_sql` escape hatch. Entities are implied by dotted field names; the compiler derives the join path or **refuses** on ambiguity.
-
-```jsonc
-{ "anchor":"role", "projections":["role.name","organization.name"],
-  "filters":[{"field":"role.status","op":"=","value":"active"}],
-  "aggregations":[], "group_by":[], "order_by":[], "limit":null,
-  "temporal":null, "confidence":0.0, "provenance":"consensus|deterministic|llm" }
-```
-
-Consensus (`veda/consensus.py`) and Verifier (`veda/verifier.py`) reconcile IR₁ (deterministic) and IR₂ (LLM) per-field before the compiler runs — the newest, partially-wired glue toward the full target.
+`writer.warm()`: persist the semantic-model file into the `Sm*` substrate (`assembler.persist`), `sync_from_engine()` (FK edges, value samples, glossary→Synonym, KG nodes/edges from `veda_engine`), then `publish_sm` + `publish_rehydrate` so every inference replica clears its `_SM` cache and reloads.
 
 ---
 
-## 9. Execution-flow catalog
+## 8. Multi-source onboarding
 
-The graph detected **230 flows**; below are the load-bearing ones by criticality with their call chains. (Full list via `list_flows_tool`; drill in with `get_flow_tool`.)
+Onboarding is a data operation, not a code change:
+1. Register a `Source` row with its connection (`host/port/dbname/db_user/password_env|password_inline`); secrets by reference.
+2. `POST /api/v1/admin/ingest {source_id}` (staff) → `task_ingest_source` reads the row and ingests that source's DB.
+3. The query path reads only `ready=True` sources; `ready` flips only on full success.
 
-### Front-door & orchestration
-- **`main`** (crit 0.81, 171 nodes) — `main.py` full pipeline (ingestion → eval → report).
-- **`run_hybrid_query`** → `classify`/`route_query` → (`_maybe_split` → `run_decomposer` → `_fan_out`/`_run_sub`) → `_dispatch_single` → head → `_to_subresult` → `MultiResult`.
-- **`run_decomposer`** (`slm_layer`) → `_call_ollama_decompose` → `_coerce_decompose` → `_extract_json` → `_conf`/`_log_decompose` → `DecomposeResult`.
-
-### Deterministic SQL head
-- **`run_query`** (`veda/pipeline.py`) — the escalation ladder of §5 (temporal → intent → fast-path/cache → retrieve → anchor → branch → firewall → execute → answer).
-- **`run_sql_builder`** (crit 0.71, 30 nodes) → `_build_sql_from_ir` → `_build_uuid_maps` → `_resolve_ir_entities` → `_infer_primary_table` → `_build_from_join`/`_resolve_join_refs` → `_build_select_cols` (`_add`,`_add_entity_col`,`col_ref`) → `_build_filter` → `_build_group_by`/`_build_order_by`/`_build_limit`, with `_Ctx.p` binding every value and `_remap_to_temporal_col`/`_pick_best_temporal` for temporal remap.
-- **`generate_sql`** (`veda/generation.py`, 19 nodes) — single-table + join-skeleton fill.
-- **`run_slm_layer`** (20 nodes) / **`run_langgraph_pipeline`** (`slm_langgraph` → `_build_graph`/`_get_graph` → `lg_nodes`: `node_classify_intent → node_select_entity → node_select_columns → node_build_filters → node_assemble_ir`) → `_validate_ir` (`_check_col`,`_check_table`,`_walk_filter`) → `SLMResult`/`_fallback_result`.
-- **Planner** — `plan_join_tree` (13), `plan_joins` (6), `resolve_fk_path` (6), `select_anchor` (7), `build_from_entities` (18), `find_value_filter_columns` (11), `build_value_filters` (8), `arbitrate` (9), `find_answer_entity` (5).
-
-### Firewall & execution
-- **`validate_sql`** (`sql_validator.SQLValidator`) → `_check_syntax`,`_check_tables`,`_check_columns`,`_check_types`,`_check_aggregations`,`_check_joins`,`_check_read_only` → `_attempt_repair` → `ValidationResult`.
-- **`repair_and_validate`** (6), **`execute_sql`** / **`execute_sql_safe`** (5), **`execute_query`**, **`log_query`** (`audit_logger`, 5).
-
-### Retrieval & graph
-- **`retrieve_v2`** → `_get_query_encoder` → `_get_pg_conn` → `first_stage_retrieve` → `_cosine_search_v2` → `graph_expand` → `_fetch_columns_by_name`.
-- **`rerank_columns`** / **`rerank_tables`** (10 each), **`suggest_expansions`** / **`get_synonyms`** / **`get_related_tables`** / **`get_related_columns`** (graph), **`run_graph_retrieval`**, **`_encode_hybrid_bge`** (11).
-
-### RAG / hybrid / NoSQL heads
-- **`run_hybrid_layer`** (14) → `retrieve_top_k_chunks` → `_encode_rag_query` → `_build_hybrid_user_message` → `_call_ollama` → `_rrf_fuse_hybrid` (DB via `db_abstraction.get_internal_connection`).
-- **`run_rag_layer`** (12), **`run_nosql_builder`** (12), **`map_envelope_to_intent`** (10), **`enrich_query`**/**`enhance_query`**, **`run_nl_answer`**.
-
-### Connectors & schema
-- **`get_real_schema`** (crit 0.77, 25) — INFORMATION_SCHEMA introspection.
-- **`get_schema`** / **`get_nosql_schema`** / **`get_chunks`** / **`get_document_count`** / **`sample_column_values`** / **`get_row_count`** / **`connect`** / **`_get_raw_connection`** / **`build_connector`** — per-connector surface.
-
-### Ingestion & eval
-- **`run_synthetic_query_gen`** (crit 0.75, 22), **`run_schema_linker`** (11), **`run_hybrid_layer`** (above), **`_diagnose`** (23), **`_read_tables`** (11), **`emit_envelope`** (4), **`batch_route`** / **`classify_batch`** (5).
+`scripts/onboard_source.sh` wraps the full reset (wipe `veda_engine` + Django substrate + derived files, re-point `.env`, recreate the `Source` row + containers). `scripts/ingest_baremetal.sh` reads the connection from the `Source` row and runs full ingestion on the host (MPS + host Ollama), then `writer.warm()` + `/v1/rehydrate`.
 
 ---
 
-## 10. Key configuration (`config.py` — single source of truth)
+## 9. Tenancy & security (what the code enforces)
 
-**Retrieval / anchor**
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `ENCODER_MODE` | `ensemble` | relgt_only \| light_text \| hybrid \| ensemble |
-| `TOP_K` | 15 | Columns retrieved per query |
-| `TOP_K_TO_LLM` | 6 | Best-N passed to L3 (token budget) |
-| `BIENCODER_MODEL` / `BIENCODER_DIM` | `BAAI/bge-large-en-v1.5` / 1024 | BGE spine |
-| `RERANKER_MODEL` | `BAAI/bge-reranker-v2-m3` | Cross-encoder rerank |
-| `PRIMARY_RERANK_ENABLED` | True | Rerank on the primary path (not just Tier-2) |
-| `FK_MAX_HOP_DEPTH` / `FK_MAX_INJECTED_COLS` | 2 / 5 | FK bridge traversal |
-| `QUERY_ROUTER_ENABLED` / `..._CONFIDENCE_THRESHOLD` | True / 0.6 | Modality routing |
-
-**Reasoning / SQL**
-| Flag | Default | Purpose |
-|------|---------|---------|
-| `SLM_MODEL_NAME` | `qwen2.5-coder:7b` | L3 model (Ollama) |
-| `SLM_TIMEOUT_SECS` / `SLM_MAX_TOKENS` / `SLM_IR_MAX_TOKENS` | 240 / 2048 / 512 | L3 budgets |
-| `IR_JOIN_FREE_ENABLED` | True | SLM omits `joins[]`; builder derives from `fk_adjacency` |
-| `FAST_PATH_ENABLED` | on | T0 templated answers |
-| `QUERY_DECOMPOSE_ENABLED` | flag | Compound-query splitting |
-| `SQL_DEFAULT_LIMIT` / `SQL_MAX_SUBQUERY_DEPTH` | 1000 / 3 | SQL bounds |
-| `NL_ANSWER_ENABLED` / `NL_ANSWER_MAX_ROWS` | True / 50 | Prose answer |
-
-**Feature-gated deterministic resolvers** (each fully try/excepted, additive): `VALUE_ARBITER_ENABLED`, `FK_VALUE_RESOLUTION_ENABLED`, `MULTIHOP_FK_RESOLUTION_ENABLED`, `ANSWER_ENTITY_DISCOVERY_ENABLED`, `GRAPH_EXPAND_ENABLED`, `QUERY_ENHANCEMENT_ENABLED`, `VALUE_FILTER_ENABLED`, `SCHEMA_LINK_ENABLED`, `TEMPORAL_PARSER_ENABLED`, `FEEDBACK_ENABLED`.
-
-**Ingestion / substrate**: `DATA_GRAPH_ENABLED` (0.70 overlap), `VALUE_SAMPLER_ENABLED`, `SYNTHETIC_QUERY_GEN_ENABLED`, `AUTO_FINETUNE_ENABLED`, `GLOSSARY_GENERATION_ENABLED`, `UNIFIED_GRAPH_ENABLED`, `GRAPH_PERSIST_ENABLED`, `GRAPH_CHUNK_LINKING_ENABLED`, `GRAPH_EMBED_ENABLED`, `GRAPH_RETRIEVAL_ENABLED`, `BIENCODER_ENABLED`, `RERANKER_ENABLED`, `PROFILING_ENABLED`, `TABLE_UNDERSTANDING_ENABLED`, `COLUMN_UNDERSTANDING_ENABLED`.
-
-Full annotated reference: [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md).
+| Concern | Mechanism (file) |
+|---------|------------------|
+| Tenant isolation | Ambient `RequestContext` (`context.py`); `current()` raises when unset; ORM auto-filter (`core/models.TenantManager`); raw reads call `_scope()` (`storage_adapters/*`). |
+| Tenant source of truth | Server-resolved (`views._resolve_tenant`), forwarded as headers (`inference_client`), set by inference middleware — never client-supplied for scoping. |
+| Read-only source access | `execute_sql` session `readonly=True`; `_FORBIDDEN` DML/DDL word guard (`runtime.py`); AST + coverage + fan-out in `validate_and_parameterize` / `graph_guard`. |
+| Parameterized SQL | `validate_and_parameterize` binds every literal; `QueryLog.executed_sql` stores placeholder text. |
+| Secrets by reference | `Source.password_env` / `connection_secret_ref`, never plaintext rows. |
+| Connection ceiling | Every pool dials PgBouncer (`settings/base.py`); `reader._connection` never sets a session-level READ ONLY (PgBouncer pooling), and `ann_search` uses `SET LOCAL` inside an explicit txn. |
+| Request tracing | `RequestIdMiddleware` mints/propagates `X-Request-Id` → forwarded → `QueryLog.request_id`. |
+| Zero-egress | `HF_HUB_OFFLINE`/`TRANSFORMERS_OFFLINE` set in `veda_hybrid.py` and `main.py` before any model import; SLM on the internal network. |
 
 ---
 
-## 11. Database & stores (PostgreSQL + pgvector)
+## 10. SLM backend seam (`veda_core/slm/_call_slm.py`)
 
-| Table / store | Purpose | Created by |
-|---------------|---------|------------|
-| `column_embeddings` | Single-encoder vector store (non-ensemble) | `vector_store.py` |
-| `column_embeddings_lt` | Light-text 256-dim (ensemble) | `vector_store.py` |
-| `column_embeddings_hybrid` | Hybrid 640-dim (ensemble) | `vector_store.py` |
-| `fk_adjacency` | FK edge store — the join engine's source of truth | `vector_store.store_fk_adjacency` |
-| `table_metadata` | Display column per table | `vector_store.py` |
-| column-value samples | Value grounding + arbitration | `value_sampler.py` |
-| Kùzu / persisted graph | Unified knowledge graph | `kuzu_store.py`, `graph_persist.py`, `schema/kuzu_graph/`, `schema/reg_graph.pkl` |
-| verified-query cache | File-based cosine ≥ 0.85 | `veda/cache.py` |
-
-**Connections** (`ingestion/db_abstraction.py`, `config.py`): a *source* DB (the data being queried) and an *internal* store DB (embeddings/graph) are separate pools. Encoder-mode dims: RELGT 256, light-text 256, MiniLM 384, hybrid 640, BGE-hybrid 1280 (BGE 1024 + RELGT 256).
+`call_slm(prompt, *, purpose, timeout=240, **opts) -> str` over a Strategy: `OllamaBackend` (POST `/api/chat`, `keep_alive:"24h"`) and `vLLMBackend` (OpenAI-compatible `/chat/completions`). Backend chosen by `SLM_BACKEND` (default `ollama`), cached per process; both return a plain string with the same error shape. A `_slm_circuit_breaker` context manager is present but is currently a pass-through skeleton. Note: the engine's existing call sites still call their own `_call_ollama` directly; rewiring them onto `call_slm` is incremental.
 
 ---
 
-## 12. Encoder modes
+## 11. Deployment (`docker/`, compose)
 
-| Mode | Vector dim | Tables | Notes |
-|------|-----------|--------|-------|
-| `relgt_only` | 256 | `column_embeddings` | Structural only |
-| `light_text` | 256 | `column_embeddings` | TF-IDF + SVD |
-| `hybrid` | 640 | `column_embeddings` | MiniLM + RELGT |
-| `ensemble` | 256 + 640 | `column_embeddings_lt` + `column_embeddings_hybrid` | **Default** — RRF merge |
-
-The 5-signal spine (§7) additionally uses BGE-M3 (1024-dim). Switching `ENCODER_MODE` requires re-running ingestion.
+Nine dev services on `veda_net`; only `nginx` publishes a host port. `api`/`worker`/`beat` build the thin `Dockerfile.api`; `inference`/`ingest-worker` build `Dockerfile.inference` (torch). `postgres` is `pgvector/pgvector:pg16` and hosts both `veda` and `veda_engine` (dev exposes `15432` for bare-metal ingestion). `pgbouncer` fronts all pools (transaction mode). Redis is split: `redis-broker` (Celery only, unbounded) and `redis-cache` (`allkeys-lru`, holds the assembled `sm` and the rehydrate pub/sub). `ollama` is the dev/ingestion SLM; prod adds `vllm`. `inference` runs with `working_dir: /app/veda_core` so engine relative paths resolve; `ingest-worker` runs `celery -A config worker -Q ingestion,high`. `docs/OPERATIONS.md` documents backups, blue/green + engine-only rollback, and scaling (size inference workers by measured RSS; SLM is the throughput bottleneck).
 
 ---
 
-## 13. How to run
+## 12. Configuration
 
-```bash
-ollama serve                                   # local LLM (terminal 1)
-python main.py                                 # full ingestion + eval (~40 min first run)
-python main.py --ingestion-only                # rebuild substrate only
-python veda_hybrid.py "how many incidents are escalated"   # single query via the front door
-python main.py --query "show me total users"   # single-query smoke test (~60s)
-python main.py --report-only                   # regenerate HTML report from saved JSON (~4s)
-python run_hybrid_suite.py                      # full eval suite through veda_hybrid
-```
-Report output: `evaluation/results/poc_report.html`.
+- **Engine flags** live in `veda_core/config.py` and reach Django only through `apps/core/settings_bridge.build_veda_settings()` (fallback default → `config.py` value → `VEDA_<FLAG>` env override) — never duplicated in Django settings. Bridged: `ENCODER_MODE`, `TOP_K`, `TOP_K_TO_LLM`, `QUERY_ROUTER_ENABLED`, `SLM_MODEL_NAME`, `SLM_BACKEND`, `IR_JOIN_FREE_ENABLED`, `FAST_PATH_ENABLED`, `QUERY_DECOMPOSE_ENABLED`, `HNSW_M/EF_CONSTRUCTION/EF_SEARCH`.
+- **Infra** (DB, Redis, secrets) is env-only.
+- **Per-source / runtime env**: `VEDA_SOURCE_*` (source DB the engine reads/executes against, via `runtime.DB_CONFIG`), `INFERENCE_URL`, `PGBOUNCER_*`, `POSTGRES_*`, `REDIS_CACHE_URL`/`REDIS_BROKER_URL`, `OLLAMA_URL`/`VLLM_URL`, `VEDA_SM_REDIS`/`VEDA_SM_SOURCE_ID`/`VEDA_SM_TENANT`, `VEDA_HNSW_EF_SEARCH`, `VEDA_RESUME`, `VEDA_DEFAULT_SOURCE_ID`.
 
 ---
 
-## 14. Related docs
+## 13. Scenario → code map
 
-| Doc | Scope |
-|-----|-------|
-| [ARCHITECTURE_HYBRID.md](ARCHITECTURE_HYBRID.md) | **Canonical target design** — IR v2, L0–L9 module map, escalation ladder, genericity proof |
-| [FINAL_ARCHITECTURE.md](FINAL_ARCHITECTURE.md) | Consolidated final architecture narrative |
-| [ARCHITECTURE_AUDIT.md](ARCHITECTURE_AUDIT.md) | Architecture audit findings |
-| [SEMANTIC_LAYER.md](SEMANTIC_LAYER.md) / [RETRIEVAL.md](RETRIEVAL.md) | Semantic-layer + retrieval deep dives |
-| [PIPELINE_WALKTHROUGH_HYBRID.md](PIPELINE_WALKTHROUGH_HYBRID.md) | Worked end-to-end query walkthrough |
-| [CONFIG_REFERENCE.md](CONFIG_REFERENCE.md) | Every config flag, annotated |
-| [SPEC.md](SPEC.md) / [CLAUDE.md](CLAUDE.md) | Functional spec / AI-agent rules |
+### Query-time
+| Scenario | Path | Outcome |
+|----------|------|---------|
+| Plain NL question | `nginx → QueryView.post` → resolve tenant/source → `InferenceClient` (HTTP) → inference middleware `set_context` → `routes/hybrid` → `run_hybrid_query` → head → firewall → `MultiResult` → `QueryLog` | `answered` / a refusal status |
+| Router off/unavailable | `veda_hybrid.classify` returns `("sql", None)` | deterministic head |
+| Count/aggregate ("how many users") | `run_query` → `fast_path.try_fast_path` (no retrieval/LLM) → firewall → execute | `answered`, fast cold |
+| Repeat of a verified query | `run_query` → `cache.verified_cache_lookup` → `reader.verified_cache_lookup` (pgvector, scoped) | `answered`, `QueryLog.cache_hit=True` |
+| Join query | `planning.try_multitable` pins join skeleton from `FkEdge`; LLM fills SELECT/WHERE; `graph_guard` fan-out | `answered` / `invalid` / `refuse` |
+| "with/without X" | `planning.existence_mode` → deterministic EXISTS/NOT EXISTS; never cached | `answered` |
+| Filter value absent | `validation.value_grounding` fails | `ungrounded` |
+| User qualifier dropped | `validation.qualifier_completeness` fails | `qualifier_dropped` |
+| LLM added unrequested semantics | `ir_equivalence.validate_ir_equivalence` fails | `ir_mismatch` |
+| Hallucinated table/column / write attempt | `validate_and_parameterize` / session read-only | `invalid` |
+| Temporal question, no date column | single-table temporal-refuse branch | `refuse` |
+| No anchor | `routing.select_primary_table` empty | `no_table` |
+| Deterministic head refuses + Tier-2 on | `_dispatch_single` → `_tier2_sql` (LLM IR → builder → same gates → execute) | `answered` or kept refusal |
+| Compound question | `_maybe_split` → `run_decomposer` → `_fan_out` | N-item `MultiResult` |
+| Nested/dependent question | `run_decomposer` → `DECOMP_DEPENDENT` | `refused` with ordered-parts guidance |
+| Doc/policy question | router → `rag_layer.run_rag_layer` | `answered` (rag) |
+| Mongo/native source | router → `_run_nosql` → `nosql_builder` | `answered` (nosql) |
+| Inference slow/unreachable | `InferenceClient._post` raises `InferenceUnavailable` → `503` + `exec_error` audit | no 500/hang |
+| Empty query | `QueryView.post` early return | `400` |
 
-> **Note on drift:** several docstrings and this map describe target-state wiring (IR v2 emit, Consensus, Verifier, dialect emit) that is partially implemented. When code and doc disagree, the code in `veda/pipeline.py` + `veda_hybrid.py` is authoritative for *current* behavior; ARCHITECTURE_HYBRID.md is authoritative for *intended* behavior.
+### Ingestion & lifecycle
+| Scenario | Path | Effect |
+|----------|------|--------|
+| Onboard a source | register `Source` → `IngestTriggerView` → `task_ingest_source` reads `as_engine_env()` → subprocess | source-specific substrate, no code change |
+| Live stage progress | subprocess `[N/NN]` markers → `marker_re` → `IngestionStage` updates | true per-stage progress |
+| ENCODER_MODE changed w/o force | guard vs last successful job → raise | re-ingestion required |
+| Resume failed job | prior FAILED or `resume=True` → `VEDA_RESUME=1` | engine skips completed expensive stages |
+| Fast structural-only | `skip_llm=True` | skips glossary/semantic-layer LLM stages |
+| Partial failure | exception → stages/job FAILED, `Source.status=FAILED`, `ready` stays False | query path never reads half-built substrate |
+| Warm after ingest | `task_warm_caches` → `writer.warm()` → `assembler.persist` + `sync_from_engine` + `publish_sm/rehydrate` | Django owns substrate; replicas notified |
+| Re-ingest reaches replicas | `publish_rehydrate` → redis pub/sub → inference subscriber drops `_SM` | next query reloads assembled `sm` |
+| Verified write under N replicas | `reader.save_verified_query` INSERT … ON CONFLICT DO NOTHING + publish | idempotent |
+
+### Platform/ops
+| Scenario | Path | Effect |
+|----------|------|--------|
+| Liveness | `GET /healthz` | `{"status":"ok"}` |
+| Readiness | `GET /readyz` → `core/views.readyz` (Postgres/both Redis/inference/SLM) | `ready`(200)/`degraded`(503) |
+| Metrics | `GET /metrics` → `core/views.metrics` (from `QueryLog` + PgBouncer `SHOW POOLS`) | Prometheus text, dependency-free |
+| Eval run | `EvalTriggerView` → `task_run_eval` → inference → `EvalRun`/`EvalCaseResult` + HTML | tracked artifact |
+| Trace across tiers | `RequestIdMiddleware` → forwarded → `QueryLog.request_id` | one id api→inference→logs |
+
+---
+
+## 14. Code changes mapped to scenarios (git history)
+
+| Commit | Change (from the diff) | Scenario it serves |
+|--------|------------------------|--------------------|
+| `d1f7ac9` Initial commit | Whole platform scaffold: six apps, `inference/`, `storage_adapters/`, `config/`, `docker/`; engine moved into `veda_core/`; `context.py` + `slm/_call_slm.py`; cache.py + `veda_hybrid.py` platform rewires | Establishes the two-tier flow (§1), frozen front door (§3), fail-closed tenancy (§9) — baseline for every §13 scenario |
+| `0e6f167` second commit | `main.run_ingestion` resume generalized to `_table_has_rows(table)` + one `VEDA_RESUME` gate across expensive stages; `parity_suite.py` extended; route/explain trace logging | "resume a failed job" / "fast structural-only ingest" (§13); parity gating |
+| `3cad291` upgrade for multi source ingestion | `Source` gains connection fields + `resolve_password/connection/as_engine_env`; `task_ingest_source` injects `src.as_engine_env()` into the subprocess; `onboard_source.sh` + `ingest_baremetal.sh` | "onboard a source" / "bare-metal ingestion" as pure data operations (§8) |
+
+Uncommitted working tree: regenerated engine artifacts (`parity_baseline.json`, `veda_glossary.json`, `veda_semantic_checkpoint.json`, trace logs, pickled schema encoders) and the removal of `veda_relationship_graph.json` / `veda_semantic_model.json` now sourced via substrate/redis.
+
+---
+
+## 15. Status (wired vs skeleton, from the code)
+
+**Wired**: the end-to-end query flow (api → inference → `run_hybrid_query` → head → firewall → audit); `task_ingest_source` real ingestion with streamed stage tracking, resume, skip-LLM, ENCODER_MODE guard, per-source connection injection; `storage_adapters.reader` (all reads incl. the ON-CONFLICT verified write) and `writer` (all except the embedding hook); `SemanticModelAssembler`; the SLM Strategy backends; health/readiness/metrics; eval runs; the rehydrate fan-out; the cache.py platform rewire (context-aware verified cache).
+
+**Skeleton / incremental**: the ten-task Celery chain (`NotImplementedError`); `writer.store_column_embeddings`; the `_call_slm` circuit breaker (pass-through) and engine call-site rewire onto `call_slm`; `vLLMBackend` production wiring; auth/JWT + tenant-from-principal (dev `AllowAny` + default tenant); pgvector RunSQL migrations + per-source HNSW tuning.
+
+**Authority**: when code and prose disagree, `veda/pipeline.py` + `veda_hybrid.py` are authoritative for engine behavior; `apps/`, `inference/`, `storage_adapters/` for platform behavior. The `§N` comments in code point to `migration_plan.md` for intended target wiring.

@@ -192,24 +192,35 @@ def _run_finetune(
     model:    "SentenceTransformer",
     examples: List["InputExample"],
     verbose:  bool,
+    batch_size:  int = None,
+    epochs:      int = None,
+    max_seq_len: int = None,
 ) -> Tuple[float, int]:
     """
     Runs the fine-tuning loop.
 
     Uses MultipleNegativesRankingLoss — in-batch negatives, no labels needed.
     Returns (final_loss_approx, epochs_completed).
+
+    batch_size/epochs/max_seq_len override the AUTO_FINETUNE_* defaults when a caller
+    passes them (BGE fine-tune uses its own lighter settings); None → default (MiniLM path
+    unchanged).
     """
     if not examples:
         return 0.0, 0
 
+    _bs  = batch_size  if batch_size  is not None else AUTO_FINETUNE_BATCH_SIZE
+    _ep  = epochs      if epochs      is not None else AUTO_FINETUNE_EPOCHS
+    _msl = max_seq_len if max_seq_len is not None else AUTO_FINETUNE_MAX_SEQ_LEN
+
     # Set max sequence length
-    model.max_seq_length = AUTO_FINETUNE_MAX_SEQ_LEN
+    model.max_seq_length = _msl
 
     # DataLoader — shuffle to ensure diverse in-batch negatives
     dataloader = DataLoader(
         examples,
         shuffle    = True,
-        batch_size = AUTO_FINETUNE_BATCH_SIZE,
+        batch_size = _bs,
     )
 
     # Multiple Negatives Ranking Loss
@@ -220,13 +231,13 @@ def _run_finetune(
     )
 
     # Warmup steps across total training
-    total_steps   = len(dataloader) * AUTO_FINETUNE_EPOCHS
+    total_steps   = len(dataloader) * _ep
     warmup_steps  = min(AUTO_FINETUNE_WARMUP_STEPS, total_steps // 4)
 
     if verbose:
         print(f"  Training examples  : {len(examples)}")
-        print(f"  Batch size         : {AUTO_FINETUNE_BATCH_SIZE}")
-        print(f"  Epochs             : {AUTO_FINETUNE_EPOCHS}")
+        print(f"  Batch size         : {_bs}")
+        print(f"  Epochs             : {_ep}")
         print(f"  Steps per epoch    : {len(dataloader)}")
         print(f"  Warmup steps       : {warmup_steps}")
         print(f"  Learning rate      : {AUTO_FINETUNE_LR}")
@@ -244,7 +255,7 @@ def _run_finetune(
     try:
         model.fit(
             train_objectives   = [(dataloader, train_loss)],
-            epochs             = AUTO_FINETUNE_EPOCHS,
+            epochs             = _ep,
             warmup_steps       = warmup_steps,
             optimizer_params   = {"lr": AUTO_FINETUNE_LR},
             show_progress_bar  = verbose,
@@ -254,7 +265,7 @@ def _run_finetune(
         del sys.modules["mlflow"]
         sys.modules.update(_saved)
 
-    return 0.0, AUTO_FINETUNE_EPOCHS
+    return 0.0, _ep
 
 
 # =============================================================================
@@ -393,8 +404,12 @@ def _run_finetune_for_model(
     pairs_path:     str,
     verbose:        bool,
     label:          str,
+    batch_size:     int = None,
+    epochs:         int = None,
+    max_seq_len:    int = None,
 ) -> "FineTuneResult":
-    """Shared fine-tune wrapper for MiniLM and BGE."""
+    """Shared fine-tune wrapper for MiniLM and BGE. batch_size/epochs/max_seq_len override
+    the AUTO_FINETUNE_* defaults (BGE passes its own lighter settings); None → default."""
     # Force CPU — MPS OOMs on Apple Silicon when BGE-large trains with
     # full gradients + optimizer states (~5GB) on top of inference allocations.
     import os as _os
@@ -525,7 +540,9 @@ def _run_finetune_for_model(
         return _skip(f"Failed to prepare examples: {e}")
 
     try:
-        final_loss, epochs_done = _run_finetune(model, examples, verbose)
+        final_loss, epochs_done = _run_finetune(
+            model, examples, verbose,
+            batch_size=batch_size, epochs=epochs, max_seq_len=max_seq_len)
     except Exception as e:
         if _mps_patched:
             _mps_mod_ref.is_available = _mps_orig_available
