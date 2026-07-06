@@ -189,6 +189,11 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
             status=JobStatus.FAILED).order_by("-id").first()
         do_resume = bool(resume or prior_failed)
         sub_env = dict(os.environ)
+        # Per-source connection (§5): inject THIS source's DB connection from its Source row,
+        # so ingestion targets the right source without any global env/code change.
+        src = job.source
+        if src and src.host:
+            sub_env.update(src.as_engine_env())
         if do_resume:
             sub_env["VEDA_RESUME"] = "1"
             job.stages.filter(name__in=("embeddings", "derived_language")).update(

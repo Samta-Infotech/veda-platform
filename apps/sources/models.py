@@ -35,8 +35,19 @@ class Source(models.Model):
     name = models.CharField(max_length=200, unique=True)
     dialect = models.CharField(max_length=20, choices=Dialect.choices)
     connector_type = models.CharField(max_length=64)
+    # Connection config lives on the Source row (§5: "how to connect to it"), so onboarding a
+    # new source is a data operation — register + trigger ingestion, no code/env edits.
+    host = models.CharField(max_length=256, blank=True)
+    port = models.PositiveIntegerField(null=True, blank=True)
+    dbname = models.CharField(max_length=256, blank=True)
+    db_user = models.CharField(max_length=256, blank=True)
+    # Password: env-ref preferred (prod → Docker secret via `env:NAME`); inline allowed for dev.
+    password_env = models.CharField(max_length=256, blank=True,
+                                    help_text="env var holding the password, e.g. HOMZHUB_DB_PASSWORD")
+    password_inline = models.CharField(max_length=256, blank=True,
+                                       help_text="dev only; prefer password_env in prod")
     # Reference into Docker secrets / env — NEVER the credential itself (§9).
-    connection_secret_ref = models.CharField(max_length=256)
+    connection_secret_ref = models.CharField(max_length=256, blank=True)
     status = models.CharField(
         max_length=20, choices=SourceStatus.choices, default=SourceStatus.REGISTERED
     )
@@ -51,6 +62,30 @@ class Source(models.Model):
 
     def __str__(self) -> str:
         return f"{self.name} ({self.dialect})"
+
+    def resolve_password(self) -> str:
+        """Resolve the source password: env-ref first (prod-safe), then inline (dev)."""
+        import os
+        if self.password_env:
+            return os.environ.get(self.password_env, "")
+        return self.password_inline or ""
+
+    def connection(self) -> dict:
+        """The engine-shaped connection dict for THIS source. Ingestion injects it so the
+        engine ingests this source's DB — no global env, no per-source code changes."""
+        return {
+            "engine": "postgresql", "host": self.host, "port": self.port or 5432,
+            "dbname": self.dbname, "user": self.db_user, "password": self.resolve_password(),
+        }
+
+    def as_engine_env(self) -> dict:
+        """Map the connection to the VEDA_SOURCE_* env the engine reads (config.get_source)."""
+        c = self.connection()
+        return {
+            "VEDA_SOURCE_HOST": str(c["host"]), "VEDA_SOURCE_PORT": str(c["port"]),
+            "VEDA_SOURCE_DBNAME": str(c["dbname"]), "VEDA_SOURCE_USER": str(c["user"]),
+            "VEDA_SOURCE_PASSWORD": str(c["password"]),
+        }
 
 
 class SourceConnectionProfile(models.Model):
