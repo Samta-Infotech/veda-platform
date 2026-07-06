@@ -87,6 +87,41 @@ class Source(models.Model):
             "VEDA_SOURCE_PASSWORD": str(c["password"]),
         }
 
+    # Dialect → (engine source-type vocabulary, connector engine name) for the engine's
+    # connector registry (connectors/base.register_connector "<type>:<engine>" keys).
+    # Only relational + nosql are representable from a Source row; document/datalake need
+    # path/format fields this model doesn't carry.
+    _DIALECT_TO_ENGINE = {
+        "postgres":  ("relational", "postgresql"),
+        "mysql":     ("relational", "mysql"),
+        "sqlite":    ("relational", "sqlite"),
+        "oracle":    ("relational", "generic"),
+        "sqlserver": ("relational", "generic"),
+        "duckdb":    ("relational", "generic"),
+        "mongo":     ("nosql", "mongodb"),
+        "es":        ("nosql", "elasticsearch"),
+        "dynamo":    ("nosql", "dynamodb"),
+    }
+
+    def source_kind(self) -> str:
+        """The engine source-type ('relational' | 'nosql') this source routes to."""
+        return self._DIALECT_TO_ENGINE.get(self.dialect, ("relational", "generic"))[0]
+
+    def as_source_config(self) -> dict:
+        """Engine source_config for THIS source, consumed by
+        source_dispatcher.dispatch_ingestion / connectors.build_connector."""
+        stype, engine = self._DIALECT_TO_ENGINE.get(self.dialect, ("relational", "generic"))
+        c = self.connection()
+        return {
+            "id": str(self.pk),
+            "type": stype,
+            "engine": engine,
+            "enabled": True,
+            "role": "queryable",
+            "host": c["host"], "port": c["port"], "dbname": c["dbname"],
+            "user": c["user"], "password": c["password"],
+        }
+
 
 class SourceConnectionProfile(models.Model):
     """Pool sizing / read-only role / timeout overrides per source (§5)."""

@@ -156,12 +156,13 @@ def load_or_generate_glossary(
     domain_description: str = None,
     table_names: List[str] = None,
     glossary_file: str = None,
+    force: bool = False,
 ) -> Dict[str, str]:
-    """Load glossary from file if exists, otherwise generate and save."""
+    """Load glossary from file if exists (unless force=True), otherwise generate and save."""
     if glossary_file is None:
         glossary_file = GLOSSARY_FILE
 
-    if os.path.exists(glossary_file):
+    if not force and os.path.exists(glossary_file):
         try:
             with open(glossary_file, "r") as f:
                 glossary = json.load(f)

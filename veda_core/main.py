@@ -117,10 +117,10 @@ def check_ingestion_status() -> dict:
 
 def _load_query_singletons(verbose: bool = False) -> None:
     """Load in-memory singletons for query pipeline without re-ingestion."""
-    # TF-IDF/SVD power only the legacy light-text/ensemble retrieval
-    # (query/semantic_layer._encode_light_text), used by --legacy-query and the
+    # TF-IDF/SVD power only the light-text/ensemble retrieval
+    # (query/semantic_layer._encode_light_text), used by the Tier-2 fallback and the
     # evaluator. The hybrid engine retrieves with BGE, so skip the eager load on the
-    # V2 path. get_light_text_models() is a lazy cached getter — the legacy/eval paths
+    # V2 path. get_light_text_models() is a lazy cached getter — the Tier-2/eval paths
     # still load it on demand, so nothing is lost.
     try:
         from config import RETRIEVAL_V2_ENABLED
@@ -536,23 +536,6 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
             _fail("Unified Graph Embedder", e)
             print("         Continuing without unified node embeddings.")
 
-    # --- Step 7d: Phase 5 GNN (optional) ---
-    from config import GRAPH_GNN_ENABLED
-    if UNIFIED_GRAPH_ENABLED and GRAPH_GNN_ENABLED:
-        print(f"  [7d/{total_steps}] Phase 5 GNN (optional)")
-        print(f"  {'─' * 56}")
-        t0 = time.time()
-        try:
-            from ingestion.relgt_encoder import run_gnn_graph_embedding
-            gnn_result = run_gnn_graph_embedding(
-                graph=context["graph"], source_id=source_id, verbose=verbose
-            )
-            if gnn_result is None:
-                _ok("Phase 5 GNN skipped (torch/PyG unavailable or disabled)", time.time() - t0)
-        except Exception as e:
-            _fail("Phase 5 GNN", e)
-            print("         Continuing without GNN embeddings.")
-
     # --- Step 8: Encoder ---
     _step(8, total_steps, f"Encoder  [mode={__import__('config').ENCODER_MODE}]")
     t0 = time.time()
@@ -648,8 +631,10 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
                 t["table_name"]: {"columns": t.get("columns", [])}
                 for t in _raw.get("tables", [])
             }
+            # force_glossary=True → regenerate data/veda_glossary.json every ingest so
+            # the query-time glossary (query_enrichment) never lags the current schema.
             semantic_model = run_full_semantic_layer(
-                schema_dict=schema_dict, profiling=None, glossary=None, force_glossary=False,
+                schema_dict=schema_dict, profiling=None, glossary=None, force_glossary=True,
             )
             save_semantic_model(semantic_model, SEMANTIC_MODEL_FILE)
             context["semantic_model"] = semantic_model
@@ -681,57 +666,6 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
     except Exception as _e:
         if verbose:
             print(f"  [primary_db] BGE biencoder warning: {_e}")
-
-    # --- Step 10: Synthetic Query Generator ---
-    # LLM step — skipped in --embed-only (fast) mode.
-    if skip_llm:
-        print(f"  [10/{total_steps}] Synthetic Query Generator — SKIPPED (--embed-only)")
-        print(f"  [11/{total_steps}] BGE Fine-Tune — SKIPPED (--embed-only)")
-    else:
-        _step(10, total_steps, "Synthetic Query Generator (training pairs)")
-        t0 = time.time()
-        try:
-            from ingestion.synthetic_query_gen import run_synthetic_query_gen
-
-            # Attach FK edges so Source 2 (FK-based generation) works
-            inference_result._fk_edges = context["scan_result"].fk_edges
-
-            gen_result = run_synthetic_query_gen(inference_result, verbose=verbose)
-            context["gen_result"] = gen_result
-            _ok(
-                f"Pairs generated — "
-                f"total={gen_result.total_pairs} "
-                f"(col={gen_result.column_pairs} "
-                f"fk={gen_result.fk_pairs} "
-                f"val={gen_result.value_pairs} "
-                f"fallback={gen_result.fallback_pairs}) "
-                f"ollama={gen_result.ollama_available}",
-                time.time() - t0,
-            )
-        except Exception as e:
-            _fail("Synthetic Query Generator", e)
-            print("         Continuing without fine-tuning.")
-
-        # --- Step 11: Fine-tune ---
-        # BGE is primary path (RETRIEVAL_V2_ENABLED). MiniLM fine-tune skipped.
-        # Only BGE fine-tune runs here.
-        _step(11, total_steps, "BGE Fine-Tune")
-        t0 = time.time()
-        try:
-            from config import BIENCODER_ENABLED
-            if BIENCODER_ENABLED:
-                from ingestion.auto_finetune import run_bge_finetune
-                bge_ft = run_bge_finetune(inference_result, verbose=verbose)
-                context["ft_result"] = bge_ft
-                _ok(
-                    f"BGE fine-tune — {'success' if bge_ft.success else 'skipped: ' + str(bge_ft.skip_reason)}",
-                    time.time() - t0,
-                )
-            else:
-                _ok("Skipped (BIENCODER_ENABLED=False)", time.time() - t0)
-        except Exception as e:
-            _fail("BGE Fine-Tune", e)
-            print("         Continuing without BGE fine-tune.")
 
     # --- Step 12: Derived artifacts (LLM-free) ---
     # Rebuild the files the FAST PATH reads so they never lag the semantic model:
@@ -766,6 +700,27 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
         except Exception as e:
             _fail("Semantic Registry Compile", e)
             print("         Continuing — fast path will use the previous semantic registry.")
+
+    # --- Step 12b: Unified graph (query-time GRAPH_EXPAND) ---
+    # Regenerate data/veda_unified_graph.json from the fresh semantic model +
+    # relationship graph (Step 12) + concept graph + domain synonyms (Step 9b), so
+    # query-time graph expansion (query_graph.py ← veda/pipeline) never reads a
+    # stale/missing file. Non-fatal: a failure leaves the prior unified graph.
+    from config import UNIFIED_GRAPH_ENABLED as _UG_ENABLED
+    if _UG_ENABLED:
+        print(f"  [12b/{total_steps}] Unified graph (data/veda_unified_graph.json)")
+        print(f"  {'─' * 56}")
+        t0 = time.time()
+        try:
+            from ingestion.unified_graph_builder import build_unified_graph, write_unified_graph
+            _ug = build_unified_graph()
+            _ug_path = write_unified_graph(_ug)
+            _ok(f"unified graph rebuilt — {len(_ug.get('nodes', []))} nodes, "
+                f"{len(_ug.get('edges', []))} edges → {_ug_path}",
+                time.time() - t0)
+        except Exception as e:
+            _fail("Unified Graph", e)
+            print("         Continuing — graph expansion will use the previous unified graph.")
 
     ingestion_duration = round(time.time() - t_total, 2)
     logger.info("=== Ingestion pipeline complete in %.2fs ===", ingestion_duration)
@@ -986,9 +941,9 @@ def run_single_query(query: str, verbose: bool = False, debug: bool = False) -> 
       • nosql  → native query builder + execution
       • compound utterances → decomposed into independent sub-queries
 
-    This replaces the legacy L1→L4 SLM→IR path (kept as _run_single_query_legacy,
-    reachable via --legacy-query). It is the SAME engine the demo and hybrid suite use,
-    so the CLI, demo, and tests all converge on one query layer.
+    This replaces the legacy L1→L4 SLM→IR path (now removed). It is the SAME engine
+    the demo and hybrid suite use, so the CLI, demo, and tests all converge on one
+    query layer.
 
     Requires ingestion to have been run first (vector store + semantic model populated).
     """
@@ -1030,467 +985,6 @@ def run_single_query(query: str, verbose: bool = False, debug: bool = False) -> 
     print()
 
 
-def _run_single_query_legacy(query: str, verbose: bool = False) -> None:
-    """
-    LEGACY single-query path (L1→L2→L3→L4 on the query/* modules). Superseded by the
-    hybrid engine in run_single_query; kept for comparison/debugging via --legacy-query.
-
-      L1 — Temporal Parser   (dateparser-based temporal extraction)
-      L2 — Semantic Layer    (MiniLM/ensemble retrieval + FK bridge)
-      L3 — SLM Layer         (Qwen-2.5-Coder via Ollama → IR JSON)
-
-    Requires ingestion to have been run first (vector store must be populated).
-    """
-    import json
-    from config import SLM_ENABLED
-
-    logger.info("=== Single query: %r ===", query)
-    print(f"\n  Query: '{query}'")
-    print(f"  {'─' * 56}")
-
-    # L0 — NL Simplifier
-    try:
-        from query.nl_simplifier import run_nl_simplifier
-        _l0 = run_nl_simplifier(query, verbose=False)
-        if _l0.was_simplified:
-            print(f"  [L0] Simplified: '{_l0.simplified_query}' ({_l0.duration_ms}ms)")
-        query = _l0.simplified_query
-    except Exception as _l0_err:
-        pass  # fallback to original query silently
-
-    # ------------------------------------------------------------------
-    # L1 — Temporal Parser
-    # ------------------------------------------------------------------
-    from query.temporal_parser import run_temporal_parser
-
-    t1_result = run_temporal_parser(query)
-    tf = t1_result.temporal_filter
-
-    if tf:
-        print(f"\n  [L1] Temporal filter detected:")
-        print(f"       Matched : {t1_result.raw_expressions}")
-        print(f"       Start   : {tf.start}")
-        print(f"       End     : {tf.end}")
-        print(f"       Cleaned : '{t1_result.cleaned_query}'")
-    else:
-        print(f"\n  [L1] No temporal expression detected")
-
-    # L2 receives the cleaned query (temporal tokens stripped)
-    l2_query = t1_result.cleaned_query or query
-
-    # ------------------------------------------------------------------
-    # Router — classify intent when QUERY_ROUTER_ENABLED=True
-    # ------------------------------------------------------------------
-    _sql_source_id   = None
-    _hybrid_doc_ids  = []      # populated by hybrid router branch below
-    _route_intent    = "sql"   # default
-    _l2_source_ids   = None    # set by router; scopes L2 retrieval to selected sources
-    from config import QUERY_ROUTER_ENABLED
-    if QUERY_ROUTER_ENABLED:
-        from query.query_router import route_query
-        route = route_query(query, verbose=verbose)
-        _l2_source_ids = route.source_ids
-        print(f"\n  [Router] Intent    : {route.intent}")
-        print(f"  [Router] Sources   : {route.source_ids}")
-        print(f"  [Router] Confidence: {route.confidence:.2f}")
-        print(f"  [Router] Reason    : {route.reason}")
-
-        # Capture the relational/datalake source for downstream SQL execution
-        from config import VEDA_SOURCES as _srcs
-        _sql_source_id = next(
-            (sid for sid in route.source_ids
-             if any(s.get("type") in ("relational", "datalake") and s["id"] == sid for s in _srcs)),
-            None,
-        )
-
-        if route.intent == "rag":
-            from query.rag_layer import run_rag_layer
-            print(f"\n  [RAG] Retrieving from document sources...")
-            print(f"  [RAG] Temporal filter: {tf is not None}")
-            rag = run_rag_layer(
-                query           = query,
-                source_ids      = route.source_ids,
-                temporal_filter = tf,              # Improvement 1: L1 → RAG
-                verbose         = verbose,
-            )
-            if rag.error:
-                print(f"\n  [RAG] ✗  {rag.error}")
-            else:
-                print(f"\n  [RAG] Answer:\n    {rag.answer}")
-                print(f"\n  [RAG] Citations  : {rag.citations}")
-                print(f"  [RAG] Confidence : {rag.confidence:.4f}")
-                print(f"  [RAG] Temporal   : {rag.stats.get('temporal_filtered')}")
-                print(f"  [RAG] Duration   : {rag.duration_ms}ms")
-            print()
-            return
-
-        if route.intent == "hybrid":
-            # Improvement 3: hybrid uses run_hybrid_layer after L2 retrieval.
-            # L2 runs below to get SQL columns; we store the intent here
-            # and call run_hybrid_layer after L2 completes.
-            _hybrid_doc_ids = [sid for sid in route.source_ids
-                               if any(s.get("type") == "document" and s["id"] == sid
-                                      for s in __import__("config").VEDA_SOURCES)]
-            print(f"\n  [Hybrid] Running SQL + RAG fusion (Improvement 3)")
-            print(f"  [Hybrid] Doc sources: {_hybrid_doc_ids}")
-            # SQL path runs below — hybrid answer built after L2
-
-        if route.intent == "nosql":
-            from query.nosql_builder import run_nosql_builder
-            from connectors.base import build_connector
-            from config import get_source as _get_src
-
-            for nsid in route.source_ids:
-                src    = _get_src(nsid)
-                engine = src.get("engine", "mongodb")
-                print(f"\n  [NoSQL] Source '{nsid}'  engine={engine}")
-
-                connector = build_connector(src)
-                status    = connector.connect()
-                if not status.ok:
-                    print(f"\n  [NoSQL] ✗ Connection failed: {status.message}")
-                    continue
-
-                collections = connector.get_nosql_schema()
-                connector.disconnect()
-
-                if not collections:
-                    print(f"\n  [NoSQL] ✗ No collections found in source")
-                    continue
-
-                nb = run_nosql_builder(
-                    query       = query,
-                    source_id   = nsid,
-                    engine      = engine,
-                    collections = collections,
-                    verbose     = verbose,
-                )
-
-                if nb.error:
-                    print(f"\n  [NoSQL] ✗ Builder error: {nb.error}")
-                    continue
-
-                if nb.warnings:
-                    for w in nb.warnings:
-                        print(f"\n  [NoSQL] ⚠  {w}")
-
-                print(f"\n  [NoSQL] Collection : {nb.collection_name}")
-                print(f"  [NoSQL] Intent     : {nb.intent}")
-                print(f"  [NoSQL] Fields     : {nb.field_hints or ['(all)']}")
-                print(f"  [NoSQL] Query      : {nb.query_json}")
-
-                # Execute
-                connector2 = build_connector(src)
-                connector2.connect()
-                exec_result = connector2.execute_query(
-                    query     = nb.query_json,
-                    row_limit = __import__("config").SQL_DEFAULT_LIMIT,
-                    timeout_sec = 30,
-                )
-                connector2.disconnect()
-
-                if exec_result.error:
-                    print(f"\n  [NoSQL] ✗ Execution error: {exec_result.error}")
-                else:
-                    trunc = "  [truncated]" if exec_result.truncated else ""
-                    print(f"\n  [NoSQL] {exec_result.row_count} docs returned"
-                          f"  ({exec_result.duration_ms}ms){trunc}")
-                    if exec_result.columns:
-                        col_w  = 22
-                        cols   = exec_result.columns[:6]
-                        header = " | ".join(f"{c[:col_w]:<{col_w}}" for c in cols)
-                        print(f"\n    {header}")
-                        print(f"    {'─' * len(header)}")
-                        for row in exec_result.rows[:10]:
-                            row_str = " | ".join(
-                                f"{str(row.get(c, ''))[:col_w]:<{col_w}}" for c in cols
-                            )
-                            print(f"    {row_str}")
-                        if exec_result.row_count > 10:
-                            print(f"    ... ({exec_result.row_count} docs total)")
-            print()
-            return
-
-    # Fallback: if router didn't identify a relational source, use primary
-    if _sql_source_id is None:
-        from config import get_primary_relational_source
-        try:
-            _sql_source_id = get_primary_relational_source()["id"]
-        except ValueError:
-            pass
-
-    # ------------------------------------------------------------------
-    # L2 — Semantic Layer
-    # ------------------------------------------------------------------
-    from query.semantic_layer import run_semantic_layer
-
-    l2 = run_semantic_layer(
-        query      = l2_query,
-        top_k      = __import__('config').TOP_K,
-        verbose    = verbose,
-        source_ids = _l2_source_ids,
-    )
-
-    print(f"\n  [L2] Encoding strategy : {l2.encoding_strategy}")
-    print(f"  [L2] Tables involved   : {l2.tables_involved}")
-    print(f"  [L2] Duration          : {l2.duration_ms}ms")
-
-    _scored_cols = [r for r in l2.top_k_columns if r.similarity > 0.0]
-    print(f"\n  [L2] Top-{len(_scored_cols)} columns:")
-    for i, r in enumerate(_scored_cols):
-        print(
-            f"    {i+1:02d}. {r.table_name}.{r.col_name:<28} "
-            f"sim={r.similarity:.4f}  {r.semantic_type}"
-        )
-
-    if l2.join_path:
-        print(f"\n  [L2] JOIN path:")
-        for edge in l2.join_path:
-            print(
-                f"    {edge.from_table_name}.{edge.from_col_name}"
-                f"  →  {edge.to_table_name}.{edge.to_col_name}"
-                f"  [{edge.join_type}]"
-            )
-
-    # ------------------------------------------------------------------
-    # Hybrid: Phase 1B — L3→L4→L6 SQL execution, then run_hybrid_layer
-    # Fuses SQL execution results + doc chunks → single SLM answer
-    # ------------------------------------------------------------------
-    if QUERY_ROUTER_ENABLED and route.intent == "hybrid" and _hybrid_doc_ids:
-        _hybrid_sql_result = None
-
-        if SLM_ENABLED:
-            from query.slm_layer import run_slm_layer
-            print(f"\n  [L3/Hybrid] Calling SLM for SQL generation...")
-            l3h = run_slm_layer(
-                query           = query,
-                temporal_filter = tf,
-                top_k_columns   = l2.top_k_columns,
-                join_path       = l2.join_path,
-                verbose         = verbose,
-                is_hybrid       = True,
-            )
-            if not l3h.error and l3h.ir_json:
-                print(f"  [L3/Hybrid] Intent={l3h.intent}  Confidence={l3h.confidence:.2f}")
-                from query.sql_builder import run_sql_builder
-                l4h = run_sql_builder(
-                    ir_json       = l3h.ir_json,
-                    top_k_columns = l2.top_k_columns,
-                    verbose       = verbose,
-                    join_path     = l2.join_path,
-                )
-                if not l4h.error:
-                    if l4h.tables_used:
-                        for t_name in l4h.tables_used:
-                            matched_sid = next((c.source_id for c in l2.top_k_columns if c.table_name == t_name and c.source_id), None)
-                            if matched_sid:
-                                _sql_source_id = matched_sid
-                                break
-
-                if not l4h.error and _sql_source_id:
-                    print(f"  [L4/Hybrid] Intent: {l4h.query_type}")
-                    print(f"  [L4/Hybrid] SQL built:")
-                    for _ln in l4h.sql.split("\n"):
-                        print(f"    {_ln}")
-                    if __import__("config").HYBRID_EXECUTE_SQL:
-                        from query.execution_engine import execute_sql
-                        print(f"  [L6/Hybrid] Executing against '{_sql_source_id}'...")
-                        _hybrid_sql_result = execute_sql(
-                            sql       = l4h.sql,
-                            params    = list(l4h.params),
-                            source_id = _sql_source_id,
-                            verbose   = verbose,
-                        )
-                        if _hybrid_sql_result.error:
-                            print(f"  [L6/Hybrid] ✗  {_hybrid_sql_result.error}")
-                            _hybrid_sql_result = None
-                        else:
-                            trunc = "  [truncated]" if _hybrid_sql_result.truncated else ""
-                            print(f"  [L6/Hybrid] {_hybrid_sql_result.row_count} rows returned{trunc}")
-                            if _hybrid_sql_result.columns:
-                                _cw   = 22
-                                _cols = _hybrid_sql_result.columns[:6]
-                                _hdr  = " | ".join(f"{c[:_cw]:<{_cw}}" for c in _cols)
-                                print(f"\n    {_hdr}")
-                                print(f"    {'─' * len(_hdr)}")
-                                for _row in _hybrid_sql_result.rows[:10]:
-                                    _rs = " | ".join(f"{str(_row.get(c,''))[:_cw]:<{_cw}}" for c in _cols)
-                                    print(f"    {_rs}")
-                                if _hybrid_sql_result.row_count > 10:
-                                    print(f"    ... ({_hybrid_sql_result.row_count} rows total)")
-                elif l4h.error:
-                    print(f"  [L4/Hybrid] ✗  {l4h.error}")
-            elif l3h.error:
-                print(f"  [L3/Hybrid] ✗  SLM unavailable: {l3h.error}")
-
-        from query.rag_layer import run_hybrid_layer
-        hybrid = run_hybrid_layer(
-            query           = query,
-            sql_columns     = l2.top_k_columns,
-            source_ids      = _hybrid_doc_ids,
-            temporal_filter = tf,
-            sql_result      = _hybrid_sql_result,
-            verbose         = verbose,
-        )
-        if hybrid.error:
-            print(f"\n  [Hybrid] ✗  {hybrid.error}")
-        else:
-            print(f"\n  [Hybrid] Answer:")
-            print(f"    {hybrid.answer}")
-            print(f"\n  [Hybrid] SQL cols used   : {len(hybrid.sql_columns)}")
-            print(f"  [Hybrid] Doc chunks used : {len(hybrid.doc_chunks)}")
-            print(f"  [Hybrid] SQL executed    : {hybrid.stats.get('sql_executed', False)}")
-            print(f"  [Hybrid] SQL rows        : {hybrid.stats.get('sql_rows', 0)}")
-            print(f"  [Hybrid] Citations       : {hybrid.citations}")
-            print(f"  [Hybrid] Confidence      : {hybrid.confidence:.4f}")
-            print(f"  [Hybrid] Duration        : {hybrid.duration_ms}ms")
-        print()
-        return
-
-    # ------------------------------------------------------------------
-    # L3 — Phase 3 Enhancement (5-Signal Hybrid Retrieval)
-    # ------------------------------------------------------------------
-    try:
-        from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
-        from query_engine.intent_detector import IntentDetector
-
-        detector = IntentDetector()
-        intent_result = detector.detect(query)
-        intent = intent_result.intent.value if hasattr(intent_result.intent, 'value') else "SIMPLE"
-
-        phase3_engine = RetrievalEnginePhase3(use_cache=True)
-        phase3_results = phase3_engine.retrieve(
-            query=query,
-            intent=intent,
-            top_k=15,
-            use_cache=True
-        )
-
-        # Update L2 results with Phase 3 improved retrieval
-        l2.top_k_columns = phase3_results
-        phase3_engine.close()
-
-        print(f"\n  [L3 Phase 3] ✓ 5-Signal Hybrid Retrieval (Intent: {intent})")
-        print(f"  [L3 Phase 3] Refined {len(phase3_results)} columns")
-    except Exception as e:
-        print(f"\n  [L3 Phase 3] ⚠  Skipped (falling back to L2): {e}")
-
-    # ------------------------------------------------------------------
-    # L3 — SLM Layer
-    # ------------------------------------------------------------------
-    l3 = l4 = None
-
-    if not SLM_ENABLED:
-        print(f"\n  [L3] Skipped (SLM_ENABLED=False in config.py)")
-    else:
-        from query.slm_layer import run_slm_layer
-
-        print(f"\n  [L3] Calling SLM ({__import__('config').SLM_MODEL_NAME})...")
-
-        l3 = run_slm_layer(
-            query           = query,          # original query — full intent
-            temporal_filter = tf,
-            top_k_columns   = l2.top_k_columns,
-            join_path       = l2.join_path,
-            verbose         = verbose,
-        )
-
-        if l3.error:
-            print(f"\n  [L3] ✗  SLM unavailable: {l3.error}")
-            print(f"         Install Ollama and run: ollama pull {__import__('config').SLM_MODEL_NAME}")
-        else:
-            print(f"\n  [L3] Intent      : {l3.intent}")
-            print(f"  [L3] Complexity  : {l3.complexity}")
-            print(f"  [L3] Confidence  : {l3.confidence:.2f}")
-            print(f"  [L3] Duration    : {l3.duration_ms}ms")
-
-            if l3.needs_clarification:
-                print(f"\n  [L3] ⚠  Clarification needed: {l3.clarification_reason}")
-                print(f"         (logged to {__import__('config').SLM_AMBIGUOUS_LOG_PATH})")
-
-            if l3.validation_warnings:
-                print(f"\n  [L3] Validation warnings:")
-                for w in l3.validation_warnings:
-                    print(f"    ⚠  {w}")
-
-            # Pretty-print IR JSON
-            print(f"\n  [L3] IR JSON:")
-            ir_lines = json.dumps(l3.ir_json, indent=4).splitlines()
-            for line in ir_lines:
-                print(f"    {line}")
-
-            # ------------------------------------------------------------------
-            # L4 — SQL Builder
-            # ------------------------------------------------------------------
-            if not l3.ir_json:
-                print(f"\n  [L4] Skipped — no IR JSON from L3")
-            else:
-                from query.sql_builder import run_sql_builder
-
-                print(f"\n  [L4] Building SQL from IR...")
-
-                l4 = run_sql_builder(
-                    ir_json       = l3.ir_json,
-                    top_k_columns = l2.top_k_columns,
-                    verbose       = verbose,
-                    join_path     = l2.join_path,
-                )
-
-                if l4.error:
-                    print(f"\n  [L4] ✗  SQL Builder error: {l4.error}")
-                else:
-                    print(f"\n  [L4] Query type  : {l4.query_type}")
-                    print(f"  [L4] Tables used : {', '.join(l4.tables_used)}")
-                    print(f"  [L4] Params      : {len(l4.params)} bound value(s)")
-                    print(f"  [L4] Duration    : {l4.duration_ms:.1f}ms")
-
-                    if l4.warnings:
-                        print(f"\n  [L4] Warnings:")
-                        for w in l4.warnings:
-                            print(f"    ⚠  {w}")
-
-                    print(f"\n  [L4] Generated SQL:")
-                    for line in l4.sql.split("\n"):
-                        print(f"    {line}")
-
-                    # L6 — Execution Engine
-                    if l4.tables_used:
-                        for t_name in l4.tables_used:
-                            matched_sid = next((c.source_id for c in l2.top_k_columns if c.table_name == t_name and c.source_id), None)
-                            if matched_sid:
-                                _sql_source_id = matched_sid
-                                break
-
-                    if _sql_source_id:
-                        from query.execution_engine import execute_sql
-                        print(f"\n  [L6] Executing against source '{_sql_source_id}'...")
-                        exec_result = execute_sql(
-                            sql       = l4.sql,
-                            params    = list(l4.params),
-                            source_id = _sql_source_id,
-                            verbose   = verbose,
-                        )
-                        if exec_result.error:
-                            print(f"\n  [L6] ✗  Execution error: {exec_result.error}")
-                        else:
-                            trunc = "  [truncated]" if exec_result.truncated else ""
-                            print(f"\n  [L6] {exec_result.row_count} rows returned  ({exec_result.duration_ms}ms){trunc}")
-                            if exec_result.columns:
-                                col_w  = 22
-                                cols   = exec_result.columns[:6]
-                                header = " | ".join(f"{c[:col_w]:<{col_w}}" for c in cols)
-                                print(f"\n    {header}")
-                                print(f"    {'─' * len(header)}")
-                                for row in exec_result.rows[:10]:
-                                    row_str = " | ".join(f"{str(row.get(c, ''))[:col_w]:<{col_w}}" for c in cols)
-                                    print(f"    {row_str}")
-                                if exec_result.row_count > 10:
-                                    print(f"    ... ({exec_result.row_count} rows total)")
-
-    _print_query_summary(query, l2, l3, l4)
-    print()
-
-
 # =============================================================================
 # Argument parser
 # =============================================================================
@@ -1523,11 +1017,6 @@ def _parse_args():
         type=str,
         default=None,
         help='Run a single query through the hybrid engine and print results.\nExample: --query "show me total rent by tenant"',
-    )
-    parser.add_argument(
-        "--legacy-query",
-        action="store_true",
-        help="With --query, use the legacy L1→L4 SLM→IR path instead of the hybrid engine.",
     )
     parser.add_argument(
         "--debug",
@@ -1636,11 +1125,7 @@ def main():
         else:
             print("  Artifacts found — loading singletons...\n")
             _load_query_singletons(verbose=args.verbose)
-        if args.legacy_query:
-            print("  (using LEGACY L1→L4 path — --legacy-query)\n")
-            _run_single_query_legacy(args.query, verbose=args.verbose)
-        else:
-            run_single_query(args.query, verbose=args.verbose, debug=args.debug)
+        run_single_query(args.query, verbose=args.verbose, debug=args.debug)
         return
 
     # ------------------------------------------------------------------

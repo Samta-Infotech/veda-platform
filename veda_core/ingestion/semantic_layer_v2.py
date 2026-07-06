@@ -1276,7 +1276,7 @@ def run_full_semantic_layer(
         try:
             table_names = list(schema_dict.keys())
             glossary = glossary_builder.load_or_generate_glossary(
-                table_names=table_names
+                table_names=table_names, force=force_glossary
             )
             if glossary is None:
                 glossary = {}

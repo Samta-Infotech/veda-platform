@@ -7,9 +7,9 @@
 #   Called by main.py once per enabled source in VEDA_SOURCES.
 #
 # Pipeline per source type:
-#   relational — full 11-step pipeline (schema → FK → data_graph →
+#   relational — full pipeline (schema → FK → data_graph →
 #                semantic inference → metadata → value_sampler → REG →
-#                encoder → vector_store → synthetic_gen → auto_finetune)
+#                encoder → vector_store → BGE biencoder)
 #
 #   datalake   — schema-compatible pipeline (same as relational but skips
 #                data_graph and value_sampler — both require a psycopg2
@@ -20,7 +20,7 @@
 #
 #   nosql      — schema inference pipeline (nosql collections → unifier →
 #                schema_scanner → FK → semantic inference → metadata →
-#                REG → encoder → vector_store → synthetic_gen → finetune;
+#                REG → encoder → vector_store;
 #                skips data_graph and value_sampler)
 #
 # main.py usage after Phase 5:
@@ -90,8 +90,7 @@ def _run_schema_pipeline(
 
     Returns a context dict with all step outputs.
     Raises on fatal failures (schema_scanner, encoder, vector_store).
-    Non-fatal failures (data_graph, value_sampler, synthetic_gen, finetune)
-    are absorbed — pipeline continues.
+    Non-fatal failures (data_graph, value_sampler) are absorbed — pipeline continues.
     """
     source_id = source_config["id"]
     ctx: dict = {"source_id": source_id}
@@ -267,20 +266,6 @@ def _run_schema_pipeline(
              f"Vector store — {store_result.rows_written} rows, backend={store_result.backend}",
              time.time() - t0)
 
-    # ── Step 10: Synthetic Query Generator ───────────────────────────────────
-    t0 = time.time()
-    try:
-        from ingestion.synthetic_query_gen import run_synthetic_query_gen
-        inference_result._fk_edges = scan_result.fk_edges
-        gen_result = run_synthetic_query_gen(inference_result, verbose=verbose)
-        ctx["gen_result"] = gen_result
-        _sok(source_id,
-             f"Synthetic query gen — {gen_result.total_pairs} pairs",
-             time.time() - t0)
-    except Exception as e:
-        _sfail(source_id, "Synthetic query gen", e)
-        print(f"  [{source_id}]    Continuing without fine-tuning.")
-
     # ── Step 9b: BGE Biencoder Ingestion ─────────────────────────────────────
     t0 = time.time()
     try:
@@ -295,22 +280,6 @@ def _run_schema_pipeline(
             _sok(source_id, f"BGE biencoder — {s}", time.time() - t0)
     except Exception as e:
         _sfail(source_id, "BGE biencoder", e)
-
-    # ── Step 11: BGE Fine-Tune ────────────────────────────────────────────────
-    t0 = time.time()
-    try:
-        from config import BIENCODER_ENABLED
-        if BIENCODER_ENABLED:
-            from ingestion.auto_finetune import run_bge_finetune
-            bge_ft = run_bge_finetune(inference_result, verbose=verbose)
-            ctx["ft_result"] = bge_ft
-            _sok(source_id,
-                 f"BGE fine-tune — {'success' if bge_ft.success else 'skipped: ' + str(bge_ft.skip_reason)}",
-                 time.time() - t0)
-        else:
-            _sok(source_id, "BGE fine-tune — skipped (BIENCODER_ENABLED=False)", time.time() - t0)
-    except Exception as e:
-        _sfail(source_id, "BGE fine-tune", e)
 
     return ctx
 
@@ -354,8 +323,8 @@ def _dispatch_relational(source_config: dict, verbose: bool) -> DispatchResult:
             ctx = run_ingestion(verbose=verbose)
             steps = ["schema", "fk", "data_graph", "semantic_types", "metadata",
                      "value_sampler", "reg", "encoder", "vector_store",
-                     "semantic_layer", "biencoder", "synthetic_gen", "finetune",
-                     "derived_artifacts"]
+                     "semantic_layer", "biencoder", "glossary",
+                     "derived_artifacts", "unified_graph"]
         else:
             ctx = _run_schema_pipeline(
                 raw_schema_dict  = raw_schema_dict,
@@ -365,8 +334,7 @@ def _dispatch_relational(source_config: dict, verbose: bool) -> DispatchResult:
                 verbose          = verbose,
             )
             steps = ["schema", "fk", "data_graph", "semantic", "metadata",
-                     "value_sampler", "reg", "encoder", "vector_store",
-                     "synthetic_gen", "finetune"]
+                     "value_sampler", "reg", "encoder", "vector_store"]
 
         return DispatchResult(
             source_id=source_id, source_type="relational",
@@ -420,8 +388,7 @@ def _dispatch_datalake(source_config: dict, verbose: bool) -> DispatchResult:
             source_id=source_id, source_type="datalake",
             success=True,
             steps_run=["schema", "fk", "semantic", "metadata",
-                       "reg", "encoder", "vector_store",
-                       "synthetic_gen", "finetune"],
+                       "reg", "encoder", "vector_store"],
             steps_failed=[],
             error=None,
             duration_s=round(time.time() - t_start, 2),
@@ -544,7 +511,7 @@ def _dispatch_nosql(source_config: dict, verbose: bool) -> DispatchResult:
             success=True,
             steps_run=["connect", "schema_sample", "schema", "fk",
                        "semantic", "metadata", "reg", "encoder",
-                       "vector_store", "synthetic_gen", "finetune"],
+                       "vector_store"],
             steps_failed=[],
             error=None,
             duration_s=round(time.time() - t_start, 2),

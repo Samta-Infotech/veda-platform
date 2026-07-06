@@ -314,7 +314,6 @@ RELGT_EMBEDDING_DIM      = 256
 LIGHT_TEXT_EMBEDDING_DIM = 256
 MINILM_EMBEDDING_DIM     = 384
 HYBRID_EMBEDDING_DIM     = MINILM_EMBEDDING_DIM + RELGT_EMBEDDING_DIM  # 640
-BGE_HYBRID_EMBEDDING_DIM = 1280  # BGE(1024) + RELGT(256)
 
 _ENCODER_DIM_MAP = {
     "relgt_only": RELGT_EMBEDDING_DIM,
@@ -347,7 +346,6 @@ SENSITIVE_PATTERNS  = [
 TABLE_NAME_EMBED_DIM  = 64
 MAX_TABLES            = 500
 NUM_TABLES            = MAX_TABLES   # alias used by schema/simulate_schema.py
-MAX_COLUMNS_PER_TABLE = 30
 
 # -----------------------------------------------------------------------------
 # RELGT Encoder
@@ -453,15 +451,12 @@ COL_ID_IDX_PATH = "schema/col_id_to_idx.pkl"
 # -----------------------------------------------------------------------------
 # Evaluation
 # -----------------------------------------------------------------------------
-EVAL_OUTPUT_DIR = "evaluation/results"
-SCORE_PRECISION = 4
 _ENCODER_LABEL_MAP = {
     "relgt_only": "POC Run 1 — RELGT structural only (256-dim)",
     "light_text": "POC Run 2 — Light Text TF-IDF+SVD (256-dim)",
     "hybrid":     "POC Run 3 — MiniLM + RELGT Hybrid (640-dim)",
     "ensemble":   "POC Run 4 — Ensemble Light Text + Hybrid + RRF",
 }
-BASELINE_LABEL = "v1.0 Hybrid (MiniLM + RELGT, 640-dim)"
 POC_LABEL      = _ENCODER_LABEL_MAP[ENCODER_MODE]
 
 # -----------------------------------------------------------------------------
@@ -563,7 +558,7 @@ SYNTHETIC_USE_EXISTING_PAIRS    = True
 # -----------------------------------------------------------------------------
 # Auto Fine-Tuning — Step 11
 # -----------------------------------------------------------------------------
-AUTO_FINETUNE_ENABLED        = True
+AUTO_FINETUNE_ENABLED        = False   # fine-tune chain removed; both tiers use base weights
 AUTO_FINETUNE_EPOCHS         = 3
 AUTO_FINETUNE_BATCH_SIZE     = 16
 BGE_FINETUNE_BATCH_SIZE      = 8    # CPU training — no MPS memory limit
@@ -712,9 +707,6 @@ GRAPH_EXPAND_MAX_NODES    = 40
 GRAPH_HOP_DECAY           = 0.6
 
 GRAPH_GNN_ENABLED         = False
-GRAPH_GNN_OUTPUT_DIM      = 256
-GRAPH_GNN_LAYERS          = 2
-GRAPH_GNN_NODE_EMB_TABLE  = "graph_node_embeddings_gnn"
 
 # --- Phase 4 retrieval tuning (regression fixes) ---
 GRAPH_HUB_DEGREE_CAP        = 30    # do not expand THROUGH nodes with degree > this (hub guard)
@@ -798,7 +790,6 @@ VALUE_FILTER_MIN_TOKEN_LEN       = 4      # ignore short tokens when matching va
 VALUE_FILTER_SCOPE_TO_CANDIDATES = True   # only keep value-matches whose table is in the candidate set
 VALUE_FILTER_ALLOW_CROSS_TABLE   = True  # if no in-scope match, add nothing (safer)
 VALUE_FILTER_DETERMINISTIC       = True   # build WHERE condition from value-match; don't rely on SLM
-VALUE_FILTER_CASE_INSENSITIVE    = True   # match token to value ignoring case; emit exact DB casing
 SLM_PROMPT_INCLUDE_VALUES        = True   # put sample values of candidate cols in the L3 prompt
 SLM_PROMPT_MAX_VALUES            = 8      # sample values per column shown to the SLM
 
@@ -807,7 +798,6 @@ BIDIRECTIONAL_ENABLED  = True
 # PART 2 — Value filter exact-match guards (query-time; no re-ingestion)
 VALUE_FILTER_VALUE_ONLY       = True    # require exact (ci) token→value; skip col-name-token matches
 VALUE_FILTER_SKIP_BOOLEAN     = True    # skip is_*/has_* cols from non-boolean tokens
-VALUE_FILTER_MIN_VALUE_MATCH  = "exact" # 'exact' | 'word' (reserved)
 
 # =============================================================================
 # ACRONYM EXPANSION  (ingestion-time; re-ingestion required when changed)
@@ -881,10 +871,6 @@ LEGACY_RETRIEVAL_DISABLED = False
 
 # --- L1: Temporal Parser ---
 TEMPORAL_PARSER_ENABLED = True
-TEMPORAL_DATEPARSER_SETTINGS = {
-    "STRICT_PARSING": False,
-    "PREFER_DATES_FROM": "current_period",
-}
 
 # --- L2: Semantic Layer (5-stage pipeline) ---
 SEMANTIC_LAYER_V2_ENABLED = True
@@ -943,7 +929,6 @@ PROFILING_TOP_VALUES_LIMIT = 10     # keep top N values per column
 
 # Stage 2: Domain Glossary (Qwen)
 GLOSSARY_GENERATION_ENABLED = True
-GLOSSARY_MODEL = SLM_MODEL_NAME
 GLOSSARY_TEMPERATURE = 0.5
 GLOSSARY_TIMEOUT = 120
 GLOSSARY_DOMAIN_DESCRIPTION = "Compliance and risk management, fraud detection, AML/KYC, incident investigation"
@@ -965,13 +950,11 @@ SQL_COLUMN_GLOSSARY_DEF_LEN  = 80
 
 # Stage 3: Table Understanding (Qwen)
 TABLE_UNDERSTANDING_ENABLED = True
-TABLE_UNDERSTANDING_MODEL = SLM_MODEL_NAME
 TABLE_UNDERSTANDING_TEMPERATURE = 0.3
 TABLE_UNDERSTANDING_TIMEOUT = 120
 
 # Stage 4: Column Understanding (Qwen, batched)
 COLUMN_UNDERSTANDING_ENABLED = True
-COLUMN_UNDERSTANDING_MODEL = SLM_MODEL_NAME
 COLUMN_UNDERSTANDING_BATCH_SIZE = 5  # Optimal batch size (10 was slower, 5 is sweet spot)
 COLUMN_UNDERSTANDING_TEMPERATURE = 0.3
 COLUMN_UNDERSTANDING_TIMEOUT = 240   # generous: concurrent generations share GPU compute → slower per call
@@ -993,25 +976,20 @@ CONCEPT_GRAPH_ENABLED = True
 CONCEPT_GRAPH_CONCEPTS = ["PERSON", "AMOUNT", "DATE", "METRIC"]
 
 # Cache invalidation: fingerprint hash of schema
-SCHEMA_FINGERPRINT_ENABLED = True
-SCHEMA_FINGERPRINT_FILE = "data/veda_cache_fingerprint.json"
 
 # --- L3: Retrieval (4-signal RRF + cross-encoder) ---
-RETRIEVAL_V2_FINAL_ENABLED = True
 
 # Signal 1: BGE-M3 semantic
 # Unified on bge-large-en-v1.5 — the SAME model BIENCODER_MODEL uses for the column
 # store (1024-dim), so query encoder and stored embeddings share one vector space.
 # (Was "BAAI/bge-m3", which isn't in the local HF cache → offline load failed.)
 BGE_MODEL_NAME = "BAAI/bge-large-en-v1.5"
-BGE_DIM = 1024
 BGE_DEVICE = _RESOLVED_DEVICE
 
 # Schema-grounding gate: a query concept is "grounded" if its best cosine to any
 # column/table embedding is >= this floor. Concepts below it (e.g. "AML risk score"
 # when no such field exists) trigger refusal instead of hallucinated SQL.
 # Single tunable knob — no hardcoded vocabulary. Calibrate per deployment.
-GROUNDING_FLOOR = 0.55
 
 # Query-grammar operators — the LANGUAGE layer (shared across ALL databases, NOT
 # per-schema). These are universal NL query semantics (negation/existence/quantity/
@@ -1153,48 +1131,24 @@ QUERY_ENHANCEMENT_LLM_FOLLOWUP = False
 FEEDBACK_ENABLED = True
 FEEDBACK_LLM_POLISH = True
 
-BGE_BATCH_SIZE = 32
-BGE_EMBEDDING_TIMEOUT = 10
 
 # Signal 2: BM25 keyword
-BM25_ENABLED = True
-BM25_TOP_K = 50
 
 # Signal 3: Subgraph
-SUBGRAPH_PRIMARY_TABLE_SCORE = 0.6
-SUBGRAPH_FK_NEIGHBOR_SCORE = 0.4
 
 # Signal 4: FK Path
-FK_PATH_SCORE = 0.95
 
 # RRF Parameters
-RRF_K_VALUE = 60              # RRF smoothing constant
-RRF_TOP_K_AFTER_FUSION = 50   # merge top-N from all signals
 
 # Cross-encoder reranking — the ONE reranker config is RERANKER_MODEL / RERANKER_DEVICE /
 # RERANKER_TOP_COLS above (used by query/reranker.py). The former CROSS_ENCODER_* triple here
 # was an unused duplicate of the same model string and has been removed to avoid drift.
 
 # Intent detection
-INTENT_AGGREGATE_KEYWORDS = [
-    "total", "sum", "average", "how many", "breakdown",
-    "compare", "net", "rank", "percentage", "highest", "lowest",
-    "count", "average", "min", "max"
-]
-INTENT_TEMPORAL_KEYWORDS = [
-    "last", "recent", "monthly", "since", "between",
-    "previous", "quarter", "period", "yesterday", "today"
-]
 
 # Intent-aware boosting
-INTENT_BOOST_MEASURE_AGGREGATE = 0.30
-INTENT_BOOST_MEASURE_TEMPORAL = 0.10
-INTENT_BOOST_IDENTIFIER_AGGREGATE = -0.40
-INTENT_BOOST_IDENTIFIER_TEMPORAL = -0.30
-HISTORY_TABLE_PENALTY = -0.60
 
 # --- L4: Intent & Cache ---
-INTENT_AND_CACHE_ENABLED = True
 # Single source of truth for the Phase-3 RETRIEVAL result cache (retrieval_cache.py, 5-min
 # TTL). Previously hardcoded per call-site — main.py used True, the hybrid engine used False —
 # so the SAME query could return cached-vs-fresh (and stale, if data changed) depending on
@@ -1202,16 +1156,8 @@ INTENT_AND_CACHE_ENABLED = True
 # deterministic + no staleness (the canonical hybrid path's behaviour); the real repeat-query
 # speedup is the verified-query cache, not this retrieval cache.
 RETRIEVAL_CACHE_ENABLED = False
-VERIFIED_QUERY_THRESHOLD = 0.85
-VERIFIED_QUERIES_FILE = "data/veda_verified_queries.json"
-VERIFIED_QUERY_MAX_COUNT = 20
 
 # --- L5: SQL Generation (Qwen + fallback) ---
-SQL_GENERATION_V2_ENABLED = True
-SQL_GENERATION_MODEL = SLM_MODEL_NAME
-SQL_GENERATION_TEMPERATURE = 0.3
-SQL_GENERATION_TIMEOUT = 180
-SQL_GENERATION_MAX_TOKENS = 2048
 
 # =============================================================================
 # DETERMINISTIC FAST PATH (Phase-1 semantic-layer slice)
@@ -1221,7 +1167,6 @@ SQL_GENERATION_MAX_TOKENS = 2048
 # Fast-path SQL is still value-grounded + AST-validated before execution.
 # =============================================================================
 FAST_PATH_ENABLED = True
-ROUTE_LOG_PATH    = "logs/route_log.jsonl"
 # Store the raw NL query text in the route log. Useful for tuning; turn OFF in
 # deployments where users may type sensitive values into questions — the log
 # then carries only route/table/latency (no query content).
@@ -1324,47 +1269,21 @@ DECOMPOSE_LOG_PATH = "logs/decompose_log.jsonl"
 DECOMPOSE_LOG_ENABLED = True
 
 # Fallback SQL (rule-based, no LLM)
-SQL_FALLBACK_ENABLED = True
-SQL_FALLBACK_SIMPLE_SELECT = True    # use rule-based SELECT * for simple queries
-SQL_FALLBACK_AGGREGATE_COUNT = True  # use rule-based COUNT(*) for aggregations
 
 # --- L6: Validation & Repair ---
-VALIDATION_V2_ENABLED = True
 
 # 5-layer checks
-VALIDATION_CHECK_BLOCKED_KEYWORDS = True
-VALIDATION_BLOCKED_KEYWORDS = [
-    "INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE",
-    "CREATE", "ALTER", "GRANT", "REVOKE"
-]
 
-VALIDATION_CHECK_WHITELIST = True
-VALIDATION_WHITELIST_EXEMPT_ALIASES = True
-VALIDATION_WHITELIST_EXEMPT_FK_COLUMNS = True
 
-VALIDATION_CHECK_AGGREGATION = True
-VALIDATION_CHECK_EXPLAIN = True
 
 # Repair loop
-VALIDATION_REPAIR_LOOP_ENABLED = True
-VALIDATION_MAX_REPAIR_ATTEMPTS = 2
 
 # Repair strategies
-VALIDATION_REPAIR_COLUMN_REMAP = True
-VALIDATION_REPAIR_FALLBACK_AGGREGATION = True
-VALIDATION_REPAIR_QWEN_REPAIR = True
 
 # --- Execution + Audit ---
 EXECUTION_QUERY_TIMEOUT_SECS = 30
 EXECUTION_RESULT_LIMIT = 1000
 
-AUDIT_LOGGING_ENABLED = True
-AUDIT_LOG_TABLE = "audit_queries"
-AUDIT_LOG_COLUMNS = [
-    "query_id", "user_query", "generated_sql",
-    "intent", "confidence", "execution_time_ms",
-    "row_count", "error_message", "timestamp", "client_id"
-]
 
 # =============================================================================
 # OUTPUT FILES (Final Architecture)
@@ -1378,12 +1297,6 @@ DOMAIN_SYNONYMS_FILE = "data/veda_domain_synonyms.json"
 CONCEPT_GRAPH_FILE = "data/veda_concept_graph.json"
 RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
 PROFILING_FILE = "data/veda_profiling.json"
-RETRIEVAL_DOCUMENTS_FILE = "data/veda_retrieval_documents.pkl"
-BGE_EMBEDDINGS_FILE = "data/veda_embeddings.pkl"
-TABLE_VECTORS_FILE = "data/veda_table_vecs.pkl"
-BM25_CORPUS_FILE = "data/veda_bm25_corpus.json"
-NX_GRAPH_FILE = "data/veda_nx_graph.pkl"
-VERIFIED_QUERIES_FILE = "data/veda_verified_queries.json"
 
 # ── Unified Knowledge Graph (fuses FK + concept + semantic + synonyms into one) ──
 # Built by ingestion/unified_graph_builder.py; queried by graph/query_graph.py.

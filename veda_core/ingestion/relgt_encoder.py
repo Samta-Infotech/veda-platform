@@ -57,8 +57,6 @@ from config import (
     MINILM_BATCH_SIZE,
     MINILM_DEVICE,
     MINILM_EMBEDDING_DIM,
-    AUTO_FINETUNE_CHECKPOINT_DIR,
-    AUTO_FINETUNE_ENABLED,
     # Light text params
     LIGHT_TEXT_SENTENCE_TEMPLATE,
     LIGHT_TEXT_TFIDF_MAX_FEATURES,
@@ -417,11 +415,8 @@ _MINILM_MODEL = None
 
 def _get_minilm_model() -> "SentenceTransformer":
     """
-    Returns the MiniLM model singleton.
-    Option A design: if a fine-tuned checkpoint exists (written by
-    auto_finetune.py during Step 11), loads it instead of the base model.
-    This means the encoder always uses the client-specific fine-tuned
-    model when available — base MiniLM is the fallback only.
+    Returns the MiniLM model singleton (base weights).
+    The fine-tune chain was removed — both query tiers use base MiniLM.
     """
     global _MINILM_MODEL
     if _MINILM_MODEL is None:
@@ -430,19 +425,7 @@ def _get_minilm_model() -> "SentenceTransformer":
                 "sentence-transformers is required for hybrid/ensemble encoder. "
                 "Install with: pip install sentence-transformers"
             )
-        # Check for fine-tuned checkpoint (Option A — set by auto_finetune.py)
-        # Only load when AUTO_FINETUNE_ENABLED so disabling it reverts to base MiniLM.
-        try:
-            from ingestion.auto_finetune import checkpoint_exists
-            if AUTO_FINETUNE_ENABLED and checkpoint_exists():
-                _MINILM_MODEL = SentenceTransformer(
-                    AUTO_FINETUNE_CHECKPOINT_DIR, device=MINILM_DEVICE
-                )
-                return _MINILM_MODEL
-        except Exception:
-            pass   # checkpoint check failed — fall through to base model
-
-        # No checkpoint — load base MiniLM
+        # Load base MiniLM (fine-tune chain removed — both tiers use base weights).
         _MINILM_MODEL = SentenceTransformer(MINILM_MODEL_NAME, device=MINILM_DEVICE)
     return _MINILM_MODEL
 
