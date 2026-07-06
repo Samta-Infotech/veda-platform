@@ -48,9 +48,27 @@ def task_warm_caches(prev=None, source_id=None, tenant="default"):
     return writer.warm()
 
 
+# Layered stage name (ingestion/layers) → STAGE_ORDER row name (§2.2). Multiple
+# fine-grained layer stages roll up into one observable STAGE_ORDER row.
+_LAYER_STAGE_TO_ROW = {
+    "schema_scan": "schema_scan", "fk_adjacency": "fk_adjacency",
+    "data_graph": "data_graph", "semantic_types": "semantic_types",
+    "table_metadata": "semantic_types", "value_profiling": "value_profiling",
+    "reg_graph": "embeddings", "join_paths": "embeddings",
+    "graph_persist": "embeddings", "graph_embed": "embeddings",
+    "encoder": "embeddings", "biencoder": "embeddings",
+    "bm25_index": "embeddings", "enrichment_index": "embeddings",
+    "rerank_docs": "embeddings",
+    "vector_store": "vector_store", "semantic_layer": "derived_language",
+    "relationship_graph": "derived_language", "semantic_registry": "derived_language",
+    "value_mirror": "derived_language", "hnsw_tune": "derived_language",
+    "unified_graph": "unified_graph",
+}
+
+
 @shared_task(queue="ingestion")
 def task_ingest_source(source_id=None, tenant="default", verbose=True, force=False,
-                       skip_llm=False, resume=False):
+                       skip_llm=False, resume=False, ingestion_mode=None):
     """Run the preserved L0 orchestration and track it as an IngestionJob (§4.3).
 
     Calls ``veda_core.main.run_ingestion`` (the verbatim pipeline) directly rather
@@ -139,6 +157,17 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         src = job.source
         if src and src.host:
             sub_env.update(src.as_engine_env())
+        # P7: the engine's run_ingestion IS the layered L1–L5 pipeline now (single
+        # ingestion path — the legacy monolith + INGESTION_MODE flag were removed).
+        # It emits "[[STAGE]] <layer> <stage> <status>" events parsed below into real
+        # per-stage lifecycle. Per-source artifact scope (P3/§3.1) so N sources never
+        # collide (opt-in until the query tier is fully scope-aware).
+        sub_env["VEDA_TENANT"] = str(tenant)
+        # Per-source artifact scope (P3/§3.1) is OPT-IN (VEDA_ARTIFACT_SCOPING=1): only
+        # when the query tier is also scope-aware (P5) do artifacts move off the flat
+        # data/ paths. Off by default so single-source behaviour stays byte-identical.
+        if os.environ.get("VEDA_ARTIFACT_SCOPING") == "1":
+            sub_env["VEDA_ARTIFACT_SCOPE"] = f"{tenant}/{source_id or 'primary_db'}/{job.pk}"
         if do_resume:
             sub_env["VEDA_RESUME"] = "1"
             job.stages.filter(name__in=("embeddings", "derived_language")).update(
@@ -175,12 +204,32 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
             (11, "derived_language"), (12, "derived_language"),
         ]
         marker_re = re.compile(r"\[(\d+)[ab]?/\d+\]\s+([A-Za-z][^\(\n]+)")
+        # Layered mode (P4): "[[STAGE]] <layer> <stage> <ok|fail|fatal>" events drive
+        # IngestionStage rows from real lifecycle instead of regex-parsing progress bars.
+        stage_re = re.compile(r"\[\[STAGE\]\]\s+(\S+)\s+(\S+)\s+(ok|fail|fatal)")
         tail = []
         current_stage = None
         for line in proc.stdout:
             tail.append(line)
             if len(tail) > 200:
                 tail.pop(0)
+            sm = stage_re.search(line)
+            if sm:
+                row_name = _LAYER_STAGE_TO_ROW.get(sm.group(2))
+                status = sm.group(3)
+                if row_name:
+                    if status == "ok":
+                        _mark([row_name], JobStatus.RUNNING)
+                    elif status == "fatal":
+                        _mark([row_name], JobStatus.FAILED)
+                    st = stages.get(row_name)
+                    if st is not None:
+                        cp = dict(st.batch_checkpoint or {})
+                        cp["layer_stage"] = sm.group(2)
+                        cp["layer"] = sm.group(1)
+                        st.batch_checkpoint = cp
+                        st.save(update_fields=["batch_checkpoint"])
+                continue
             m = marker_re.search(line)
             if not m:
                 continue

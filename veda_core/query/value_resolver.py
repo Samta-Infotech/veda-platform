@@ -147,6 +147,34 @@ def resolve_value_filter(anchor, qtoks, graph, lookup, anchor_cols=None):
 # Default data-driven lookup: the value sampler's column_values index.
 # Pluggable — pass any lookup(token)->[(table,column,value)] to resolve_value_filter.
 # ---------------------------------------------------------------------------
+def _mirror_scope():
+    """(source_id, tenant) for the Redis value-mirror key, from the ambient context."""
+    try:
+        from veda_core.context import try_current
+        ctx = try_current()
+        if ctx is not None:
+            return str(getattr(ctx, "source_id", "")), str(getattr(ctx, "tenant", "default"))
+    except Exception:
+        pass
+    return "", "default"
+
+
+def _mirror_lookup(token):
+    """Q-5: Redis-first value resolution → [(table, col, raw)] or None (Postgres fallback)."""
+    try:
+        from config import VALUE_MIRROR_ENABLED
+        if not VALUE_MIRROR_ENABLED:
+            return None
+        from ingestion.value_mirror import lookup_value
+        sid, tenant = _mirror_scope()
+        entries = lookup_value(token.lower(), source_id=sid, tenant=tenant)
+        if entries is None:
+            return None
+        return [(e["table"], e["col"], e["raw"]) for e in entries]
+    except Exception:
+        return None
+
+
 def column_values_lookup(conn_fn):
     """Build a lookup backed by the `column_values` store (data-driven; the sampler
     already chose which columns to index, so there's no name/role heuristic here).
@@ -154,6 +182,9 @@ def column_values_lookup(conn_fn):
     def _lookup(token):
         if len(token) < 3:
             return []
+        mirror = _mirror_lookup(token)     # Q-5: sub-ms Redis hit before the PG round trip
+        if mirror is not None:
+            return mirror
         conn = None
         try:
             conn = conn_fn()
@@ -181,6 +212,19 @@ def column_values_lookup(conn_fn):
         toks = sorted({t.lower() for t in tokens if t and len(t) >= 3})
         if not toks:
             return {}
+        # Q-5: resolve what the Redis mirror covers first; only miss to Postgres.
+        out = {}
+        remaining = []
+        for tok in toks:
+            mirror = _mirror_lookup(tok)
+            if mirror is not None:
+                if mirror:
+                    out[tok] = mirror
+            else:
+                remaining.append(tok)
+        if not remaining:
+            return out
+        toks = remaining
         conn = None
         try:
             conn = conn_fn()
@@ -188,12 +232,11 @@ def column_values_lookup(conn_fn):
                 cur.execute(
                     "SELECT value_norm, table_name, col_name, value_raw FROM column_values "
                     "WHERE value_norm = ANY(%s)", (toks,))
-                out = {}
                 for vnorm, table_name, col_name, value_raw in cur.fetchall():
                     out.setdefault(vnorm, []).append((table_name, col_name, value_raw))
                 return out
         except Exception:
-            return {}
+            return out
         finally:
             if conn is not None:
                 try:

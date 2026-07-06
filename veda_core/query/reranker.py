@@ -92,12 +92,36 @@ def _columns_of_table(table_id: str) -> List[str]:
         return []
 
 
+def _precomputed_rerank_text(item_id, is_table: bool):
+    """Q-4: return the precomputed rerank text for a column/table id, or None (flag off,
+    artifact absent, or id not covered → caller assembles text live)."""
+    if not item_id:
+        return None
+    try:
+        from config import RERANK_DOCS_ENABLED
+        if not RERANK_DOCS_ENABLED:
+            return None
+        from ingestion.rerank_docs import load_rerank_docs
+        docs = load_rerank_docs()
+        if not docs:
+            return None
+        bucket = docs.get("tables" if is_table else "columns", {})
+        return bucket.get(item_id)
+    except Exception:
+        return None
+
+
 def _table_text(c: RetrievalResult) -> str:
     """
     Describe a table candidate for the cross-encoder.
     Uses the table name + its column names so the reranker has real content.
     Without this, table candidates score ~0 from doubled-name text like 'incident incident'.
     """
+    # Q-4: use the precomputed rerank text (built at ingestion) when available —
+    # avoids the per-query column-name stitch + the SELECT name FROM graph_nodes.
+    _pre = _precomputed_rerank_text(getattr(c, "table_id", None), is_table=True)
+    if _pre is not None:
+        return _pre
     col_names = _columns_of_table(getattr(c, "table_id", None) or "")
     if col_names:
         names_str = ", ".join(col_names[:20])
@@ -111,6 +135,10 @@ def _col_text(c: RetrievalResult, sampled: dict) -> str:
     Uses build_enriched_column_text so the cross-encoder has the same
     vocabulary that was used at indexing time.
     """
+    # Q-4: precomputed enriched column text (built at ingestion) when available.
+    _pre = _precomputed_rerank_text(c.col_id, is_table=False)
+    if _pre is not None:
+        return _pre[:RERANKER_MAX_TEXT_LEN]
     if not RERANKER_USE_ENRICHED_TEXT:
         return (c.col_name + " " + (c.table_name or ""))[:RERANKER_MAX_TEXT_LEN]
     try:

@@ -123,6 +123,19 @@ def value_samples(column_uuid: str) -> List[str]:
         return [r[0] for r in cur.fetchall()]
 
 
+def _resolve_ef_search(source_id) -> int:
+    """Per-source hnsw.ef_search (P7/Q-10 knob): VEDA_HNSW_EF_SEARCH_<source_id> →
+    VEDA_HNSW_EF_SEARCH → 40. Env is set per inference worker from the source's
+    SubstrateVersion.hnsw_ef_search, so tuning is per source without a per-query DB hit."""
+    per_source = os.environ.get(f"VEDA_HNSW_EF_SEARCH_{source_id}")
+    if per_source:
+        try:
+            return int(per_source)
+        except ValueError:
+            pass
+    return int(os.environ.get("VEDA_HNSW_EF_SEARCH", "40"))
+
+
 def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     """Raw pgvector cosine ANN over the HNSW index for `mode`'s table (§6.4),
     scoped to the current (source, tenant)."""
@@ -134,8 +147,11 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     # Pin hnsw.ef_search to the §7.1a-tuned value (recall@k=1.0 on the home-schema
     # fixtures) so the served ANN ordering matches exact cosine — the shipped index IS
-    # the gated index. Env-overridable; re-run scripts/hnsw_parity_sweep.py per source.
-    ef_search = int(os.environ.get("VEDA_HNSW_EF_SEARCH", "40"))
+    # the gated index. Per-source override (tuned at L5 by source size, stored on
+    # SubstrateVersion.hnsw_ef_search) via VEDA_HNSW_EF_SEARCH_<source_id>, then the
+    # global VEDA_HNSW_EF_SEARCH, then 40 — so a large source can widen search without
+    # changing the global (re-run scripts/hnsw_parity_sweep.py per source).
+    ef_search = _resolve_ef_search(source_id)
     sql = (
         f'SELECT column_uuid, 1 - (embedding <=> %s::vector) AS score FROM "{table}" '
         f'WHERE source_id = %s AND tenant = %s ORDER BY embedding <=> %s::vector LIMIT %s'
@@ -175,6 +191,24 @@ def _query_hash(query: str) -> str:
     import re
     norm = re.sub(r"\s+", " ", (query or "").strip().lower())
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:64]
+
+
+def verified_cache_exact(query: str) -> Optional[dict]:
+    """Q-8: exact-hash short-circuit — one indexed PK lookup on (source, tenant,
+    query_hash) BEFORE any BGE encode + cosine ANN. Returns similarity 1.0 on hit.
+    Repeat/identical queries skip the embed entirely."""
+    source_id, tenant = _scope()
+    qhash = _query_hash(query)
+    with _connection().cursor() as cur:
+        cur.execute(
+            "SELECT verified_sql, columns_json FROM substrate_verifiedquerycache "
+            "WHERE source_id = %s AND tenant = %s AND query_hash = %s LIMIT 1",
+            [source_id, tenant, qhash],
+        )
+        row = cur.fetchone()
+    if row:
+        return {"sql": row[0], "columns": row[1], "similarity": 1.0}
+    return None
 
 
 def save_verified_query(query: str, qvec: List[float], sql: str, columns=None) -> bool:

@@ -53,6 +53,12 @@ class Source(models.Model):
     )
     # Query path reads only sources with ready=True (§5).
     ready = models.BooleanField(default=False)
+    # Client-specific table exclusions (§3.1) — moved out of config.VEDA_SOURCES so no
+    # client table names live in code. Framework-noise defaults (django_*/celery_*) are
+    # applied by the engine scanner on top of this list.
+    exclude_tables = models.JSONField(default=list, blank=True)
+    # Restrict scanning to a single schema (None/"" = all public schemas).
+    schema_filter = models.CharField(max_length=128, blank=True)
     last_ingested_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -79,13 +85,22 @@ class Source(models.Model):
         }
 
     def as_engine_env(self) -> dict:
-        """Map the connection to the VEDA_SOURCE_* env the engine reads (config.get_source)."""
+        """Map the connection to the VEDA_SOURCE_* env the engine reads (config.get_source).
+
+        Also carries the client exclude_tables (JSON) + schema filter so the engine
+        scanner honours THIS source's exclusions without any config-file registry (§3.1)."""
+        import json
         c = self.connection()
-        return {
+        env = {
+            "VEDA_SOURCE_ID": str(self.pk),
             "VEDA_SOURCE_HOST": str(c["host"]), "VEDA_SOURCE_PORT": str(c["port"]),
             "VEDA_SOURCE_DBNAME": str(c["dbname"]), "VEDA_SOURCE_USER": str(c["user"]),
             "VEDA_SOURCE_PASSWORD": str(c["password"]),
+            "VEDA_EXCLUDE_TABLES": json.dumps(list(self.exclude_tables or [])),
         }
+        if self.schema_filter:
+            env["VEDA_SOURCE_SCHEMA"] = str(self.schema_filter)
+        return env
 
     # Dialect → (engine source-type vocabulary, connector engine name) for the engine's
     # connector registry (connectors/base.register_connector "<type>:<engine>" keys).
@@ -120,6 +135,8 @@ class Source(models.Model):
             "role": "queryable",
             "host": c["host"], "port": c["port"], "dbname": c["dbname"],
             "user": c["user"], "password": c["password"],
+            "schema": self.schema_filter or None,
+            "exclude_tables": list(self.exclude_tables or []),
         }
 
 

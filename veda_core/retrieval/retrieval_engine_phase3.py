@@ -149,8 +149,23 @@ class RetrievalEnginePhase3:
             self.semantic_searcher = None
 
         logger.info("\n[4/8] Initializing BM25 ranker...")
-        self.bm25_ranker = BM25Ranker()
-        self.bm25_ranker.fit(self.semantic_model)
+        self.bm25_ranker = None
+        # Q-2: load the persisted BM25 index (built at ingestion) instead of re-fitting
+        # tokenization + IDF on every process warm. Scores are identical. Flag-gated;
+        # falls back to a live fit() when the index is absent or loading fails.
+        try:
+            from config import BM25_PERSISTED_INDEX_ENABLED
+            if BM25_PERSISTED_INDEX_ENABLED:
+                from ingestion.bm25_index import load_bm25_index
+                self.bm25_ranker = load_bm25_index()
+                if self.bm25_ranker is not None:
+                    logger.info("✓ BM25 ranker loaded from persisted index")
+        except Exception as e:
+            logger.warning(f"BM25 persisted-index load failed ({e}); falling back to fit()")
+            self.bm25_ranker = None
+        if self.bm25_ranker is None:
+            self.bm25_ranker = BM25Ranker()
+            self.bm25_ranker.fit(self.semantic_model)
         logger.info("✓ BM25 ranker ready")
 
         logger.info("\n[5/8] Initializing signal builder...")

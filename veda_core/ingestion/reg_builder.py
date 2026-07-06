@@ -512,13 +512,6 @@ def run_reg_builder(
         stats                 = stats,
     )
 
-    try:
-        from ingestion.graph_store import save_graph
-        save_graph(graph, col_id_map)
-        from ingestion.kuzu_store import save_graph_to_kuzu
-        save_graph_to_kuzu(graph)
-    except Exception as _e:
-        logger.warning("Graph persistence failed: %s", _e)
 
     return graph
 

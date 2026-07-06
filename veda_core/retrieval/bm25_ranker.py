@@ -79,6 +79,25 @@ class BM25Ranker:
 
         logger.info(f"✓ BM25 fitted ({len(self.idf)} unique tokens)")
 
+    def to_dict(self) -> Dict:
+        """Serialize the fitted index (Q-2) so ingestion can persist it and the query
+        tier loads it ready-made instead of re-fitting on every process warm."""
+        return {
+            "k1": self.k1, "b": self.b, "N": self.N, "avgdl": self.avgdl,
+            "idf": self.idf, "documents": self.documents,
+        }
+
+    def load(self, state: Dict) -> "BM25Ranker":
+        """Load a persisted index (Q-2) — the inverse of to_dict(). Scores are
+        byte-identical to a live fit() on the same corpus."""
+        self.k1 = state.get("k1", self.k1)
+        self.b = state.get("b", self.b)
+        self.N = state.get("N", 0)
+        self.avgdl = state.get("avgdl", 0)
+        self.idf = state.get("idf", {}) or {}
+        self.documents = state.get("documents", {}) or {}
+        return self
+
     def rank(self, query: str, top_k: int = 20) -> List[Tuple[str, float]]:
         """
         Rank columns by BM25 score for query.

@@ -236,35 +236,10 @@ def _run_schema_pipeline(
         except Exception as e:
             _sfail(source_id, "Graph embedder", e)
 
-    # ── Step 8: Encoder ───────────────────────────────────────────────────────
-    t0 = time.time()
-    from ingestion.relgt_encoder import run_relgt_encoder, EnsembleEncoderResult
-    encoder_result = run_relgt_encoder(graph=graph, verbose=verbose)
-    ctx["encoder_result"] = encoder_result
-    if isinstance(encoder_result, EnsembleEncoderResult):
-        _sok(source_id,
-             f"Encoder (ensemble) — {encoder_result.stats['total_embeddings']} cols",
-             time.time() - t0)
-    else:
-        _sok(source_id,
-             f"Encoder — {encoder_result.stats['total_embeddings']} cols, "
-             f"dim={encoder_result.stats['embedding_dim']}",
-             time.time() - t0)
-
-    # ── Step 9: Vector Store ──────────────────────────────────────────────────
-    t0 = time.time()
-    from ingestion.vector_store import run_vector_store, EnsembleStoreResult
-    store_result = run_vector_store(encoder_result=encoder_result, source_id=source_id, verbose=verbose)
-    ctx["store_result"] = store_result
-    if isinstance(store_result, EnsembleStoreResult):
-        _sok(source_id,
-             f"Vector store (ensemble) — lt={store_result.lt_result.rows_written} "
-             f"hybrid={store_result.hybrid_result.rows_written} rows",
-             time.time() - t0)
-    else:
-        _sok(source_id,
-             f"Vector store — {store_result.rows_written} rows, backend={store_result.backend}",
-             time.time() - t0)
+    # Steps 8/9 (ensemble encoder → tfidf/svd pkls + column_embeddings_lt/_hybrid
+    # vector store) were removed: the MiniLM/RELGT ensemble retrieval signal is never
+    # executed at query time (BGE-only spine), so those artifacts were write-only. The
+    # BGE biencoder below is the live retrieval store — same as the primary pipeline.
 
     # ── Step 9b: BGE Biencoder Ingestion ─────────────────────────────────────
     t0 = time.time()
@@ -305,20 +280,20 @@ def _dispatch_relational(source_config: dict, verbose: bool) -> DispatchResult:
                 duration_s=round(time.time() - t_start, 2),
             )
 
-        # Single source of truth: the PRIMARY relational source flows through the
-        # unified pipeline in main.run_ingestion (schema → … → semantic layer →
-        # biencoder → derived artifacts). This is the ONLY relational ingestion
-        # implementation; _run_schema_pipeline remains for datalake/nosql and any
-        # non-primary relational source. Lazy import avoids a main↔dispatcher cycle.
-        from config import get_primary_relational_source
-        is_primary = source_id == get_primary_relational_source()["id"]
+        # Honour the PASSED source (§3.2 / I-2 fix): the ingesting worker injected
+        # THIS source's connection into the engine env, so main.run_ingestion (which
+        # reads the injected source via config.get_source — the DB Source row is the
+        # single source of truth, §3.1) ingests exactly this source. No "primary"
+        # re-derivation. _run_schema_pipeline stays as an explicit schema-only opt-in
+        # (source_config["use_schema_pipeline"]) for datalake/nosql-style runs.
+        use_full_pipeline = not source_config.get("use_schema_pipeline", False)
 
-        # Fetch schema before disconnecting (needed by the non-primary fallback;
-        # run_ingestion re-reads the schema itself for the primary source).
+        # Fetch schema before disconnecting (needed by the schema-pipeline fallback;
+        # run_ingestion re-reads the schema itself for the full pipeline).
         raw_schema_dict = connector.get_raw_schema_dict()
         connector.disconnect()
 
-        if is_primary:
+        if use_full_pipeline:
             from main import run_ingestion
             ctx = run_ingestion(verbose=verbose)
             steps = ["schema", "fk", "data_graph", "semantic_types", "metadata",

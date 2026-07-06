@@ -322,15 +322,15 @@ class GraphNodeEmbedding(models.Model):
 
 
 class GraphArtifact(TenantScopedModel):
-    """Registers the Kùzu / persisted graph file path + version (§6.5).
+    """Registers a persisted graph-artifact file path + version (§6.5).
 
-    The graph file store itself lives on a mounted volume; inference loads it
-    into memory at startup from ``path``.
+    Currently the relationship graph (``kind="relationship_graph"``, read by the
+    query path's join_planner). The former Kùzu graph-DB backend was removed.
     """
 
     path = models.CharField(max_length=1024)
     version = models.CharField(max_length=64)
-    kind = models.CharField(max_length=32, default="kuzu")
+    kind = models.CharField(max_length=32, default="relationship_graph")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -377,6 +377,10 @@ class SubstrateVersion(TenantScopedModel):
 
     version = models.CharField(max_length=64)
     sm_version = models.CharField(max_length=16, default="1.0")  # sm["version"]
+    # P7/Q-10: per-source HNSW ef_search tuned at L5 by source size, served at query
+    # time via VEDA_HNSW_EF_SEARCH_<source_id> (reader._resolve_ef_search) instead of
+    # one global value. 40 == the shipped default (§7.1a-tuned).
+    hnsw_ef_search = models.PositiveIntegerField(default=40)
 
     class Meta:
         constraints = [

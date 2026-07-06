@@ -16,182 +16,104 @@
 ENCODER_MODE = "ensemble"   # "relgt_only" | "light_text" | "hybrid" | "ensemble"
 
 # =============================================================================
-# SOURCE REGISTRY
+# SOURCE REGISTRY  (§3.1 — config-file registry eliminated)
 #
-# VEDA_SOURCES — list of all client data sources VEDA should ingest and query.
-# Each source is a dict describing one connected data system.
-# The ingestion dispatcher (ingestion/source_dispatcher.py) reads this list
-# and routes each source to the correct connector.
+# The DB `Source` row is the SINGLE source of truth. The ingesting worker
+# serializes THIS source's connection (id, type, engine, host/port/dbname/user,
+# password-by-reference, schema filter, client exclude_tables) into
+# VEDA_SOURCE_JSON (preferred) or discrete VEDA_SOURCE_* env before starting the
+# engine subprocess. There is NO hardcoded source list, NO credential defaults,
+# and NO client-specific table names in code.
 #
-# Source types:
-#   "relational" — PostgreSQL, MySQL, SQLite, Oracle, SQL Server
-#   "document"   — PDF, Word, HTML, TXT, Markdown files
-#   "datalake"   — Delta Lake, Parquet, CSV, Iceberg
-#   "nosql"      — MongoDB, Elasticsearch, DynamoDB, Cassandra
-#
-# Each source MUST have:
-#   id    — unique string identifier used throughout the pipeline
-#   type  — one of the four source types above
-#   role  — "queryable" (SQL/query generation) | "searchable" (RAG/vector search)
-#
-# Add as many sources as needed. The pipeline processes all enabled sources.
+# `get_source` / `get_enabled_sources` / `get_primary_relational_source` build
+# the one injected source LAZILY from env, so importing config stays side-effect
+# free (the query tier imports config without a source connection). A missing
+# connection field is a hard fail at request time, never a silent localhost
+# fallback.
 # =============================================================================
+import os as _os_src
+import json as _json_src
 
-VEDA_SOURCES = [
-    # ------------------------------------------------------------------
-    # Primary relational database (client's main DB)
-    # ------------------------------------------------------------------
-    {
-        "id":       "primary_db",
-        "type":     "relational",
-        "enabled":  True,
-        "engine":   "postgresql",      # postgresql | mysql | sqlite | oracle | sqlserver
-        # Env-overridable (§9) so containers reach the launchpad DB via
-        # host.docker.internal:5433 while a bare-metal run keeps localhost.
-        "host":     __import__("os").environ.get("VEDA_SOURCE_HOST", "localhost"),
-        "port":     int(__import__("os").environ.get("VEDA_SOURCE_PORT", "5433")),
-        "dbname":   __import__("os").environ.get("VEDA_SOURCE_DBNAME", "launchpad"),
-        "user":     __import__("os").environ.get("VEDA_SOURCE_USER", "postgres"),
-        "password": __import__("os").environ.get("VEDA_SOURCE_PASSWORD", "admin"),
-        "role":     "queryable",       # generates SQL against this source
-        # Optional: schema to restrict scanning to (None = all public schemas)
-        "schema":   None,
-        # Optional: tables to exclude from ingestion (in addition to VEDA internal)
-        "exclude_tables": [
-            "auth_group",
-            "auth_group_permissions",
-            "auth_permission",
-            "django_admin_log",
-            "django_content_type",
-            "django_migrations",
-            "django_session",
-            "django_celery_beat_clockedschedule",
-            "django_celery_beat_crontabschedule",
-            "django_celery_beat_intervalschedule",
-            "django_celery_beat_periodictask",
-            "django_celery_beat_periodictasks",
-            "django_celery_beat_solarschedule",
-            "celery_task",
-            "audit_log",
-            "job_execution_log",
-            "task_execution_log",
-            "document_ingestion_audit_log",
-            "table_ingestion_audit_log",
-            "sampling_history",
-            "workflow_history",
-            "identity_management_historicaluser",
-            "risk_scoring_historicalsignalrule",
-            "counterparty_merge_history",
-            "pipeline_state",
-            "entity_cfg",
-            "entity_schedule_cfg",
-            "entity_schedule_status",
-            "entity_source_cfg",
-            "source_ocs_column_map_cfg",
-            "source_type",
-            "tenant_config",
-            "tenant_connection_config",
-            "tenant_data_config",
-            "tenant_source_config",
-            "sync_item",
-            "sync_status",
-            "table_tracker",
-            "ml_config",
-            "model_registry",
-            "prompt_registry",
-            "message_config",
-            "notification_property",
-            "password_attempt_log",
-            "common_password",
-            "mfa_delivery_method",
-            "mfa_provider",
-            "user_login_session",
-            "user_mfa_settings",
-            "user_mfa_settings_delivery_methods",
-            "dashboard_available_filters",
-            "dashboard_global_filters",
-            "dashboard_item_filters",
-            "dashboard_item_layouts",
-            "dashboard_item_permissions",
-            "document_chunks",
-            "agent_registry",
-            "agent_message_documents",
-            "ocs_agent",
-            "ocs_agent_message",
-            "notification_preference",
-            "notification_template",
-            "scheduled_notification",
-            "subsupervisor_registry",
-            "incident_processing_status",
-            "workflow_group"
-        ],
-    },
-
-    # ------------------------------------------------------------------
-    # Document store example (PDF/Word/HTML files)
-    # Uncomment and configure to enable document RAG
-    # ------------------------------------------------------------------
-    # {
-    #     "id":      "contracts",
-    #     "type":    "document",
-    #     "enabled": False,
-    #     "engine":  "filesystem",    # filesystem | s3 | azure_blob | gcs
-    #     "path":    "/data/contracts",
-    #     "formats": ["pdf", "docx", "txt", "html", "md"],
-    #     "role":    "searchable",    # chunk retrieval + LLM synthesis
-    #     # Optional: recursive directory scanning
-    #     "recursive": True,
-    #     # Optional: file size limit in MB
-    #     "max_file_mb": 50,
-    # },
-    {
-        "id":      "dmt",
-        "type":    "document",
-        "enabled": False,           # disabled: stale veda-poc CSV doc source, not part of homzhub
-        "engine":  "filesystem",    # filesystem | s3 | azure_blob | gcs
-        "path":    "",              # was /Users/ekesel/samta/veda-poc — removed (self-contained)
-        "formats": ["csv"],
-        "role":    "searchable",    # chunk retrieval + LLM synthesis
-        # Optional: recursive directory scanning
-        "recursive": False,
-        # Optional: file size limit in MB
-        "max_file_mb": 50,
-    },
-
-    # ------------------------------------------------------------------
-    # Data lake example (Delta / Parquet)
-    # Uncomment and configure to enable data lake querying
-    # ------------------------------------------------------------------
-    # {
-    #     "id":      "analytics_lake",
-    #     "type":    "datalake",
-    #     "enabled": True,
-    #     "engine":  "csv",           # delta | parquet | csv | iceberg
-    #     "path":    "/Users/ekesel/samta/veda-poc",
-    #     "role":    "queryable",     # generates DuckDB/Spark SQL against this source
-    #     # Optional: AWS/GCS credentials
-    #     "aws_access_key": None,
-    #     "aws_secret_key": None,
-    #     "aws_region":     "us-east-1",
-    # },
-
-    # ------------------------------------------------------------------
-    # NoSQL example (MongoDB)
-    # Uncomment and configure to enable NoSQL querying
-    # ------------------------------------------------------------------
-    # {
-    #     "id":      "events_db",
-    #     "type":    "nosql",
-    #     "enabled": False,
-    #     "engine":  "mongodb",       # mongodb | elasticsearch | dynamodb | cassandra
-    #     "host":    "localhost",
-    #     "port":    27017,
-    #     "dbname":  "events",
-    #     "role":    "queryable",     # generates native MongoDB query
-    #     "user":    None,
-    #     "password": None,
-    # },
+# Framework-noise tables always excluded by the scanner (Django/Celery internals).
+# Client-specific exclusions live on the Source row (Source.exclude_tables) and
+# arrive via VEDA_EXCLUDE_TABLES / VEDA_SOURCE_JSON — never baked into the repo.
+FRAMEWORK_NOISE_EXCLUDES = [
+    "auth_group", "auth_group_permissions", "auth_permission",
+    "django_admin_log", "django_content_type", "django_migrations",
+    "django_session", "django_site",
+    "django_celery_beat_clockedschedule", "django_celery_beat_crontabschedule",
+    "django_celery_beat_intervalschedule", "django_celery_beat_periodictask",
+    "django_celery_beat_periodictasks", "django_celery_beat_solarschedule",
+    "django_celery_results_taskresult", "django_celery_results_chordcounter",
 ]
+
+
+def _require_source_env(name: str) -> str:
+    v = _os_src.environ.get(name)
+    if not v:
+        raise RuntimeError(
+            f"{name} is not set. The source connection must be provided by the "
+            f"ingesting worker from the DB Source row (VEDA_SOURCE_JSON / "
+            f"VEDA_SOURCE_* env) — there are no hardcoded credentials (config §3.1)."
+        )
+    return v
+
+
+def _parse_exclude_tables(raw) -> list:
+    if not raw:
+        return []
+    if isinstance(raw, (list, tuple)):
+        return [str(t) for t in raw]
+    try:
+        parsed = _json_src.loads(raw)
+        if isinstance(parsed, (list, tuple)):
+            return [str(t) for t in parsed]
+    except Exception:
+        pass
+    return [t.strip() for t in str(raw).split(",") if t.strip()]
+
+
+def _build_injected_source() -> dict:
+    """Build the one injected source from env (VEDA_SOURCE_JSON preferred).
+
+    No hardcoded registry, no credential defaults. Applied client excludes are
+    merged with the framework-noise defaults so the scanner always skips VEDA/
+    Django internals even for a source row that specifies none.
+    """
+    raw_json = _os_src.environ.get("VEDA_SOURCE_JSON")
+    if raw_json:
+        src = dict(_json_src.loads(raw_json))
+        src.setdefault("type", "relational")
+        src.setdefault("enabled", True)
+        src.setdefault("role", "queryable")
+        src.setdefault("engine", "postgresql")
+        src.setdefault("schema", _os_src.environ.get("VEDA_SOURCE_SCHEMA") or None)
+    else:
+        src = {
+            "id":       _os_src.environ.get("VEDA_SOURCE_ID", "primary_db"),
+            "type":     _os_src.environ.get("VEDA_SOURCE_TYPE", "relational"),
+            "enabled":  True,
+            "engine":   _os_src.environ.get("VEDA_SOURCE_ENGINE", "postgresql"),
+            "host":     _require_source_env("VEDA_SOURCE_HOST"),
+            "port":     int(_require_source_env("VEDA_SOURCE_PORT")),
+            "dbname":   _require_source_env("VEDA_SOURCE_DBNAME"),
+            "user":     _require_source_env("VEDA_SOURCE_USER"),
+            "password": _require_source_env("VEDA_SOURCE_PASSWORD"),
+            "role":     "queryable",
+            "schema":   _os_src.environ.get("VEDA_SOURCE_SCHEMA") or None,
+        }
+    excludes = _parse_exclude_tables(
+        src.get("exclude_tables") or _os_src.environ.get("VEDA_EXCLUDE_TABLES")
+    )
+    # framework noise is always applied on top of the client list (dedup, order-stable)
+    merged, seen = [], set()
+    for t in list(excludes) + FRAMEWORK_NOISE_EXCLUDES:
+        if t not in seen:
+            seen.add(t)
+            merged.append(t)
+    src["exclude_tables"] = merged
+    src.setdefault("id", "primary_db")
+    return src
 
 
 # =============================================================================
@@ -212,7 +134,7 @@ VEDA_INTERNAL_DB = {
     "port":     int(_os_env.environ.get("VEDA_INTERNAL_PORT", "5433")),
     "dbname":   _os_env.environ.get("VEDA_INTERNAL_DBNAME", "veda"),  # embeddings + v2 tables
     "user":     _os_env.environ.get("VEDA_INTERNAL_USER", "postgres"),
-    "password": _os_env.environ.get("VEDA_INTERNAL_PASSWORD", "admin"),
+    "password": _os_env.environ.get("VEDA_INTERNAL_PASSWORD", ""),
 }
 
 
@@ -229,36 +151,37 @@ DB_CONFIG = VEDA_INTERNAL_DB   # shim — points to internal DB for existing cod
 
 
 # =============================================================================
-# SOURCE HELPERS — used by ingestion/source_dispatcher.py
+# SOURCE HELPERS — build the one injected source lazily from env (§3.1)
 # =============================================================================
 
-def get_source(source_id: str) -> dict:
-    """Returns the source config dict for the given source_id. Raises if not found."""
-    for src in VEDA_SOURCES:
-        if src["id"] == source_id:
-            return src
-    raise KeyError(f"No source with id='{source_id}' found in VEDA_SOURCES")
+def get_source(source_id: str = None) -> dict:
+    """Return the injected source (built lazily from env). In a single-source
+    engine process the injected source IS the one in play, so an explicit
+    source_id is accepted but not used to select from a registry (there is none)."""
+    return _build_injected_source()
 
 
 def get_enabled_sources(source_type: str = None) -> list:
-    """
-    Returns all enabled sources, optionally filtered by type.
-    source_type: "relational" | "document" | "datalake" | "nosql" | None (all)
-    """
-    sources = [s for s in VEDA_SOURCES if s.get("enabled", True)]
-    if source_type:
-        sources = [s for s in sources if s["type"] == source_type]
-    return sources
+    """Return the injected source as a one-element list, optionally type-filtered."""
+    try:
+        src = _build_injected_source()
+    except RuntimeError:
+        return []
+    if source_type and src.get("type") != source_type:
+        return []
+    return [src]
 
 
 def get_primary_relational_source() -> dict:
-    """
-    Returns the first enabled relational source.
-    """
-    sources = get_enabled_sources("relational")
-    if not sources:
-        raise ValueError("No enabled relational source found in VEDA_SOURCES")
-    return sources[0]
+    """Return the injected relational source. Raises if the injected source is not
+    relational or its connection env is missing (hard fail at request time)."""
+    src = _build_injected_source()
+    if src.get("type") != "relational":
+        raise ValueError(
+            f"Injected source id={src.get('id')!r} is type={src.get('type')!r}, "
+            "not relational — relational ingestion cannot run for it."
+        )
+    return src
 
 
 # =============================================================================
@@ -850,6 +773,22 @@ IR_JOIN_FREE_ENABLED = True   # SLM omits joins[]; sql_builder derives from fk_a
 
 NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
+# Q-7: answer canonical result shapes (empty / single scalar / single row) with a
+# deterministic template instead of an SLM call. Multi-row results still use the SLM.
+NL_TEMPLATE_ENABLED    = True
+
+# =============================================================================
+# PRECOMPUTE CONSUMPTION FLAGS (Track 4 / P6–P7) — query-side read halves.
+# All default OFF so the default query path is byte-identical to pre-precompute;
+# flip on ONE at a time during the live parity gate and diff latency histograms.
+# =============================================================================
+BM25_PERSISTED_INDEX_ENABLED = False   # Q-2: load persisted BM25 index, skip warm fit()
+ENRICHMENT_INDEX_ENABLED     = False   # Q-3: union merged enrichment index into enrich()
+JOIN_PATHS_ENABLED           = False   # Q-9: consult precompiled join paths for reachability
+VALUE_MIRROR_ENABLED         = False   # Q-5: Redis-first value resolution, Postgres fallback
+SUBSTRATE_SIGNALS_ENABLED    = False   # Q-1: FK signals from substrate, not live info_schema
+RERANK_DOCS_ENABLED          = False   # Q-4: precomputed rerank text per candidate
+FAST_PATH_EXPANSION_ENABLED  = False   # Q-6: widened fast-path templates from compile step
 
 # =============================================================================
 # BGE fine-tune mode — mirrors MINILM_FINETUNE_MODE
@@ -1286,21 +1225,63 @@ EXECUTION_RESULT_LIMIT = 1000
 
 
 # =============================================================================
-# OUTPUT FILES (Final Architecture)
+# OUTPUT FILES (Final Architecture) — scoped per (tenant, source, version) (§3.1)
 # =============================================================================
-# Absolute-overridable (§9) so the inference container finds it regardless of cwd.
+# artifact_scope resolution: every derived file artifact is keyed
+# (tenant, source_id, substrate_version). The ingesting/query worker sets
+# VEDA_ARTIFACT_SCOPE="<tenant>/<source>/<version>" (or the discrete
+# VEDA_ARTIFACT_{TENANT,SOURCE,VERSION} env). With a scope set, files resolve to
+#   <ARTIFACT_ROOT>/<tenant>/<source>/<version>/<name>
+# so N sources coexist without overwriting each other (fixes I-4). With NO scope
+# set, resolution falls back to the legacy flat "data/<name>" path, so a single
+# source still works unchanged (P3 gate). DB/pgvector artifacts already carry
+# source+tenant columns; this only scopes the file/pkl artifacts.
+ARTIFACT_ROOT = __import__("os").environ.get("VEDA_ARTIFACT_ROOT", "data")
+
+
+def artifact_scope() -> tuple:
+    """(tenant, source, version) for this process, or None if unscoped (legacy flat)."""
+    _os = __import__("os")
+    raw = _os.environ.get("VEDA_ARTIFACT_SCOPE")
+    if raw:
+        parts = [p for p in raw.strip("/").split("/") if p]
+        if len(parts) == 3:
+            return tuple(parts)  # type: ignore[return-value]
+    tenant = _os.environ.get("VEDA_ARTIFACT_TENANT")
+    source = _os.environ.get("VEDA_ARTIFACT_SOURCE")
+    version = _os.environ.get("VEDA_ARTIFACT_VERSION")
+    if tenant and source and version:
+        return (tenant, source, version)
+    return None
+
+
+def artifact_path(name: str) -> str:
+    """Resolve a derived-artifact filename to its scoped path.
+
+    ``name`` is the bare filename (e.g. "veda_semantic_model.json"). Scoped →
+    ``<ARTIFACT_ROOT>/<tenant>/<source>/<version>/<name>``; unscoped → the legacy
+    ``<ARTIFACT_ROOT>/<name>`` (== "data/<name>")."""
+    _os = __import__("os")
+    scope = artifact_scope()
+    if scope:
+        return _os.path.join(ARTIFACT_ROOT, scope[0], scope[1], scope[2], name)
+    return _os.path.join(ARTIFACT_ROOT, name)
+
+
+# Absolute-overridable (§9) so the inference container finds it regardless of cwd;
+# otherwise scoped per (tenant, source, version) via artifact_path().
 SEMANTIC_MODEL_FILE = __import__("os").environ.get(
-    "VEDA_SEMANTIC_MODEL_FILE", "data/veda_semantic_model.json"
+    "VEDA_SEMANTIC_MODEL_FILE", artifact_path("veda_semantic_model.json")
 )
-GLOSSARY_FILE = "data/veda_glossary.json"
-DOMAIN_SYNONYMS_FILE = "data/veda_domain_synonyms.json"
-CONCEPT_GRAPH_FILE = "data/veda_concept_graph.json"
-RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
-PROFILING_FILE = "data/veda_profiling.json"
+GLOSSARY_FILE = artifact_path("veda_glossary.json")
+DOMAIN_SYNONYMS_FILE = artifact_path("veda_domain_synonyms.json")
+CONCEPT_GRAPH_FILE = artifact_path("veda_concept_graph.json")
+RELATIONSHIP_GRAPH_FILE = artifact_path("veda_relationship_graph.json")
+PROFILING_FILE = artifact_path("veda_profiling.json")
 
 # ── Unified Knowledge Graph (fuses FK + concept + semantic + synonyms into one) ──
 # Built by ingestion/unified_graph_builder.py; queried by graph/query_graph.py.
-UNIFIED_GRAPH_FILE = "data/veda_unified_graph.json"
+UNIFIED_GRAPH_FILE = artifact_path("veda_unified_graph.json")
 # graph_expand() in retrieval_v2 is ADDITIVE + flag-guarded — OFF keeps retrieval byte-identical.
 GRAPH_EXPAND_ENABLED = True
 GRAPH_EXPAND_MAX     = 12   # cap columns added per query (token/latency bound; reranker still cuts)
