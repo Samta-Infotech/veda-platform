@@ -36,6 +36,7 @@ INSTALLED_APPS = [
     "apps.ingestion",
     "apps.query",
     "apps.evaluation",
+    "apps.chat",
 ]
 
 MIDDLEWARE = [

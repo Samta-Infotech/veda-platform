@@ -20,6 +20,7 @@ def healthz(request):
 urlpatterns = [
     path("admin/", admin.site.urls),
     path("api/v1/", include("apps.query.urls")),
+    path("api/v1/", include("apps.chat.urls")),
     path("healthz", healthz),
     path("readyz", core_views.readyz),   # real readiness (Postgres via PgBouncer + Redis)
     path("metrics", core_views.metrics),  # Prometheus text (§6.3)
