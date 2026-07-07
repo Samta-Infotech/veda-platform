@@ -30,6 +30,50 @@ class NLAnswerResult:
     error:       Optional[str] = None
 
 
+def _fmt_value(v):
+    """Human-friendly scalar formatting (thousands separators for ints)."""
+    if isinstance(v, bool):
+        return "yes" if v else "no"
+    if isinstance(v, int):
+        return f"{v:,}"
+    if isinstance(v, float):
+        return f"{v:,.2f}".rstrip("0").rstrip(".")
+    return str(v)
+
+
+def _label_from_column(col: str) -> str:
+    return str(col).replace("_", " ").strip().lower()
+
+
+def template_answer(query: str, columns: List[str], rows: List[dict]) -> Optional[str]:
+    """Q-7: deterministic NL answer for CANONICAL result shapes — no SLM call.
+
+    Covers the empty set, single scalar (incl. count/aggregate), and single row.
+    Returns None for multi-row narrative results, which still go to the SLM. This
+    is the same phrasing the SLM would produce for these shapes, computed for free.
+    """
+    row_count = len(rows)
+    if row_count == 0:
+        return "No results found."
+
+    if row_count == 1 and columns:
+        row = rows[0]
+        if len(columns) == 1:
+            col = columns[0]
+            val = _fmt_value(row.get(col))
+            label = _label_from_column(col)
+            # count/aggregate shapes: "count", "total", "n", "count(*)" …
+            if any(k in label for k in ("count", "total", "number", "num ", "sum", "avg", "min", "max")):
+                return f"The {label} is {val}."
+            return f"{col}: {val}" if val != "" else "No results found."
+        # single row, multiple columns — compact deterministic summary
+        parts = [f"{_label_from_column(c)} {_fmt_value(row.get(c))}"
+                 for c in columns[:6] if row.get(c) is not None]
+        if parts:
+            return "Result: " + ", ".join(parts) + "."
+    return None
+
+
 def run_nl_answer(
     query:   str,
     columns: List[str],
@@ -44,6 +88,20 @@ def run_nl_answer(
     t0 = time.time()
 
     row_count = len(rows)
+
+    # Q-7: canonical shapes (empty / single scalar / single row) are answered
+    # deterministically — skip the SLM round trip entirely (~1–3s saved). Gated so
+    # it can be turned off for parity comparison. Multi-row results still use the SLM.
+    try:
+        from config import NL_TEMPLATE_ENABLED as _NL_TEMPLATE_ENABLED
+    except Exception:
+        _NL_TEMPLATE_ENABLED = True
+    if _NL_TEMPLATE_ENABLED:
+        _tmpl = template_answer(query, columns, rows)
+        if _tmpl is not None:
+            return NLAnswerResult(answer=_tmpl, row_count=row_count,
+                                  duration_ms=round((time.time() - t0) * 1000, 2))
+
     sample_rows = rows[:NL_ANSWER_MAX_ROWS]
 
     # Build a compact table representation
@@ -66,23 +124,16 @@ def run_nl_answer(
         f"Do not repeat the column names verbatim. No markdown."
     )
 
-    payload = json.dumps({
-        "model":  SLM_MODEL_NAME,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.1, "num_predict": 128},
-    }).encode()
-
     try:
-        req = urllib.request.Request(
-            f"{SLM_OLLAMA_BASE_URL}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=min(SLM_TIMEOUT_SECS, 60)) as resp:
-            data = json.loads(resp.read())
-        answer = data.get("response", "").strip()
+        from slm import call_slm
+        answer = call_slm(
+            prompt,
+            purpose="nl_answer",
+            temperature=0.1,
+            num_predict=128,
+            endpoint="generate",
+            timeout=min(SLM_TIMEOUT_SECS, 60),
+        ).strip()
         if not answer:
             raise ValueError("Empty response from SLM")
     except Exception as e:

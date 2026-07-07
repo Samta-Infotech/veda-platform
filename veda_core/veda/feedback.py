@@ -7,7 +7,7 @@ optional, gated LLM pass (FEEDBACK_LLM_POLISH) only REPHRASES these facts — it
 invents values/tables — and the deterministic text is the guaranteed fallback.
 """
 import re
-from veda.runtime import DB_CONFIG
+from veda.runtime import get_db_config
 
 
 def _distinct_values(table, column, limit=8):
@@ -16,9 +16,10 @@ def _distinct_values(table, column, limit=8):
         return []
     try:
         import psycopg2
+        cfg = get_db_config()
         conn = psycopg2.connect(
-            host=DB_CONFIG["host"], port=DB_CONFIG["port"], dbname=DB_CONFIG["database"],
-            user=DB_CONFIG["user"], password=DB_CONFIG["password"])
+            host=cfg["host"], port=cfg["port"], dbname=cfg["database"],
+            user=cfg["user"], password=cfg["password"])
         try:
             conn.set_session(readonly=True, autocommit=True)
             with conn.cursor() as cur:
@@ -127,22 +128,15 @@ def _polish(facts):
     """Rephrase the structured facts into one friendly line — add NOTHING. None on any
     failure (caller keeps the deterministic text)."""
     try:
-        import json, urllib.request
-        from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
+        import json
+        from slm import call_slm
         system = ("You rephrase database-query failure facts into ONE short, friendly "
                   "sentence for the user. Use ONLY the given facts — never invent column "
                   "names, values, or tables. If suggestions are given, keep them verbatim. "
                   "Output one sentence, no markdown.")
         user = json.dumps({k: facts[k] for k in ("why", "what_needed", "suggestions")})
-        payload = {"model": SLM_MODEL_NAME, "stream": False, "keep_alive": "24h",
-                   "options": {"temperature": 0.1, "num_predict": 96},
-                   "messages": [{"role": "system", "content": system},
-                                {"role": "user", "content": user}]}
-        req = urllib.request.Request(
-            f"{SLM_OLLAMA_BASE_URL}/api/chat", data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"}, method="POST")
-        body = json.loads(urllib.request.urlopen(req, timeout=30).read())
-        txt = (body.get("message", {}).get("content") or "").strip()
+        txt = call_slm(user, system=system, purpose="refusal_polish",
+                       temperature=0.1, num_predict=96, timeout=30).strip()
         return txt or None
     except Exception:
         return None

@@ -18,21 +18,30 @@ except ImportError:
     _cfg = None
 
 # (attribute name, fallback default, caster) — §9 env-overridable engine flags.
-# SLM_BACKEND and the HNSW_* params are NEW (§8b, §7.1a) and not yet in
-# config.py; their fallbacks here are the pre-tuning defaults.
 _FLAGS: list[tuple[str, Any, type]] = [
     ("ENCODER_MODE", "ensemble", str),
     ("TOP_K", 15, int),
     ("TOP_K_TO_LLM", 6, int),
     ("QUERY_ROUTER_ENABLED", True, bool),
     ("SLM_MODEL_NAME", "qwen2.5-coder:7b", str),
-    ("SLM_BACKEND", "ollama", str),
+    ("SLM_BACKEND", "ollama", str),          # §10 seam: "ollama" | "vllm"
+    ("VLLM_BASE_URL", "http://vllm:8000", str),
     ("IR_JOIN_FREE_ENABLED", True, bool),
     ("FAST_PATH_ENABLED", True, bool),
     ("QUERY_DECOMPOSE_ENABLED", False, bool),
     ("HNSW_M", 16, int),
     ("HNSW_EF_CONSTRUCTION", 200, int),
     ("HNSW_EF_SEARCH", 40, int),
+    # Track-4 precompute consumption flags (review Finding 3) — flip one at a time
+    # during the parity gate via VEDA_<FLAG> env; visible in Django settings for ops.
+    ("NL_TEMPLATE_ENABLED", True, bool),
+    ("BM25_PERSISTED_INDEX_ENABLED", True, bool),
+    ("ENRICHMENT_INDEX_ENABLED", True, bool),
+    ("JOIN_PATHS_ENABLED", True, bool),
+    ("VALUE_MIRROR_ENABLED", True, bool),
+    ("SUBSTRATE_SIGNALS_ENABLED", True, bool),
+    ("RERANK_DOCS_ENABLED", True, bool),
+    ("FAST_PATH_EXPANSION_ENABLED", True, bool),
 ]
 
 

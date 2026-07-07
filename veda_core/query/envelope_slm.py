@@ -117,21 +117,18 @@ def emit_envelope(query, sel_columns, verbose=False):
     """One JSON-constrained Ollama call → (envelope_dict | None, handle_map)."""
     handle_map, display = build_handles(query, sel_columns)
     user = f'Question: "{query}"\n\n{display}\nReturn the envelope JSON.'
-    payload = json.dumps({
-        "model": SLM_MODEL_NAME,
-        "stream": False,
-        "format": "json",
-        "keep_alive": "24h",
-        "messages": [{"role": "system", "content": _SYSTEM},
-                     {"role": "user", "content": user}],
-        "options": {"temperature": 0.0, "num_predict": SLM_IR_MAX_TOKENS, "num_ctx": SLM_NUM_CTX},
-    }).encode("utf-8")
-    url = f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat"
     try:
-        req = urllib.request.Request(url, data=payload,
-                                     headers={"Content-Type": "application/json"}, method="POST")
-        with urllib.request.urlopen(req, timeout=SLM_TIMEOUT_SECS) as resp:
-            content = json.loads(resp.read().decode("utf-8")).get("message", {}).get("content", "")
+        from slm import call_slm
+        content = call_slm(
+            user,
+            system=_SYSTEM,
+            purpose="envelope",
+            temperature=0.0,
+            num_predict=SLM_IR_MAX_TOKENS,
+            num_ctx=SLM_NUM_CTX,
+            json_format=True,
+            timeout=SLM_TIMEOUT_SECS,
+        )
         content = re.sub(r"```(?:json)?\s*|\s*```", "", content).strip()
         s, e = content.find("{"), content.rfind("}") + 1
         env = json.loads(content[s:e]) if s >= 0 and e > s else None

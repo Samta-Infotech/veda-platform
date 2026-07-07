@@ -103,19 +103,19 @@ class SemanticSearcher:
             List of (col_id, similarity_score) tuples
             Scores range from 0.0 (opposite) to 1.0 (identical)
         """
-        # Phase 8 (B#6): route Signal 1 through storage_adapters.ann_search → Django-owned
-        # column_embeddings_bge (HNSW, tenant-scoped, ef_search pinned to §7.1a recall@k=1.0).
+        # Phase 8 (B#6): Signal 1 routes through storage_adapters.ann_search → Django-owned
+        # column_embeddings_bge (HNSW, per-(source,tenant), ef_search pinned to §7.1a
+        # recall@k=1.0). This is the ACTIVE, multi-source-correct Signal-1 path: the store is
+        # scoped to the request's ambient source_id, so one warm engine serves N sources.
         #
-        # GATED OFF by default (VEDA_ANN_VIA_ADAPTER=1 to enable). Reason: in the platform the
-        # engine's own Signal-1 store returns 0 rows (DB_CONFIG points at the L7 source, not the
-        # internal store), so live retrieval has been running on BM25 + the other 4 signals with
-        # adaptive-cutoff tuned to that. Turning on rich HNSW Signal 1 shifts the RRF/cutoff
-        # balance and makes nonsense queries match spuriously (e.g. "unicorns in the stable" →
-        # COUNT(*) FROM state) instead of refusing — a parity regression. Wiring the 5-signal
-        # engine to the Django HNSW store needs adaptive-cutoff/RRF retuning (separate effort).
-        # The adapter + tuned HNSW remain the backend for /v1/retrieve, where they work correctly.
+        # ON by default; set VEDA_ANN_VIA_ADAPTER=0 to fall back to the engine's own db_config
+        # store (single-source, no source filter — dev/CLI only). NOTE (was gated off historically):
+        # the engine's direct store returned 0 rows because db_config pointed at the L7 source
+        # instead of the internal store, so retrieval ran on BM25 + 4 signals with adaptive-cutoff
+        # tuned to an EMPTY Signal 1. Activating Signal 1 shifts the RRF/cutoff balance — recalibrate
+        # ADAPTIVE_CUTOFF/RRF against eval traffic once there's data to tune on.
         import os as _os
-        if _os.environ.get("VEDA_ANN_VIA_ADAPTER") == "1":
+        if _os.environ.get("VEDA_ANN_VIA_ADAPTER", "1") != "0":
             try:
                 from veda_core.context import try_current
                 if try_current() is not None:

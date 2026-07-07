@@ -16,8 +16,8 @@ That makes the children importable both ways:
 
 This shim is the only new code inside ``veda_core`` that is not part of the
 verbatim move. The later migration edits permitted here (plan §0.2) are confined
-to storage call sites (Phase 3 → ``storage_adapters``) and SLM call sites
-(Phase 3b → ``slm/_call_slm``); everything else stays byte-for-byte.
+to storage call sites (Phase 3 → ``storage_adapters``); SLM call sites invoke
+Ollama directly via urllib (veda/generation, query/slm_layer, query/nl_answer).
 """
 from __future__ import annotations
 

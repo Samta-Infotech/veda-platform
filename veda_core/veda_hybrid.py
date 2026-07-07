@@ -38,24 +38,40 @@ from query.multi_result import (
     MultiResult, SubResult, STATUS_OK, STATUS_REFUSED, STATUS_ERROR,
 )
 
-_SM = {"sm": None, "cols": None}
+_SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (P5)
 
 
-def _load_sm_from_redis():
+def _sm_scope():
+    """(source_id, tenant) for the semantic-model cache/Redis key. Prefers the
+    ambient per-request context (set by the inference middleware from headers),
+    falling back to the env pin (single-source dev / bare-metal runs)."""
+    try:
+        from context import try_current
+        ctx = try_current()
+        if ctx is not None:
+            return (str(ctx.source_id), str(ctx.tenant))
+    except Exception:
+        pass
+    return (os.environ.get("VEDA_SM_SOURCE_ID", "1"),
+            os.environ.get("VEDA_SM_TENANT", "default"))
+
+
+def _load_sm_from_redis(scope=None):
     """Load the Django-assembled `sm` from redis-cache (§3.6, §8a).
 
     The SemanticModelAssembler (running in a Django tier) rebuilds `sm` from the
     normalized substrate and publishes it to `veda:sm:{source}:{tenant}`. The
-    inference tier reads it here — no Django/ORM dependency in this process. Returns
-    the sm dict, or None to fall back to the on-disk file (dev / cache miss).
+    inference tier reads it here — no Django/ORM dependency in this process. The
+    key is the ambient (source, tenant) scope, so one warm worker can serve N
+    ready sources (P5). Returns the sm dict, or None to fall back to the on-disk
+    file (dev / cache miss).
     """
     if os.environ.get("VEDA_SM_REDIS", "").strip().lower() not in ("1", "true", "yes", "on"):
         return None
     try:
         import redis as _redis
         url = os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
-        source_id = os.environ.get("VEDA_SM_SOURCE_ID", "1")
-        tenant = os.environ.get("VEDA_SM_TENANT", "default")
+        source_id, tenant = scope or _sm_scope()
         raw = _redis.Redis.from_url(url).get(f"veda:sm:{source_id}:{tenant}")
         return json.loads(raw) if raw else None
     except Exception:
@@ -63,21 +79,26 @@ def _load_sm_from_redis():
 
 
 def _load_semantic_model():
-    """Load the deterministic engine's semantic model once (for the SQL head).
+    """Load the deterministic engine's semantic model once per (source, tenant)
+    scope (for the SQL head).
 
     Prefers the Django-owned substrate via the assembler's Redis publication
     (§3.6); falls back to the on-disk `SEMANTIC_MODEL_FILE` when Redis is not
-    configured or misses. The front-door signature is unchanged.
+    configured or misses. The front-door signature is unchanged; the cache is
+    scope-keyed so multiple ready sources are queryable from one warm worker (P5),
+    and the rehydrate subscriber clears it on re-ingest.
     """
-    if _SM["sm"] is None:
-        sm = _load_sm_from_redis()
+    scope = _sm_scope()
+    entry = _SM.get(scope)
+    if entry is None:
+        sm = _load_sm_from_redis(scope)
         if sm is None:
             from config import SEMANTIC_MODEL_FILE
             with open(SEMANTIC_MODEL_FILE) as f:
                 sm = json.load(f)
-        _SM["sm"] = sm
-        _SM["cols"] = list(_SM["sm"].get("columns", {}).keys())
-    return _SM["sm"], _SM["cols"]
+        entry = {"sm": sm, "cols": list(sm.get("columns", {}).keys())}
+        _SM[scope] = entry
+    return entry["sm"], entry["cols"]
 
 
 def classify(query, verbose=False):

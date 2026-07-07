@@ -21,7 +21,7 @@ case "$ROLE" in
     worker)
         exec celery -A config worker \
             --loglevel="${CELERY_LOGLEVEL:-info}" \
-            --queues="${CELERY_QUEUES:-ingestion,high,default}" \
+            --queues="${CELERY_QUEUES:-high,default}" \
             --concurrency="${CELERY_CONCURRENCY:-4}"
         ;;
     beat)

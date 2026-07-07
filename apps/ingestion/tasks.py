@@ -1,18 +1,15 @@
-"""apps.ingestion.tasks — the L0 pipeline as a resumable Celery chain (migration_plan.md §7).
+"""apps.ingestion.tasks — the API-triggered ingestion entrypoint (migration_plan.md §7).
 
-ARCHITECTURE.md §4's nine ingestion steps become ten chained Celery tasks (a
-warm-caches step is added). The step *logic* lives in ``veda_core/ingestion/``
-and is called here; persistence goes through ``storage_adapters.writer``; each
-task checkpoints an ``IngestionStage`` and is idempotent (upsert by natural key).
+``task_ingest_source`` is the single ingestion path: it records an ``IngestionJob``
+(+ ordered ``IngestionStage`` rows from ``STAGE_ORDER`` for observability), injects
+THIS source's connection, and runs the engine pipeline in an isolated subprocess —
+routed by source type (relational → ``main.run_ingestion``; nosql/document/datalake
+→ ``source_dispatcher.dispatch_ingestion``). ``task_warm_caches`` then syncs the
+Django substrate from the engine store and rehydrates caches.
 
-Unit of Work: each stage runs inside one ``transaction.atomic()`` — EXCEPT stage
-6 (``task_embeddings``), which uses batched commits per pgvector table (§4.2a) so
-a failure at 95% resumes from the last committed batch instead of rolling back
-the whole embedding set.
-
-These are SKELETONS: the orchestration hoist out of ``main.py --ingestion-only``
-into importable stage functions is Phase 4.0, and the writer calls land in
-Phase 4.2. Bodies raise NotImplementedError so nothing silently no-ops.
+The engine step *logic* lives in ``veda_core/ingestion/``; the subprocess streams
+its ``[N/NN] StageName`` markers back to live ``IngestionStage`` updates so admin
+shows true per-stage progress.
 """
 from __future__ import annotations
 
@@ -41,59 +38,6 @@ STAGE_ORDER = [
 ]
 
 
-def _todo(stage: str) -> None:
-    raise NotImplementedError(
-        f"Phase 4: {stage} — call veda_core.ingestion stage fn + storage_adapters.writer"
-    )
-
-
-@shared_task(queue="ingestion")
-def task_schema_scan(source_id, tenant):
-    _todo("task_schema_scan → schema_scanner → SchemaTable/SchemaColumn")
-
-
-@shared_task(queue="ingestion")
-def task_fk_adjacency(prev, source_id=None, tenant=None):
-    _todo("task_fk_adjacency → vector_store.store_fk_adjacency → FkEdge(is_declared=True)")
-
-
-@shared_task(queue="ingestion")
-def task_data_graph(prev, source_id=None, tenant=None):
-    _todo("task_data_graph → data_graph (overlap≥0.70) → FkEdge(is_declared=False); non-fatal")
-
-
-@shared_task(queue="ingestion")
-def task_semantic_types(prev, source_id=None, tenant=None):
-    _todo("task_semantic_types → semantic_type_inference → SemanticType")
-
-
-@shared_task(queue="ingestion")
-def task_value_profiling(prev, source_id=None, tenant=None):
-    _todo("task_value_profiling → value_sampler/data_profiler → ColumnValueSample/ColumnProfile")
-
-
-@shared_task(queue="ingestion")
-def task_embeddings(prev, source_id=None, tenant=None):
-    # NOTE (§4.2a): NOT one transaction.atomic() — commit per pgvector table and
-    # advance IngestionStage.batch_checkpoint so resume continues mid-stage.
-    _todo("task_embeddings → relgt/biencoder/MiniLM/TF-IDF → all six pgvector tables (batched)")
-
-
-@shared_task(queue="ingestion")
-def task_vector_store(prev, source_id=None, tenant=None):
-    _todo("task_vector_store → HNSW index build")
-
-
-@shared_task(queue="ingestion")
-def task_derived_language(prev, source_id=None, tenant=None):
-    _todo("task_derived_language → glossary/synonyms/synthetic pairs (SLM via _call_slm)")
-
-
-@shared_task(queue="ingestion")
-def task_unified_graph(prev, source_id=None, tenant=None):
-    _todo("task_unified_graph → KG nodes/edges/chunk embeddings + GraphArtifact")
-
-
 @shared_task(queue="high")
 def task_warm_caches(prev=None, source_id=None, tenant="default"):
     """Sync Django substrate from the engine store + publish sm + rehydrate fan-out (§8.4)."""
@@ -104,9 +48,29 @@ def task_warm_caches(prev=None, source_id=None, tenant="default"):
     return writer.warm()
 
 
+# Layered stage name (ingestion/layers) → STAGE_ORDER row name (§2.2). Multiple
+# fine-grained layer stages roll up into one observable STAGE_ORDER row.
+_LAYER_STAGE_TO_ROW = {
+    "schema_scan": "schema_scan", "fk_adjacency": "fk_adjacency",
+    "data_graph": "data_graph", "semantic_types": "semantic_types",
+    "table_metadata": "semantic_types", "value_profiling": "value_profiling",
+    "reg_graph": "embeddings", "join_paths": "embeddings",
+    "graph_persist": "embeddings", "graph_embed": "embeddings",
+    "bm25_index": "embeddings", "enrichment_index": "embeddings",
+    "rerank_docs": "embeddings",
+    # BGE biencoder is the live vector store (column_embeddings_v2) now that the
+    # ensemble encoder + _lt/_hybrid store were removed — map it to the vector_store row.
+    "biencoder": "vector_store",
+    "semantic_layer": "derived_language",
+    "relationship_graph": "derived_language", "semantic_registry": "derived_language",
+    "value_mirror": "derived_language", "hnsw_tune": "derived_language",
+    "unified_graph": "unified_graph",
+}
+
+
 @shared_task(queue="ingestion")
 def task_ingest_source(source_id=None, tenant="default", verbose=True, force=False,
-                       skip_llm=False, resume=False):
+                       skip_llm=False, resume=False, ingestion_mode=None):
     """Run the preserved L0 orchestration and track it as an IngestionJob (§4.3).
 
     Calls ``veda_core.main.run_ingestion`` (the verbatim pipeline) directly rather
@@ -177,6 +141,7 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         # artifact-persistence extraction; here a failed job records exactly which stage
         # failed (the ones before it stay success), and a re-run restarts the idempotent
         # pipeline. The batched-stage-6 checkpoint is recorded per encoder table below.
+        import json
         import re
         import subprocess
 
@@ -194,13 +159,42 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         src = job.source
         if src and src.host:
             sub_env.update(src.as_engine_env())
+        # P7: the engine's run_ingestion IS the layered L1–L5 pipeline now (single
+        # ingestion path — the legacy monolith + INGESTION_MODE flag were removed).
+        # It emits "[[STAGE]] <layer> <stage> <status>" events parsed below into real
+        # per-stage lifecycle. Per-source artifact scope (P3/§3.1) so N sources never
+        # collide (opt-in until the query tier is fully scope-aware).
+        sub_env["VEDA_TENANT"] = str(tenant)
+        # Per-source artifact scope (P3/§3.1) is OPT-IN (VEDA_ARTIFACT_SCOPING=1): only
+        # when the query tier is also scope-aware (P5) do artifacts move off the flat
+        # data/ paths. Off by default so single-source behaviour stays byte-identical.
+        if os.environ.get("VEDA_ARTIFACT_SCOPING") == "1":
+            sub_env["VEDA_ARTIFACT_SCOPE"] = f"{tenant}/{source_id or 'primary_db'}/{job.pk}"
         if do_resume:
             sub_env["VEDA_RESUME"] = "1"
             job.stages.filter(name__in=("embeddings", "derived_language")).update(
                 batch_checkpoint={"resume": True})
+
+        # Source-type routing (§5): relational sources flow through the full, proven
+        # run_ingestion pipeline (its per-source connection is injected via as_engine_env
+        # above). Non-relational sources (nosql/document/datalake) — which run_ingestion
+        # cannot handle — are routed by type through source_dispatcher.dispatch_ingestion,
+        # receiving this source's config as JSON (single source of truth = the DB Source row).
+        src_kind = src.source_kind() if src else "relational"
+        if src_kind == "relational":
+            py_code = f"import main; main.run_ingestion(verbose=False, skip_llm={bool(skip_llm)})"
+        else:
+            sub_env["VEDA_SOURCE_JSON"] = json.dumps(src.as_source_config())
+            py_code = (
+                "import os, json; "
+                "from ingestion.source_dispatcher import dispatch_ingestion; "
+                "cfg = json.loads(os.environ['VEDA_SOURCE_JSON']); "
+                "r = dispatch_ingestion(cfg, verbose=False); "
+                "print('[dispatch] type=%s success=%s' % (r.source_type, r.success)); "
+                "raise SystemExit(0 if r.success else 1)"
+            )
         proc = subprocess.Popen(
-            ["python", "-u", "-c",
-             f"import main; main.run_ingestion(verbose=False, skip_llm={bool(skip_llm)})"],
+            ["python", "-u", "-c", py_code],
             cwd=veda_core_dir, env=sub_env,
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
         )
@@ -212,12 +206,48 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
             (11, "derived_language"), (12, "derived_language"),
         ]
         marker_re = re.compile(r"\[(\d+)[ab]?/\d+\]\s+([A-Za-z][^\(\n]+)")
+        # Layered mode (P4): "[[STAGE]] <layer> <stage> <ok|fail|fatal>" events drive
+        # IngestionStage rows from real lifecycle instead of regex-parsing progress bars.
+        stage_re = re.compile(r"\[\[STAGE\]\]\s+(\S+)\s+(\S+)\s+(ok|fail|fatal)")
         tail = []
         current_stage = None
+        current_row = None       # [[STAGE]] path: the STAGE_ORDER row currently active
         for line in proc.stdout:
+            # Echo the engine subprocess output to the worker's stdout so ingestion
+            # progress is visible live via `docker compose logs -f ingest-worker`
+            # (the task still parses these lines below into IngestionStage rows).
+            print(line, end="", flush=True)
             tail.append(line)
             if len(tail) > 200:
                 tail.pop(0)
+            sm = stage_re.search(line)
+            if sm:
+                row_name = _LAYER_STAGE_TO_ROW.get(sm.group(2))
+                status = sm.group(3)
+                if row_name:
+                    # Row transition = the previous observable row finished all its
+                    # constituent layer stages → mark it SUCCESS *now* (real per-stage
+                    # timing in admin), not en masse at the end (review nit).
+                    if current_row and current_row != row_name:
+                        prev = stages.get(current_row)
+                        if prev is not None and prev.status != JobStatus.FAILED:
+                            _mark([current_row], JobStatus.SUCCESS)
+                    current_row = row_name
+                    # The pipeline emits "[[STAGE]] … ok" AFTER a stage completes, so
+                    # ok → SUCCESS (mark done). Rolled-up rows (several layer stages →
+                    # one row) simply re-confirm SUCCESS as each sub-stage lands.
+                    if status == "ok":
+                        _mark([row_name], JobStatus.SUCCESS)
+                    elif status == "fatal":
+                        _mark([row_name], JobStatus.FAILED)
+                    st = stages.get(row_name)
+                    if st is not None:
+                        cp = dict(st.batch_checkpoint or {})
+                        cp["layer_stage"] = sm.group(2)
+                        cp["layer"] = sm.group(1)
+                        st.batch_checkpoint = cp
+                        st.save(update_fields=["batch_checkpoint"])
+                continue
             m = marker_re.search(line)
             if not m:
                 continue
@@ -238,13 +268,17 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
                 current_stage = stage_name
         proc.wait()
         if proc.returncode != 0:
+            if current_row:
+                _mark([current_row], JobStatus.FAILED)
             if current_stage:
                 _mark([current_stage], JobStatus.FAILED)
             raise RuntimeError(f"run_ingestion subprocess failed (rc={proc.returncode}): "
                                f"{''.join(tail)[-1500:]}")
+        if current_row:
+            _mark([current_row], JobStatus.SUCCESS)
         if current_stage:
             _mark([current_stage], JobStatus.SUCCESS)
-        result = {"source_id": "primary_db"}
+        result = {"source_id": str(source_id) if source_id else "primary_db"}
         _mark([n for _o, n, _q in STAGE_ORDER if n != "warm_caches"], JobStatus.SUCCESS)
 
         # warm stage: sync Django substrate + publish sm + rehydrate fan-out.

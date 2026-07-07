@@ -28,12 +28,19 @@ def verified_cache_lookup(query, threshold=0.85):
     # storage_adapters seam → Django VerifiedQueryCache + pgvector cosine, tenant-scoped.
     # Falls back to the legacy file store when no context (standalone/dev). Same return
     # shape (sql, similarity). Skip rules stay in the caller (pipeline.py).
+    _nq = " ".join(str(query).lower().split())
     try:
         from veda_core.context import try_current
         if try_current() is not None:
-            from storage_adapters.reader import verified_cache_lookup as _adapter_lookup
+            from storage_adapters import reader as _reader
+            # Q-8: exact-hash short-circuit — one indexed lookup BEFORE the BGE encode.
+            _exact = getattr(_reader, "verified_cache_exact", None)
+            if _exact is not None:
+                hit = _exact(query)
+                if hit:
+                    return hit["sql"], hit["similarity"]
             qv = _encode_query(query)
-            hit = _adapter_lookup(list(qv), threshold)
+            hit = _reader.verified_cache_lookup(list(qv), threshold)
             return (hit["sql"], hit["similarity"]) if hit else (None, 0.0)
     except Exception:
         pass
@@ -45,6 +52,10 @@ def verified_cache_lookup(query, threshold=0.85):
         store = json.load(open(VERIFIED_FILE))
         if not store:
             return None, 0.0
+        # Q-8 (file store): normalized exact-string short-circuit before any encode.
+        for _e in store:
+            if " ".join(str(_e["query"]).lower().split()) == _nq:
+                return _e["sql"], 1.0
         bge = _get_bge()
         stored_queries = [e["query"] for e in store]
         # Embed each stored query at most ONCE. Previously the whole store was

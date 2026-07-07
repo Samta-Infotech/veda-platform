@@ -23,7 +23,6 @@ volumes:
   pg_data:
   model_cache:      # BGE-M3 / reranker / MiniLM weights (§9), mounted into inference
   ollama_models:
-  kuzu_graph:       # persisted unified KG (§6.5)
 
 services:
   postgres:
@@ -117,7 +116,6 @@ services:
     volumes:
       - ".:/app"
       - model_cache:/models:ro
-      - kuzu_graph:/graph
     extra_hosts: ["host.docker.internal:host-gateway"]
     depends_on: [redis-broker, pgbouncer, ollama]
     networks: [veda_net]
@@ -135,7 +133,6 @@ services:
     volumes:
       - ".:/app"           # DEV: live code
       - model_cache:/models:ro
-      - kuzu_graph:/graph
     extra_hosts: ["host.docker.internal:host-gateway"]  # reach launchpad DB on host :5433
     depends_on: [pgbouncer, redis-cache, ollama]
     networks: [veda_net]
@@ -147,7 +144,11 @@ services:
 
   nginx:                        # the ONLY service that maps a host port (§3)
     image: nginx:alpine
-    volumes: [./docker/nginx.conf:/etc/nginx/nginx.conf:ro]
+    volumes:
+      - ./docker/nginx.conf:/etc/nginx/nginx.conf:ro
+      # nginx serves /static/ from here (alias /app/staticfiles/); the api's
+      # collectstatic writes into this same repo dir (bind-mounted at /app).
+      - ./staticfiles:/app/staticfiles:ro
     ports: ["8080:80"]
     depends_on: [api]
     networks: [veda_net]
