@@ -103,8 +103,7 @@ class ConversationQueryService:
         for block in self._build_content_blocks(res0):
             yield {"event": "content", "data": block}
 
-        viz = self._build_visualization(res0)
-        if viz is not None:
+        for viz in self._build_visualizations(res0):
             yield {"event": "visualization", "data": viz}
 
         yield {"event": "explainability",
@@ -136,14 +135,11 @@ class ConversationQueryService:
         return blocks
 
     @staticmethod
-    def _build_visualization(res0: dict) -> dict | None:
+    def _build_visualizations(res0: dict) -> list:
         cols, rows = res0.get("cols"), res0.get("rows")
         if not cols or not rows:
-            return None
-        spec = _visualization_recommender.recommend(cols, rows)
-        if spec is None:
-            return None
-        return {"type": spec.type.value, "title": spec.title, "chart_data": spec.chart_data}
+            return []
+        return [spec.to_dict() for spec in _visualization_recommender.recommend(cols, rows)]
 
     @staticmethod
     def _build_explainability_steps(trace: dict) -> list:
