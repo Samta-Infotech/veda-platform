@@ -94,22 +94,14 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
             f"Rules: SELECT only, FROM {table}. Use only listed columns. "
             f"Always end with LIMIT 100.")
 
-    payload = {
-        "model": SLM_MODEL_NAME, "stream": False, "keep_alive": "24h",
-        "messages": [{"role": "system", "content": system},
-                     {"role": "user", "content": user}],
-        # temperature 0 + fixed seed → greedy, reproducible decoding. SQL generation
-        # must be DETERMINISTIC: the same question had been returning different WHERE
-        # clauses (and different counts) run-to-run at temperature 0.1.
-        "options": {"temperature": 0, "seed": 0, "num_predict": 256, "num_ctx": 2048},
-    }
-    req = urllib.request.Request(
-        f"{SLM_OLLAMA_BASE_URL}/api/chat",
-        data=json.dumps(payload).encode(),
-        headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=1200) as resp:
-        out = json.loads(resp.read().decode())
-    sql = out.get("message", {}).get("content", "").strip()
+    # temperature 0 + fixed seed → greedy, reproducible decoding. SQL generation
+    # must be DETERMINISTIC: the same question had been returning different WHERE
+    # clauses (and different counts) run-to-run at temperature 0.1.
+    from slm import call_slm
+    sql = call_slm(
+        user, system=system, purpose="sql_single_table",
+        temperature=0, seed=0, num_predict=256, num_ctx=2048, timeout=1200,
+    ).strip()
     # strip markdown fences if the model added them
     if sql.startswith("```"):
         sql = sql.strip("`")
@@ -267,16 +259,11 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf):
             + _join_glossary_block(alias_map, sm) + _term_directive_block(_join_term_map)
             + date_line +
             "\nRules: prefix every column with its alias; SELECT only; end with LIMIT 100.")
-    payload = {"model": SLM_MODEL_NAME, "stream": False, "keep_alive": "24h",
-               "messages": [{"role": "system", "content": system},
-                            {"role": "user", "content": user}],
-               "options": {"temperature": 0, "seed": 0, "num_predict": 320, "num_ctx": 3072}}
-    req = urllib.request.Request(f"{SLM_OLLAMA_BASE_URL}/api/chat",
-                                 data=json.dumps(payload).encode(),
-                                 headers={"Content-Type": "application/json"}, method="POST")
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        out = json.loads(resp.read().decode())
-    sql = out.get("message", {}).get("content", "").strip()
+    from slm import call_slm
+    sql = call_slm(
+        user, system=system, purpose="sql_join",
+        temperature=0, seed=0, num_predict=320, num_ctx=3072, timeout=120,
+    ).strip()
     if sql.startswith("```"):
         sql = sql.strip("`")
         sql = sql[sql.lower().find("select"):] if "select" in sql.lower() else sql

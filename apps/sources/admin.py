@@ -8,7 +8,19 @@ from .models import Source, SourceConnectionProfile
 class SourceAdmin(admin.ModelAdmin):
     list_display = ("name", "dialect", "status", "ready", "last_ingested_at")
     list_filter = ("dialect", "status", "ready")
-    actions = ["test_connection"]
+    actions = ["ingest", "test_connection"]
+
+    @admin.action(description="Ingest source (enqueue ingestion job)")
+    def ingest(self, request, queryset):
+        """Enqueue task_ingest_source for each selected source on the `ingestion`
+        queue (processed by the ingest-worker). Works for first-time ingestion and
+        re-ingestion alike."""
+        from apps.ingestion.tasks import task_ingest_source
+        n = 0
+        for src in queryset:
+            task_ingest_source.delay(source_id=src.pk, tenant="default", force=True)
+            n += 1
+        self.message_user(request, f"Enqueued {n} ingestion job(s) on the ingestion queue.")
 
     @admin.action(description="Test connection")
     def test_connection(self, request, queryset):

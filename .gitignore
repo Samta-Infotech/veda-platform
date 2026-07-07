@@ -25,7 +25,6 @@ docker/userlist.txt
 model_cache/
 *.safetensors
 *.gguf
-veda_core/schema/kuzu_graph
 veda_core/ingestion/client_bge/model.safetensors
 
 # OS
@@ -34,6 +33,13 @@ veda_core/ingestion/client_bge/model.safetensors
 # Migration/eval generated output
 evaluation/results/*.html
 evaluation/results/*.json
+
+# Derived ingestion artifacts — regenerated every ingest, never in source control
+# (semantic model, graphs, glossary/synonyms/concepts, precompute indexes, pkls,
+# per-(tenant,source,version) artifact scope trees). Plan §3.1 / Track 1 delta.
+veda_core/data/
+veda_core/schema/*.pkl
+parity_baseline.json
 
 # AI Related
 .omc

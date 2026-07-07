@@ -203,25 +203,17 @@ def _call_slm_for_synonyms(
         semantic_type = semantic_type,
         sample_values = sample_values[:5] if sample_values else [],
     )
-    payload = json.dumps({
-        "model":    "qwen2.5-coder:7b",
-        "stream":   False,
-        "messages": [{"role": "user", "content": prompt}],
-        "options":  {"temperature": 0.3, "num_predict": 200},
-    }).encode("utf-8")
-    req = urllib.request.Request(
-        f"{ollama_url.rstrip('/')}/api/chat",
-        data    = payload,
-        headers = {"Content-Type": "application/json"},
-        method  = "POST",
-    )
+    # `ollama_url` is kept in the signature for caller compatibility; the §10 seam
+    # resolves the backend/URL itself (SLM_BACKEND / SLM_OLLAMA_BASE_URL / VLLM_URL).
     try:
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            body    = json.loads(resp.read().decode("utf-8"))
-            content = body.get("message", {}).get("content", "")
-            match   = _re.search(r'\{.*\}', content, _re.DOTALL)
-            if match:
-                return json.loads(match.group())
+        from slm import call_slm
+        content = call_slm(
+            prompt, purpose="synonym_gen",
+            temperature=0.3, num_predict=200, timeout=30,
+        )
+        match = _re.search(r'\{.*\}', content, _re.DOTALL)
+        if match:
+            return json.loads(match.group())
     except Exception:
         pass
     return None

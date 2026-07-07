@@ -62,6 +62,7 @@ class QueryEnricher:
         self.concept_graph = {}
         self.glossary = {}
         self.semantic_model = {}
+        self._merged_index = {}   # Q-3: precomputed merged enrichment index (token→expansions)
 
         self._load_artifacts()
 
@@ -98,6 +99,20 @@ class QueryEnricher:
             logger.info(f"✓ Loaded semantic model")
         except FileNotFoundError:
             logger.warning(f"Semantic model not found at {self.data_dir}/veda_semantic_model.json")
+
+        # Q-3: prefer the precomputed merged enrichment index (one pre-inverted
+        # artifact built at ingestion). Flag-gated; the four individual files above
+        # remain the fallback so enrichment still works when the index is absent.
+        try:
+            from config import ENRICHMENT_INDEX_ENABLED
+            if ENRICHMENT_INDEX_ENABLED:
+                from ingestion.enrichment_index import load_enrichment_index
+                merged = load_enrichment_index()
+                if merged:
+                    self._merged_index = merged
+                    logger.info(f"✓ Loaded merged enrichment index ({len(merged)} terms)")
+        except Exception as e:
+            logger.warning(f"Merged enrichment index load failed ({e}); using individual files")
 
     def expand_with_synonyms(self, tokens: List[str]) -> Set[str]:
         """
@@ -253,6 +268,13 @@ class QueryEnricher:
         enriched.update(concepts)
         enriched.update(glossary_terms)
         enriched.update(literals)
+
+        # Q-3: union expansions from the precomputed merged index (when loaded). This is
+        # a superset of the individual-file expansions above, pre-inverted at ingestion.
+        if self._merged_index:
+            for tok in base_tokens:
+                for exp in self._merged_index.get(tok, ()):
+                    enriched.add(exp)
 
         # Remove empty strings and very short tokens
         enriched = {t for t in enriched if t and len(t) > 1}

@@ -349,6 +349,42 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
                 "aggregation":          agg,
                 "fanout_safe":          True,
             }
+
+    # Q-6: widen the fast path — emit a plain COUNT(*) metric for EVERY table that
+    # has no entity-count metric yet, so "how many <table>" is fast-path answerable
+    # (skips retrieval + rerank + LLM) for the whole schema, not just concept tables.
+    # Flag-gated; grain-suspect tables are marked so the fast path still declines them.
+    try:
+        from config import FAST_PATH_EXPANSION_ENABLED
+    except Exception:
+        FAST_PATH_EXPANSION_ENABLED = False
+    if FAST_PATH_EXPANSION_ENABLED:
+        covered = {m.get("source_table") for m in out.values()}
+        for t in tabs.keys():
+            if t in covered:
+                continue
+            ek = _grain_suspect(t)
+            mid = f"{t}_count"
+            words = t.replace("_", " ")
+            out[mid] = {
+                "metric_id":            mid,
+                "kind":                 "COUNT",
+                "labels":               list(dict.fromkeys(
+                    [mid.replace("_", " "), f"number of {words}",
+                     f"count of {words}", f"how many {words}", f"total {words}"])),
+                "entity_concept":       t,
+                "expression":           "COUNT(*)",
+                "source_table":         t,
+                "grain":                f"{t}.*",
+                "grain_suspect":        bool(ek),
+                "entity_key_candidate": f"{t}.{ek}" if ek else None,
+                "soft_delete_filter":   _soft_delete_filter(t),
+                "default_filters":      [],
+                "allowed_dimensions":   dims_by_table.get(t, []),
+                "allowed_time_dimension": _time_dim(t),
+                "fanout_safe":          True,
+                "fast_path_expanded":   True,
+            }
     return out, grain_report
 
 

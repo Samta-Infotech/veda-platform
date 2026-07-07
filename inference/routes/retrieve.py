@@ -63,8 +63,17 @@ if APIRouter is not None:
         # Local reload (invalidate the in-process sm cache so the next query reloads
         # the Django-assembled sm from redis), then fan out to peers via pub/sub (§8.4).
         import veda_hybrid
-        veda_hybrid._SM["sm"] = None
-        veda_hybrid._SM["cols"] = None
+        veda_hybrid._SM.clear()   # scope-keyed dict (P5) — drop all scopes
+        try:                       # rebuild per-source engines from the fresh model (P5)
+            from veda.runtime import clear_engines
+            clear_engines()
+        except Exception:
+            pass
+        try:                       # re-ingest may have retuned ef_search (Q-10)
+            from storage_adapters import reader as _reader
+            _reader.clear_ef_search_cache()
+        except Exception:
+            pass
         published = 0
         try:
             import json

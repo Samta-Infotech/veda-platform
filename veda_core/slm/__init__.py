@@ -1,11 +1,6 @@
-"""veda_core/slm
+"""SLM backend seam (§10) — restored per the post-cleanup review (Finding 1).
 
-Migration plan §8b — the SLM backend seam. Query-time SLM inference must not
-be hardwired to Ollama, because a single Ollama instance serializes every SLM
-call across the whole inference fleet. `call_slm` is the one choke point every
-call site (IR emit, decomposer, RAG synthesis, NL answer) routes through.
+`call_slm` is the single entry every engine call site uses to reach the local
+SLM; `SLM_BACKEND` selects Ollama (dev/ingestion) or vLLM (prod query tier).
 """
-
-from ._call_slm import call_slm
-
-__all__ = ["call_slm"]
+from slm._call_slm import call_slm, get_backend, prewarm, reset_backend  # noqa: F401
