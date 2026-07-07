@@ -7,10 +7,13 @@ from typing import Iterator
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 from .models import ChatMessage, ChatSession, MessageType
+from .visualization import VisualizationRecommender
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONVERSATION_TITLE = "New Chat"
+
+_visualization_recommender = VisualizationRecommender()
 
 
 class ChatNotFound(Exception):
@@ -18,10 +21,13 @@ class ChatNotFound(Exception):
 
 
 def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
+    # rows are positional (each row is a list/tuple aligned with cols by index) —
+    # this is what the engine actually returns (JSON-serialized SQL tuples), NOT
+    # column-keyed dicts.
     header = "| " + " | ".join(str(c) for c in cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body_lines = [
-        "| " + " | ".join(str(r.get(c, "")) for c in cols) + " |" for r in rows[:limit]
+        "| " + " | ".join(str(v) for v in row[:len(cols)]) + " |" for row in rows[:limit]
     ]
     return "\n".join([header, sep, *body_lines])
 
@@ -118,7 +124,10 @@ class ConversationQueryService:
         blocks = []
         answer = res0.get("answer")
         if answer:
-            blocks.append({"type": "markdown", "content": str(answer)})
+            # is_summary marks this as the primary answer (vs. supporting content like
+            # the table below) so callers can surface it distinctly without a second
+            # LLM call or re-deriving which block "is" the summary.
+            blocks.append({"type": "markdown", "content": str(answer), "is_summary": True})
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
             blocks.append({"type": "markdown", "content": _rows_to_markdown_table(cols, rows)})
@@ -129,17 +138,12 @@ class ConversationQueryService:
     @staticmethod
     def _build_visualization(res0: dict) -> dict | None:
         cols, rows = res0.get("cols"), res0.get("rows")
-        if not cols or not rows or len(cols) < 2:
+        if not cols or not rows:
             return None
-        label_col, value_col = cols[0], cols[1]
-        try:
-            chart_data = {
-                "labels": [str(r.get(label_col)) for r in rows[:25]],
-                "values": [float(r.get(value_col)) for r in rows[:25]],
-            }
-        except (TypeError, ValueError):
+        spec = _visualization_recommender.recommend(cols, rows)
+        if spec is None:
             return None
-        return {"type": "bar", "title": f"{value_col} by {label_col}", "chart_data": chart_data}
+        return {"type": spec.type.value, "title": spec.title, "chart_data": spec.chart_data}
 
     @staticmethod
     def _build_explainability_steps(trace: dict) -> list:

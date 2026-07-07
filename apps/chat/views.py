@@ -142,13 +142,15 @@ class ConversationQueryView(APIView):
 
     def _json_response(self, service, chat, message, rid):
         logger.info("conversation query AI processing started chat_id=%s", chat.pk)
-        content_blocks, explainability, thinking_text, error = [], [], "", None
+        content_blocks, explainability, thinking_text, summary_text, error = [], [], "", "", None
         for evt in service.run_turn(chat, message, request_id=rid):
             kind, payload = evt["event"], evt["data"]
             if kind == "thinking":
                 thinking_text = payload.get("message", "")
             elif kind in ("content", "visualization"):
                 content_blocks.append(payload)  # one ordered response[] array (§history)
+                if payload.get("is_summary"):
+                    summary_text = payload.get("content", "")
             elif kind == "explainability":
                 explainability = payload.get("steps", [])
             elif kind == "error":
@@ -174,6 +176,7 @@ class ConversationQueryView(APIView):
             "data": {
                 "chat_id": chat.pk,
                 "message_id": assistant_msg.pk,
+                "summary": summary_text,
                 "response": content_blocks,
                 "metadata": metadata,
             },
@@ -191,7 +194,7 @@ class ConversationQueryView(APIView):
 
     def _sse_generator(self, service, chat, message, rid):
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
-        content_blocks, explainability, thinking_text = [], [], ""
+        content_blocks, explainability, thinking_text, summary_text = [], [], "", ""
         try:
             for evt in service.run_turn(chat, message, request_id=rid):
                 kind, payload = evt["event"], evt["data"]
@@ -199,6 +202,8 @@ class ConversationQueryView(APIView):
                     thinking_text = payload.get("message", "")
                 elif kind in ("content", "visualization"):
                     content_blocks.append(payload)  # one ordered response[] array (§history)
+                    if payload.get("is_summary"):
+                        summary_text = payload.get("content", "")
                 elif kind == "explainability":
                     explainability = payload.get("steps", [])
                 elif kind == "error":
@@ -217,7 +222,8 @@ class ConversationQueryView(APIView):
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
         yield _sse_format("completed",
-                          {"chat_id": chat.pk, "message_id": assistant_msg.pk, "is_complete": True})
+                          {"chat_id": chat.pk, "message_id": assistant_msg.pk,
+                           "summary": summary_text, "is_complete": True})
         logger.info("conversation query streaming completed chat_id=%s", chat.pk)
 
 
