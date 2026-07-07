@@ -1,0 +1,1490 @@
+{
+  "version": "1.0",
+  "source_hash": "36744c204539a87a",
+  "source_model": "data/clients/homzhub/veda_semantic_model.json",
+  "stats": {
+    "concepts": 280,
+    "dimensions": 908,
+    "metrics": 770,
+    "grain_suspects": 122,
+    "redacted_dimensions": 203,
+    "soft_delete_metrics": 1
+  },
+  "grain_suspects": {
+    "accounts_generalledger_history": {
+      "entity_key_candidate": "accounts_generalledger_history.history_id",
+      "row_pk": "accounts_generalledger_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_generalledger_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_generalledger_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_generalledger_history\"",
+        "SELECT COUNT(*) FROM \"accounts_generalledger_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_generalledgerattachment_history": {
+      "entity_key_candidate": "accounts_generalledgerattachment_history.history_id",
+      "row_pk": "accounts_generalledgerattachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_generalledgerattachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_generalledgerattachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_generalledgerattachment_history\"",
+        "SELECT COUNT(*) FROM \"accounts_generalledgerattachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_generalledgercategory_history": {
+      "entity_key_candidate": "accounts_generalledgercategory_history.history_id",
+      "row_pk": "accounts_generalledgercategory_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_generalledgercategory_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_generalledgercategory_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_generalledgercategory_history\"",
+        "SELECT COUNT(*) FROM \"accounts_generalledgercategory_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_paymenttransaction_history": {
+      "entity_key_candidate": "accounts_paymenttransaction_history.history_id",
+      "row_pk": "accounts_paymenttransaction_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_paymenttransaction_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_paymenttransaction_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_paymenttransaction_history\"",
+        "SELECT COUNT(*) FROM \"accounts_paymenttransaction_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_paymenttransactionsettlement_history": {
+      "entity_key_candidate": "accounts_paymenttransactionsettlement_history.history_id",
+      "row_pk": "accounts_paymenttransactionsettlement_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_paymenttransactionsettlement_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_paymenttransactionsettlement_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_paymenttransactionsettlement_history\"",
+        "SELECT COUNT(*) FROM \"accounts_paymenttransactionsettlement_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_paymenttype_history": {
+      "entity_key_candidate": "accounts_paymenttype_history.history_id",
+      "row_pk": "accounts_paymenttype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_paymenttype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_paymenttype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_paymenttype_history\"",
+        "SELECT COUNT(*) FROM \"accounts_paymenttype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_userinvoice_history": {
+      "entity_key_candidate": "accounts_userinvoice_history.history_id",
+      "row_pk": "accounts_userinvoice_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_userinvoice_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_userinvoice_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_userinvoice_history\"",
+        "SELECT COUNT(*) FROM \"accounts_userinvoice_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "accounts_userinvoiceitem_history": {
+      "entity_key_candidate": "accounts_userinvoiceitem_history.history_id",
+      "row_pk": "accounts_userinvoiceitem_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"accounts_userinvoiceitem_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"accounts_userinvoiceitem_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"accounts_userinvoiceitem_history\"",
+        "SELECT COUNT(*) FROM \"accounts_userinvoiceitem_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "advertisements_advertisement_history": {
+      "entity_key_candidate": "advertisements_advertisement_history.history_id",
+      "row_pk": "advertisements_advertisement_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"advertisements_advertisement_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"advertisements_advertisement_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"advertisements_advertisement_history\"",
+        "SELECT COUNT(*) FROM \"advertisements_advertisement_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "asset_assignment_history": {
+      "entity_key_candidate": "asset_assignment_history.history_id",
+      "row_pk": "asset_assignment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"asset_assignment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"asset_assignment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"asset_assignment_history\"",
+        "SELECT COUNT(*) FROM \"asset_assignment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_asset_history": {
+      "entity_key_candidate": "assets_asset_history.history_id",
+      "row_pk": "assets_asset_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_asset_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_asset_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_asset_history\"",
+        "SELECT COUNT(*) FROM \"assets_asset_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetadditionalinfo_history": {
+      "entity_key_candidate": "assets_assetadditionalinfo_history.history_id",
+      "row_pk": "assets_assetadditionalinfo_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetadditionalinfo_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetadditionalinfo_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetadditionalinfo_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetadditionalinfo_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetdocument_history": {
+      "entity_key_candidate": "assets_assetdocument_history.history_id",
+      "row_pk": "assets_assetdocument_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetdocument_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetdocument_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetdocument_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetdocument_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetdocumentleasetenant_history": {
+      "entity_key_candidate": "assets_assetdocumentleasetenant_history.history_id",
+      "row_pk": "assets_assetdocumentleasetenant_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetdocumentleasetenant_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetdocumentleasetenant_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetdocumentleasetenant_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetdocumentleasetenant_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetgroup_history": {
+      "entity_key_candidate": "assets_assetgroup_history.history_id",
+      "row_pk": "assets_assetgroup_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetgroup_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetgroup_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetgroup_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetgroup_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetgroupspacetype_history": {
+      "entity_key_candidate": "assets_assetgroupspacetype_history.history_id",
+      "row_pk": "assets_assetgroupspacetype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetgroupspacetype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetgroupspacetype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetgroupspacetype_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetgroupspacetype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetkey_history": {
+      "entity_key_candidate": "assets_assetkey_history.history_id",
+      "row_pk": "assets_assetkey_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetkey_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetkey_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetkey_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetkey_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetpayments_history": {
+      "entity_key_candidate": "assets_assetpayments_history.history_id",
+      "row_pk": "assets_assetpayments_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetpayments_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetpayments_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetpayments_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetpayments_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetspaceattachment_history": {
+      "entity_key_candidate": "assets_assetspaceattachment_history.history_id",
+      "row_pk": "assets_assetspaceattachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetspaceattachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetspaceattachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetspaceattachment_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetspaceattachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assettype_history": {
+      "entity_key_candidate": "assets_assettype_history.history_id",
+      "row_pk": "assets_assettype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assettype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assettype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assettype_history\"",
+        "SELECT COUNT(*) FROM \"assets_assettype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetuser_history": {
+      "entity_key_candidate": "assets_assetuser_history.history_id",
+      "row_pk": "assets_assetuser_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetuser_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetuser_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetuser_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetuser_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_assetverificationdocument_history": {
+      "entity_key_candidate": "assets_assetverificationdocument_history.history_id",
+      "row_pk": "assets_assetverificationdocument_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_assetverificationdocument_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_assetverificationdocument_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_assetverificationdocument_history\"",
+        "SELECT COUNT(*) FROM \"assets_assetverificationdocument_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_closurereason_history": {
+      "entity_key_candidate": "assets_closurereason_history.history_id",
+      "row_pk": "assets_closurereason_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_closurereason_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_closurereason_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_closurereason_history\"",
+        "SELECT COUNT(*) FROM \"assets_closurereason_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leaselisting_history": {
+      "entity_key_candidate": "assets_leaselisting_history.history_id",
+      "row_pk": "assets_leaselisting_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leaselisting_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leaselisting_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leaselisting_history\"",
+        "SELECT COUNT(*) FROM \"assets_leaselisting_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leaselistinglead_history": {
+      "entity_key_candidate": "assets_leaselistinglead_history.history_id",
+      "row_pk": "assets_leaselistinglead_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leaselistinglead_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leaselistinglead_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leaselistinglead_history\"",
+        "SELECT COUNT(*) FROM \"assets_leaselistinglead_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leaselistinguser_history": {
+      "entity_key_candidate": "assets_leaselistinguser_history.history_id",
+      "row_pk": "assets_leaselistinguser_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leaselistinguser_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leaselistinguser_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leaselistinguser_history\"",
+        "SELECT COUNT(*) FROM \"assets_leaselistinguser_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leasenegotiation_history": {
+      "entity_key_candidate": "assets_leasenegotiation_history.history_id",
+      "row_pk": "assets_leasenegotiation_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leasenegotiation_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leasenegotiation_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leasenegotiation_history\"",
+        "SELECT COUNT(*) FROM \"assets_leasenegotiation_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leasetenant_history": {
+      "entity_key_candidate": "assets_leasetenant_history.history_id",
+      "row_pk": "assets_leasetenant_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leasetenant_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leasetenant_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leasetenant_history\"",
+        "SELECT COUNT(*) FROM \"assets_leasetenant_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leasetermination_history": {
+      "entity_key_candidate": "assets_leasetermination_history.history_id",
+      "row_pk": "assets_leasetermination_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leasetermination_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leasetermination_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leasetermination_history\"",
+        "SELECT COUNT(*) FROM \"assets_leasetermination_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leasetransaction_history": {
+      "entity_key_candidate": "assets_leasetransaction_history.history_id",
+      "row_pk": "assets_leasetransaction_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leasetransaction_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leasetransaction_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leasetransaction_history\"",
+        "SELECT COUNT(*) FROM \"assets_leasetransaction_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leaseunit_history": {
+      "entity_key_candidate": "assets_leaseunit_history.history_id",
+      "row_pk": "assets_leaseunit_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leaseunit_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leaseunit_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leaseunit_history\"",
+        "SELECT COUNT(*) FROM \"assets_leaseunit_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_leaseunitdetail_history": {
+      "entity_key_candidate": "assets_leaseunitdetail_history.history_id",
+      "row_pk": "assets_leaseunitdetail_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_leaseunitdetail_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_leaseunitdetail_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_leaseunitdetail_history\"",
+        "SELECT COUNT(*) FROM \"assets_leaseunitdetail_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_listingreview_history": {
+      "entity_key_candidate": "assets_listingreview_history.history_id",
+      "row_pk": "assets_listingreview_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_listingreview_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_listingreview_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_listingreview_history\"",
+        "SELECT COUNT(*) FROM \"assets_listingreview_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_listingvisit_history": {
+      "entity_key_candidate": "assets_listingvisit_history.history_id",
+      "row_pk": "assets_listingvisit_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_listingvisit_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_listingvisit_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_listingvisit_history\"",
+        "SELECT COUNT(*) FROM \"assets_listingvisit_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_negotiationthreadcomment_history": {
+      "entity_key_candidate": "assets_negotiationthreadcomment_history.history_id",
+      "row_pk": "assets_negotiationthreadcomment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_negotiationthreadcomment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_negotiationthreadcomment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_negotiationthreadcomment_history\"",
+        "SELECT COUNT(*) FROM \"assets_negotiationthreadcomment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_project_history": {
+      "entity_key_candidate": "assets_project_history.history_id",
+      "row_pk": "assets_project_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_project_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_project_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_project_history\"",
+        "SELECT COUNT(*) FROM \"assets_project_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_prospect_history": {
+      "entity_key_candidate": "assets_prospect_history.history_id",
+      "row_pk": "assets_prospect_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_prospect_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_prospect_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_prospect_history\"",
+        "SELECT COUNT(*) FROM \"assets_prospect_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_prospectfeedback_history": {
+      "entity_key_candidate": "assets_prospectfeedback_history.history_id",
+      "row_pk": "assets_prospectfeedback_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_prospectfeedback_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_prospectfeedback_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_prospectfeedback_history\"",
+        "SELECT COUNT(*) FROM \"assets_prospectfeedback_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_renttransaction_history": {
+      "entity_key_candidate": "assets_renttransaction_history.history_id",
+      "row_pk": "assets_renttransaction_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_renttransaction_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_renttransaction_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_renttransaction_history\"",
+        "SELECT COUNT(*) FROM \"assets_renttransaction_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_salelisting_history": {
+      "entity_key_candidate": "assets_salelisting_history.history_id",
+      "row_pk": "assets_salelisting_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_salelisting_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_salelisting_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_salelisting_history\"",
+        "SELECT COUNT(*) FROM \"assets_salelisting_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_salelistinglead_history": {
+      "entity_key_candidate": "assets_salelistinglead_history.history_id",
+      "row_pk": "assets_salelistinglead_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_salelistinglead_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_salelistinglead_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_salelistinglead_history\"",
+        "SELECT COUNT(*) FROM \"assets_salelistinglead_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_salelistinguser_history": {
+      "entity_key_candidate": "assets_salelistinguser_history.history_id",
+      "row_pk": "assets_salelistinguser_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_salelistinguser_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_salelistinguser_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_salelistinguser_history\"",
+        "SELECT COUNT(*) FROM \"assets_salelistinguser_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_salenegotiation_history": {
+      "entity_key_candidate": "assets_salenegotiation_history.history_id",
+      "row_pk": "assets_salenegotiation_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_salenegotiation_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_salenegotiation_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_salenegotiation_history\"",
+        "SELECT COUNT(*) FROM \"assets_salenegotiation_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_saletransaction_history": {
+      "entity_key_candidate": "assets_saletransaction_history.history_id",
+      "row_pk": "assets_saletransaction_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_saletransaction_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_saletransaction_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_saletransaction_history\"",
+        "SELECT COUNT(*) FROM \"assets_saletransaction_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_society_history": {
+      "entity_key_candidate": "assets_society_history.history_id",
+      "row_pk": "assets_society_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_society_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_society_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_society_history\"",
+        "SELECT COUNT(*) FROM \"assets_society_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_societybankinfo_history": {
+      "entity_key_candidate": "assets_societybankinfo_history.history_id",
+      "row_pk": "assets_societybankinfo_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_societybankinfo_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_societybankinfo_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_societybankinfo_history\"",
+        "SELECT COUNT(*) FROM \"assets_societybankinfo_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_societyuserconfirm_history": {
+      "entity_key_candidate": "assets_societyuserconfirm_history.history_id",
+      "row_pk": "assets_societyuserconfirm_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_societyuserconfirm_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_societyuserconfirm_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_societyuserconfirm_history\"",
+        "SELECT COUNT(*) FROM \"assets_societyuserconfirm_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_spacetype_history": {
+      "entity_key_candidate": "assets_spacetype_history.history_id",
+      "row_pk": "assets_spacetype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_spacetype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_spacetype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_spacetype_history\"",
+        "SELECT COUNT(*) FROM \"assets_spacetype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_tenantpreference_history": {
+      "entity_key_candidate": "assets_tenantpreference_history.history_id",
+      "row_pk": "assets_tenantpreference_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_tenantpreference_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_tenantpreference_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_tenantpreference_history\"",
+        "SELECT COUNT(*) FROM \"assets_tenantpreference_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "assets_usersearch_history": {
+      "entity_key_candidate": "assets_usersearch_history.history_id",
+      "row_pk": "assets_usersearch_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"assets_usersearch_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"assets_usersearch_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"assets_usersearch_history\"",
+        "SELECT COUNT(*) FROM \"assets_usersearch_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "attachments_attachment_history": {
+      "entity_key_candidate": "attachments_attachment_history.history_id",
+      "row_pk": "attachments_attachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"attachments_attachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"attachments_attachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"attachments_attachment_history\"",
+        "SELECT COUNT(*) FROM \"attachments_attachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "chats_message_history": {
+      "entity_key_candidate": "chats_message_history.history_id",
+      "row_pk": "chats_message_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"chats_message_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"chats_message_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"chats_message_history\"",
+        "SELECT COUNT(*) FROM \"chats_message_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "chats_messageattachment_history": {
+      "entity_key_candidate": "chats_messageattachment_history.history_id",
+      "row_pk": "chats_messageattachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"chats_messageattachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"chats_messageattachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"chats_messageattachment_history\"",
+        "SELECT COUNT(*) FROM \"chats_messageattachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "chats_messagegroup_history": {
+      "entity_key_candidate": "chats_messagegroup_history.history_id",
+      "row_pk": "chats_messagegroup_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"chats_messagegroup_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"chats_messagegroup_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"chats_messagegroup_history\"",
+        "SELECT COUNT(*) FROM \"chats_messagegroup_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "chats_messagegroupuser_history": {
+      "entity_key_candidate": "chats_messagegroupuser_history.history_id",
+      "row_pk": "chats_messagegroupuser_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"chats_messagegroupuser_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"chats_messagegroupuser_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"chats_messagegroupuser_history\"",
+        "SELECT COUNT(*) FROM \"chats_messagegroupuser_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "chats_messagerecipient_history": {
+      "entity_key_candidate": "chats_messagerecipient_history.history_id",
+      "row_pk": "chats_messagerecipient_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"chats_messagerecipient_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"chats_messagerecipient_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"chats_messagerecipient_history\"",
+        "SELECT COUNT(*) FROM \"chats_messagerecipient_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "client_support_clientsupport_history": {
+      "entity_key_candidate": "client_support_clientsupport_history.history_id",
+      "row_pk": "client_support_clientsupport_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"client_support_clientsupport_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"client_support_clientsupport_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"client_support_clientsupport_history\"",
+        "SELECT COUNT(*) FROM \"client_support_clientsupport_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "client_support_clientsupportattachment_history": {
+      "entity_key_candidate": "client_support_clientsupportattachment_history.history_id",
+      "row_pk": "client_support_clientsupportattachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"client_support_clientsupportattachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"client_support_clientsupportattachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"client_support_clientsupportattachment_history\"",
+        "SELECT COUNT(*) FROM \"client_support_clientsupportattachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "comments_comment": {
+      "entity_key_candidate": "comments_comment.parent_comment_id",
+      "row_pk": "comments_comment.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"comments_comment\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"comments_comment\"",
+        "SELECT COUNT(DISTINCT \"parent_comment_id\") FROM \"comments_comment\"",
+        "SELECT COUNT(*) FROM \"comments_comment\" WHERE \"parent_comment_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "comments_comment_history": {
+      "entity_key_candidate": "comments_comment_history.history_id",
+      "row_pk": "comments_comment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"comments_comment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"comments_comment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"comments_comment_history\"",
+        "SELECT COUNT(*) FROM \"comments_comment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "communications_comment_history": {
+      "entity_key_candidate": "communications_comment_history.history_id",
+      "row_pk": "communications_comment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"communications_comment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"communications_comment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"communications_comment_history\"",
+        "SELECT COUNT(*) FROM \"communications_comment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "inspections_inspectionreport_history": {
+      "entity_key_candidate": "inspections_inspectionreport_history.history_id",
+      "row_pk": "inspections_inspectionreport_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"inspections_inspectionreport_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"inspections_inspectionreport_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"inspections_inspectionreport_history\"",
+        "SELECT COUNT(*) FROM \"inspections_inspectionreport_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "inspections_spaceinspectionattachment_history": {
+      "entity_key_candidate": "inspections_spaceinspectionattachment_history.history_id",
+      "row_pk": "inspections_spaceinspectionattachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"inspections_spaceinspectionattachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"inspections_spaceinspectionattachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"inspections_spaceinspectionattachment_history\"",
+        "SELECT COUNT(*) FROM \"inspections_spaceinspectionattachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "leads_customsearch_history": {
+      "entity_key_candidate": "leads_customsearch_history.history_id",
+      "row_pk": "leads_customsearch_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"leads_customsearch_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"leads_customsearch_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"leads_customsearch_history\"",
+        "SELECT COUNT(*) FROM \"leads_customsearch_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "leads_customsearchassettype_history": {
+      "entity_key_candidate": "leads_customsearchassettype_history.history_id",
+      "row_pk": "leads_customsearchassettype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"leads_customsearchassettype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"leads_customsearchassettype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"leads_customsearchassettype_history\"",
+        "SELECT COUNT(*) FROM \"leads_customsearchassettype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "leads_lead_history": {
+      "entity_key_candidate": "leads_lead_history.history_id",
+      "row_pk": "leads_lead_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"leads_lead_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"leads_lead_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"leads_lead_history\"",
+        "SELECT COUNT(*) FROM \"leads_lead_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "leads_leadstage_history": {
+      "entity_key_candidate": "leads_leadstage_history.history_id",
+      "row_pk": "leads_leadstage_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"leads_leadstage_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"leads_leadstage_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"leads_leadstage_history\"",
+        "SELECT COUNT(*) FROM \"leads_leadstage_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "list_of_values_listofvalue_history": {
+      "entity_key_candidate": "list_of_values_listofvalue_history.history_id",
+      "row_pk": "list_of_values_listofvalue_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"list_of_values_listofvalue_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"list_of_values_listofvalue_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"list_of_values_listofvalue_history\"",
+        "SELECT COUNT(*) FROM \"list_of_values_listofvalue_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "newsletters_subscription_history": {
+      "entity_key_candidate": "newsletters_subscription_history.history_id",
+      "row_pk": "newsletters_subscription_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"newsletters_subscription_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"newsletters_subscription_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"newsletters_subscription_history\"",
+        "SELECT COUNT(*) FROM \"newsletters_subscription_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "notifications_notification_history": {
+      "entity_key_candidate": "notifications_notification_history.history_id",
+      "row_pk": "notifications_notification_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"notifications_notification_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"notifications_notification_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"notifications_notification_history\"",
+        "SELECT COUNT(*) FROM \"notifications_notification_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "notifications_notificationtype_history": {
+      "entity_key_candidate": "notifications_notificationtype_history.history_id",
+      "row_pk": "notifications_notificationtype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"notifications_notificationtype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"notifications_notificationtype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"notifications_notificationtype_history\"",
+        "SELECT COUNT(*) FROM \"notifications_notificationtype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reminders_reminder_history": {
+      "entity_key_candidate": "reminders_reminder_history.history_id",
+      "row_pk": "reminders_reminder_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reminders_reminder_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reminders_reminder_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reminders_reminder_history\"",
+        "SELECT COUNT(*) FROM \"reminders_reminder_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reminders_remindercategory_history": {
+      "entity_key_candidate": "reminders_remindercategory_history.history_id",
+      "row_pk": "reminders_remindercategory_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reminders_remindercategory_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reminders_remindercategory_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reminders_remindercategory_history\"",
+        "SELECT COUNT(*) FROM \"reminders_remindercategory_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reminders_reminderfrequency_history": {
+      "entity_key_candidate": "reminders_reminderfrequency_history.history_id",
+      "row_pk": "reminders_reminderfrequency_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reminders_reminderfrequency_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reminders_reminderfrequency_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reminders_reminderfrequency_history\"",
+        "SELECT COUNT(*) FROM \"reminders_reminderfrequency_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reminders_reminderpaymenttransaction_history": {
+      "entity_key_candidate": "reminders_reminderpaymenttransaction_history.history_id",
+      "row_pk": "reminders_reminderpaymenttransaction_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reminders_reminderpaymenttransaction_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reminders_reminderpaymenttransaction_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reminders_reminderpaymenttransaction_history\"",
+        "SELECT COUNT(*) FROM \"reminders_reminderpaymenttransaction_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reviews_pillar_history": {
+      "entity_key_candidate": "reviews_pillar_history.history_id",
+      "row_pk": "reviews_pillar_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reviews_pillar_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reviews_pillar_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reviews_pillar_history\"",
+        "SELECT COUNT(*) FROM \"reviews_pillar_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reviews_pillarrating_history": {
+      "entity_key_candidate": "reviews_pillarrating_history.history_id",
+      "row_pk": "reviews_pillarrating_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reviews_pillarrating_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reviews_pillarrating_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reviews_pillarrating_history\"",
+        "SELECT COUNT(*) FROM \"reviews_pillarrating_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reviews_review_history": {
+      "entity_key_candidate": "reviews_review_history.history_id",
+      "row_pk": "reviews_review_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reviews_review_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reviews_review_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reviews_review_history\"",
+        "SELECT COUNT(*) FROM \"reviews_review_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reviews_reviewcomment_history": {
+      "entity_key_candidate": "reviews_reviewcomment_history.history_id",
+      "row_pk": "reviews_reviewcomment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reviews_reviewcomment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reviews_reviewcomment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reviews_reviewcomment_history\"",
+        "SELECT COUNT(*) FROM \"reviews_reviewcomment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reviews_reviewreport_history": {
+      "entity_key_candidate": "reviews_reviewreport_history.history_id",
+      "row_pk": "reviews_reviewreport_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reviews_reviewreport_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reviews_reviewreport_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reviews_reviewreport_history\"",
+        "SELECT COUNT(*) FROM \"reviews_reviewreport_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "reviews_reviewtype_history": {
+      "entity_key_candidate": "reviews_reviewtype_history.history_id",
+      "row_pk": "reviews_reviewtype_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"reviews_reviewtype_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"reviews_reviewtype_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"reviews_reviewtype_history\"",
+        "SELECT COUNT(*) FROM \"reviews_reviewtype_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "role_history": {
+      "entity_key_candidate": "role_history.history_id",
+      "row_pk": "role_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"role_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"role_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"role_history\"",
+        "SELECT COUNT(*) FROM \"role_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_serviceplan_history": {
+      "entity_key_candidate": "services_serviceplan_history.history_id",
+      "row_pk": "services_serviceplan_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_serviceplan_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_serviceplan_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_serviceplan_history\"",
+        "SELECT COUNT(*) FROM \"services_serviceplan_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_serviceplanbundle_history": {
+      "entity_key_candidate": "services_serviceplanbundle_history.history_id",
+      "row_pk": "services_serviceplanbundle_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_serviceplanbundle_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_serviceplanbundle_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_serviceplanbundle_history\"",
+        "SELECT COUNT(*) FROM \"services_serviceplanbundle_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_serviceplanpricing_history": {
+      "entity_key_candidate": "services_serviceplanpricing_history.history_id",
+      "row_pk": "services_serviceplanpricing_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_serviceplanpricing_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_serviceplanpricing_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_serviceplanpricing_history\"",
+        "SELECT COUNT(*) FROM \"services_serviceplanpricing_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_user_value_bundle_attachment_history": {
+      "entity_key_candidate": "services_user_value_bundle_attachment_history.history_id",
+      "row_pk": "services_user_value_bundle_attachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_user_value_bundle_attachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_user_value_bundle_attachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_user_value_bundle_attachment_history\"",
+        "SELECT COUNT(*) FROM \"services_user_value_bundle_attachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_userserviceplan_history": {
+      "entity_key_candidate": "services_userserviceplan_history.history_id",
+      "row_pk": "services_userserviceplan_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_userserviceplan_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_userserviceplan_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_userserviceplan_history\"",
+        "SELECT COUNT(*) FROM \"services_userserviceplan_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_uservaluebundle_history": {
+      "entity_key_candidate": "services_uservaluebundle_history.history_id",
+      "row_pk": "services_uservaluebundle_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_uservaluebundle_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_uservaluebundle_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_uservaluebundle_history\"",
+        "SELECT COUNT(*) FROM \"services_uservaluebundle_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_valuebundle_history": {
+      "entity_key_candidate": "services_valuebundle_history.history_id",
+      "row_pk": "services_valuebundle_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_valuebundle_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_valuebundle_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_valuebundle_history\"",
+        "SELECT COUNT(*) FROM \"services_valuebundle_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_valuebundleadditionalinfo_history": {
+      "entity_key_candidate": "services_valuebundleadditionalinfo_history.history_id",
+      "row_pk": "services_valuebundleadditionalinfo_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_valuebundleadditionalinfo_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_valuebundleadditionalinfo_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_valuebundleadditionalinfo_history\"",
+        "SELECT COUNT(*) FROM \"services_valuebundleadditionalinfo_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_valuebundleitem_history": {
+      "entity_key_candidate": "services_valuebundleitem_history.history_id",
+      "row_pk": "services_valuebundleitem_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_valuebundleitem_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_valuebundleitem_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_valuebundleitem_history\"",
+        "SELECT COUNT(*) FROM \"services_valuebundleitem_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "services_valuebundlepricing_history": {
+      "entity_key_candidate": "services_valuebundlepricing_history.history_id",
+      "row_pk": "services_valuebundlepricing_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"services_valuebundlepricing_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"services_valuebundlepricing_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"services_valuebundlepricing_history\"",
+        "SELECT COUNT(*) FROM \"services_valuebundlepricing_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "user_role_hierarchy_history": {
+      "entity_key_candidate": "user_role_hierarchy_history.history_id",
+      "row_pk": "user_role_hierarchy_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"user_role_hierarchy_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"user_role_hierarchy_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"user_role_hierarchy_history\"",
+        "SELECT COUNT(*) FROM \"user_role_hierarchy_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "user_role_permission_history": {
+      "entity_key_candidate": "user_role_permission_history.history_id",
+      "row_pk": "user_role_permission_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"user_role_permission_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"user_role_permission_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"user_role_permission_history\"",
+        "SELECT COUNT(*) FROM \"user_role_permission_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_markettrend_history": {
+      "entity_key_candidate": "users_markettrend_history.history_id",
+      "row_pk": "users_markettrend_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_markettrend_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_markettrend_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_markettrend_history\"",
+        "SELECT COUNT(*) FROM \"users_markettrend_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_socialloginprovider_history": {
+      "entity_key_candidate": "users_socialloginprovider_history.history_id",
+      "row_pk": "users_socialloginprovider_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_socialloginprovider_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_socialloginprovider_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_socialloginprovider_history\"",
+        "SELECT COUNT(*) FROM \"users_socialloginprovider_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_socialloginsetting_history": {
+      "entity_key_candidate": "users_socialloginsetting_history.history_id",
+      "row_pk": "users_socialloginsetting_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_socialloginsetting_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_socialloginsetting_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_socialloginsetting_history\"",
+        "SELECT COUNT(*) FROM \"users_socialloginsetting_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_user_history": {
+      "entity_key_candidate": "users_user_history.history_id",
+      "row_pk": "users_user_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_user_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_user_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_user_history\"",
+        "SELECT COUNT(*) FROM \"users_user_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_useraddress_history": {
+      "entity_key_candidate": "users_useraddress_history.history_id",
+      "row_pk": "users_useraddress_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_useraddress_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_useraddress_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_useraddress_history\"",
+        "SELECT COUNT(*) FROM \"users_useraddress_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_userbankinfo_history": {
+      "entity_key_candidate": "users_userbankinfo_history.history_id",
+      "row_pk": "users_userbankinfo_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_userbankinfo_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_userbankinfo_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_userbankinfo_history\"",
+        "SELECT COUNT(*) FROM \"users_userbankinfo_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_usercoin_history": {
+      "entity_key_candidate": "users_usercoin_history.history_id",
+      "row_pk": "users_usercoin_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_usercoin_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_usercoin_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_usercoin_history\"",
+        "SELECT COUNT(*) FROM \"users_usercoin_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_useremployer_history": {
+      "entity_key_candidate": "users_useremployer_history.history_id",
+      "row_pk": "users_useremployer_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_useremployer_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_useremployer_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_useremployer_history\"",
+        "SELECT COUNT(*) FROM \"users_useremployer_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_useridentitydocument_history": {
+      "entity_key_candidate": "users_useridentitydocument_history.history_id",
+      "row_pk": "users_useridentitydocument_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_useridentitydocument_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_useridentitydocument_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_useridentitydocument_history\"",
+        "SELECT COUNT(*) FROM \"users_useridentitydocument_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_userpreference_history": {
+      "entity_key_candidate": "users_userpreference_history.history_id",
+      "row_pk": "users_userpreference_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_userpreference_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_userpreference_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_userpreference_history\"",
+        "SELECT COUNT(*) FROM \"users_userpreference_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_userrole_history": {
+      "entity_key_candidate": "users_userrole_history.history_id",
+      "row_pk": "users_userrole_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_userrole_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_userrole_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_userrole_history\"",
+        "SELECT COUNT(*) FROM \"users_userrole_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_userstatpreference_history": {
+      "entity_key_candidate": "users_userstatpreference_history.history_id",
+      "row_pk": "users_userstatpreference_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_userstatpreference_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_userstatpreference_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_userstatpreference_history\"",
+        "SELECT COUNT(*) FROM \"users_userstatpreference_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_userwithdrawal_history": {
+      "entity_key_candidate": "users_userwithdrawal_history.history_id",
+      "row_pk": "users_userwithdrawal_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_userwithdrawal_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_userwithdrawal_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_userwithdrawal_history\"",
+        "SELECT COUNT(*) FROM \"users_userwithdrawal_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "users_userworklocation_history": {
+      "entity_key_candidate": "users_userworklocation_history.history_id",
+      "row_pk": "users_userworklocation_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"users_userworklocation_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"users_userworklocation_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"users_userworklocation_history\"",
+        "SELECT COUNT(*) FROM \"users_userworklocation_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_quote_history": {
+      "entity_key_candidate": "worklists_quote_history.history_id",
+      "row_pk": "worklists_quote_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_quote_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_quote_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_quote_history\"",
+        "SELECT COUNT(*) FROM \"worklists_quote_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_quoteactivity_history": {
+      "entity_key_candidate": "worklists_quoteactivity_history.history_id",
+      "row_pk": "worklists_quoteactivity_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_quoteactivity_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_quoteactivity_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_quoteactivity_history\"",
+        "SELECT COUNT(*) FROM \"worklists_quoteactivity_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_quoteapprovedgroup_history": {
+      "entity_key_candidate": "worklists_quoteapprovedgroup_history.history_id",
+      "row_pk": "worklists_quoteapprovedgroup_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_quoteapprovedgroup_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_quoteapprovedgroup_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_quoteapprovedgroup_history\"",
+        "SELECT COUNT(*) FROM \"worklists_quoteapprovedgroup_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_quoterequest_history": {
+      "entity_key_candidate": "worklists_quoterequest_history.history_id",
+      "row_pk": "worklists_quoterequest_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_quoterequest_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_quoterequest_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_quoterequest_history\"",
+        "SELECT COUNT(*) FROM \"worklists_quoterequest_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_quoterequestcategory_history": {
+      "entity_key_candidate": "worklists_quoterequestcategory_history.history_id",
+      "row_pk": "worklists_quoterequestcategory_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_quoterequestcategory_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_quoterequestcategory_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_quoterequestcategory_history\"",
+        "SELECT COUNT(*) FROM \"worklists_quoterequestcategory_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_quotesubmitgroup_history": {
+      "entity_key_candidate": "worklists_quotesubmitgroup_history.history_id",
+      "row_pk": "worklists_quotesubmitgroup_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_quotesubmitgroup_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_quotesubmitgroup_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_quotesubmitgroup_history\"",
+        "SELECT COUNT(*) FROM \"worklists_quotesubmitgroup_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticket_history": {
+      "entity_key_candidate": "worklists_ticket_history.history_id",
+      "row_pk": "worklists_ticket_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticket_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticket_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticket_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticket_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketactivity_history": {
+      "entity_key_candidate": "worklists_ticketactivity_history.history_id",
+      "row_pk": "worklists_ticketactivity_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketactivity_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketactivity_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketactivity_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketactivity_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketattachment_history": {
+      "entity_key_candidate": "worklists_ticketattachment_history.history_id",
+      "row_pk": "worklists_ticketattachment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketattachment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketattachment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketattachment_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketattachment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketcategory_history": {
+      "entity_key_candidate": "worklists_ticketcategory_history.history_id",
+      "row_pk": "worklists_ticketcategory_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketcategory_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketcategory_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketcategory_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketcategory_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketpayment_history": {
+      "entity_key_candidate": "worklists_ticketpayment_history.history_id",
+      "row_pk": "worklists_ticketpayment_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketpayment_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketpayment_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketpayment_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketpayment_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketreview_history": {
+      "entity_key_candidate": "worklists_ticketreview_history.history_id",
+      "row_pk": "worklists_ticketreview_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketreview_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketreview_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketreview_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketreview_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketupdate_history": {
+      "entity_key_candidate": "worklists_ticketupdate_history.history_id",
+      "row_pk": "worklists_ticketupdate_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketupdate_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketupdate_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketupdate_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketupdate_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "worklists_ticketuser_history": {
+      "entity_key_candidate": "worklists_ticketuser_history.history_id",
+      "row_pk": "worklists_ticketuser_history.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"worklists_ticketuser_history\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"worklists_ticketuser_history\"",
+        "SELECT COUNT(DISTINCT \"history_id\") FROM \"worklists_ticketuser_history\"",
+        "SELECT COUNT(*) FROM \"worklists_ticketuser_history\" WHERE \"history_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    }
+  },
+  "low_discoverability": {
+    "count": 32,
+    "columns": [
+      {
+        "column": "assets_assetdocument_history.id",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.description",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.created_at",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.updated_at",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.history_id",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.history_date",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.history_type",
+        "score": 0
+      },
+      {
+        "column": "users_userbankinfo_history.id",
+        "score": 0
+      },
+      {
+        "column": "users_userbankinfo_history.created_at",
+        "score": 0
+      },
+      {
+        "column": "users_userbankinfo_history.updated_at",
+        "score": 0
+      },
+      {
+        "column": "users_userbankinfo_history.history_id",
+        "score": 0
+      },
+      {
+        "column": "users_userbankinfo_history.history_date",
+        "score": 0
+      },
+      {
+        "column": "users_userbankinfo_history.history_type",
+        "score": 0
+      },
+      {
+        "column": "worklists_ticketupdate.id",
+        "score": 0
+      },
+      {
+        "column": "worklists_ticketupdate.title",
+        "score": 0
+      },
+      {
+        "column": "worklists_ticketupdate.description",
+        "score": 0
+      },
+      {
+        "column": "worklists_ticketupdate.created_at",
+        "score": 0
+      },
+      {
+        "column": "assets_assetdocument_history.history_change_reason",
+        "score": 1
+      },
+      {
+        "column": "assets_assetdocument_history.asset_id",
+        "score": 1
+      },
+      {
+        "column": "assets_assetdocument_history.attachment_id",
+        "score": 1
+      },
+      {
+        "column": "newsletters_subscription.is_sycned_with_sendy",
+        "score": 1
+      },
+      {
+        "column": "reviews_reviewreport.review_comment",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.beneficiary_name",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.bank_name",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.account_number",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.ifsc_code",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.is_primary",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.end_date",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.history_change_reason",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.created_by_id",
+        "score": 1
+      },
+      {
+        "column": "users_userbankinfo_history.history_user_id",
+        "score": 1
+      },
+      {
+        "column": "worklists_ticketupdate.end_date",
+        "score": 1
+      }
+    ]
+  }
+}

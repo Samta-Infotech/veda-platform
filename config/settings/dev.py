@@ -15,8 +15,8 @@ ALLOWED_HOSTS = ["*"]
 # incl. the admin login. Requests arrive through nginx on :8080, so that origin must
 # be trusted explicitly (ALLOWED_HOSTS="*" does NOT cover CSRF origin checking).
 CSRF_TRUSTED_ORIGINS = [
-    "http://localhost:8080",
-    "http://127.0.0.1:8080",
+    "http://localhost:8080/",
+    "http://127.0.0.1:8080/",
 ]
 
 if os.environ.get("VEDA_DB_HOST") is None and os.environ.get("PGBOUNCER_HOST") is None:
