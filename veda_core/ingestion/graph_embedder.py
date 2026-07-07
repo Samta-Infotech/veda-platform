@@ -36,6 +36,9 @@ from config import (
     GRAPH_TABLE_SENTENCE_TEMPLATE,
     DOC_CHUNKS_TABLE_NAME,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -220,8 +223,7 @@ def embed_graph_nodes(source_id: str, verbose: bool = False) -> GraphEmbedResult
             ).astype(np.float32)
             embeddings = _l2_normalize(embeddings)
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ [graph_embedder] BGE model unavailable ({e}) — col/table nodes skipped")
+            logger.warning("BGE model unavailable (%s) — col/table nodes skipped", e)
             embeddings = None
             node_meta = []
 
@@ -257,8 +259,7 @@ def embed_graph_nodes(source_id: str, verbose: bool = False) -> GraphEmbedResult
                     )
                 chunk_rows.append((graph_persist.chunk_node_id(r["chunk_id"]), fvec))
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ [graph_embedder] chunk embedding copy failed ({e})")
+            logger.warning("chunk embedding copy failed (%s)", e)
 
     # ------------------------------------------------------------------
     # Persist
@@ -331,9 +332,10 @@ def embed_graph_nodes(source_id: str, verbose: bool = False) -> GraphEmbedResult
 
     duration = round(time.time() - t0, 4)
     if verbose:
-        print(f"[GraphEmbedder] {nodes_embedded} node embeddings "
-              f"({len(node_meta)} col/table + {len(chunk_rows)} chunk), "
-              f"backend={backend}, {duration}s")
+        logger.info(
+            "%d node embeddings (%d col/table + %d chunk), backend=%s, %ss",
+            nodes_embedded, len(node_meta), len(chunk_rows), backend, duration,
+        )
 
     return GraphEmbedResult(
         nodes_embedded = nodes_embedded,

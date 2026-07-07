@@ -51,6 +51,9 @@ from config import (
     COLUMN_VALUES_TABLE_NAME,
     GRAPH_LINK_NAME_STOPWORDS,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -195,8 +198,7 @@ def _scoped_delete(source_id: str, verbose: bool = False) -> None:
         finally:
             release_internal_connection(conn)
     except Exception as e:
-        if verbose:
-            print(f"  ⚠ [chunk_linker] scoped delete failed ({e})")
+        logger.warning("scoped delete failed (%s)", e)
 
 
 # =============================================================================
@@ -390,8 +392,7 @@ def link_chunks_to_graph(
                         ))
                         stat_embedding += 1
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ [chunk_linker] embedding signal unavailable ({e}) — name-match only")
+            logger.warning("embedding signal unavailable (%s) — name-match only", e)
 
     # ------------------------------------------------------------------
     # Per-chunk: dedup by (target, edge_type) keeping max weight, cap top-N
@@ -424,10 +425,11 @@ def link_chunks_to_graph(
 
     duration = round(time.time() - t0, 4)
     if verbose:
-        print(f"[ChunkLinker] {chunk_nodes_written} chunk nodes, "
-              f"{link_edges_written} link edges "
-              f"(value={stat_value_overlap}, name={stat_name_match}, "
-              f"embed={stat_embedding}), backend={backend}, {duration}s")
+        logger.info(
+            "%d chunk nodes, %d link edges (value=%d, name=%d, embed=%d), backend=%s, %ss",
+            chunk_nodes_written, link_edges_written,
+            stat_value_overlap, stat_name_match, stat_embedding, backend, duration,
+        )
 
     return ChunkLinkResult(
         chunk_nodes_written = chunk_nodes_written,

@@ -9,6 +9,10 @@ import numpy as np
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Tuple
 
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 KUZU_DB_PATH = "schema/kuzu_graph"
 
 try:
@@ -43,7 +47,7 @@ def save_graph_to_kuzu(graph) -> bool:
     Returns True on success, False on failure.
     """
     if not KUZU_AVAILABLE:
-        print("[KuzuStore] kuzu not installed — skipping graph save")
+        logger.info("kuzu not installed — skipping graph save")
         return False
 
     # Let Kùzu create its own directory — pre-creating an empty dir causes
@@ -132,11 +136,11 @@ def save_graph_to_kuzu(graph) -> bool:
         n_cols   = len(graph.column_nodes)
         n_tables = len(graph.table_nodes)
         n_fk     = len(graph.fk_to_edges)
-        print(f"[KuzuStore] Saved: {n_tables} tables, {n_cols} columns, {n_fk} FK edges → {KUZU_DB_PATH}")
+        logger.info("Saved: %d tables, %d columns, %d FK edges → %s", n_tables, n_cols, n_fk, KUZU_DB_PATH)
         return True
 
     except Exception as e:
-        print(f"[KuzuStore] Save failed: {e}")
+        logger.error("Save failed: %s", e)
         return False
 
 
@@ -201,7 +205,7 @@ def _subgraph_from_kuzu(
         return _subgraph_from_memory(list(relevant_ids), graph, col_id_to_idx)
 
     except Exception as e:
-        print(f"[KuzuStore] Kuzu subgraph query failed ({e}) — using memory fallback")
+        logger.warning("Kuzu subgraph query failed (%s) — using memory fallback", e)
         return _subgraph_from_memory(query_col_ids, graph, col_id_to_idx)
 
 
