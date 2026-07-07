@@ -3,17 +3,9 @@
 # VEDA — Universal Natural Language Data Platform
 # Central Configuration — all parameters live here. Nothing hardcoded elsewhere.
 #
-# ENCODER_MODE switch:
-#   "relgt_only"  — RELGT 256-dim structural only        (POC run 1)
-#   "light_text"  — TF-IDF + SVD 256-dim                 (POC run 2)
-#   "hybrid"      — MiniLM 384 + RELGT 256 = 640-dim     (POC run 3)
-#   "ensemble"    — Light Text + Hybrid dual-store + RRF  (POC run 4, default)
+# WP3: one embedding model (BGE-M3). The ENCODER_MODE experiment switch and its
+# relgt/light_text/hybrid/ensemble vocabulary were removed — see EMBEDDING_MODEL_ID.
 # =============================================================================
-
-# -----------------------------------------------------------------------------
-# *** EXPERIMENT SWITCH — only line you need to change between encoder runs ***
-# -----------------------------------------------------------------------------
-ENCODER_MODE = "ensemble"   # "relgt_only" | "light_text" | "hybrid" | "ensemble"
 
 # =============================================================================
 # SOURCE REGISTRY  (§3.1 — config-file registry eliminated)
@@ -192,14 +184,18 @@ def get_primary_relational_source() -> dict:
 BIENCODER_COL_TABLE   = "column_embeddings_v2"
 BIENCODER_TABLE_TABLE = "table_embeddings_v2"
 
+# Learned-sparse stores (WP3) — token→weight maps that replace BM25 (Signal 2) and
+# supply the sparse half of the WP4 table prior.
+COLUMN_SPARSE_TABLE = "column_sparse_v1"
+TABLE_SPARSE_TABLE  = "table_sparse_v1"
+
 VEDA_INTERNAL_TABLES = {
-    # Embedding stores
-    "column_embeddings",
-    "column_embeddings_lt",
-    "column_embeddings_hybrid",
     # V2 retrieval stores
     BIENCODER_COL_TABLE,
     BIENCODER_TABLE_TABLE,
+    # Learned-sparse stores
+    COLUMN_SPARSE_TABLE,
+    TABLE_SPARSE_TABLE,
     # Metadata stores
     "fk_adjacency",
     "table_metadata",
@@ -212,13 +208,6 @@ VEDA_INTERNAL_TABLES = {
     "graph_nodes", "graph_edges", "graph_node_embeddings", "graph_node_embeddings_gnn",
 }
 
-# -----------------------------------------------------------------------------
-# Vector store table names (unchanged)
-# -----------------------------------------------------------------------------
-VECTOR_TABLE_NAME            = "column_embeddings"
-VECTOR_TABLE_NAME_LIGHT_TEXT = "column_embeddings_lt"
-VECTOR_TABLE_NAME_HYBRID     = "column_embeddings_hybrid"
-
 # Delete stale rows scoped to source_id before re-inserting (idempotent re-ingestion)
 VECTOR_STORE_TRUNCATE_ON_INGEST = True
 
@@ -229,22 +218,6 @@ FK_ADJACENCY_TABLE_NAME    = "fk_adjacency"
 FK_MAX_HOP_DEPTH           = 2
 FK_BRIDGE_INJECTION_ENABLED = True
 FK_MAX_INJECTED_COLS       = 5
-
-# -----------------------------------------------------------------------------
-# Embedding dimensions — driven by ENCODER_MODE
-# -----------------------------------------------------------------------------
-RELGT_EMBEDDING_DIM      = 256
-LIGHT_TEXT_EMBEDDING_DIM = 256
-MINILM_EMBEDDING_DIM     = 384
-HYBRID_EMBEDDING_DIM     = MINILM_EMBEDDING_DIM + RELGT_EMBEDDING_DIM  # 640
-
-_ENCODER_DIM_MAP = {
-    "relgt_only": RELGT_EMBEDDING_DIM,
-    "light_text": LIGHT_TEXT_EMBEDDING_DIM,
-    "hybrid":     HYBRID_EMBEDDING_DIM,
-    "ensemble":   LIGHT_TEXT_EMBEDDING_DIM,
-}
-VECTOR_DIM = _ENCODER_DIM_MAP[ENCODER_MODE]
 
 # -----------------------------------------------------------------------------
 # Semantic type inference
@@ -269,14 +242,6 @@ SENSITIVE_PATTERNS  = [
 TABLE_NAME_EMBED_DIM  = 64
 MAX_TABLES            = 500
 NUM_TABLES            = MAX_TABLES   # alias used by schema/simulate_schema.py
-
-# -----------------------------------------------------------------------------
-# RELGT Encoder
-# -----------------------------------------------------------------------------
-RELGT_HIDDEN_DIM    = 128
-RELGT_NUM_LAYERS    = 3
-RELGT_OUTPUT_DIM    = RELGT_EMBEDDING_DIM
-RELGT_FK_EDGE_WEIGHT = 3.0   # FK cross-table edges weighted 3x sibling edges before normalisation
 
 
 # -----------------------------------------------------------------------------
@@ -335,31 +300,6 @@ def scaled_batch_size(base: int, per_gb: int = 8, cap: int = 256) -> int:
 _RESOLVED_DEVICE = resolve_device()
 
 # -----------------------------------------------------------------------------
-# MiniLM Encoder
-# -----------------------------------------------------------------------------
-MINILM_MODEL_NAME         = "all-MiniLM-L6-v2"
-MINILM_SENTENCE_TEMPLATE  = "{col_name} {table_name} {semantic_type}"
-MINILM_BATCH_SIZE         = 64
-MINILM_DEVICE             = _RESOLVED_DEVICE
-
-# -----------------------------------------------------------------------------
-# Light Text Encoder
-# -----------------------------------------------------------------------------
-LIGHT_TEXT_SENTENCE_TEMPLATE  = "{col_name} {table_name} {semantic_type}"
-LIGHT_TEXT_TFIDF_MAX_FEATURES = 512
-LIGHT_TEXT_TFIDF_NGRAM_RANGE  = (1, 2)
-LIGHT_TEXT_SVD_COMPONENTS     = LIGHT_TEXT_EMBEDDING_DIM
-LIGHT_TEXT_CHAR_SPLIT         = True
-
-# -----------------------------------------------------------------------------
-# Ensemble Retrieval (RRF)
-# -----------------------------------------------------------------------------
-ENSEMBLE_RRF_K                = 60
-ENSEMBLE_LIGHT_TEXT_WEIGHT    = 1.0
-ENSEMBLE_HYBRID_WEIGHT        = 1.8
-ENSEMBLE_CANDIDATES_PER_STORE = 60
-
-# -----------------------------------------------------------------------------
 # Query pipeline
 # -----------------------------------------------------------------------------
 TOP_K      = 15
@@ -374,23 +314,10 @@ COL_ID_IDX_PATH = "schema/col_id_to_idx.pkl"
 # -----------------------------------------------------------------------------
 # Evaluation
 # -----------------------------------------------------------------------------
-_ENCODER_LABEL_MAP = {
-    "relgt_only": "POC Run 1 — RELGT structural only (256-dim)",
-    "light_text": "POC Run 2 — Light Text TF-IDF+SVD (256-dim)",
-    "hybrid":     "POC Run 3 — MiniLM + RELGT Hybrid (640-dim)",
-    "ensemble":   "POC Run 4 — Ensemble Light Text + Hybrid + RRF",
-}
-POC_LABEL      = _ENCODER_LABEL_MAP[ENCODER_MODE]
 
 # -----------------------------------------------------------------------------
 # Validation
 # -----------------------------------------------------------------------------
-_VALID_ENCODER_MODES = {"relgt_only", "light_text", "hybrid", "ensemble"}
-if ENCODER_MODE not in _VALID_ENCODER_MODES:
-    raise ValueError(
-        f"config.py: ENCODER_MODE='{ENCODER_MODE}' is invalid. "
-        f"Must be one of: {_VALID_ENCODER_MODES}"
-    )
 
 # -----------------------------------------------------------------------------
 # NL Simplifier — Layer 0
@@ -615,14 +542,20 @@ GRAPH_TABLE_SENTENCE_TEMPLATE  = "{table_name}"
 
 GRAPH_RETRIEVAL_ENABLED   = True
 GRAPH_SEED_TOP_K          = 12
-GRAPH_EXPAND_HOPS         = 2
-GRAPH_EXPAND_MAX_NODES    = 40
-GRAPH_HOP_DECAY           = 0.6
+
+# --- WP5: Personalized PageRank expansion (replaces hop-decay BFS) ---
+# The full source edge list becomes a row-normalized transition matrix; seed
+# similarities form the restart vector; PPR propagates relevance. Row normalization
+# IS the hub treatment (high-degree nodes dilute), so the old hub-degree cap is gone.
+GRAPH_PPR_DAMPING         = 0.85    # d in p = (1-d)·p0 + d·Pᵀp
+GRAPH_PPR_TOL             = 1e-6    # L1 convergence tolerance
+GRAPH_PPR_MAX_ITERS       = 50      # iteration cap (milliseconds at this graph size)
+GRAPH_PPR_MAX_NODES       = 40      # visited-node budget (was GRAPH_EXPAND_MAX_NODES)
+GRAPH_CHUNK_SCORE_FACTOR  = 0.6     # chunk safety-net score = parent_score * this
 
 GRAPH_GNN_ENABLED         = False
 
 # --- Phase 4 retrieval tuning (regression fixes) ---
-GRAPH_HUB_DEGREE_CAP        = 30    # do not expand THROUGH nodes with degree > this (hub guard)
 GRAPH_SIBLING_SCORE_FACTOR  = 0.5   # sibling score = min(expanded_scores) * this
 GRAPH_SIBLING_MAX_PER_TABLE = 6     # cap sibling columns added per seed table
 GRAPH_SINGLE_TABLE_SIM      = 0.9   # top-seed sim that triggers single-table short-circuit
@@ -648,14 +581,41 @@ GRAPH_LINK_NAME_STOPWORDS = {
 # =============================================================================
 
 BIENCODER_ENABLED      = True
-BIENCODER_MODEL        = "BAAI/bge-large-en-v1.5"
+BIENCODER_MODEL        = "BAAI/bge-m3"   # WP3: unified encoder (dense + learned sparse)
 BIENCODER_DIM          = 1024
 BIENCODER_DEVICE       = _RESOLVED_DEVICE
 BIENCODER_BATCH_SIZE   = 32
-BIENCODER_QUERY_PREFIX   = "Represent this sentence for searching relevant passages: "
+# M3 requires NO instruction prefix (unlike bge-large, which needed a query prompt) —
+# query and passage are encoded verbatim so their vectors stay in the same space (WP3).
+BIENCODER_QUERY_PREFIX   = ""
 BIENCODER_PASSAGE_PREFIX = ""
 BIENCODER_CANDIDATE_COLS   = 80
 BIENCODER_CANDIDATE_TABLES = 10
+
+# =============================================================================
+# TABLE-FIRST PRIOR (WP4) — table affinity as a soft prior on column scores.
+# The dense query vector is ANN'd against table_embeddings_v2 (top-M); each column
+# candidate inherits its table's similarity as a 6th ranked fusion signal and as an
+# additive blend in retrieval_v2's first stage. Soft only — NEVER hard-filter columns
+# to the top-M tables (that silently kills rare-table recall). WP6 tunes BETA.
+# =============================================================================
+TABLE_PRIOR_TOP_M = 10
+TABLE_PRIOR_BETA  = 0.3
+
+# =============================================================================
+# WEIGHTED FUSION (WP6) — per-signal weights for the RRF merger.
+# score(d) = Σ_s w_s / (k + rank_s(d)). Identity (all 1.0) == the pre-WP6 unweighted
+# ranking bit-for-bit. scripts/tune_fusion_weights.py grid-searches these against the
+# golden set; the human commits the tuned dict here (the script never writes config).
+# =============================================================================
+FUSION_WEIGHTS = {
+    "dense":       1.0,
+    "sparse":      1.0,
+    "subgraph":    1.0,
+    "fk":          1.0,
+    "value":       1.0,
+    "table_prior": 1.0,
+}
 
 # =============================================================================
 # RERANKER  (cross-encoder — final stage)
@@ -763,35 +723,15 @@ IR_JOIN_FREE_ENABLED = True   # SLM omits joins[]; sql_builder derives from fk_a
 
 NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
-# Q-7: answer canonical result shapes (empty / single scalar / single row) with a
-# deterministic template instead of an SLM call. Multi-row results still use the SLM.
-NL_TEMPLATE_ENABLED    = _os.environ.get(
-    "VEDA_NL_TEMPLATE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # =============================================================================
-# PRECOMPUTE CONSUMPTION FLAGS (Track 4 / P6–P7) — query-side read halves.
-# All default OFF so the default query path is byte-identical to pre-precompute;
-# flip on ONE at a time during the live parity gate and diff latency histograms.
-# Every flag is env-overridable (VEDA_<FLAG>=1|true|on) so the parity rollout is a
-# deploy-env change, not a code edit + redeploy per flip (review Finding 3). They
-# are also bridged into Django settings (apps.core.settings_bridge).
+# WP7: the Track-4 precompute consumption flags (_env_flag + the seven toggles and
+# NL_TEMPLATE_ENABLED) were removed — this plan's fresh ingestion IS the cutover, so
+# precompute is now THE path (not a parity-gated dual). At each former read site the
+# precompute is unconditional; the genuine resilience fallbacks that remain (Redis→
+# Postgres value resolution, precompiled-then-live join paths, template-then-SLM
+# answers) are the design, not flags.
 # =============================================================================
-def _env_flag(name: str, default: bool) -> bool:
-    raw = _os.environ.get(f"VEDA_{name}")
-    if raw is None or raw == "":
-        return default
-    return raw.strip().lower() in ("1", "true", "yes", "on")
-
-BM25_PERSISTED_INDEX_ENABLED = _env_flag("BM25_PERSISTED_INDEX_ENABLED", False)  # Q-2: load persisted BM25 index, skip warm fit()
-ENRICHMENT_INDEX_ENABLED     = _env_flag("ENRICHMENT_INDEX_ENABLED", False)      # Q-3: union merged enrichment index into enrich()
-JOIN_PATHS_ENABLED           = _env_flag("JOIN_PATHS_ENABLED", False)            # Q-9: consult precompiled join paths for reachability
-VALUE_MIRROR_ENABLED         = _env_flag("VALUE_MIRROR_ENABLED", False)          # Q-5: Redis-first value resolution, Postgres fallback
-SUBSTRATE_SIGNALS_ENABLED    = _env_flag("SUBSTRATE_SIGNALS_ENABLED", False)     # Q-1: FK signals from substrate, not live info_schema
-RERANK_DOCS_ENABLED          = _env_flag("RERANK_DOCS_ENABLED", False)           # Q-4: precomputed rerank text per candidate
-FAST_PATH_EXPANSION_ENABLED  = _env_flag("FAST_PATH_EXPANSION_ENABLED", False)   # Q-6: widened fast-path templates from compile step
-
-# RELGT in hybrid embedding (always True in merged branch)
-RELGT_IN_HYBRID = True
 
 # Retrieval V2 — off by default, enable when BGE indexed
 RETRIEVAL_V2_ENABLED = _os.environ.get("RETRIEVAL_V2_ENABLED", "true").lower() == "true"
@@ -914,11 +854,17 @@ CONCEPT_GRAPH_CONCEPTS = ["PERSON", "AMOUNT", "DATE", "METRIC"]
 # --- L3: Retrieval (4-signal RRF + cross-encoder) ---
 
 # Signal 1: BGE-M3 semantic
-# Unified on bge-large-en-v1.5 — the SAME model BIENCODER_MODEL uses for the column
-# store (1024-dim), so query encoder and stored embeddings share one vector space.
-# (Was "BAAI/bge-m3", which isn't in the local HF cache → offline load failed.)
-BGE_MODEL_NAME = "BAAI/bge-large-en-v1.5"
+# Unified on BAAI/bge-m3 (WP3): ONE model produces the 1024-dim dense vectors for
+# columns, tables, graph nodes AND document chunks, plus the learned-sparse weights
+# that replace BM25 (Signal 2). Query encoder and every stored embedding share one
+# vector space. Weights are baked into the image at build time (local_files_only).
+BGE_MODEL_NAME = "BAAI/bge-m3"
 BGE_DEVICE = _RESOLVED_DEVICE
+
+# Stamp refused at ingestion resume when the persisted model id differs — a silent
+# model swap between resume runs would mix incompatible embedding spaces (WP3, replaces
+# the old ENCODER_MODE resume guard).
+EMBEDDING_MODEL_ID = "bge-m3"
 
 # Schema-grounding gate: a query concept is "grounded" if its best cosine to any
 # column/table embedding is >= this floor. Concepts below it (e.g. "AML risk score"
@@ -1273,6 +1219,19 @@ DOMAIN_SYNONYMS_FILE = artifact_path("veda_domain_synonyms.json")
 CONCEPT_GRAPH_FILE = artifact_path("veda_concept_graph.json")
 RELATIONSHIP_GRAPH_FILE = artifact_path("veda_relationship_graph.json")
 PROFILING_FILE = artifact_path("veda_profiling.json")
+
+# ── Compiled deterministic fast-path registries (semantic/compile_semantic_layer) ──
+# Built by compile_all() from the semantic model; read by semantic/registry.py and
+# ingestion/unified_graph_builder.py. Historically these four lived (unscoped) in
+# veda_core/semantic/ and ignored artifact scoping entirely — the one set of
+# artifacts that never isolated per source, so a second source's compile silently
+# clobbered the first. Now routed through artifact_path() like every other derived
+# artifact: unscoped → data/<name> (byte-identical to legacy flat behaviour, just
+# under data/ instead of semantic/), scoped → data/<tenant>/<source>/<version>/<name>.
+CONCEPTS_FILE   = artifact_path("concepts.json")
+DIMENSIONS_FILE = artifact_path("dimensions.json")
+METRICS_FILE    = artifact_path("metrics.json")
+MANIFEST_FILE   = artifact_path("MANIFEST.json")
 
 # ── Unified Knowledge Graph (fuses FK + concept + semantic + synonyms into one) ──
 # Built by ingestion/unified_graph_builder.py; queried by graph/query_graph.py.

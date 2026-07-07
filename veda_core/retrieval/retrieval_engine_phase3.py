@@ -37,7 +37,7 @@ from .semantic_search import SemanticSearchEngine
 from .intent_boosting import IntentBooster
 from .adaptive_cutoff import AdaptiveCutoff
 from .retrieval_cache import RetrievalCache
-from .bm25_ranker import BM25Ranker
+from .sparse_ranker import SparseRanker
 from .signal_builder import SignalBuilder
 from .rrf_merger import RRFMerger
 
@@ -55,7 +55,7 @@ class RetrievalResult:
 
     # Signal scores (for debugging)
     semantic_score: float = 0.0
-    bm25_score: float = 0.0
+    sparse_score: float = 0.0
     subgraph_score: float = 0.0
     fk_path_score: float = 0.0
     value_index_score: float = 0.0
@@ -113,7 +113,7 @@ class RetrievalEnginePhase3:
         self.semantic_model = {}
         self.enricher = None
         self.semantic_searcher = None
-        self.bm25_ranker = None
+        self.sparse_ranker = None
         self.signal_builder = None
         self.intent_booster = None
         self.rrf_merger = None
@@ -170,25 +170,24 @@ class RetrievalEnginePhase3:
                 logger.error(f"✗ Semantic search init failed: {e}")
                 self.semantic_searcher = None
 
-        logger.info("\n[4/8] Initializing BM25 ranker...")
-        self.bm25_ranker = None
-        # Q-2: load the persisted BM25 index (built at ingestion) instead of re-fitting
-        # tokenization + IDF on every process warm. Scores are identical. Flag-gated;
-        # falls back to a live fit() when the index is absent or loading fails.
+        logger.info("\n[4/8] Initializing learned-sparse ranker (Signal 2)...")
+        # WP3: BGE-M3 learned-sparse replaces BM25. Warm-load the source's persisted
+        # sparse rows (column_sparse_v1) and build the in-memory inverted index; fall
+        # back to encoding retrieval_documents in-memory when the store is empty
+        # (dev / not-yet-ingested).
+        self.sparse_ranker = SparseRanker()
+        _loaded = 0
         try:
-            from config import BM25_PERSISTED_INDEX_ENABLED
-            if BM25_PERSISTED_INDEX_ENABLED:
-                from ingestion.bm25_index import load_bm25_index
-                self.bm25_ranker = load_bm25_index()
-                if self.bm25_ranker is not None:
-                    logger.info("✓ BM25 ranker loaded from persisted index")
+            from veda_core import context
+            _ctx = context.try_current()
+            _sids = [str(_ctx.source_id)] if _ctx is not None else []
+            _loaded = self.sparse_ranker.warm_from_store(_sids)
         except Exception as e:
-            logger.warning(f"BM25 persisted-index load failed ({e}); falling back to fit()")
-            self.bm25_ranker = None
-        if self.bm25_ranker is None:
-            self.bm25_ranker = BM25Ranker()
-            self.bm25_ranker.fit(self.semantic_model)
-        logger.info("✓ BM25 ranker ready")
+            logger.warning(f"sparse warm-load failed ({e}); falling back to fit()")
+            _loaded = 0
+        if not _loaded:
+            self.sparse_ranker.fit(self.semantic_model)
+        logger.info("✓ Sparse ranker ready")
 
         logger.info("\n[5/8] Initializing signal builder...")
         self.signal_builder = SignalBuilder()
@@ -254,7 +253,7 @@ class RetrievalEnginePhase3:
         # STEP 2: CHECK CACHE
         if use_cache and self.cache:
             logger.info("[STEP 2/7] Checking cache...")
-            cached_results = self.cache.get(enriched_tokens)
+            cached_results = self.cache.get(enriched_tokens, raw_query=query)
             if cached_results:
                 logger.info(f"✓ Cache hit! Returning {len(cached_results)} results")
                 results = self._results_from_tuples(cached_results)
@@ -267,17 +266,20 @@ class RetrievalEnginePhase3:
         # STEP 3: 5-SIGNAL RETRIEVAL
         logger.info("\n[STEP 3/7] 5-Signal Retrieval...")
 
-        # Signal 1: BGE-M3 semantic
+        # Signal 1: BGE-M3 semantic — encodes the RAW query (WP1). Enriched tokens
+        # feed only the sparse (Signal 2) and value (Signal 5) signals below.
         signal1_semantic = []
         if self.semantic_searcher:
             logger.info("  - Signal 1: BGE-M3 semantic search (1024-dim)...")
-            signal1_semantic = self.semantic_searcher.search(enriched_tokens, k=50)
+            signal1_semantic = self.semantic_searcher.search(query, k=50)
             logger.info(f"    ✓ {len(signal1_semantic)} results")
 
-        # Signal 2: BM25 keyword
-        logger.info("  - Signal 2: BM25 keyword matching (enriched)...")
-        signal2_bm25 = self.bm25_ranker.rank(query, top_k=50) or []
-        logger.info(f"    ✓ {len(signal2_bm25)} results")
+        # Signal 2: learned-sparse (BGE-M3) — raw query + enriched expansions, max-pooled.
+        # This is where enrichment now lives (Signal 1 encodes the raw query only, WP1).
+        logger.info("  - Signal 2: learned-sparse (M3) matching...")
+        signal2_sparse = self.sparse_ranker.rank(
+            query, enriched_tokens=enriched_tokens, top_k=50) or []
+        logger.info(f"    ✓ {len(signal2_sparse)} results")
 
         # Signal 3: FK subgraph
         logger.info("  - Signal 3: FK subgraph signals...")
@@ -322,14 +324,38 @@ class RetrievalEnginePhase3:
             logger.warning(f"    value signal skipped: {_e}")
         logger.info(f"    ✓ {len(signal5_value_signals)} signals")
 
+        # Signal 6: table-first prior (WP4) — dense table ANN ⊕ sparse table scores,
+        # max per table (soft prior on column scores; no hard filter).
+        logger.info("  - Signal 6: table-first prior...")
+        table_prior = {}
+        try:
+            from query.retrieval_v2 import table_prior_scores
+            from veda_core import context as _context
+            _ctx = _context.try_current()
+            _sids = [str(_ctx.source_id)] if _ctx is not None else None
+            table_prior = dict(table_prior_scores(query, source_ids=_sids))  # dense, [0,1]
+        except Exception as _e:
+            logger.warning(f"    table prior (dense) skipped: {_e}")
+        try:
+            _sp = self.sparse_ranker.table_scores(query, enriched_tokens=enriched_tokens)
+            if _sp:
+                _mx = max(_sp.values()) or 1.0
+                for _tn, _sc in _sp.items():   # normalize sparse to [0,1] before max-combine
+                    _norm = float(_sc) / _mx
+                    table_prior[_tn] = max(table_prior.get(_tn, 0.0), _norm)
+        except Exception:
+            pass
+        logger.info(f"    ✓ {len(table_prior)} tables")
+
         # STEP 4: RRF FUSION
-        logger.info("\n[STEP 4/7] RRF Fusion (5-signal)...")
+        logger.info("\n[STEP 4/7] RRF Fusion (6-signal)...")
         fused = self.rrf_merger.merge(
             signal1_semantic,
-            signal2_bm25,
+            signal2_sparse,
             signal4_fk_signals,
             signal3_subgraph_signals,
             signal5_value_signals,
+            table_prior_signals=table_prior,
             top_k=50
         )
         logger.info(f"✓ Merged {len(fused)} candidates")
@@ -347,7 +373,7 @@ class RetrievalEnginePhase3:
         # STEP 7: CACHE RESULTS
         if use_cache and self.cache:
             logger.info("\n[STEP 7/7] Caching results...")
-            self.cache.set(enriched_tokens, cutoff_results)
+            self.cache.set(enriched_tokens, cutoff_results, raw_query=query)
             logger.info(f"✓ Cached {len(cutoff_results)} results")
 
         # CONVERT TO RESULT OBJECTS

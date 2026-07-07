@@ -1,5 +1,5 @@
-# inference/ (ASGI query/retrieval service — warm-loads BGE-M3, reranker, MiniLM,
-# the 5-signal engine, and veda_core) — pip install -r requirements/inference.txt
+# inference/ (ASGI query/retrieval service — warm-loads BGE-M3 (dense + sparse),
+# the reranker, the 5-signal engine, and veda_core) — pip install -r requirements/inference.txt
 #
 # ML deps carried over verbatim from the POC's requirements.txt, plus the ASGI/serving
 # stack needed to run inference as a standalone process (migration_plan.md §1.3, §8).
@@ -9,6 +9,8 @@ torch
 transformers
 torch-geometric
 sentence-transformers
+FlagEmbedding==1.2.10   # WP3: BGE-M3 dense + learned-sparse (pulls peft)
+scipy==1.11.4           # WP5: PPR transition matrix (scipy.sparse CSR)
 scikit-learn
 dateparser
 

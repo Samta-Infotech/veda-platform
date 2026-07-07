@@ -1,24 +1,23 @@
 """Pre-pull query-time model weights into the model-cache volume (migration_plan.md §9).
 
 Run once (online) so the inference container can warm-load offline (HF_HUB_OFFLINE=1).
-Downloads into HF_HOME=/models. Models are the ones config.py actually loads:
-  BAAI/bge-large-en-v1.5   (biencoder + Signal-1 BGE, 1024-dim)
-  BAAI/bge-reranker-v2-m3  (cross-encoder reranker)
-  all-MiniLM-L6-v2         (ensemble hybrid text encoder, 384-dim)
+Downloads into HF_HOME=/models. WP3 unified on ONE embedding model:
+  BAAI/bge-m3              (unified dense + learned-sparse encoder, 1024-dim)
+  BAAI/bge-reranker-v2-m3  (cross-encoder reranker — unchanged)
+
+bge-large-en-v1.5 and all-MiniLM-L6-v2 are no longer used and are NOT baked.
 """
 import sys
 
-from sentence_transformers import CrossEncoder, SentenceTransformer
+from sentence_transformers import CrossEncoder
+from FlagEmbedding import BGEM3FlagModel
 
-BI = "BAAI/bge-large-en-v1.5"
+M3 = "BAAI/bge-m3"
 RERANK = "BAAI/bge-reranker-v2-m3"
-MINILM = "all-MiniLM-L6-v2"
 
-print(f"[download] {BI} ...", flush=True)
-SentenceTransformer(BI)
-print(f"[download] {MINILM} ...", flush=True)
-SentenceTransformer(MINILM)
+print(f"[download] {M3} ...", flush=True)
+BGEM3FlagModel(M3, use_fp16=False)   # pulls dense + sparse heads into the cache
 print(f"[download] {RERANK} ...", flush=True)
 CrossEncoder(RERANK)
-print("[download] all three models cached OK", flush=True)
+print("[download] models cached OK", flush=True)
 sys.exit(0)

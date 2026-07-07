@@ -100,17 +100,15 @@ class QueryEnricher:
         except FileNotFoundError:
             logger.warning(f"Semantic model not found at {self.data_dir}/veda_semantic_model.json")
 
-        # Q-3: prefer the precomputed merged enrichment index (one pre-inverted
-        # artifact built at ingestion). Flag-gated; the four individual files above
-        # remain the fallback so enrichment still works when the index is absent.
+        # WP7: load the precomputed merged enrichment index unconditionally (one
+        # pre-inverted artifact built at ingestion). The per-file parse above remains a
+        # resilience fallback when the index is absent.
         try:
-            from config import ENRICHMENT_INDEX_ENABLED
-            if ENRICHMENT_INDEX_ENABLED:
-                from ingestion.enrichment_index import load_enrichment_index
-                merged = load_enrichment_index()
-                if merged:
-                    self._merged_index = merged
-                    logger.info(f"✓ Loaded merged enrichment index ({len(merged)} terms)")
+            from ingestion.enrichment_index import load_enrichment_index
+            merged = load_enrichment_index()
+            if merged:
+                self._merged_index = merged
+                logger.info(f"✓ Loaded merged enrichment index ({len(merged)} terms)")
         except Exception as e:
             logger.warning(f"Merged enrichment index load failed ({e}); using individual files")
 

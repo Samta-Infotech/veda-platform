@@ -55,28 +55,15 @@ _QVEC_CACHE = {}
 
 
 def _get_bge():
-    """Lazy-load one BGE-M3 (offline). Reused for table routing + verified cache.
+    """The ONE dense encoder (BGE-M3), reused for table routing + verified cache.
 
-    Delegates to the ingestion biencoder singleton when it's the SAME model/device — the query
-    path preloads bge-large via `ingestion.biencoder._get_biencoder`, so funnelling here means
-    the whole process holds ONE ~1.3GB copy instead of two."""
+    WP3: returns the shared m3_encoder dense facade — the SAME underlying model that
+    produces the stored column/table/graph/chunk vectors AND the sparse weights, so the
+    whole process holds exactly one copy and query/passage vectors share one space."""
     global _BGE
     if _BGE is None:
-        from config import BGE_MODEL_NAME, BIENCODER_MODEL, BGE_DEVICE
-        # Share the ingestion biencoder singleton whenever it's the SAME model — one ~1.3GB
-        # copy instead of two. (Was gated on device=="cpu"; the shared instance already sits
-        # on the resolved device, so the gate is unnecessary and blocked GPU sharing.)
-        if BGE_MODEL_NAME == BIENCODER_MODEL:
-            try:
-                from ingestion.biencoder import _get_biencoder
-                shared = _get_biencoder()
-                if shared is not None:
-                    _BGE = shared
-                    return _BGE
-            except Exception:
-                pass   # fall back to an own load
-        from sentence_transformers import SentenceTransformer
-        _BGE = SentenceTransformer(BGE_MODEL_NAME, device=BGE_DEVICE, local_files_only=True)
+        from ingestion import m3_encoder
+        _BGE = m3_encoder.get_dense_encoder()
     return _BGE
 
 

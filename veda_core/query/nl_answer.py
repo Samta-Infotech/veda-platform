@@ -89,18 +89,13 @@ def run_nl_answer(
 
     row_count = len(rows)
 
-    # Q-7: canonical shapes (empty / single scalar / single row) are answered
-    # deterministically — skip the SLM round trip entirely (~1–3s saved). Gated so
-    # it can be turned off for parity comparison. Multi-row results still use the SLM.
-    try:
-        from config import NL_TEMPLATE_ENABLED as _NL_TEMPLATE_ENABLED
-    except Exception:
-        _NL_TEMPLATE_ENABLED = True
-    if _NL_TEMPLATE_ENABLED:
-        _tmpl = template_answer(query, columns, rows)
-        if _tmpl is not None:
-            return NLAnswerResult(answer=_tmpl, row_count=row_count,
-                                  duration_ms=round((time.time() - t0) * 1000, 2))
+    # WP7: canonical shapes (empty / single scalar / single row) are answered by template
+    # UNCONDITIONALLY — that IS the design (the SLM handles everything else below). Skips
+    # the SLM round trip (~1–3s) for the common shapes; multi-row results still use the SLM.
+    _tmpl = template_answer(query, columns, rows)
+    if _tmpl is not None:
+        return NLAnswerResult(answer=_tmpl, row_count=row_count,
+                              duration_ms=round((time.time() - t0) * 1000, 2))
 
     sample_rows = rows[:NL_ANSWER_MAX_ROWS]
 

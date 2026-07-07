@@ -121,7 +121,7 @@ def _extract_csv(path: "Path") -> str:
     Each row is rendered as a natural language sentence:
       "project_name: Norm Saratoga | num_stories: 12 | status: active"
 
-    This preserves column context so MiniLM can match queries like
+    This preserves column context so the encoder can match queries like
     "number of stories in project Norm Saratoga" against the row text.
 
     No external library needed — stdlib csv only.

@@ -56,7 +56,7 @@ _LAYER_STAGE_TO_ROW = {
     "table_metadata": "semantic_types", "value_profiling": "value_profiling",
     "reg_graph": "embeddings", "join_paths": "embeddings",
     "graph_persist": "embeddings", "graph_embed": "embeddings",
-    "bm25_index": "embeddings", "enrichment_index": "embeddings",
+    "sparse_index": "embeddings", "enrichment_index": "embeddings",
     "rerank_docs": "embeddings",
     # BGE biencoder is the live vector store (column_embeddings_v2) now that the
     # ensemble encoder + _lt/_hybrid store were removed — map it to the vector_store row.
@@ -91,9 +91,22 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
     from veda_core import config
     from veda_core.context import RequestContext, set_context
 
-    set_context(RequestContext(source_id=int(source_id or 1), tenant=str(tenant)))
+    # A missing source_id used to silently default to 1 — which stamped every
+    # internal-DB row (embeddings, graph_nodes, …) and the request context as
+    # source 1, and skipped the Source row update, so a job for another source
+    # masqueraded as source 1. Fail loudly instead: the whole task assumes a real
+    # Source row (job.source / as_engine_env), so None was never valid anyway.
+    if source_id is None:
+        raise ValueError(
+            "task_ingest_source requires an explicit source_id; refusing to "
+            "default to source 1 (that mislabels the job and its artifacts)."
+        )
+    set_context(RequestContext(source_id=int(source_id), tenant=str(tenant)))
 
-    encoder_mode = getattr(config, "ENCODER_MODE", "ensemble")
+    # WP3: stamp the embedding model id. The IngestionJob.encoder_mode
+    # column is reused to hold it — same purpose: refuse a silent model change between
+    # resume runs, which would mix incompatible embedding spaces.
+    encoder_mode = getattr(config, "EMBEDDING_MODEL_ID", "bge-m3")
     job = IngestionJob.objects.create(
         source_id=source_id, tenant=tenant, status=JobStatus.RUNNING,
         encoder_mode=encoder_mode, started_at=timezone.now(),
@@ -104,8 +117,9 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         for order, name, _q in STAGE_ORDER
     }
 
-    # ENCODER_MODE guard (§7): refuse if the requested mode differs from the persisted
-    # one without an explicit force flag (re-ingestion required, per §12).
+    # Embedding-model guard (§7): refuse if the model id differs from the persisted one
+    # without an explicit force flag (re-ingestion required — a changed embedding space
+    # invalidates every stored vector, per §12).
     prev = job.source.ingestion_jobs.exclude(pk=job.pk).filter(
         status=JobStatus.SUCCESS).order_by("-id").first()
     if prev and prev.encoder_mode and prev.encoder_mode != encoder_mode and not force:
@@ -113,7 +127,7 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         job.finished_at = timezone.now()
         job.save(update_fields=["status", "finished_at"])
         raise RuntimeError(
-            f"ENCODER_MODE changed {prev.encoder_mode!r}→{encoder_mode!r}; re-ingestion "
+            f"embedding model changed {prev.encoder_mode!r}→{encoder_mode!r}; re-ingestion "
             "required — pass force=True (§12)."
         )
 
@@ -169,7 +183,7 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         # when the query tier is also scope-aware (P5) do artifacts move off the flat
         # data/ paths. Off by default so single-source behaviour stays byte-identical.
         if os.environ.get("VEDA_ARTIFACT_SCOPING") == "1":
-            sub_env["VEDA_ARTIFACT_SCOPE"] = f"{tenant}/{source_id or 'primary_db'}/{job.pk}"
+            sub_env["VEDA_ARTIFACT_SCOPE"] = f"{tenant}/{source_id}/{job.pk}"
         if do_resume:
             sub_env["VEDA_RESUME"] = "1"
             job.stages.filter(name__in=("embeddings", "derived_language")).update(

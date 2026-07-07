@@ -200,10 +200,9 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     """Raw pgvector cosine ANN over the HNSW index for `mode`'s table (§6.4),
     scoped to the current (source, tenant)."""
     source_id, tenant = _scope()
-    table = {
-        "relgt_only": "column_embeddings", "light_text": "column_embeddings_lt",
-        "hybrid": "column_embeddings_hybrid", "bge": "column_embeddings_bge",
-    }.get(mode, "column_embeddings_bge")
+    # WP3: one embedding space (BGE-M3) → one store. The legacy relgt/light_text/hybrid
+    # modes and their column_embeddings/_lt/_hybrid tables were removed.
+    table = "column_embeddings_bge"
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     # Pin hnsw.ef_search to the §7.1a-tuned value (recall@k=1.0 on the home-schema
     # fixtures) so the served ANN ordering matches exact cosine — the shipped index IS

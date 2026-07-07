@@ -9,22 +9,16 @@
 #   - Resolves JOIN paths from FK relationships between top-K columns
 #   - Returns SemanticLayerResult consumed by L3 (SLM)
 #
-# Encoding strategy — selected by config.ENCODER_MODE:
+# WP3: the legacy multi-encoder strategies were removed — retrieval runs on the one
+# BGE-M3 dense + learned-sparse spine. This module now provides only FK-bridge
+# injection and JOIN-path resolution over the retrieved columns.
 #
-#   "relgt_only"  — structural keyword projection → 256-dim (POC Run 1)
-#   "light_text"  — TF-IDF + SVD using fitted ingestion models → 256-dim (POC Run 2)
-#   "hybrid"      — MiniLM(384) + RELGT(256) concat → 640-dim (POC Run 3)
-#   "ensemble"    — both light_text AND hybrid encoded independently,
-#                   top-K fetched from both stores, merged via RRF (POC Run 4)
-#
-# FK Bridge Injection (all modes):
+# FK Bridge Injection:
 #   After cosine search, _inject_bridge_columns() queries the FK adjacency
 #   store to find bridge PKs needed to JOIN the retrieved tables together.
 #   These are injected into top_k_results before JOIN resolution.
 #   Controlled by FK_BRIDGE_INJECTION_ENABLED in config.py.
 #
-# ENCODER_MODE in config.py is the single switch that keeps ingestion and
-# query encoding in sync.
 # =============================================================================
 
 import sys
@@ -37,44 +31,17 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional, Tuple
 
-from ingestion.value_sampler import expand_query_tokens
+# WP3: the legacy ensemble encode path (retrieve_top_k / LT / hybrid, MiniLM/RELGT/
+# light-text config) has been removed — this module now provides only the FK-bridge
+# injection + JOIN-path resolution the live retrieval path (retrieval_select) consumes.
 from ingestion.vector_store import (
-    retrieve_top_k,
-    retrieve_top_k_lt,
-    retrieve_top_k_hybrid,
-    retrieve_temporal_cols_for_tables,
-    retrieve_cols_by_name_keywords,
     RetrievalResult,
     get_fk_adjacency,
-    get_display_columns,
     FKEdge,
 )
 from config import (
-    ENCODER_MODE,
-    TOP_K,
-    VECTOR_DIM,
-    SEMANTIC_TYPES,
-    MONETARY_KEYWORDS,
-    METRIC_KEYWORDS,
-    IDENTIFIER_SUFFIXES,
-    RELGT_HIDDEN_DIM,
-    RELGT_OUTPUT_DIM,
-    RELGT_NUM_LAYERS,
-    RELGT_EMBEDDING_DIM,
-    LIGHT_TEXT_SENTENCE_TEMPLATE,
-    LIGHT_TEXT_CHAR_SPLIT,
-    LIGHT_TEXT_EMBEDDING_DIM,
-    MINILM_SENTENCE_TEMPLATE,
-    MINILM_DEVICE,
-    MINILM_EMBEDDING_DIM,
-    HYBRID_EMBEDDING_DIM,
-    ENSEMBLE_RRF_K,
-    ENSEMBLE_LIGHT_TEXT_WEIGHT,
     FK_BRIDGE_INJECTION_ENABLED,
-    FK_MAX_HOP_DEPTH,
     FK_MAX_INJECTED_COLS,
-    ENSEMBLE_HYBRID_WEIGHT,
-    ENSEMBLE_CANDIDATES_PER_STORE,
 )
 from utils.logger import get_logger
 
