@@ -247,21 +247,9 @@ class _EmbeddingMirror(models.Model):
         managed = False
 
 
-class ColumnEmbedding(_EmbeddingMirror):
-    class Meta(_EmbeddingMirror.Meta):
-        db_table = "column_embeddings"  # 256-dim relgt_only / light_text
-
-
-class ColumnEmbeddingLT(_EmbeddingMirror):
-    class Meta(_EmbeddingMirror.Meta):
-        db_table = "column_embeddings_lt"  # 256-dim ensemble light-text
-
-
-class ColumnEmbeddingHybrid(_EmbeddingMirror):
-    class Meta(_EmbeddingMirror.Meta):
-        db_table = "column_embeddings_hybrid"  # 640-dim MiniLM+RELGT
-
-
+# WP3: the legacy relgt/light-text/hybrid embedding mirrors (column_embeddings,
+# column_embeddings_lt, column_embeddings_hybrid) were removed — one embedding space
+# (BGE-M3) means one store. Migration 0006 drops the physical tables.
 class ColumnEmbeddingBGE(_EmbeddingMirror):
     class Meta(_EmbeddingMirror.Meta):
         db_table = "column_embeddings_bge"  # 1024-dim BGE-M3 (5-signal spine)

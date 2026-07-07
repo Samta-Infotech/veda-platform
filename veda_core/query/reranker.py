@@ -92,67 +92,49 @@ def _columns_of_table(table_id: str) -> List[str]:
         return []
 
 
+_RERANK_DOCS = None
+_RERANK_DOCS_LOADED = False
+
+
+def _get_rerank_docs() -> dict:
+    """The precomputed rerank-doc artifact (built at ingestion). WP7: this is the ONLY
+    source of cross-encoder text — the per-query runtime assembly was removed. Fail loud
+    at first use if the artifact is missing (that means ingestion is incomplete)."""
+    global _RERANK_DOCS, _RERANK_DOCS_LOADED
+    if not _RERANK_DOCS_LOADED:
+        from ingestion.rerank_docs import load_rerank_docs
+        _RERANK_DOCS = load_rerank_docs() or {}
+        _RERANK_DOCS_LOADED = True
+        if not _RERANK_DOCS:
+            raise RuntimeError(
+                "rerank_docs artifact missing — the cross-encoder text is precomputed at "
+                "ingestion (WP7). Run ingestion to build it.")
+    return _RERANK_DOCS
+
+
 def _precomputed_rerank_text(item_id, is_table: bool):
-    """Q-4: return the precomputed rerank text for a column/table id, or None (flag off,
-    artifact absent, or id not covered → caller assembles text live)."""
+    """Precomputed rerank text for a column/table id, or None when the id isn't covered."""
     if not item_id:
         return None
-    try:
-        from config import RERANK_DOCS_ENABLED
-        if not RERANK_DOCS_ENABLED:
-            return None
-        from ingestion.rerank_docs import load_rerank_docs
-        docs = load_rerank_docs()
-        if not docs:
-            return None
-        bucket = docs.get("tables" if is_table else "columns", {})
-        return bucket.get(item_id)
-    except Exception:
-        return None
+    bucket = _get_rerank_docs().get("tables" if is_table else "columns", {})
+    return bucket.get(item_id)
 
 
 def _table_text(c: RetrievalResult) -> str:
-    """
-    Describe a table candidate for the cross-encoder.
-    Uses the table name + its column names so the reranker has real content.
-    Without this, table candidates score ~0 from doubled-name text like 'incident incident'.
-    """
-    # Q-4: use the precomputed rerank text (built at ingestion) when available —
-    # avoids the per-query column-name stitch + the SELECT name FROM graph_nodes.
+    """Cross-encoder text for a table candidate — precomputed (WP7), else the bare name."""
     _pre = _precomputed_rerank_text(getattr(c, "table_id", None), is_table=True)
     if _pre is not None:
         return _pre
-    col_names = _columns_of_table(getattr(c, "table_id", None) or "")
-    if col_names:
-        names_str = ", ".join(col_names[:20])
-        return f"{c.table_name}: columns {names_str}"
     return c.table_name or c.col_name or ""
 
 
 def _col_text(c: RetrievalResult, sampled: dict) -> str:
-    """
-    Enriched text for a column candidate: gloss + type + sample values.
-    Uses build_enriched_column_text so the cross-encoder has the same
-    vocabulary that was used at indexing time.
-    """
-    # Q-4: precomputed enriched column text (built at ingestion) when available.
+    """Cross-encoder text for a column candidate — precomputed enriched text (WP7), else
+    the bare name+table. The per-query build_enriched_column_text assembly was removed."""
     _pre = _precomputed_rerank_text(c.col_id, is_table=False)
     if _pre is not None:
         return _pre[:RERANKER_MAX_TEXT_LEN]
-    if not RERANKER_USE_ENRICHED_TEXT:
-        return (c.col_name + " " + (c.table_name or ""))[:RERANKER_MAX_TEXT_LEN]
-    try:
-        from ingestion.column_text import build_enriched_column_text
-        s = sampled.get(c.col_id)
-        return build_enriched_column_text(
-            c.col_name,
-            c.table_name or "",
-            getattr(c, "semantic_type", None) or "",
-            sampled=s,
-            style="minilm",
-        )[:RERANKER_MAX_TEXT_LEN]
-    except Exception:
-        return (c.col_name + " " + (c.table_name or ""))[:RERANKER_MAX_TEXT_LEN]
+    return (c.col_name + " " + (c.table_name or ""))[:RERANKER_MAX_TEXT_LEN]
 
 
 def _apply_cutoff(scored: list, top_n: int, n_candidate_tables: int = 1) -> list:

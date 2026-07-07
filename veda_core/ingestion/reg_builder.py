@@ -36,7 +36,6 @@ from ingestion.semantic_type_inference import (
 from config import (
     SEMANTIC_TYPES,
     TABLE_NAME_EMBED_DIM,
-    RELGT_EMBEDDING_DIM,
 )
 from utils.logger import get_logger
 

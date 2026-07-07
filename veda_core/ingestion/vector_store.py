@@ -1,29 +1,15 @@
 # =============================================================================
 # ingestion/vector_store.py
-# VEDA POC — Step 5: PostgreSQL + pgvector Metadata Store
+# VEDA — metadata stores (FK adjacency, table metadata, column values) + the
+# keyword-match retrieval helper.
 #
-# Responsibility:
-#   - Accepts EncoderResult or EnsembleEncoderResult from relgt_encoder.py
-#   - Creates pgvector table(s) if they do not exist
-#   - Persists embeddings with upsert — safe to re-run
-#   - Creates ivfflat cosine index on each embedding column
-#   - Provides retrieval helpers used by semantic_layer.py (L2)
-#
-# Single-encoder modes (relgt_only, light_text, hybrid):
-#   - Writes to VECTOR_TABLE_NAME (column_embeddings)
-#   - retrieve_top_k() queries that single table
-#
-# Ensemble mode:
-#   - Writes light_text embeddings → VECTOR_TABLE_NAME_LIGHT_TEXT
-#   - Writes hybrid embeddings    → VECTOR_TABLE_NAME_HYBRID
-#   - retrieve_top_k_lt()     queries the light_text table (256-dim)
-#   - retrieve_top_k_hybrid() queries the hybrid table (640-dim)
-#   - semantic_layer.py calls both and merges via RRF
-#
-# In-memory fallback:
-#   - Activates when psycopg2 / pgvector is unavailable
-#   - Two separate in-memory stores for ensemble mode
-#   - Identical retrieval interface — semantic_layer.py sees no difference
+# WP3: the legacy encoder-embedding write path and the ensemble LT/hybrid stores
+# (column_embeddings / _lt / _hybrid) were removed — dense embeddings now live in
+# column_embeddings_v2 (ingestion/biencoder.py, BGE-M3). What remains here:
+#   - store_fk_adjacency / get_fk_adjacency  (the join engine's FK source of truth)
+#   - store_table_metadata / get_display_columns
+#   - retrieve_cols_by_name_keywords         (keyword safety-net over the v2 store)
+#   - RetrievalResult / FKEdge dataclasses consumed across the query tier
 # =============================================================================
 
 import sys
@@ -36,23 +22,10 @@ import numpy as np
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from ingestion.relgt_encoder import (
-    EncoderResult,
-    EnsembleEncoderResult,
-    ColumnEmbedding,
-    run_relgt_encoder,
-)
 from config import (
-    ENCODER_MODE,
-    VECTOR_TABLE_NAME,
-    VECTOR_TABLE_NAME_LIGHT_TEXT,
-    VECTOR_TABLE_NAME_HYBRID,
     VECTOR_STORE_TRUNCATE_ON_INGEST,
-    VECTOR_DIM,
-    LIGHT_TEXT_EMBEDDING_DIM,
-    HYBRID_EMBEDDING_DIM,
     TOP_K,
-    ENSEMBLE_CANDIDATES_PER_STORE,
+    BIENCODER_COL_TABLE,
 )
 from utils.logger import get_logger
 
@@ -70,29 +43,6 @@ from ingestion.db_abstraction import (
 # =============================================================================
 # Output data structures
 # =============================================================================
-
-@dataclass
-class StoreResult:
-    """Result of a single store operation."""
-    rows_written:  int
-    rows_skipped:  int
-    table_name:    str
-    vector_dim:    int
-    index_created: bool
-    backend:       str      # "pgvector" | "in_memory_fallback"
-    duration_sec:  float
-    stats:         dict = field(default_factory=dict)
-
-
-@dataclass
-class EnsembleStoreResult:
-    """Result of an ensemble store — wraps two StoreResults."""
-    lt_result:     StoreResult
-    hybrid_result: StoreResult
-    backend:       str
-    duration_sec:  float
-    stats:         dict = field(default_factory=dict)
-
 
 @dataclass
 class RetrievalResult:
@@ -115,536 +65,6 @@ class RetrievalResult:
 
 _IN_MEMORY_STORE:        List[dict] = []   # single-encoder + ensemble LT
 _IN_MEMORY_STORE_HYBRID: List[dict] = []   # ensemble hybrid only
-
-def _cosine_similarity(a: np.ndarray, b: np.ndarray) -> float:
-    dot = float(np.dot(a, b))
-    na  = float(np.linalg.norm(a))
-    nb  = float(np.linalg.norm(b))
-    if na == 0 or nb == 0:
-        return 0.0
-    return dot / (na * nb)
-
-
-def _store_in_memory_to(
-    store:      List[dict],
-    embeddings: List[ColumnEmbedding],
-    table_name: str,
-    vector_dim: int,
-) -> StoreResult:
-    """Generic in-memory store into the given list."""
-    store.clear()
-    t0 = time.time()
-    for emb in embeddings:
-        store.append({
-            "col_id":        emb.col_id,
-            "col_name":      emb.col_name,
-            "table_id":      emb.table_id,
-            "table_name":    emb.table_name,
-            "semantic_type": emb.semantic_type,
-            "embedding":     emb.embedding.copy(),
-        })
-    return StoreResult(
-        rows_written  = len(embeddings),
-        rows_skipped  = 0,
-        table_name    = table_name,
-        vector_dim    = vector_dim,
-        index_created = False,
-        backend       = "in_memory_fallback",
-        duration_sec  = round(time.time() - t0, 4),
-        stats         = {"total_stored": len(store)},
-    )
-
-
-def _retrieve_from_memory(
-    store:        List[dict],
-    query_vector: np.ndarray,
-    top_k:        int,
-) -> List[RetrievalResult]:
-    """Cosine similarity search over a given in-memory store."""
-    if not store:
-        return []
-    scores = [(  _cosine_similarity(query_vector, row["embedding"]), row)
-              for row in store]
-    scores.sort(key=lambda x: x[0], reverse=True)
-    return [
-        RetrievalResult(
-            col_id        = row["col_id"],
-            col_name      = row["col_name"],
-            table_id      = row["table_id"],
-            table_name    = row["table_name"],
-            semantic_type = row["semantic_type"],
-            similarity    = round(sim, 6),
-            embedding     = row["embedding"],
-        )
-        for sim, row in scores[:top_k]
-    ]
-
-
-# =============================================================================
-# pgvector helpers — generic, table-name and dim parameterised
-# =============================================================================
-
-def _ensure_pgvector_extension(cursor) -> None:
-    cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
-
-
-def _create_table_for(cursor, table_name: str, vector_dim: int) -> None:
-    """Creates a column_embeddings-style table with the given dim."""
-    cursor.execute(f"""
-        CREATE TABLE IF NOT EXISTS {table_name} (
-            col_id        UUID        PRIMARY KEY,
-            table_id      UUID        NOT NULL,
-            col_name      TEXT        NOT NULL,
-            table_name    TEXT        NOT NULL,
-            semantic_type TEXT        NOT NULL,
-            source_id     TEXT        NOT NULL DEFAULT '',
-            embedding     vector({vector_dim})
-        );
-    """)
-    # Migrate tables created before source_id was added to the schema.
-    cursor.execute(f"""
-        ALTER TABLE {table_name}
-        ADD COLUMN IF NOT EXISTS source_id TEXT NOT NULL DEFAULT '';
-    """)
-
-
-def _create_index_for(cursor, table_name: str) -> bool:
-    """Creates ivfflat cosine index. Returns True if created."""
-    cursor.execute(f"SELECT COUNT(*) FROM {table_name};")
-    count = cursor.fetchone()[0]
-    if count < 100:
-        return False
-    cursor.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{table_name}_embedding
-        ON {table_name}
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 10);
-    """)
-    return True
-
-
-def _upsert_to(
-    cursor,
-    table_name: str,
-    embeddings: List[ColumnEmbedding],
-    source_id: str = "",
-) -> Tuple[int, int]:
-    """Upserts embeddings into the given table. Returns (written, skipped)."""
-    written = skipped = 0
-    for emb in embeddings:
-        vec_str = "[" + ",".join(f"{v:.8f}" for v in emb.embedding.tolist()) + "]"
-        try:
-            cursor.execute(f"""
-                INSERT INTO {table_name}
-                    (col_id, table_id, col_name, table_name, semantic_type, source_id, embedding)
-                VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-                ON CONFLICT (col_id) DO UPDATE SET
-                    semantic_type = EXCLUDED.semantic_type,
-                    source_id     = EXCLUDED.source_id,
-                    embedding     = EXCLUDED.embedding;
-            """, (
-                emb.col_id, emb.table_id, emb.col_name,
-                emb.table_name, emb.semantic_type, source_id, vec_str,
-            ))
-            written += 1
-        except Exception as e:
-            skipped += 1
-            if written == 0:
-                raise RuntimeError(f"Failed to upsert col '{emb.col_name}': {e}")
-    return written, skipped
-
-
-def _store_pgvector_to(
-    table_name: str,
-    vector_dim: int,
-    embeddings: List[ColumnEmbedding],
-    source_id: str = "",
-) -> StoreResult:
-    """Stores embeddings into the named pgvector table."""
-    t0   = time.time()
-    conn = _get_connection()
-    try:
-        with conn:
-            with conn.cursor() as cur:
-                _ensure_pgvector_extension(cur)
-                _create_table_for(cur, table_name, vector_dim)
-                if VECTOR_STORE_TRUNCATE_ON_INGEST and source_id:
-                    cur.execute(
-                        f"DELETE FROM {table_name} WHERE source_id = %s;",
-                        (source_id,),
-                    )
-                written, skipped = _upsert_to(cur, table_name, embeddings, source_id)
-                index_created    = _create_index_for(cur, table_name)
-    finally:
-        release_internal_connection(conn)
-
-    return StoreResult(
-        rows_written  = written,
-        rows_skipped  = skipped,
-        table_name    = table_name,
-        vector_dim    = vector_dim,
-        index_created = index_created,
-        backend       = "pgvector",
-        duration_sec  = round(time.time() - t0, 4),
-        stats         = {"total_stored": written},
-    )
-
-
-def _retrieve_pgvector_from(
-    table_name:   str,
-    query_vector: np.ndarray,
-    top_k:        int,
-) -> List[RetrievalResult]:
-    """Cosine similarity search from the named pgvector table."""
-    vec_str = "[" + ",".join(f"{v:.8f}" for v in query_vector.tolist()) + "]"
-    conn    = _get_connection()
-    try:
-        with conn.cursor(cursor_factory=DICT_CURSOR) as cur:
-            cur.execute(f"""
-                SELECT col_id, col_name, table_id, table_name, semantic_type, source_id,
-                       1 - (embedding <=> %s::vector) AS similarity,
-                       embedding::text AS embedding_str
-                FROM {table_name}
-                ORDER BY embedding <=> %s::vector, col_id ASC
-                LIMIT %s;
-            """, (vec_str, vec_str, top_k))
-            rows = cur.fetchall()
-    finally:
-        release_internal_connection(conn)
-
-    results = []
-    for row in rows:
-        try:
-            emb_arr = np.array(
-                json.loads(row["embedding_str"].replace("{", "[").replace("}", "]")),
-                dtype=np.float32,
-            )
-        except Exception:
-            emb_arr = None
-        results.append(RetrievalResult(
-            col_id        = str(row["col_id"]),
-            col_name      = row["col_name"],
-            table_id      = str(row["table_id"]),
-            table_name    = row["table_name"],
-            semantic_type = row["semantic_type"],
-            similarity    = round(float(row["similarity"]), 6),
-            source_id     = row.get("source_id", ""),
-            embedding     = emb_arr,
-        ))
-    return results
-
-
-# =============================================================================
-# Public store entry point
-# =============================================================================
-
-def run_vector_store(
-    encoder_result = None,
-    source_id: str = "",
-    verbose: bool  = False,
-):
-    """
-    Main entry point for Step 5.
-
-    Accepts EncoderResult (single-encoder) or EnsembleEncoderResult (ensemble).
-    Routes to the correct store path automatically.
-
-    source_id: identifies which VEDA_SOURCE these embeddings came from.
-               When set and VECTOR_STORE_TRUNCATE_ON_INGEST=True, stale rows
-               for this source are deleted before inserting, making re-ingestion
-               fully idempotent without accumulating duplicate UUID rows.
-
-    Returns StoreResult or EnsembleStoreResult depending on ENCODER_MODE.
-    """
-    if encoder_result is None:
-        encoder_result = run_relgt_encoder(verbose=verbose)
-
-    logger.debug("Starting vector store: mode=%s, source_id=%r",
-                 "ensemble" if isinstance(encoder_result, EnsembleEncoderResult) else "single",
-                 source_id)
-
-    # ------------------------------------------------------------------
-    # Ensemble path — write to two separate tables
-    # ------------------------------------------------------------------
-    if isinstance(encoder_result, EnsembleEncoderResult):
-        return _run_ensemble_store(encoder_result, source_id=source_id, verbose=verbose)
-
-    # ------------------------------------------------------------------
-    # Single-encoder path — write to one table
-    # ------------------------------------------------------------------
-    embeddings = encoder_result.embeddings
-    emb_dim    = encoder_result.embedding_dim
-
-    if verbose:
-        logger.debug(
-            "Persisting embeddings... backend=%s embeddings=%d dim=%d table=%s source_id=%r",
-            "pgvector" if PSYCOPG2_AVAILABLE else "in_memory_fallback",
-            len(embeddings), emb_dim, VECTOR_TABLE_NAME, source_id,
-        )
-
-    if PSYCOPG2_AVAILABLE:
-        try:
-            result = _store_pgvector_to(VECTOR_TABLE_NAME, emb_dim, embeddings, source_id)
-        except Exception as e:
-            logger.warning("pgvector failed (%s) — falling back to in-memory store", e)
-            result = _store_in_memory_to(
-                _IN_MEMORY_STORE, embeddings, VECTOR_TABLE_NAME, emb_dim
-            )
-    else:
-        result = _store_in_memory_to(
-            _IN_MEMORY_STORE, embeddings, VECTOR_TABLE_NAME, emb_dim
-        )
-
-    logger.info(
-        "Vector store complete: %d rows, dim=%d, backend=%s, index_created=%s, duration=%ss",
-        result.rows_written, result.vector_dim, result.backend, result.index_created,
-        result.duration_sec,
-    )
-
-    return result
-
-
-def _run_ensemble_store(
-    enc: EnsembleEncoderResult,
-    source_id: str = "",
-    verbose: bool = False,
-) -> EnsembleStoreResult:
-    """
-    Writes light_text and hybrid embeddings to their respective tables.
-    Both use the same backend (pgvector or in-memory).
-    """
-    t0 = time.time()
-
-    if verbose:
-        logger.debug(
-            "Ensemble mode — writing to two stores. backend=%s lt=%s(dim=%d) hybrid=%s(dim=%d) "
-            "embeddings_each=%d source_id=%r",
-            "pgvector" if PSYCOPG2_AVAILABLE else "in_memory_fallback",
-            VECTOR_TABLE_NAME_LIGHT_TEXT, enc.lt_embedding_dim,
-            VECTOR_TABLE_NAME_HYBRID, enc.hybrid_embedding_dim,
-            len(enc.lt_embeddings), source_id,
-        )
-
-    if PSYCOPG2_AVAILABLE:
-        try:
-            lt_result = _store_pgvector_to(
-                VECTOR_TABLE_NAME_LIGHT_TEXT,
-                enc.lt_embedding_dim,
-                enc.lt_embeddings,
-                source_id,
-            )
-            hybrid_result = _store_pgvector_to(
-                VECTOR_TABLE_NAME_HYBRID,
-                enc.hybrid_embedding_dim,
-                enc.hybrid_embeddings,
-                source_id,
-            )
-            backend = "pgvector"
-        except Exception as e:
-            logger.warning("pgvector failed (%s) — falling back to in-memory stores", e)
-            lt_result = _store_in_memory_to(
-                _IN_MEMORY_STORE, enc.lt_embeddings,
-                VECTOR_TABLE_NAME_LIGHT_TEXT, enc.lt_embedding_dim,
-            )
-            hybrid_result = _store_in_memory_to(
-                _IN_MEMORY_STORE_HYBRID, enc.hybrid_embeddings,
-                VECTOR_TABLE_NAME_HYBRID, enc.hybrid_embedding_dim,
-            )
-            backend = "in_memory_fallback"
-    else:
-        lt_result = _store_in_memory_to(
-            _IN_MEMORY_STORE, enc.lt_embeddings,
-            VECTOR_TABLE_NAME_LIGHT_TEXT, enc.lt_embedding_dim,
-        )
-        hybrid_result = _store_in_memory_to(
-            _IN_MEMORY_STORE_HYBRID, enc.hybrid_embeddings,
-            VECTOR_TABLE_NAME_HYBRID, enc.hybrid_embedding_dim,
-        )
-        backend = "in_memory_fallback"
-
-    duration = round(time.time() - t0, 4)
-
-    logger.info(
-        "Ensemble store complete: lt=%d rows (index=%s), hybrid=%d rows (index=%s), "
-        "backend=%s, duration=%ss",
-        lt_result.rows_written, lt_result.index_created,
-        hybrid_result.rows_written, hybrid_result.index_created,
-        backend, duration,
-    )
-
-    return EnsembleStoreResult(
-        lt_result     = lt_result,
-        hybrid_result = hybrid_result,
-        backend       = backend,
-        duration_sec  = duration,
-        stats         = {
-            "lt_rows":     lt_result.rows_written,
-            "hybrid_rows": hybrid_result.rows_written,
-            "backend":     backend,
-        },
-    )
-
-
-# =============================================================================
-# Public retrieval entry points
-# =============================================================================
-
-def retrieve_top_k(
-    query_vector: np.ndarray,
-    top_k:        int  = TOP_K,
-    verbose:      bool = False,
-) -> List[RetrievalResult]:
-    """
-    Single-store retrieval — used by single-encoder modes (relgt_only,
-    light_text, hybrid) and also as the light_text sub-retrieval in ensemble.
-
-    Queries VECTOR_TABLE_NAME (or in-memory fallback).
-    """
-    assert query_vector.ndim == 1, "query_vector must be 1-D"
-
-    t0 = time.time()
-
-    if PSYCOPG2_AVAILABLE and not _IN_MEMORY_STORE:
-        try:
-            results = _retrieve_pgvector_from(VECTOR_TABLE_NAME, query_vector, top_k)
-        except Exception as e:
-            logger.warning("pgvector retrieval failed (%s) — using in-memory fallback", e)
-            results = _retrieve_from_memory(_IN_MEMORY_STORE, query_vector, top_k)
-    else:
-        results = _retrieve_from_memory(_IN_MEMORY_STORE, query_vector, top_k)
-
-    if verbose:
-        logger.debug("Top-%d retrieval in %sms", top_k, round((time.time() - t0) * 1000, 2))
-        for r in results[:3]:
-            logger.debug("  %s.%-28s sim=%.4f  %s", r.table_name, r.col_name, r.similarity, r.semantic_type)
-
-    return results
-
-
-def retrieve_top_k_lt(
-    query_vector: np.ndarray,
-    top_k:        int  = ENSEMBLE_CANDIDATES_PER_STORE,
-    verbose:      bool = False,
-) -> List[RetrievalResult]:
-    """
-    Ensemble light-text sub-retrieval.
-    Queries VECTOR_TABLE_NAME_LIGHT_TEXT (256-dim store).
-    Called exclusively by semantic_layer.py in ensemble mode.
-    """
-    assert query_vector.shape == (LIGHT_TEXT_EMBEDDING_DIM,), (
-        f"LT query vector must be shape ({LIGHT_TEXT_EMBEDDING_DIM},), "
-        f"got {query_vector.shape}"
-    )
-
-    if PSYCOPG2_AVAILABLE and not _IN_MEMORY_STORE:
-        try:
-            return _retrieve_pgvector_from(VECTOR_TABLE_NAME_LIGHT_TEXT, query_vector, top_k)
-        except Exception as e:
-            logger.warning("pgvector LT retrieval failed (%s) — using in-memory", e)
-    return _retrieve_from_memory(_IN_MEMORY_STORE, query_vector, top_k)
-
-
-def retrieve_top_k_hybrid(
-    query_vector: np.ndarray,
-    top_k:        int  = ENSEMBLE_CANDIDATES_PER_STORE,
-    verbose:      bool = False,
-) -> List[RetrievalResult]:
-    """
-    Ensemble hybrid sub-retrieval.
-    Queries VECTOR_TABLE_NAME_HYBRID (640-dim store).
-    Called exclusively by semantic_layer.py in ensemble mode.
-    """
-    assert query_vector.shape == (HYBRID_EMBEDDING_DIM,), (
-        f"Hybrid query vector must be shape ({HYBRID_EMBEDDING_DIM},), "
-        f"got {query_vector.shape}"
-    )
-
-    if PSYCOPG2_AVAILABLE and not _IN_MEMORY_STORE_HYBRID:
-        try:
-            return _retrieve_pgvector_from(VECTOR_TABLE_NAME_HYBRID, query_vector, top_k)
-        except Exception as e:
-            logger.warning("pgvector hybrid retrieval failed (%s) — using in-memory", e)
-    return _retrieve_from_memory(_IN_MEMORY_STORE_HYBRID, query_vector, top_k)
-
-
-def retrieve_temporal_cols_for_tables(
-    table_ids: List[str],
-) -> List[RetrievalResult]:
-    """Return all TEMPORAL-typed columns for the given table_ids.
-
-    Used by the semantic layer's temporal injection step: when L1 detects a
-    date expression, L2 guarantees at least one TEMPORAL column per primary
-    table is present in the top-k list so L3/L4 can build a date filter.
-
-    No vector search — this is a direct SQL filter on semantic_type.
-    Returns similarity=0.0 for all results (injected, not ranked).
-
-    Args:
-        table_ids: UUIDs of tables whose TEMPORAL columns are needed.
-
-    Returns:
-        List of RetrievalResult with semantic_type == 'TEMPORAL'.
-    """
-    if not table_ids:
-        return []
-
-    if PSYCOPG2_AVAILABLE and not _IN_MEMORY_STORE:
-        try:
-            conn = _get_connection()
-            cur  = conn.cursor()
-            placeholders = ",".join(["%s"] * len(table_ids))
-            # In ensemble mode each store has different random UUIDs for the
-            # same physical table, so query both stores and deduplicate by col_id.
-            seen_cols: Dict[Tuple[str, str], RetrievalResult] = {}
-            for store in (VECTOR_TABLE_NAME_LIGHT_TEXT, VECTOR_TABLE_NAME_HYBRID):
-                try:
-                    cur.execute(
-                        f"SELECT col_id, col_name, table_id, table_name, semantic_type "
-                        f"FROM {store} "
-                        f"WHERE table_id IN ({placeholders}) "
-                        f"AND semantic_type = 'TEMPORAL'",
-                        table_ids,
-                    )
-                    for row in cur.fetchall():
-                        tbl_name = str(row[3])
-                        col_name = str(row[1])
-                        key = (tbl_name, col_name)
-                        if key not in seen_cols:
-                            seen_cols[key] = RetrievalResult(
-                                col_id=str(row[0]), col_name=col_name,
-                                table_id=str(row[2]), table_name=tbl_name,
-                                semantic_type=str(row[4]), similarity=0.0, embedding=None,
-                            )
-                except Exception:
-                    pass
-            cur.close()
-            conn.close()
-            return list(seen_cols.values())
-        except Exception:
-            pass  # fall through to in-memory scan
-
-    # In-memory fallback
-    id_set = set(table_ids)
-    results: List[RetrievalResult] = []
-    seen: set = set()
-    for row in _IN_MEMORY_STORE:
-        col_id = row.get("col_id", "")
-        if col_id in seen:
-            continue
-        if (row.get("table_id", "") in id_set
-                and row.get("semantic_type", "") == "TEMPORAL"):
-            results.append(RetrievalResult(
-                col_id=col_id,
-                col_name=row.get("col_name", ""),
-                table_id=row.get("table_id", ""),
-                table_name=row.get("table_name", ""),
-                semantic_type="TEMPORAL",
-                similarity=0.0,
-                embedding=None,
-            ))
-            seen.add(col_id)
-    return results
-
 
 def retrieve_cols_by_name_keywords(
     keywords: List[str],
@@ -676,7 +96,7 @@ def retrieve_cols_by_name_keywords(
             like_clause = " OR ".join(f"LOWER(col_name) LIKE %s" for _ in kw_set)
             patterns    = [f"%{kw}%" for kw in kw_set]
 
-            for store in (VECTOR_TABLE_NAME_LIGHT_TEXT, VECTOR_TABLE_NAME_HYBRID):
+            for store in (BIENCODER_COL_TABLE,):   # WP3: the one live column store
                 try:
                     cur.execute(
                         f"SELECT col_id, col_name, table_id, table_name, semantic_type, source_id "
@@ -732,53 +152,6 @@ def retrieve_cols_by_name_keywords(
 
 
 # =============================================================================
-# Smoke test — python ingestion/vector_store.py
-# =============================================================================
-
-if __name__ == "__main__":
-    store_result = run_vector_store(verbose=True)
-
-    print("=" * 60)
-    print(f"VEDA POC — Vector Store Output  [{ENCODER_MODE}]")
-    print("=" * 60)
-
-    if isinstance(store_result, EnsembleStoreResult):
-        print(f"  Backend           : {store_result.backend}")
-        print(f"  LT rows written   : {store_result.lt_result.rows_written}")
-        print(f"  Hybrid rows written: {store_result.hybrid_result.rows_written}")
-        print(f"  Duration          : {store_result.duration_sec}s")
-        print()
-
-        # Test both retrievals
-        lt_q = np.random.randn(LIGHT_TEXT_EMBEDDING_DIM).astype(np.float32)
-        lt_q = lt_q / np.linalg.norm(lt_q)
-        h_q  = np.random.randn(HYBRID_EMBEDDING_DIM).astype(np.float32)
-        h_q  = h_q / np.linalg.norm(h_q)
-
-        print("LT top-3 (random query):")
-        for r in retrieve_top_k_lt(lt_q, top_k=3):
-            print(f"  {r.table_name}.{r.col_name:<28} sim={r.similarity:.4f}")
-        print("Hybrid top-3 (random query):")
-        for r in retrieve_top_k_hybrid(h_q, top_k=3):
-            print(f"  {r.table_name}.{r.col_name:<28} sim={r.similarity:.4f}")
-    else:
-        print(f"  Backend          : {store_result.backend}")
-        print(f"  Rows written     : {store_result.rows_written}")
-        print(f"  Vector dim       : {store_result.vector_dim}")
-        print(f"  Index created    : {store_result.index_created}")
-        print(f"  Duration         : {store_result.duration_sec}s")
-        print()
-
-        dummy_query = np.random.randn(VECTOR_DIM).astype(np.float32)
-        dummy_query = dummy_query / np.linalg.norm(dummy_query)
-        results = retrieve_top_k(dummy_query, top_k=5, verbose=True)
-        print(f"\nTop-5 results:")
-        for i, r in enumerate(results):
-            print(f"  {i+1}. {r.table_name}.{r.col_name:<28} "
-                  f"sim={r.similarity:.4f}  {r.semantic_type}")
-
-
-# =============================================================================
 # FK Adjacency Store
 #
 # Responsibility:
@@ -803,7 +176,7 @@ if __name__ == "__main__":
 #   _FK_ADJACENCY stores the same data as a list of dicts.
 #   get_fk_adjacency() returns from it when psycopg2 is unavailable.
 #
-# Design: independent of ENCODER_MODE — works with all four strategies.
+# Design: encoder-independent — plain SQL FK edges, no vectors.
 # =============================================================================
 
 from config import (
@@ -1095,7 +468,7 @@ def get_fk_adjacency(
 #
 # Called independently from main.py after run_semantic_type_inference().
 # Provides get_display_columns() for query-time injection in semantic_layer.py.
-# Independent of ENCODER_MODE — works with all four encoder strategies.
+# Encoder-independent — plain metadata store.
 # =============================================================================
 
 _TABLE_METADATA_STORE: List[dict] = []   # in-memory fallback

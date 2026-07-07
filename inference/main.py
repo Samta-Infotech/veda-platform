@@ -42,6 +42,11 @@ def _start_rehydrate_subscriber():
             for msg in pubsub.listen():
                 if msg.get("type") == "pmessage":
                     veda_hybrid._SM.clear()   # scope-keyed dict (P5) — drop all scopes
+                    try:                       # fast-path registries are scope-keyed too (P5)
+                        from semantic import registry as _reg
+                        _reg.clear()
+                    except Exception:
+                        pass
                     try:                       # rebuild per-source engines from the fresh model (P5)
                         from veda.runtime import clear_engines
                         clear_engines()
@@ -50,6 +55,11 @@ def _start_rehydrate_subscriber():
                     try:                       # re-ingest may have retuned ef_search (Q-10)
                         from storage_adapters import reader as _reader
                         _reader.clear_ef_search_cache()
+                    except Exception:
+                        pass
+                    try:                       # re-ingest rebuilt the graph (WP5 PPR matrix)
+                        from query import graph_retriever as _gr
+                        _gr.clear_ppr_cache()
                     except Exception:
                         pass
         except Exception:

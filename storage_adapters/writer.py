@@ -313,6 +313,15 @@ def warm() -> dict:
     counts = sync_from_engine()
     counts["hnsw_ef_search"] = _persist_hnsw_tuning(ctx, os.path.dirname(sm_file))
     assembler.publish_sm(ctx.source_id, ctx.tenant)
+    # Fast-path registries (concepts/dimensions/metrics) aren't in the Sm* substrate —
+    # publish them to redis keyed by (source, tenant) so the query tier reads them
+    # scope-keyed instead of from a shared flat file (the one remaining un-scoped
+    # query-time read). Best-effort; a miss leaves the file fallback intact.
+    try:
+        counts["registry_bytes"] = assembler.publish_registry(
+            ctx.source_id, ctx.tenant, os.path.dirname(sm_file))
+    except Exception:
+        counts["registry_bytes"] = 0
     assembler.publish_rehydrate(ctx.source_id, ctx.tenant, scope="all")
     counts["sm_columns"] = sm_cols
     return counts

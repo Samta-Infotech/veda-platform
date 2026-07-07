@@ -8,11 +8,34 @@
 # =============================================================================
 
 import os
+import sys
 import json
 import re
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.dirname(_HERE))
 
+# Resolve the compiled registries through config's scoped artifact paths so the
+# reader and the writer (compile_semantic_layer) always agree. Falls back to the
+# legacy flat _HERE location if config is unavailable, so the loader can never
+# crash on import.
+try:
+    from config import CONCEPTS_FILE, DIMENSIONS_FILE, METRICS_FILE
+    _REG_FILES = {
+        "concepts.json":   CONCEPTS_FILE,
+        "dimensions.json": DIMENSIONS_FILE,
+        "metrics.json":    METRICS_FILE,
+    }
+except Exception:
+    _REG_FILES = {}
+
+# Per-(source, tenant) registry cache. The query tier is a warm worker that serves
+# N ready sources, so the registries must be scope-keyed exactly like the semantic
+# model (veda_hybrid._SM) — a single global would serve one source's concepts to
+# every source. `_STATE` is kept as a LIVE MIRROR of the active scope so external
+# readers that reference `registry._STATE[...]` (query/intent_envelope, query/fast_path)
+# keep working; _active() refreshes it on every access.
+_CACHE: dict = {}   # (source_id, tenant) → {"concepts","dimensions","metrics","source_hash"}
 _STATE = {"loaded": False, "concepts": {}, "dimensions": {}, "metrics": {},
           "source_hash": None}
 
@@ -49,29 +72,110 @@ def query_tokens(query: str) -> set:
     return raw | {_singularize(w) for w in raw}
 
 
+def _reg_scope():
+    """(source_id, tenant) for the registry cache / redis key. Mirrors
+    veda_hybrid._sm_scope so the SQL head and the fast path agree on scope: prefers
+    the ambient per-request context, falling back to the env pin (single-source dev)."""
+    try:
+        from context import try_current
+        ctx = try_current()
+        if ctx is not None:
+            return (str(ctx.source_id), str(ctx.tenant))
+    except Exception:
+        pass
+    return (os.environ.get("VEDA_SM_SOURCE_ID", "1"),
+            os.environ.get("VEDA_SM_TENANT", "default"))
+
+
 def _load_file(name):
-    path = os.path.join(_HERE, name)
+    path = _REG_FILES.get(name) or os.path.join(_HERE, name)
     if not os.path.exists(path):
         return {}, None
     blob = json.load(open(path))
     return blob.get("items", {}), blob.get("source_hash")
 
 
-def load(force: bool = False) -> bool:
-    """Load registries into memory once. Returns True if a non-empty layer loaded."""
-    if _STATE["loaded"] and not force:
-        return bool(_STATE["concepts"] or _STATE["metrics"])
+def _load_from_redis(scope):
+    """Load {concepts,dimensions,metrics} for this scope from redis-cache (published by
+    storage_adapters.assembler.publish_registry at warm time), keyed by (source, tenant).
+    Gated by the same VEDA_SM_REDIS flag as the semantic model. Returns a state dict, or
+    None to fall back to the on-disk files (dev / cache miss / flag off)."""
+    if os.environ.get("VEDA_SM_REDIS", "").strip().lower() not in ("1", "true", "yes", "on"):
+        return None
+    try:
+        import redis as _redis
+        url = os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
+        source_id, tenant = scope
+        raw = _redis.Redis.from_url(url).get(f"veda:registry:{source_id}:{tenant}")
+        if not raw:
+            return None
+        blob = json.loads(raw)
+        c = blob.get("concepts", {}) or {}
+        d = blob.get("dimensions", {}) or {}
+        m = blob.get("metrics", {}) or {}
+        return {"loaded": True,
+                "concepts":   c.get("items", {}) or {},
+                "dimensions": d.get("items", {}) or {},
+                "metrics":    m.get("items", {}) or {},
+                "source_hash": c.get("source_hash")}
+    except Exception:
+        return None
+
+
+def _load_scope(scope):
+    """Build the state dict for a scope: redis first (scoped), on-disk files as fallback."""
+    st = _load_from_redis(scope)
+    if st is not None:
+        return st
     c, h1 = _load_file("concepts.json")
     d, _  = _load_file("dimensions.json")
     m, _  = _load_file("metrics.json")
-    _STATE.update({"loaded": True, "concepts": c, "dimensions": d,
-                   "metrics": m, "source_hash": h1})
-    return bool(c or m)
+    return {"loaded": True, "concepts": c, "dimensions": d, "metrics": m, "source_hash": h1}
+
+
+def _active() -> dict:
+    """Return the registry state for the current (source, tenant) scope, loading and
+    caching it on first access. Also refreshes the `_STATE` mirror so external readers
+    of `registry._STATE[...]` see the active scope."""
+    scope = _reg_scope()
+    st = _CACHE.get(scope)
+    if st is None:
+        st = _load_scope(scope)
+        _CACHE[scope] = st
+    if _STATE is not st:            # keep the legacy mirror pointed at the active scope
+        _STATE.clear()
+        _STATE.update(st)
+    return st
+
+
+def load(force: bool = False) -> bool:
+    """Ensure the current scope's registries are loaded. Returns True if a non-empty
+    layer loaded. `force` drops this scope's cache so the next access reloads."""
+    if force:
+        _CACHE.pop(_reg_scope(), None)
+    st = _active()
+    return bool(st["concepts"] or st["metrics"])
+
+
+def clear() -> None:
+    """Drop every cached scope — called on rehydrate / re-ingest so the next query
+    reloads the fresh registries from redis (or file)."""
+    _CACHE.clear()
+    _STATE.clear()
+    _STATE.update({"loaded": False, "concepts": {}, "dimensions": {}, "metrics": {},
+                   "source_hash": None})
 
 
 def is_ready() -> bool:
-    load()
-    return bool(_STATE["concepts"] and _STATE["metrics"])
+    st = _active()
+    return bool(st["concepts"] and st["metrics"])
+
+
+def active() -> dict:
+    """Public accessor for the CURRENT (source, tenant) scope's registry state —
+    {"concepts","dimensions","metrics","source_hash"}. Loads/caches on first access.
+    External readers must use this (not the `_STATE` mirror) to be scope-correct."""
+    return _active()
 
 
 # ---------------------------------------------------------------------------
@@ -81,9 +185,8 @@ def is_ready() -> bool:
 def match_concepts(qtoks: set) -> list:
     """Return [(concept, score)] for entity concepts whose tokens appear in the query,
     best first. score = (#matched tokens, coverage)."""
-    load()
     hits = []
-    for c in _STATE["concepts"].values():
+    for c in _active()["concepts"].values():
         ctoks = set(c.get("match_tokens", []))
         if not ctoks:
             continue
@@ -97,16 +200,14 @@ def match_concepts(qtoks: set) -> list:
 
 
 def get_metric(metric_id: str):
-    load()
-    return _STATE["metrics"].get(metric_id)
+    return _active()["metrics"].get(metric_id)
 
 
 def match_metric_labels(query_l: str) -> list:
     """Direct label match for non-count metrics (SUM/AVG) that have no entity noun.
     Returns [(metric, n_label_tokens_matched)]."""
-    load()
     out = []
-    for m in _STATE["metrics"].values():
+    for m in _active()["metrics"].values():
         if m.get("kind") == "COUNT":
             continue                      # COUNT resolved via concept, not labels
         for lab in m.get("labels", []):
@@ -118,8 +219,7 @@ def match_metric_labels(query_l: str) -> list:
 
 
 def dimensions_for_table(table: str) -> list:
-    load()
-    return [d for d in _STATE["dimensions"].values() if d.get("owner_table") == table]
+    return [d for d in _active()["dimensions"].values() if d.get("owner_table") == table]
 
 
 def match_dimension_in_table(table: str, qtoks: set, query_l: str):

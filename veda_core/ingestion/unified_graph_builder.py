@@ -53,15 +53,18 @@ try:
     _CONCEPT_GRAPH  = _p(getattr(_cfg, "CONCEPT_GRAPH_FILE", "data/veda_concept_graph.json"))
     _DOMAIN_SYN     = _p(getattr(_cfg, "DOMAIN_SYNONYMS_FILE", "data/veda_domain_synonyms.json"))
     _OUT_FILE       = _p(getattr(_cfg, "UNIFIED_GRAPH_FILE", "data/veda_unified_graph.json"))
+    # Compiled registries moved under artifact_path() (data/…, scope-aware) — was
+    # hardcoded to the flat semantic/ dir, which never isolated per source.
+    _METRICS        = _p(getattr(_cfg, "METRICS_FILE", "data/metrics.json"))
+    _DIMENSIONS     = _p(getattr(_cfg, "DIMENSIONS_FILE", "data/dimensions.json"))
 except Exception:
     _SEMANTIC_MODEL = _p("data/veda_semantic_model.json")
     _REL_GRAPH      = _p("data/veda_relationship_graph.json")
     _CONCEPT_GRAPH  = _p("data/veda_concept_graph.json")
     _DOMAIN_SYN     = _p("data/veda_domain_synonyms.json")
     _OUT_FILE       = _p("data/veda_unified_graph.json")
-
-_METRICS    = _p("semantic/metrics.json")
-_DIMENSIONS = _p("semantic/dimensions.json")
+    _METRICS        = _p("data/metrics.json")
+    _DIMENSIONS     = _p("data/dimensions.json")
 
 GRAPH_VERSION = "1.0"
 

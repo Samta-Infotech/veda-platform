@@ -62,13 +62,14 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
         except Exception as e:
             out.append(StageOutcome("biencoder", False, fatal=False, error=str(e)))
 
-    # --- BM25 index (NEW, Q-2) — non-fatal ------------------------------------
+    # --- learned-sparse index (WP3, replaces the BM25 index) — non-fatal ------
     try:
-        from ingestion.bm25_index import build_bm25_index
-        bm = build_bm25_index(source_id=source_id, verbose=verbose)
-        out.append(StageOutcome("bm25_index", True, detail=f"{bm.get('docs', 0)} docs"))
+        from ingestion.sparse_index import build_sparse_index
+        sp = build_sparse_index(state["inference_result"], source_id=source_id, verbose=verbose)
+        detail = f"{sp.cols_indexed} cols, {sp.tables_indexed} tables" if not sp.error else f"warn: {sp.error}"
+        out.append(StageOutcome("sparse_index", True, detail=detail))
     except Exception as e:
-        out.append(StageOutcome("bm25_index", False, fatal=False, error=str(e)))
+        out.append(StageOutcome("sparse_index", False, fatal=False, error=str(e)))
 
     # --- enrichment index (NEW, Q-3) — non-fatal ------------------------------
     try:

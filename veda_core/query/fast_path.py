@@ -556,10 +556,11 @@ def _diagnose(query, tf=None):
 
 
 if __name__ == "__main__":
+    _rst = reg.active()
     print(f"registry ready: {reg.is_ready()}  "
-          f"(concepts={len(reg._STATE['concepts'])}, "
-          f"dimensions={len(reg._STATE['dimensions'])}, "
-          f"metrics={len(reg._STATE['metrics'])})")
+          f"(concepts={len(_rst['concepts'])}, "
+          f"dimensions={len(_rst['dimensions'])}, "
+          f"metrics={len(_rst['metrics'])})")
     for q in [
         "how many incidents",
         "count of incidents that are escalated",

@@ -48,9 +48,7 @@ logger = get_logger(__name__)
 _IN_MEMORY_NODE_EMB: List[dict] = []
 
 
-def _get_bge_model():
-    from ingestion.biencoder import _get_biencoder
-    return _get_biencoder()
+# Dense encoding is the shared BGE-M3 singleton (WP3) — same model everywhere.
 
 
 # =============================================================================
@@ -103,8 +101,8 @@ def _create_node_emb_table(cursor) -> None:
     cursor.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_{GRAPH_NODE_EMB_TABLE}_embedding
         ON {GRAPH_NODE_EMB_TABLE}
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 10);
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 200);
     """)
 
 
@@ -113,16 +111,10 @@ def _create_node_emb_table(cursor) -> None:
 # =============================================================================
 
 def embed_text_bge(text: str) -> np.ndarray:
-    model = _get_bge_model()
-    if model is None:
-        raise RuntimeError("BGE model unavailable")
-    from config import BIENCODER_PASSAGE_PREFIX
-    vec = model.encode(
-        [BIENCODER_PASSAGE_PREFIX + text],
-        normalize_embeddings=True,
-        show_progress_bar=False,
-    )[0]
-    return np.asarray(vec, dtype=np.float32)
+    """Query-time dense encode via the shared BGE-M3 singleton (WP3, 1024-dim normalized).
+    Name kept for call-site stability; the model is now bge-m3, no passage prefix."""
+    from ingestion import m3_encoder
+    return m3_encoder.encode_dense([text])[0]
 
 
 def _l2_normalize(mat: np.ndarray) -> np.ndarray:
@@ -212,23 +204,17 @@ def embed_graph_nodes(source_id: str, verbose: bool = False) -> GraphEmbedResult
     embeddings: Optional[np.ndarray] = None
     if sentences:
         try:
-            from config import BIENCODER_PASSAGE_PREFIX
-            model = _get_bge_model()
-            if model is None:
-                raise RuntimeError("BGE model unavailable")
-            embeddings = model.encode(
-                [BIENCODER_PASSAGE_PREFIX + s for s in sentences],
-                normalize_embeddings = True,
-                show_progress_bar    = False,
-            ).astype(np.float32)
-            embeddings = _l2_normalize(embeddings)
+            from ingestion import m3_encoder
+            embeddings = m3_encoder.encode_dense(sentences)  # 1024-dim, L2-normalized
         except Exception as e:
-            logger.warning("BGE model unavailable (%s) — col/table nodes skipped", e)
+            logger.warning("BGE-M3 unavailable (%s) — col/table nodes skipped", e)
             embeddings = None
             node_meta = []
 
     # ------------------------------------------------------------------
-    # Chunk nodes: copy vectors from doc_chunks (no re-embedding)
+    # Chunk nodes: copy vectors from doc_chunks (no re-embedding). Now that chunks are
+    # BGE-M3 1024-dim (WP3), these are the SAME space as the col/table node vectors —
+    # no mixed-dimension handling needed.
     # ------------------------------------------------------------------
     chunk_rows: List[Tuple[str, np.ndarray]] = []
     if INTERNAL_DB_AVAILABLE:
@@ -410,6 +396,13 @@ def retrieve_graph_seeds(
         return _retrieve_seeds_from_memory(query_vector, top_k, source_ids, node_types)
     try:
         cur = conn.cursor(cursor_factory=DICT_CURSOR)
+        # HNSW: pin ef_search for this transaction so the seed ANN ordering matches the
+        # tuned recall target (WP2). Resolved per-source via the one shared helper;
+        # released at COMMIT (transaction-pool-safe).
+        from storage_adapters.reader import _resolve_ef_search
+        _ef = _resolve_ef_search(source_ids[0] if source_ids else None)
+        cur.execute("BEGIN")
+        cur.execute(f"SET LOCAL hnsw.ef_search = {int(_ef)}")
         cur.execute(f"""
             SELECT node_id, node_type,
                    1 - (embedding <=> %s::vector) AS similarity
@@ -419,6 +412,8 @@ def retrieve_graph_seeds(
             LIMIT %s;
         """, params)
         rows = cur.fetchall()
+        try: cur.execute("COMMIT")
+        except Exception: pass
         try: cur.close()
         except Exception: pass
     except Exception:
