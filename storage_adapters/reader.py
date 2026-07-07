@@ -278,35 +278,25 @@ def save_verified_query(query: str, qvec: List[float], sql: str, columns=None) -
     read-modify-write. Publishes a cache-entry fan-out so peers warm it (§8.4). Skip rules
     (existence/fast-path/temporal never cached) stay in the caller (pipeline.py)."""
     import json as _json
-    import os
-
-    import psycopg2
 
     source_id, tenant = _scope()
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     qhash = _query_hash(query)
-    conn = psycopg2.connect(
-        host=os.environ.get("PGBOUNCER_HOST", "pgbouncer"),
-        port=int(os.environ.get("PGBOUNCER_PORT", "6432")),
-        dbname=os.environ.get("POSTGRES_DB", "veda"),
-        user=os.environ.get("POSTGRES_USER", "veda"),
-        password=os.environ.get("POSTGRES_PASSWORD", "change-me"),
-    )
-    conn.autocommit = True
+    # F7: reuse the module's cached connection instead of opening a fresh TCP
+    # connection per save — _connection() is autocommit + read-only-by-construction
+    # (SELECT only elsewhere), safe to share since this is the one documented write.
+    conn = _connection()
     inserted = False
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "INSERT INTO substrate_verifiedquerycache "
-                "(id, source_id, tenant, query_hash, query_text, verified_sql, columns_json, "
-                " query_embedding, created_at, updated_at) "
-                "VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s::jsonb, %s::vector, now(), now()) "
-                "ON CONFLICT (source_id, tenant, query_hash) DO NOTHING",
-                [source_id, tenant, qhash, query, sql, _json.dumps(columns or []), vec],
-            )
-            inserted = cur.rowcount > 0
-    finally:
-        conn.close()
+    with conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO substrate_verifiedquerycache "
+            "(id, source_id, tenant, query_hash, query_text, verified_sql, columns_json, "
+            " query_embedding, created_at, updated_at) "
+            "VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s::jsonb, %s::vector, now(), now()) "
+            "ON CONFLICT (source_id, tenant, query_hash) DO NOTHING",
+            [source_id, tenant, qhash, query, sql, _json.dumps(columns or []), vec],
+        )
+        inserted = cur.rowcount > 0
     if inserted:
         try:
             import redis as _redis
