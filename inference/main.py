@@ -41,8 +41,17 @@ def _start_rehydrate_subscriber():
             import veda_hybrid
             for msg in pubsub.listen():
                 if msg.get("type") == "pmessage":
-                    veda_hybrid._SM["sm"] = None
-                    veda_hybrid._SM["cols"] = None
+                    veda_hybrid._SM.clear()   # scope-keyed dict (P5) — drop all scopes
+                    try:                       # rebuild per-source engines from the fresh model (P5)
+                        from veda.runtime import clear_engines
+                        clear_engines()
+                    except Exception:
+                        pass
+                    try:                       # re-ingest may have retuned ef_search (Q-10)
+                        from storage_adapters import reader as _reader
+                        _reader.clear_ef_search_cache()
+                    except Exception:
+                        pass
         except Exception:
             return  # non-fatal: a replica catches up on its next lifespan warm-load
 

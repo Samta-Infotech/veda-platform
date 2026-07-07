@@ -96,23 +96,16 @@ def run_nl_simplifier(query: str, verbose: bool = False) -> SimplifierResult:
     hints_used  = list(value_hints.keys())
     prompt      = _build_prompt(query, value_hints)
     try:
-        from config import SLM_OLLAMA_BASE_URL, SLM_MODEL_NAME
-        import urllib.request as _req, json
-        payload = {
-            "model":  SLM_MODEL_NAME,
-            "prompt": prompt,
-            "stream": False,
-            "options": {"temperature": 0.1, "num_predict": 64, "num_ctx": 512},
-        }
-        req = _req.Request(
-            f"{SLM_OLLAMA_BASE_URL}/api/generate",
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with _req.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        raw        = data.get("response", "").strip()
+        from slm import call_slm
+        raw = call_slm(
+            prompt,
+            purpose="nl_simplify",
+            temperature=0.1,
+            num_predict=64,
+            num_ctx=512,
+            endpoint="generate",
+            timeout=10,
+        ).strip()
         simplified = re.sub(
             r'^(rewritten[:\s]*|query[:\s]*)', '', raw,
             flags=re.IGNORECASE

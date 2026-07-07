@@ -52,7 +52,6 @@ def select_retrieval(
         RETRIEVAL_V2_ENABLED, SCHEMA_LINK_ENABLED, BIENCODER_ENABLED,
         UNIFIED_GRAPH_ENABLED, GRAPH_RETRIEVAL_ENABLED, GRAPH_EMBED_ENABLED,
     )
-    from query.semantic_layer import run_semantic_layer
 
     stats: dict = {}
     _v2_cols      = None
@@ -112,41 +111,18 @@ def select_retrieval(
             stats["graph_error"]  = str(e)
             _graph_result = None
 
-    # ── Step 4: Semantic layer (always) ───────────────────────────────────
-    # Legacy ensemble signal. Under ENCODER_MODE=ensemble it needs MiniLM, which is NOT
-    # loaded when BGE (RETRIEVAL_V2) is the primary path — so this one signal can fail
-    # ("MiniLM model not loaded"). Degrade instead of crashing: skip it and let the BGE +
-    # BM25 + FK + value signals carry retrieval (BGE already overrides sl.top_k_columns
-    # below, and sl.join_path is recomputed for the V2 columns). Never fatal.
-    # Pin the V2-dispatch guard BEFORE calling run_semantic_layer for Step 4. Without this,
-    # run_semantic_layer sees the guard unset and RE-DISPATCHES back into select_retrieval —
-    # running the entire BGE first-stage + cross-encoder rerank a SECOND time (the duplicate
-    # "[Reranker] Reranked 80 -> top 20" seen in traces). Setting it here forces Step 4 down
-    # the legacy path directly, so the expensive V2 retrieval runs exactly once.
-    import query.semantic_layer as _sl_mod
-    _prev_dispatch = _sl_mod._IN_V2_DISPATCH
-    _sl_mod._IN_V2_DISPATCH = True
-    try:
-        sl = run_semantic_layer(
-            query=query,
-            top_k=TOP_K,
-            verbose=verbose,
-            source_ids=source_ids,
-        )
-    except Exception as _sle:
-        import numpy as _np
-        from query.semantic_layer import SemanticLayerResult
-        stats["semantic_layer_skipped"] = True
-        stats["semantic_layer_error"]   = str(_sle)
-        if verbose:
-            print(f"  [RetrievalV2] legacy semantic signal skipped "
-                  f"({type(_sle).__name__}) — fusing BGE+BM25+FK+value")
-        sl = SemanticLayerResult(
-            query=query, query_vector=_np.zeros(0, dtype=_np.float32),
-            top_k_columns=[], join_path=[], tables_involved=[],
-            encoding_strategy="unavailable", duration_ms=0.0, stats={})
-    finally:
-        _sl_mod._IN_V2_DISPATCH = _prev_dispatch    # restore (re-entrancy safe)
+    # ── Step 4: Semantic layer (removed) ──────────────────────────────────
+    # The legacy MiniLM/RELGT ensemble signal has been removed. It required MiniLM,
+    # never loaded on the BGE-primary platform, so it always degraded to this empty
+    # result — BGE + BM25 + FK + value carry retrieval (BGE overrides sl.top_k_columns
+    # and sl.join_path is recomputed for the V2 columns below).
+    import numpy as _np
+    from query.semantic_layer import SemanticLayerResult
+    stats["semantic_layer_skipped"] = True
+    sl = SemanticLayerResult(
+        query=query, query_vector=_np.zeros(0, dtype=_np.float32),
+        top_k_columns=[], join_path=[], tables_involved=[],
+        encoding_strategy="unavailable", duration_ms=0.0, stats={})
 
     # ── Step 5: Graph-helps flag — mirrors main.py logic exactly ─────────
     _graph_helps = bool(_graph_result) and (

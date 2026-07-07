@@ -173,7 +173,9 @@ def run_query(query, sm, all_cols, return_result=False):
             from config import RETRIEVAL_CACHE_ENABLED as _RC
         except Exception:
             _RC = False
-        results = get_engine().retrieve(query=_search, intent=intent, top_k=15, use_cache=_RC)
+        # Pass THIS (source, tenant)'s semantic model so the engine for this scope is built
+        # from the right source's BM25/signals (P5 multi-source); Signal-1 store is source-scoped.
+        results = get_engine(sm).retrieve(query=_search, intent=intent, top_k=15, use_cache=_RC)
 
         # ── Unified-graph recall booster (Phase 4): ADD columns the 5-signal engine may
         # have missed, via synonym/alias resolution + FK-neighbour reach. Purely additive

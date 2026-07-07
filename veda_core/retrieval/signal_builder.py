@@ -22,6 +22,48 @@ from utils.logger import get_logger
 logger = get_logger(__name__)
 
 
+def _load_schema_from_substrate():
+    """Q-1: reconstruct a FK-only schema dict from the substrate `fk_adjacency` table
+    (written at ingestion), so the signal builder never touches the client DB at warm.
+
+    Only FK columns are materialised — that is all `_build_fk_graph` / adjacency use.
+    Returns {"tables": [{"table_name", "columns":[{col_name, is_fk, fk_ref_table,
+    fk_ref_col}]}]} or None on any failure (caller falls back to live introspection)."""
+    try:
+        from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+    except Exception:
+        return None
+    conn = None
+    try:
+        conn = get_internal_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT from_table_name, from_col_name, to_table_name, to_col_name "
+                "FROM fk_adjacency")
+            rows = cur.fetchall()
+    except Exception:
+        return None
+    finally:
+        if conn is not None:
+            try:
+                release_internal_connection(conn)
+            except Exception:
+                pass
+    if not rows:
+        return None
+    tables: Dict[str, dict] = {}
+    for from_table, from_col, to_table, to_col in rows:
+        if not from_table or not from_col:
+            continue
+        t = tables.setdefault(from_table, {"table_name": from_table, "columns": []})
+        t["columns"].append({
+            "col_name": from_col, "is_fk": True,
+            "fk_ref_table": to_table, "fk_ref_col": to_col,
+        })
+        tables.setdefault(to_table, {"table_name": to_table, "columns": []})
+    return {"tables": list(tables.values())}
+
+
 class SignalBuilder:
     """Build FK and subgraph signals for column ranking."""
 
@@ -44,8 +86,20 @@ class SignalBuilder:
         """
         logger.info("Building relationship signals...")
 
-        # Load schema
-        self.schema = get_real_schema()
+        # Load schema. Q-1: read the FK graph from the substrate (fk_adjacency, written
+        # at ingestion) instead of live information_schema on the CLIENT DB every warm —
+        # removes the source-DB dependency from the query tier. Flag-gated; falls back
+        # to the live introspection when the substrate FK store is empty/unavailable.
+        self.schema = None
+        try:
+            from config import SUBSTRATE_SIGNALS_ENABLED
+            if SUBSTRATE_SIGNALS_ENABLED:
+                self.schema = _load_schema_from_substrate()
+        except Exception as e:
+            logger.warning(f"Substrate signal load failed ({e}); using live schema")
+            self.schema = None
+        if not self.schema or not self.schema.get("tables"):
+            self.schema = get_real_schema()
         tables = self.schema.get("tables", [])
 
         # Build FK graph

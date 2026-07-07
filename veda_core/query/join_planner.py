@@ -27,6 +27,27 @@ _POLY_PENALTY = 0.95
 _INFERRED_PENALTY = 0.9
 
 
+_JOIN_PATHS_MAP = None   # Q-9: lazily-loaded precomputed reachability map
+
+
+def _is_reachable(adj, t, o, max_hops=4):
+    """Q-9: consult the precompiled join-path map first (deterministic, O(1)); fall back
+    to live shortest-path traversal for unmapped pairs or when the flag/map is absent.
+    Reachability only — the actual join edges are still computed by _shortest_path."""
+    global _JOIN_PATHS_MAP
+    try:
+        from config import JOIN_PATHS_ENABLED
+        if JOIN_PATHS_ENABLED:
+            if _JOIN_PATHS_MAP is None:
+                from ingestion.join_paths import load_join_paths
+                _JOIN_PATHS_MAP = load_join_paths() or {}
+            if _JOIN_PATHS_MAP:
+                return f"{t}|{o}" in _JOIN_PATHS_MAP
+    except Exception:
+        pass
+    return _shortest_path(adj, t, o, max_hops=max_hops) is not None
+
+
 def load_graph(path=RELATIONSHIP_GRAPH_FILE):
     if not os.path.exists(path):
         return {"tables": [], "edges": []}
@@ -124,8 +145,7 @@ def score_anchors(query, candidate_tables, scores=None, graph=None, adj=None):
         graph_sig = 0.0
         if adj is not None and len(candidate_tables) > 1:
             others = [o for o in candidate_tables if o != t]
-            reach = sum(1 for o in others
-                        if _shortest_path(adj, t, o, max_hops=4) is not None)
+            reach = sum(1 for o in others if _is_reachable(adj, t, o))
             graph_sig = reach / len(others) if others else 0.0
         composite = (W["lexical"] * lexical + W["position"] * position
                      + W["retrieval"] * retrieval + W["graph"] * graph_sig)

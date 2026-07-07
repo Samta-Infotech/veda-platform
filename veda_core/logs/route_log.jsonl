@@ -1,0 +1,16 @@
+{"t": 1783358803.077, "route": "full:SIMPLE", "latency_ms": 71097.4, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783358809.887, "route": "full:SIMPLE", "latency_ms": 6704.7, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783358818.516, "route": "full:SIMPLE", "latency_ms": 8613.4, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783358824.347, "route": "full:SIMPLE", "latency_ms": 5800.3, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783358832.882, "route": "full:SIMPLE", "latency_ms": 8524.1, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783358836.147, "route": "full:SIMPLE", "latency_ms": 3250.2, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783358839.62, "route": "full:SIMPLE", "latency_ms": 3465.3, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
+{"t": 1783358842.438, "route": "full:SIMPLE", "latency_ms": 2804.9, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
+{"t": 1783360626.24, "route": "full:SIMPLE", "latency_ms": 61771.7, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783360630.723, "route": "full:SIMPLE", "latency_ms": 4450.6, "query": "how many users are there", "table": "user", "rows": 1}
+{"t": 1783360634.261, "route": "full:SIMPLE", "latency_ms": 3527.9, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783360637.656, "route": "full:SIMPLE", "latency_ms": 3387.5, "query": "how many change requests are there", "table": "change_request", "rows": 1}
+{"t": 1783360641.222, "route": "full:SIMPLE", "latency_ms": 3559.6, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783360644.381, "route": "full:SIMPLE", "latency_ms": 3149.7, "query": "count annotations", "table": "annotation_record", "rows": 1}
+{"t": 1783360646.89, "route": "full:SIMPLE", "latency_ms": 2503.9, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
+{"t": 1783360649.081, "route": "full:SIMPLE", "latency_ms": 2183.8, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}

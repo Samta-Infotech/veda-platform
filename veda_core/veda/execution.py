@@ -1,13 +1,14 @@
 """VEDA · L7 — read-only execution."""
 import os, re, sys, time, json, logging, threading
-from veda.runtime import DB_CONFIG
+from veda.runtime import get_db_config
 
 
 def execute_sql(sql, params=None):
     import psycopg2
+    cfg = get_db_config()
     conn = psycopg2.connect(
-        host=DB_CONFIG["host"], port=DB_CONFIG["port"], dbname=DB_CONFIG["database"],
-        user=DB_CONFIG["user"], password=DB_CONFIG["password"])
+        host=cfg["host"], port=cfg["port"], dbname=cfg["database"],
+        user=cfg["user"], password=cfg["password"])
     try:
         conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:

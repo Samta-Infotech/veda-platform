@@ -10,7 +10,6 @@ transformers
 torch-geometric
 sentence-transformers
 scikit-learn
-kuzu
 dateparser
 
 fastapi

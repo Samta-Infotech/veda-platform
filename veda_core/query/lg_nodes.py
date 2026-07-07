@@ -80,36 +80,23 @@ def _call_node(system_prompt: str, user_msg: str) -> Optional[Dict]:
     Returns parsed dict or None on any failure.
     num_predict=256 — each node outputs a small JSON object.
     """
-    payload = json.dumps({
-        "model":    SLM_MODEL_NAME,
-        "stream":   False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_msg},
-        ],
-        "options": {
-            "temperature": SLM_TEMPERATURE,
-            "num_predict": 256,
-        },
-    }).encode("utf-8")
-
-    url = f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat"
-    req = urllib.request.Request(
-        url, data=payload,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
     try:
-        with urllib.request.urlopen(req, timeout=SLM_TIMEOUT_SECS) as resp:
-            body    = json.loads(resp.read().decode("utf-8"))
-            content = body.get("message", {}).get("content", "")
-            # Strip markdown fences if present
-            content = re.sub(r"```(?:json)?\s*", "", content)
-            content = re.sub(r"```\s*$", "", content, flags=re.MULTILINE).strip()
-            start   = content.find("{")
-            end     = content.rfind("}") + 1
-            if start >= 0 and end > start:
-                return json.loads(content[start:end])
+        from slm import call_slm
+        content = call_slm(
+            user_msg,
+            system=system_prompt,
+            purpose="lg_node",
+            temperature=SLM_TEMPERATURE,
+            num_predict=256,
+            timeout=SLM_TIMEOUT_SECS,
+        )
+        # Strip markdown fences if present
+        content = re.sub(r"```(?:json)?\s*", "", content)
+        content = re.sub(r"```\s*$", "", content, flags=re.MULTILINE).strip()
+        start   = content.find("{")
+        end     = content.rfind("}") + 1
+        if start >= 0 and end > start:
+            return json.loads(content[start:end])
     except Exception:
         pass
     return None

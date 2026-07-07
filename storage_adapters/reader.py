@@ -61,6 +61,38 @@ def _scope():
     return ctx.source_id, ctx.tenant
 
 
+def source_connection() -> dict:
+    """The client source DB connection for the current request's source_id, read
+    from the `Source` registry row (§3.1, §5) — the single source of truth. This is
+    the query-tier counterpart to ``apps.sources.models.Source.as_engine_env`` (the
+    ingestion tier): both resolve the SAME row, so one warm engine serves N sources
+    by connecting to whichever source the ambient context selects.
+
+    Django-free — raw psycopg2 over the same Postgres the ORM manages (through
+    PgBouncer), so the inference tier resolves the per-request source WITHOUT
+    importing Django. Password resolves env-ref first (prod: Docker secret named by
+    ``password_env``), then the dev inline value — mirrors ``Source.resolve_password``.
+    Fail-closed: a missing/unset context raises; an unknown source_id raises — never
+    a silent localhost/default-credential fallback (§3.1)."""
+    source_id, _tenant = _scope()  # fail-closed if context unset (§4.1)
+    with _connection().cursor() as cur:
+        cur.execute(
+            "SELECT host, port, dbname, db_user, password_env, password_inline "
+            "FROM sources_source WHERE id = %s",
+            [source_id],
+        )
+        row = cur.fetchone()
+    if row is None:
+        raise RuntimeError(
+            f"Source id={source_id} not found in the sources registry — cannot resolve "
+            "its connection (§3.1: the Source row is the single source of truth)."
+        )
+    host, port, dbname, db_user, password_env, password_inline = row
+    password = os.environ.get(password_env, "") if password_env else (password_inline or "")
+    return {"host": host, "port": port or 5432, "database": dbname,
+            "user": db_user, "password": password}
+
+
 def get_fk_adjacency(table_ids: Optional[List[str]] = None) -> List[FKEdge]:
     """FK edges (legacy FKEdge shape) for the current (source, tenant), optionally
     restricted to edges touching `table_ids`. Raw SQL join over the Django-owned
@@ -123,6 +155,47 @@ def value_samples(column_uuid: str) -> List[str]:
         return [r[0] for r in cur.fetchall()]
 
 
+_EF_SEARCH_CACHE: dict = {}   # (source_id, tenant) → int; cleared on rehydrate
+
+
+def clear_ef_search_cache() -> None:
+    """Called by the inference rehydrate subscriber so a re-ingest's newly tuned
+    ef_search is picked up without a process restart."""
+    _EF_SEARCH_CACHE.clear()
+
+
+def _resolve_ef_search(source_id) -> int:
+    """Per-source hnsw.ef_search (P7/Q-10 knob, review Finding 4 closed):
+    VEDA_HNSW_EF_SEARCH_<source_id> env → SubstrateVersion.hnsw_ef_search (tuned at
+    L5, persisted by writer.warm; cached per process so it is NOT a per-query DB
+    hit) → VEDA_HNSW_EF_SEARCH → 40."""
+    per_source = os.environ.get(f"VEDA_HNSW_EF_SEARCH_{source_id}")
+    if per_source:
+        try:
+            return int(per_source)
+        except ValueError:
+            pass
+    # Substrate lookup (Django-free — raw SQL, one query per (scope, process)).
+    try:
+        _, tenant = _scope()
+        key = (str(source_id), str(tenant))
+        if key not in _EF_SEARCH_CACHE:
+            with _connection().cursor() as cur:
+                cur.execute(
+                    "SELECT hnsw_ef_search FROM substrate_substrateversion "
+                    "WHERE source_id = %s AND tenant = %s "
+                    "ORDER BY id DESC LIMIT 1",
+                    [source_id, tenant],
+                )
+                row = cur.fetchone()
+            _EF_SEARCH_CACHE[key] = int(row[0]) if row and row[0] else 0
+        if _EF_SEARCH_CACHE[key] > 0:
+            return _EF_SEARCH_CACHE[key]
+    except Exception:
+        pass  # table absent / no context — fall through to the global default
+    return int(os.environ.get("VEDA_HNSW_EF_SEARCH", "40"))
+
+
 def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     """Raw pgvector cosine ANN over the HNSW index for `mode`'s table (§6.4),
     scoped to the current (source, tenant)."""
@@ -134,8 +207,11 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     # Pin hnsw.ef_search to the §7.1a-tuned value (recall@k=1.0 on the home-schema
     # fixtures) so the served ANN ordering matches exact cosine — the shipped index IS
-    # the gated index. Env-overridable; re-run scripts/hnsw_parity_sweep.py per source.
-    ef_search = int(os.environ.get("VEDA_HNSW_EF_SEARCH", "40"))
+    # the gated index. Per-source override (tuned at L5 by source size, stored on
+    # SubstrateVersion.hnsw_ef_search) via VEDA_HNSW_EF_SEARCH_<source_id>, then the
+    # global VEDA_HNSW_EF_SEARCH, then 40 — so a large source can widen search without
+    # changing the global (re-run scripts/hnsw_parity_sweep.py per source).
+    ef_search = _resolve_ef_search(source_id)
     sql = (
         f'SELECT column_uuid, 1 - (embedding <=> %s::vector) AS score FROM "{table}" '
         f'WHERE source_id = %s AND tenant = %s ORDER BY embedding <=> %s::vector LIMIT %s'
@@ -175,6 +251,24 @@ def _query_hash(query: str) -> str:
     import re
     norm = re.sub(r"\s+", " ", (query or "").strip().lower())
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:64]
+
+
+def verified_cache_exact(query: str) -> Optional[dict]:
+    """Q-8: exact-hash short-circuit — one indexed PK lookup on (source, tenant,
+    query_hash) BEFORE any BGE encode + cosine ANN. Returns similarity 1.0 on hit.
+    Repeat/identical queries skip the embed entirely."""
+    source_id, tenant = _scope()
+    qhash = _query_hash(query)
+    with _connection().cursor() as cur:
+        cur.execute(
+            "SELECT verified_sql, columns_json FROM substrate_verifiedquerycache "
+            "WHERE source_id = %s AND tenant = %s AND query_hash = %s LIMIT 1",
+            [source_id, tenant, qhash],
+        )
+        row = cur.fetchone()
+    if row:
+        return {"sql": row[0], "columns": row[1], "similarity": 1.0}
+    return None
 
 
 def save_verified_query(query: str, qvec: List[float], sql: str, columns=None) -> bool:

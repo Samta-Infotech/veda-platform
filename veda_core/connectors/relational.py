@@ -29,6 +29,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import time
 import uuid
+from collections import defaultdict
 from typing import Dict, List, Optional, Tuple
 
 from connectors.base import (
@@ -177,6 +178,72 @@ class RelationalConnector(BaseConnector):
             [table_name, schema_filter],
         )
 
+    # ------------------------------------------------------------------
+    # Batched (schema-wide) introspection — one query per metadata type
+    # instead of one-per-table. The per-table variants above are kept for
+    # value sampling / single-table callers; get_schema() uses these.
+    # ------------------------------------------------------------------
+
+    def _get_all_columns_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        """(sql, params) → (table_name, column_name, data_type, is_nullable) for the whole schema."""
+        schema_filter = schema or "public"
+        return (
+            """
+            SELECT table_name, column_name, data_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = %s
+            ORDER BY table_name, ordinal_position;
+            """,
+            [schema_filter],
+        )
+
+    def _get_all_pks_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        """(sql, params) → (table_name, column_name) for every PK column in the schema."""
+        schema_filter = schema or "public"
+        return (
+            """
+            SELECT tc.table_name, kcu.column_name
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name = kcu.constraint_name
+             AND tc.table_schema    = kcu.table_schema
+            WHERE tc.table_schema = %s
+              AND tc.constraint_type = 'PRIMARY KEY';
+            """,
+            [schema_filter],
+        )
+
+    def _get_all_fks_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        """(sql, params) → (src_table, fk_col, ref_table, ref_col) for every FK in the schema."""
+        schema_filter = schema or "public"
+        return (
+            """
+            SELECT tc.table_name  AS src_table,
+                   kcu.column_name AS fk_col,
+                   kcu2.table_name AS ref_table,
+                   kcu2.column_name AS ref_col
+            FROM information_schema.table_constraints tc
+            JOIN information_schema.key_column_usage kcu
+              ON tc.constraint_name  = kcu.constraint_name
+             AND tc.table_schema     = kcu.table_schema
+            JOIN information_schema.referential_constraints rc
+              ON tc.constraint_name  = rc.constraint_name
+             AND tc.table_schema     = rc.constraint_schema
+            JOIN information_schema.key_column_usage kcu2
+              ON rc.unique_constraint_name   = kcu2.constraint_name
+             AND rc.unique_constraint_schema = kcu2.table_schema
+             AND kcu.ordinal_position        = kcu2.ordinal_position
+            WHERE tc.table_schema = %s
+              AND tc.constraint_type = 'FOREIGN KEY';
+            """,
+            [schema_filter],
+        )
+
+    def _get_all_row_counts_sql(self, schema: Optional[str]) -> Tuple[Optional[str], list]:
+        """(sql, params) → (table_name, row_count) for the whole schema, or (None, [])
+        when the engine has no cheap batch path (caller falls back to per-table COUNT(*))."""
+        return (None, [])
+
     def _get_row_count_sql(self, table_name: str) -> Tuple[str, list]:
         """Returns (sql, params) to count rows in a table."""
         return f'SELECT COUNT(*) FROM {self._q(table_name)};', []
@@ -272,40 +339,69 @@ class RelationalConnector(BaseConnector):
                 if r[0] not in self._exclude
             ]
 
-            # ── 2. Per-table extraction ───────────────────────────────
+            # ── 2. Batched schema-wide introspection ──────────────────
+            # One query per metadata type (columns / PKs / FKs / row-counts)
+            # for the WHOLE schema, grouped in Python — instead of 3-4 queries
+            # per table. On a large catalog the per-table information_schema
+            # constraint joins cost seconds *each* (they re-scan every schema's
+            # constraints before filtering), so N tables × that = ~an hour.
+            # Batched (and pg_catalog on Postgres) takes the scan to sub-second.
+            tset = set(table_names)
+
+            cols_by_table: Dict[str, list] = defaultdict(list)
+            sql, params = self._get_all_columns_sql(schema)
+            cur.execute(sql, params)
+            for tname, col_name, raw_type, nullable in cur.fetchall():
+                if tname in tset:
+                    cols_by_table[tname].append((col_name, raw_type, nullable))
+
+            pks_by_table: Dict[str, set] = defaultdict(set)
+            sql, params = self._get_all_pks_sql(schema)
+            cur.execute(sql, params)
+            for tname, col_name in cur.fetchall():
+                if tname in tset:
+                    pks_by_table[tname].add(col_name)
+
+            fks_by_table: Dict[str, Dict[str, Tuple[str, str]]] = defaultdict(dict)
+            sql, params = self._get_all_fks_sql(schema)
+            cur.execute(sql, params)
+            for tname, fk_col, ref_table, ref_col in cur.fetchall():
+                if tname in tset:
+                    fks_by_table[tname][fk_col] = (ref_table, ref_col)
+
+            # Row counts: cheap batch path if the engine offers one (Postgres →
+            # pg_class estimate), else per-table COUNT(*) below.
+            row_counts: Dict[str, int] = {}
+            rc_sql, rc_params = self._get_all_row_counts_sql(schema)
+            if rc_sql:
+                cur.execute(rc_sql, rc_params)
+                for tname, rc in cur.fetchall():
+                    if tname in tset:
+                        row_counts[tname] = max(int(rc or 0), 0)
+
+            # ── 3. Assemble tables from the grouped metadata ──────────
             # Deterministic UUID — same table always gets the same UUID so
             # pgvector UPSERTs overwrite instead of accumulating stale rows.
             for tname in table_names:
                 tid = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{schema}.{tname}"))
                 name_to_id[tname] = tid
 
-                # PKs
-                sql, params = self._get_pk_sql(tname, schema)
-                cur.execute(sql, params)
-                pk_cols = {r[0] for r in cur.fetchall()}
+                pk_cols = pks_by_table.get(tname, set())
+                fk_map: Dict[str, Tuple[str, str]] = fks_by_table.get(tname, {})
 
-                # FKs
-                sql, params = self._get_fk_sql(tname, schema)
-                cur.execute(sql, params)
-                fk_map: Dict[str, Tuple[str, str]] = {
-                    r[0]: (r[1], r[2]) for r in cur.fetchall()
-                }
-
-                # Row count
-                try:
-                    sql, params = self._get_row_count_sql(tname)
-                    cur.execute(sql, params)
-                    row_count = cur.fetchone()[0]
-                except Exception:
-                    row_count = 0
-
-                # Columns
-                sql, params = self._get_columns_sql(tname, schema)
-                cur.execute(sql, params)
-                cols_raw = cur.fetchall()
+                # Row count: batched value when available, else per-table COUNT(*).
+                if tname in row_counts:
+                    row_count = row_counts[tname]
+                else:
+                    try:
+                        sql, params = self._get_row_count_sql(tname)
+                        cur.execute(sql, params)
+                        row_count = cur.fetchone()[0]
+                    except Exception:
+                        row_count = 0
 
                 columns: List[RawColumn] = []
-                for col_name, raw_type, nullable in cols_raw:
+                for col_name, raw_type, nullable in cols_by_table.get(tname, []):
                     # Sensitive column exclusion
                     if any(p in col_name.lower() for p in SENSITIVE_PATTERNS):
                         continue
@@ -544,6 +640,60 @@ class PostgreSQLConnector(RelationalConnector):
             password = cfg.get("password"),
         )
 
+    # -- Fast batched introspection via pg_catalog --------------------------
+    # information_schema's constraint views (referential_constraints +
+    # key_column_usage) are pathologically slow on large catalogs — a
+    # schema-wide FK query can take *minutes*. pg_catalog is indexed and
+    # returns the same data in milliseconds. Columns stay on information_schema
+    # (fast, and preserves the exact data_type vocabulary, e.g. ARRAY→text).
+
+    def _get_all_pks_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        return (
+            """
+            SELECT src.relname, att.attname
+            FROM pg_constraint con
+            JOIN pg_class src     ON src.oid = con.conrelid
+            JOIN pg_namespace n   ON n.oid = con.connamespace
+            JOIN unnest(con.conkey) AS ck(attnum) ON true
+            JOIN pg_attribute att  ON att.attrelid = con.conrelid AND att.attnum = ck.attnum
+            WHERE con.contype = 'p' AND n.nspname = %s;
+            """,
+            [schema or "public"],
+        )
+
+    def _get_all_fks_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        # unnest conkey/confkey WITH ORDINALITY and join on matching position so
+        # composite FKs map each local column to its referenced column correctly.
+        return (
+            """
+            SELECT src.relname, att.attname, tgt.relname, att2.attname
+            FROM pg_constraint con
+            JOIN pg_class src      ON src.oid = con.conrelid
+            JOIN pg_class tgt      ON tgt.oid = con.confrelid
+            JOIN pg_namespace n    ON n.oid = con.connamespace
+            JOIN unnest(con.conkey)  WITH ORDINALITY AS ck(attnum, ord)  ON true
+            JOIN unnest(con.confkey) WITH ORDINALITY AS cfk(attnum, ord) ON ck.ord = cfk.ord
+            JOIN pg_attribute att   ON att.attrelid  = con.conrelid  AND att.attnum  = ck.attnum
+            JOIN pg_attribute att2  ON att2.attrelid = con.confrelid AND att2.attnum = cfk.attnum
+            WHERE con.contype = 'f' AND n.nspname = %s;
+            """,
+            [schema or "public"],
+        )
+
+    def _get_all_row_counts_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        # reltuples is the planner's estimate (accurate after ANALYZE). row_count
+        # feeds only cardinality normalisation / log-scaled features downstream,
+        # so an estimate is fine — and avoids 316 COUNT(*) full scans.
+        return (
+            """
+            SELECT c.relname, c.reltuples::bigint
+            FROM pg_class c
+            JOIN pg_namespace n ON n.oid = c.relnamespace
+            WHERE n.nspname = %s AND c.relkind = 'r';
+            """,
+            [schema or "public"],
+        )
+
 
 # =============================================================================
 # MySQL connector
@@ -629,6 +779,44 @@ class MySQLConnector(RelationalConnector):
               AND referenced_table_name IS NOT NULL;
             """,
             [table_name, db],
+        )
+
+    # -- Batched (schema-wide) variants used by get_schema() ---------------
+    def _get_all_columns_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        db = schema or self._config.get("dbname", "")
+        return (
+            """
+            SELECT table_name, column_name, column_type, is_nullable
+            FROM information_schema.columns
+            WHERE table_schema = %s
+            ORDER BY table_name, ordinal_position;
+            """,
+            [db],
+        )
+
+    def _get_all_pks_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        db = schema or self._config.get("dbname", "")
+        return (
+            """
+            SELECT table_name, column_name
+            FROM information_schema.key_column_usage
+            WHERE constraint_schema = %s
+              AND constraint_name   = 'PRIMARY';
+            """,
+            [db],
+        )
+
+    def _get_all_fks_sql(self, schema: Optional[str]) -> Tuple[str, list]:
+        db = schema or self._config.get("dbname", "")
+        return (
+            """
+            SELECT table_name, column_name,
+                   referenced_table_name, referenced_column_name
+            FROM information_schema.key_column_usage
+            WHERE constraint_schema = %s
+              AND referenced_table_name IS NOT NULL;
+            """,
+            [db],
         )
 
 

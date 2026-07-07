@@ -311,7 +311,40 @@ def warm() -> dict:
         sm_cols = len(sm.get("columns", {}))
 
     counts = sync_from_engine()
+    counts["hnsw_ef_search"] = _persist_hnsw_tuning(ctx, os.path.dirname(sm_file))
     assembler.publish_sm(ctx.source_id, ctx.tenant)
     assembler.publish_rehydrate(ctx.source_id, ctx.tenant, scope="all")
     counts["sm_columns"] = sm_cols
     return counts
+
+
+def _persist_hnsw_tuning(ctx, data_dir: str):
+    """Close the per-source HNSW loop (P7/Q-10, review Finding 4): read the
+    `veda_hnsw.json` the L5 hnsw_tune stage wrote and persist the value onto the
+    newest `SubstrateVersion` row for this (source, tenant). Query-time reads it
+    via `storage_adapters.reader._resolve_ef_search` (env override → this row →
+    the global default). Best-effort — a missing file or row changes nothing."""
+    import json
+    import os
+
+    try:
+        path = os.path.join(data_dir, "veda_hnsw.json")
+        if not os.path.exists(path):
+            return None
+        with open(path) as f:
+            ef = int(json.load(f).get("hnsw_ef_search", 0))
+        if ef <= 0:
+            return None
+
+        from apps.substrate.models import SubstrateVersion
+
+        row = (SubstrateVersion.objects
+               .filter(source_id=ctx.source_id, tenant=ctx.tenant)
+               .order_by("-id").first())
+        if row is None:
+            return None
+        row.hnsw_ef_search = ef
+        row.save(update_fields=["hnsw_ef_search"])
+        return ef
+    except Exception:
+        return None  # non-fatal: reader falls back to env/global default
