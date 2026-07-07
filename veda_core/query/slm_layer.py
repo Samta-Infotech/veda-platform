@@ -552,56 +552,24 @@ def _build_user_message(
 
 def _call_ollama(user_message: str) -> str:
     """
-    Calls Ollama /api/chat endpoint with the configured model.
-    Returns the raw assistant response string.
+    Calls the configured SLM backend (§10 seam — Ollama dev / vLLM prod) with the
+    IR system prompt. Returns the raw assistant response string.
     Raises RuntimeError on network / API errors.
     """
     try:
         from config import SLM_IR_MAX_TOKENS as _IR_CAP
     except Exception:
         _IR_CAP = SLM_MAX_TOKENS
-    payload = {
-        "model":      SLM_MODEL_NAME,
-        "stream":     False,
-        "keep_alive": "24h",            # pin the model in memory → no per-query reload
-        "messages": [
-            {"role": "system", "content": _SYSTEM_PROMPT},
-            {"role": "user",   "content": user_message},
-        ],
-        "options": {
-            "temperature": SLM_TEMPERATURE,
-            "num_predict": _IR_CAP,     # IR JSON is small; smaller decode → lower latency
-            "num_ctx": SLM_NUM_CTX,
-        },
-    }
-
-    url  = f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat"
-    data = json.dumps(payload).encode("utf-8")
-    req  = urllib.request.Request(
-        url,
-        data    = data,
-        headers = {"Content-Type": "application/json"},
-        method  = "POST",
+    from slm import call_slm
+    return call_slm(
+        user_message,
+        system=_SYSTEM_PROMPT,
+        purpose="ir_emit",
+        temperature=SLM_TEMPERATURE,
+        num_predict=_IR_CAP,        # IR JSON is small; smaller decode → lower latency
+        num_ctx=SLM_NUM_CTX,
+        timeout=SLM_TIMEOUT_SECS,
     )
-
-    try:
-        with urllib.request.urlopen(req, timeout=SLM_TIMEOUT_SECS) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(
-            f"Ollama unreachable at {url}. "
-            f"Is Ollama running? (ollama serve)  Detail: {exc}"
-        ) from exc
-
-    try:
-        body = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise RuntimeError(f"Ollama returned non-JSON: {raw[:300]}") from exc
-
-    content = body.get("message", {}).get("content", "")
-    if not content:
-        raise RuntimeError(f"Ollama returned empty content. Full body: {raw[:500]}")
-    return content
 
 
 # =============================================================================
@@ -1254,34 +1222,16 @@ def _call_ollama_decompose(query: str) -> str:
     """Decomposer Ollama call. Mirrors _call_ollama but uses the decomposer system
     prompt and a tiny decode budget (the output is a small JSON object). Raises
     RuntimeError on network/API errors — the caller degrades to 'single'."""
-    payload = {
-        "model":      SLM_MODEL_NAME,
-        "stream":     False,
-        "keep_alive": "24h",
-        "messages": [
-            {"role": "system", "content": _DECOMPOSE_SYSTEM_PROMPT},
-            {"role": "user",   "content": query},
-        ],
-        "options": {
-            "temperature": 0.0,            # deterministic split decision
-            "num_predict": 256,
-            "num_ctx": SLM_NUM_CTX,
-        },
-    }
-    url  = f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat"
-    data = json.dumps(payload).encode("utf-8")
-    req  = urllib.request.Request(
-        url, data=data, headers={"Content-Type": "application/json"}, method="POST")
-    try:
-        with urllib.request.urlopen(req, timeout=SLM_TIMEOUT_SECS) as resp:
-            raw = resp.read().decode("utf-8")
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Ollama unreachable at {url}: {exc}") from exc
-    body = json.loads(raw)
-    content = body.get("message", {}).get("content", "")
-    if not content:
-        raise RuntimeError(f"Ollama returned empty content: {raw[:300]}")
-    return content
+    from slm import call_slm
+    return call_slm(
+        query,
+        system=_DECOMPOSE_SYSTEM_PROMPT,
+        purpose="decompose",
+        temperature=0.0,               # deterministic split decision
+        num_predict=256,
+        num_ctx=SLM_NUM_CTX,
+        timeout=SLM_TIMEOUT_SECS,
+    )
 
 
 def _conf(parsed: Dict[str, Any]) -> Optional[float]:

@@ -156,32 +156,16 @@ _HYBRID_SYSTEM_PROMPT = (
 
 
 def _call_ollama(system_prompt: str, user_message: str) -> str:
-    """Single Ollama call with configurable system prompt."""
-    payload = {
-        "model":    SLM_MODEL_NAME,
-        "stream":   False,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user",   "content": user_message},
-        ],
-        "options": {
-            "temperature": SLM_TEMPERATURE,
-            "num_predict": SLM_MAX_TOKENS,
-        },
-    }
-    url  = f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat"
-    data = json.dumps(payload).encode("utf-8")
-    req  = urllib.request.Request(
-        url, data=data,
-        headers={"Content-Type": "application/json"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=SLM_TIMEOUT_SECS) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        return body.get("message", {}).get("content", "").strip()
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Ollama unreachable at {url}: {exc}") from exc
+    """Single SLM call with configurable system prompt (§10 seam)."""
+    from slm import call_slm
+    return call_slm(
+        user_message,
+        system=system_prompt,
+        purpose="rag_synthesis",
+        temperature=SLM_TEMPERATURE,
+        num_predict=SLM_MAX_TOKENS,
+        timeout=SLM_TIMEOUT_SECS,
+    ).strip()
 
 
 # =============================================================================

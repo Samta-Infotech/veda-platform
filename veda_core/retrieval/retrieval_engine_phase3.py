@@ -85,21 +85,30 @@ class RetrievalEnginePhase3:
         semantic_model_file: str = SEMANTIC_MODEL_FILE,
         db_config: Optional[Dict] = None,
         use_cache: bool = True,
-        use_redis: bool = False
+        use_redis: bool = False,
+        semantic_model: Optional[Dict] = None,
+        semantic_searcher: Optional[object] = None,
     ):
         """
         Initialize 5-signal retrieval engine.
 
         Args:
-            semantic_model_file: Path to L2 semantic model
-            db_config: PostgreSQL config (for semantic search)
+            semantic_model_file: Path to L2 semantic model (fallback when semantic_model unset)
+            db_config: PostgreSQL config for Signal-1 semantic search (VEDA INTERNAL store)
             use_cache: Enable result caching
             use_redis: Use Redis for cache (vs file-based)
+            semantic_model: In-memory L2 model for THIS (source, tenant) scope (P5). When
+                given, the engine builds its BM25/signals from it instead of reading the
+                flat file — so one warm worker serves N sources, each with its own model.
+            semantic_searcher: A shared SemanticSearchEngine (one BGE across all per-source
+                engines). When given, the engine reuses it instead of loading its own BGE.
         """
         self.semantic_model_file = semantic_model_file
         self.db_config = db_config or self._default_db_config()
         self.use_cache = use_cache
         self.use_redis = use_redis
+        self._injected_sm = semantic_model
+        self._injected_searcher = semantic_searcher
 
         self.semantic_model = {}
         self.enricher = None
@@ -114,13 +123,17 @@ class RetrievalEnginePhase3:
         self._initialize()
 
     def _default_db_config(self) -> Dict:
-        """Default PostgreSQL config."""
+        """VEDA's INTERNAL embeddings store (config.VEDA_INTERNAL_DB) — where Signal-1's
+        column_embeddings_v2 lives. NOT the client source DB (that's the L7 SQL execution
+        target only, never holds embeddings). Env-configured internal store; no hardcoded
+        client-source host/credentials."""
+        from config import VEDA_INTERNAL_DB as v
         return {
-            "host": os.getenv("DB_HOST", "localhost"),
-            "port": int(os.getenv("DB_PORT", 5432)),
-            "database": os.getenv("DB_NAME", "veda_db"),
-            "user": os.getenv("DB_USER", "veda_user"),
-            "password": os.getenv("DB_PASSWORD", "password")
+            "host": v["host"],
+            "port": v["port"],
+            "database": v["dbname"],
+            "user": v["user"],
+            "password": v["password"],
         }
 
     def _initialize(self):
@@ -129,11 +142,15 @@ class RetrievalEnginePhase3:
         logger.info("INITIALIZING PHASE 3 - 5-SIGNAL HYBRID RETRIEVAL")
         logger.info("="*70)
 
-        # Load semantic model
+        # Load semantic model — in-memory per-source model (P5) preferred; flat file fallback.
         logger.info("\n[1/8] Loading semantic model...")
-        with open(self.semantic_model_file) as f:
-            self.semantic_model = json.load(f)
-        logger.info(f"✓ Loaded semantic model")
+        if self._injected_sm is not None:
+            self.semantic_model = self._injected_sm
+            logger.info("✓ Using in-memory (per-source) semantic model")
+        else:
+            with open(self.semantic_model_file) as f:
+                self.semantic_model = json.load(f)
+            logger.info(f"✓ Loaded semantic model")
 
         # Initialize components
         logger.info("\n[2/8] Initializing query enricher...")
@@ -141,12 +158,17 @@ class RetrievalEnginePhase3:
         logger.info("✓ Query enricher ready")
 
         logger.info("\n[3/8] Initializing BGE-M3 semantic search...")
-        try:
-            self.semantic_searcher = SemanticSearchEngine(self.db_config)
-            logger.info("✓ Semantic searcher ready")
-        except Exception as e:
-            logger.error(f"✗ Semantic search init failed: {e}")
-            self.semantic_searcher = None
+        if self._injected_searcher is not None:
+            # Reuse the ONE shared BGE searcher across all per-source engines (P5).
+            self.semantic_searcher = self._injected_searcher
+            logger.info("✓ Semantic searcher (shared) ready")
+        else:
+            try:
+                self.semantic_searcher = SemanticSearchEngine(self.db_config)
+                logger.info("✓ Semantic searcher ready")
+            except Exception as e:
+                logger.error(f"✗ Semantic search init failed: {e}")
+                self.semantic_searcher = None
 
         logger.info("\n[4/8] Initializing BM25 ranker...")
         self.bm25_ranker = None

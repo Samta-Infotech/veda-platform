@@ -402,6 +402,14 @@ NL_SIMPLIFIER_ENABLED = True
 # -----------------------------------------------------------------------------
 SLM_MODEL_NAME       = "qwen2.5-coder:7b"
 SLM_OLLAMA_BASE_URL  = __import__("os").environ.get("OLLAMA_URL", "http://localhost:11434")  # env-overridable (§9): container reaches ollama:11434
+# SLM backend seam (§10, slm/_call_slm.py): "ollama" (dev/ingestion) | "vllm" (prod
+# query tier — OpenAI-compatible /v1/chat/completions). Every engine call site
+# routes through slm.call_slm(); flipping the backend is env-only, no code change.
+SLM_BACKEND          = __import__("os").environ.get("SLM_BACKEND", "ollama")
+VLLM_BASE_URL        = __import__("os").environ.get("VLLM_URL", "http://vllm:8000")
+# vLLM serves under the HF model path (e.g. "Qwen/Qwen2.5-Coder-7B-Instruct"),
+# not the Ollama tag — set when SLM_BACKEND=vllm.
+VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or None
 SLM_TEMPERATURE      = 0.3
 SLM_TIMEOUT_SECS     = 240
 SLM_MAX_RETRIES      = 2
@@ -478,27 +486,9 @@ SYNTHETIC_GEN_MAX_FK_EDGES      = 50
 # pairs, skip re-generation and reuse the existing file.
 SYNTHETIC_USE_EXISTING_PAIRS    = True
 
-# -----------------------------------------------------------------------------
-# Auto Fine-Tuning — Step 11
-# -----------------------------------------------------------------------------
-AUTO_FINETUNE_ENABLED        = False   # fine-tune chain removed; both tiers use base weights
-AUTO_FINETUNE_EPOCHS         = 3
-AUTO_FINETUNE_BATCH_SIZE     = 16
-BGE_FINETUNE_BATCH_SIZE      = 8    # CPU training — no MPS memory limit
-BGE_FINETUNE_DEVICE          = "cpu"  # BGE-large OOMs on MPS at 6.77 GB; always train on CPU
-BGE_FINETUNE_EPOCHS          = 1    # optional fine-tune step; referenced by main.py step 11
-BGE_FINETUNE_MAX_SEQ_LEN     = 128  # NL/column training pairs are short; matches AUTO_FINETUNE_MAX_SEQ_LEN
-AUTO_FINETUNE_WARMUP_STEPS   = 10
-AUTO_FINETUNE_MAX_SEQ_LEN    = 128
-AUTO_FINETUNE_CHECKPOINT_DIR = "ingestion/client_minilm"
-AUTO_FINETUNE_LR             = 2e-5
-
-# MiniLM fine-tuning mode
-# "synthetic_only" — synthetic_query_gen.py pairs only (baseline)
-# "glossary_only"  — glossary-derived query pairs only
-# "combined"       — synthetic + glossary + paraphrase (default, best)
+# (Fine-tune chain removed in Track 1 — the AUTO_FINETUNE_* / BGE_FINETUNE_* /
+# MINILM_FINETUNE_MODE keys were deleted with it; both tiers use base weights.)
 import os as _os
-MINILM_FINETUNE_MODE = _os.environ.get("MINILM_FINETUNE_MODE", "combined")
 USE_LANGGRAPH        = _os.environ.get("USE_LANGGRAPH", "true").lower() == "true"
 
 # =============================================================================
@@ -775,25 +765,30 @@ NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
 # Q-7: answer canonical result shapes (empty / single scalar / single row) with a
 # deterministic template instead of an SLM call. Multi-row results still use the SLM.
-NL_TEMPLATE_ENABLED    = True
+NL_TEMPLATE_ENABLED    = _os.environ.get(
+    "VEDA_NL_TEMPLATE_ENABLED", "true").strip().lower() in ("1", "true", "yes", "on")
 
 # =============================================================================
 # PRECOMPUTE CONSUMPTION FLAGS (Track 4 / P6–P7) — query-side read halves.
 # All default OFF so the default query path is byte-identical to pre-precompute;
 # flip on ONE at a time during the live parity gate and diff latency histograms.
+# Every flag is env-overridable (VEDA_<FLAG>=1|true|on) so the parity rollout is a
+# deploy-env change, not a code edit + redeploy per flip (review Finding 3). They
+# are also bridged into Django settings (apps.core.settings_bridge).
 # =============================================================================
-BM25_PERSISTED_INDEX_ENABLED = False   # Q-2: load persisted BM25 index, skip warm fit()
-ENRICHMENT_INDEX_ENABLED     = False   # Q-3: union merged enrichment index into enrich()
-JOIN_PATHS_ENABLED           = False   # Q-9: consult precompiled join paths for reachability
-VALUE_MIRROR_ENABLED         = False   # Q-5: Redis-first value resolution, Postgres fallback
-SUBSTRATE_SIGNALS_ENABLED    = False   # Q-1: FK signals from substrate, not live info_schema
-RERANK_DOCS_ENABLED          = False   # Q-4: precomputed rerank text per candidate
-FAST_PATH_EXPANSION_ENABLED  = False   # Q-6: widened fast-path templates from compile step
+def _env_flag(name: str, default: bool) -> bool:
+    raw = _os.environ.get(f"VEDA_{name}")
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in ("1", "true", "yes", "on")
 
-# =============================================================================
-# BGE fine-tune mode — mirrors MINILM_FINETUNE_MODE
-# =============================================================================
-BGE_FINETUNE_MODE = _os.environ.get("BGE_FINETUNE_MODE", "combined")
+BM25_PERSISTED_INDEX_ENABLED = _env_flag("BM25_PERSISTED_INDEX_ENABLED", False)  # Q-2: load persisted BM25 index, skip warm fit()
+ENRICHMENT_INDEX_ENABLED     = _env_flag("ENRICHMENT_INDEX_ENABLED", False)      # Q-3: union merged enrichment index into enrich()
+JOIN_PATHS_ENABLED           = _env_flag("JOIN_PATHS_ENABLED", False)            # Q-9: consult precompiled join paths for reachability
+VALUE_MIRROR_ENABLED         = _env_flag("VALUE_MIRROR_ENABLED", False)          # Q-5: Redis-first value resolution, Postgres fallback
+SUBSTRATE_SIGNALS_ENABLED    = _env_flag("SUBSTRATE_SIGNALS_ENABLED", False)     # Q-1: FK signals from substrate, not live info_schema
+RERANK_DOCS_ENABLED          = _env_flag("RERANK_DOCS_ENABLED", False)           # Q-4: precomputed rerank text per candidate
+FAST_PATH_EXPANSION_ENABLED  = _env_flag("FAST_PATH_EXPANSION_ENABLED", False)   # Q-6: widened fast-path templates from compile step
 
 # RELGT in hybrid embedding (always True in merged branch)
 RELGT_IN_HYBRID = True

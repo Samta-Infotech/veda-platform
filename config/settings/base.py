@@ -133,8 +133,8 @@ TIME_ZONE = "UTC"
 USE_I18N = True
 USE_TZ = True
 
-STATIC_URL = "static/"
-STATIC_ROOT = BASE_DIR / "staticfiles"  # collectstatic target (api entrypoint)
+STATIC_URL = "/static/"  # leading slash → absolute URLs so {% static %} works on nested /admin/ pages
+STATIC_ROOT = BASE_DIR / "staticfiles"  # collectstatic target (api entrypoint); served by nginx
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
 REST_FRAMEWORK = {

@@ -124,23 +124,16 @@ def run_nl_answer(
         f"Do not repeat the column names verbatim. No markdown."
     )
 
-    payload = json.dumps({
-        "model":  SLM_MODEL_NAME,
-        "prompt": prompt,
-        "stream": False,
-        "options": {"temperature": 0.1, "num_predict": 128},
-    }).encode()
-
     try:
-        req = urllib.request.Request(
-            f"{SLM_OLLAMA_BASE_URL}/api/generate",
-            data=payload,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-        with urllib.request.urlopen(req, timeout=min(SLM_TIMEOUT_SECS, 60)) as resp:
-            data = json.loads(resp.read())
-        answer = data.get("response", "").strip()
+        from slm import call_slm
+        answer = call_slm(
+            prompt,
+            purpose="nl_answer",
+            temperature=0.1,
+            num_predict=128,
+            endpoint="generate",
+            timeout=min(SLM_TIMEOUT_SECS, 60),
+        ).strip()
         if not answer:
             raise ValueError("Empty response from SLM")
     except Exception as e:

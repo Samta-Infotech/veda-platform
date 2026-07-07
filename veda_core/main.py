@@ -323,8 +323,10 @@ def run_doc_ingestion(verbose: bool = False) -> None:
 
     doc_sources = get_enabled_sources("document")
     if not doc_sources:
-        print("  ⚠  No enabled document sources found in VEDA_SOURCES.")
-        print("     Add a source with type='document' and enabled=True to config.py.")
+        print("  ⚠  No document source injected for this run.")
+        print("     Register a Source row (dialect=filesystem/s3_docs, source_path set)")
+        print("     and trigger POST /api/v1/admin/ingest {source_id} — the worker")
+        print("     injects it via VEDA_SOURCE_JSON (§3.1; no config-file registry).")
         return
 
     for src in doc_sources:

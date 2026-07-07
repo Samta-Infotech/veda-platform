@@ -39,37 +39,15 @@ logger = get_logger(__name__)
 
 
 def _call_ollama(prompt: str, model: str = None, temperature: float = 0.5, timeout: int = 120) -> Optional[str]:
-    """Call Ollama API to get LLM response."""
-    if model is None:
-        model = SLM_MODEL_NAME
-
-    url = f"{SLM_OLLAMA_BASE_URL}/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "temperature": temperature,
-        "stream": False,
-    }
-
-    request_data = json.dumps(payload).encode("utf-8")
-
+    """Call the SLM via the §10 seam. Returns response text or None on failure."""
     try:
-        req = urllib.request.Request(
-            url,
-            data=request_data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-            return response_data.get("response", "").strip()
-
-    except urllib.error.URLError as e:
-        logger.error(f"Ollama connection error: {e}")
-        return None
+        from slm import call_slm
+        return call_slm(
+            prompt, purpose="glossary", model=model,
+            temperature=temperature, endpoint="generate", timeout=timeout,
+        ).strip()
     except Exception as e:
-        logger.error(f"Ollama call failed: {e}")
+        logger.error(f"SLM call failed: {e}")
         return None
 
 

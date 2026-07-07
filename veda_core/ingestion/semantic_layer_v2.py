@@ -198,34 +198,17 @@ def _call_ollama(prompt: str, model: str = None, temperature: float = 0.3, timeo
 
 
 def _raw_call_ollama(prompt: str, model: str = None, temperature: float = 0.3, timeout: int = 120) -> Optional[str]:
-    """Single Ollama HTTP attempt (no retry). Returns response text or None on any failure."""
-    if model is None:
-        model = SLM_MODEL_NAME
-
-    url = f"{SLM_OLLAMA_BASE_URL}/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "temperature": temperature,
-        "stream": False,
-    }
-
-    request_data = json.dumps(payload).encode("utf-8")
-
+    """Single SLM attempt via the §10 seam (no retry). Returns response text or None
+    on any failure. (Note: the previous direct call put `temperature` at the payload
+    top level, which Ollama ignores — the seam applies it correctly via options.)"""
     try:
-        req = urllib.request.Request(
-            url,
-            data=request_data,
-            headers={"Content-Type": "application/json"},
-            method="POST",
-        )
-
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-            return response_data.get("response", "").strip()
-
+        from slm import call_slm
+        return call_slm(
+            prompt, purpose="semantic_layer", model=model,
+            temperature=temperature, endpoint="generate", timeout=timeout,
+        ).strip()
     except Exception as e:
-        logger.error(f"Ollama call failed: {e}")
+        logger.error(f"SLM call failed: {e}")
         return None
 
 

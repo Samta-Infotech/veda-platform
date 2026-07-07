@@ -56,10 +56,12 @@ _LAYER_STAGE_TO_ROW = {
     "table_metadata": "semantic_types", "value_profiling": "value_profiling",
     "reg_graph": "embeddings", "join_paths": "embeddings",
     "graph_persist": "embeddings", "graph_embed": "embeddings",
-    "encoder": "embeddings", "biencoder": "embeddings",
     "bm25_index": "embeddings", "enrichment_index": "embeddings",
     "rerank_docs": "embeddings",
-    "vector_store": "vector_store", "semantic_layer": "derived_language",
+    # BGE biencoder is the live vector store (column_embeddings_v2) now that the
+    # ensemble encoder + _lt/_hybrid store were removed — map it to the vector_store row.
+    "biencoder": "vector_store",
+    "semantic_layer": "derived_language",
     "relationship_graph": "derived_language", "semantic_registry": "derived_language",
     "value_mirror": "derived_language", "hnsw_tune": "derived_language",
     "unified_graph": "unified_graph",
@@ -209,7 +211,12 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         stage_re = re.compile(r"\[\[STAGE\]\]\s+(\S+)\s+(\S+)\s+(ok|fail|fatal)")
         tail = []
         current_stage = None
+        current_row = None       # [[STAGE]] path: the STAGE_ORDER row currently active
         for line in proc.stdout:
+            # Echo the engine subprocess output to the worker's stdout so ingestion
+            # progress is visible live via `docker compose logs -f ingest-worker`
+            # (the task still parses these lines below into IngestionStage rows).
+            print(line, end="", flush=True)
             tail.append(line)
             if len(tail) > 200:
                 tail.pop(0)
@@ -218,8 +225,19 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
                 row_name = _LAYER_STAGE_TO_ROW.get(sm.group(2))
                 status = sm.group(3)
                 if row_name:
+                    # Row transition = the previous observable row finished all its
+                    # constituent layer stages → mark it SUCCESS *now* (real per-stage
+                    # timing in admin), not en masse at the end (review nit).
+                    if current_row and current_row != row_name:
+                        prev = stages.get(current_row)
+                        if prev is not None and prev.status != JobStatus.FAILED:
+                            _mark([current_row], JobStatus.SUCCESS)
+                    current_row = row_name
+                    # The pipeline emits "[[STAGE]] … ok" AFTER a stage completes, so
+                    # ok → SUCCESS (mark done). Rolled-up rows (several layer stages →
+                    # one row) simply re-confirm SUCCESS as each sub-stage lands.
                     if status == "ok":
-                        _mark([row_name], JobStatus.RUNNING)
+                        _mark([row_name], JobStatus.SUCCESS)
                     elif status == "fatal":
                         _mark([row_name], JobStatus.FAILED)
                     st = stages.get(row_name)
@@ -250,10 +268,14 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
                 current_stage = stage_name
         proc.wait()
         if proc.returncode != 0:
+            if current_row:
+                _mark([current_row], JobStatus.FAILED)
             if current_stage:
                 _mark([current_stage], JobStatus.FAILED)
             raise RuntimeError(f"run_ingestion subprocess failed (rc={proc.returncode}): "
                                f"{''.join(tail)[-1500:]}")
+        if current_row:
+            _mark([current_row], JobStatus.SUCCESS)
         if current_stage:
             _mark([current_stage], JobStatus.SUCCESS)
         result = {"source_id": str(source_id) if source_id else "primary_db"}

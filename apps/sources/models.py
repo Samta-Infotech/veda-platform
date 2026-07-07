@@ -20,6 +20,14 @@ class Dialect(models.TextChoices):
     MONGO = "mongo", "MongoDB"
     ES = "es", "Elasticsearch"
     DYNAMO = "dynamo", "DynamoDB"
+    # Non-DB source kinds (review Finding 5): now representable from a Source row,
+    # so document/datalake onboarding is the same pure data operation via the API.
+    FILESYSTEM = "filesystem", "Filesystem documents"
+    S3_DOCS = "s3_docs", "S3 documents"
+    DELTA = "delta", "Delta Lake"
+    PARQUET = "parquet", "Parquet"
+    CSV_LAKE = "csv_lake", "CSV data lake"
+    ICEBERG = "iceberg", "Iceberg"
 
 
 class SourceStatus(models.TextChoices):
@@ -59,6 +67,18 @@ class Source(models.Model):
     exclude_tables = models.JSONField(default=list, blank=True)
     # Restrict scanning to a single schema (None/"" = all public schemas).
     schema_filter = models.CharField(max_length=128, blank=True)
+    # Document / datalake sources (review Finding 5): the connector-facing fields
+    # (path, formats, recursion, size cap) live on the row, same as DB connections.
+    source_path = models.CharField(
+        max_length=512, blank=True,
+        help_text="Root path/URI for document or datalake sources "
+                  "(e.g. /data/contracts, s3://bucket/prefix)")
+    doc_formats = models.JSONField(
+        default=list, blank=True,
+        help_text='Document formats to ingest, e.g. ["pdf", "docx", "md"]; '
+                  "empty = connector defaults")
+    doc_recursive = models.BooleanField(default=True)
+    doc_max_file_mb = models.PositiveIntegerField(null=True, blank=True)
     last_ingested_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -104,40 +124,60 @@ class Source(models.Model):
 
     # Dialect → (engine source-type vocabulary, connector engine name) for the engine's
     # connector registry (connectors/base.register_connector "<type>:<engine>" keys).
-    # Only relational + nosql are representable from a Source row; document/datalake need
-    # path/format fields this model doesn't carry.
+    # All four source kinds are representable from a Source row (review Finding 5):
+    # relational/nosql via the connection fields, document/datalake via source_path.
     _DIALECT_TO_ENGINE = {
-        "postgres":  ("relational", "postgresql"),
-        "mysql":     ("relational", "mysql"),
-        "sqlite":    ("relational", "sqlite"),
-        "oracle":    ("relational", "generic"),
-        "sqlserver": ("relational", "generic"),
-        "duckdb":    ("relational", "generic"),
-        "mongo":     ("nosql", "mongodb"),
-        "es":        ("nosql", "elasticsearch"),
-        "dynamo":    ("nosql", "dynamodb"),
+        "postgres":   ("relational", "postgresql"),
+        "mysql":      ("relational", "mysql"),
+        "sqlite":     ("relational", "sqlite"),
+        "oracle":     ("relational", "generic"),
+        "sqlserver":  ("relational", "generic"),
+        "duckdb":     ("relational", "generic"),
+        "mongo":      ("nosql", "mongodb"),
+        "es":         ("nosql", "elasticsearch"),
+        "dynamo":     ("nosql", "dynamodb"),
+        "filesystem": ("document", "filesystem"),
+        "s3_docs":    ("document", "s3"),
+        "delta":      ("datalake", "delta"),
+        "parquet":    ("datalake", "parquet"),
+        "csv_lake":   ("datalake", "csv"),
+        "iceberg":    ("datalake", "iceberg"),
     }
 
     def source_kind(self) -> str:
-        """The engine source-type ('relational' | 'nosql') this source routes to."""
+        """The engine source-type ('relational' | 'nosql' | 'document' | 'datalake')
+        this source routes to (apps.ingestion.tasks / ingestion.dispatcher)."""
         return self._DIALECT_TO_ENGINE.get(self.dialect, ("relational", "generic"))[0]
 
     def as_source_config(self) -> dict:
         """Engine source_config for THIS source, consumed by
         source_dispatcher.dispatch_ingestion / connectors.build_connector."""
         stype, engine = self._DIALECT_TO_ENGINE.get(self.dialect, ("relational", "generic"))
-        c = self.connection()
-        return {
+        cfg = {
             "id": str(self.pk),
             "type": stype,
             "engine": engine,
             "enabled": True,
-            "role": "queryable",
-            "host": c["host"], "port": c["port"], "dbname": c["dbname"],
-            "user": c["user"], "password": c["password"],
-            "schema": self.schema_filter or None,
-            "exclude_tables": list(self.exclude_tables or []),
+            # documents are chunk-retrieval (RAG) sources; the rest generate queries
+            "role": "searchable" if stype == "document" else "queryable",
         }
+        if stype in ("document", "datalake"):
+            cfg["path"] = self.source_path or ""
+            if stype == "document":
+                if self.doc_formats:
+                    cfg["formats"] = list(self.doc_formats)
+                cfg["recursive"] = bool(self.doc_recursive)
+                if self.doc_max_file_mb:
+                    cfg["max_file_mb"] = int(self.doc_max_file_mb)
+        else:
+            c = self.connection()
+            cfg.update({
+                "host": c["host"], "port": c["port"], "dbname": c["dbname"],
+                "user": c["user"], "password": c["password"],
+                "schema": self.schema_filter or None,
+                "exclude_tables": list(self.exclude_tables or []),
+            })
+        return cfg
 
 
 class SourceConnectionProfile(models.Model):

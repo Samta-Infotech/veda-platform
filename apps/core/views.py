@@ -121,11 +121,20 @@ def readyz(request):
                 ok = False
     except Exception as exc:  # noqa: BLE001
         checks["inference"] = f"fail: {exc}"; ok = False
-    # SLM backend reachability (Ollama dev / vLLM prod).
+    # SLM backend reachability — probes the CONFIGURED backend (§10 seam):
+    # Ollama → /api/tags; vLLM → /v1/models (OpenAI-compatible).
     try:
-        slm = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/") + "/api/tags"
+        backend = os.environ.get("SLM_BACKEND", "ollama").strip().lower()
+        if backend == "vllm":
+            base = os.environ.get("VLLM_URL", "http://vllm:8000").rstrip("/")
+            if base.endswith("/v1"):
+                base = base[: -len("/v1")].rstrip("/")
+            slm = base + "/v1/models"
+        else:
+            slm = os.environ.get("OLLAMA_URL", "http://ollama:11434").rstrip("/") + "/api/tags"
         with urllib.request.urlopen(slm, timeout=3) as r:
             checks["slm_backend"] = "ok" if r.status == 200 else f"status {r.status}"
+        checks["slm_backend_kind"] = backend
     except Exception as exc:  # noqa: BLE001
         checks["slm_backend"] = f"fail: {exc}"  # non-gating (dev), reported
     return JsonResponse({"status": "ready" if ok else "degraded", "checks": checks},
