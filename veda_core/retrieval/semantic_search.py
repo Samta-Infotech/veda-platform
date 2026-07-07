@@ -18,6 +18,7 @@ from typing import List, Tuple, Optional
 from sentence_transformers import SentenceTransformer
 from config import BGE_MODEL_NAME   # unified model (cached); was hardcoded "BAAI/bge-m3"
 from config import BIENCODER_COL_TABLE   # the 1024-dim BGE store that ensemble ingest writes
+from config import BIENCODER_QUERY_PREFIX   # WP1: query prefix, matches how passages were stored
 
 logger = logging.getLogger(__name__)
 
@@ -40,44 +41,42 @@ class SemanticSearcher:
         self._load_model()
 
     def _load_model(self):
-        """Load BGE-M3 model. Reuse the ONE shared instance (veda.runtime._get_bge) when it's
-        the same model/device — avoids loading a second ~1.3GB copy of bge-large per process."""
+        """Use the ONE shared BGE-M3 dense facade (WP3) — the same underlying model that
+        produced the stored column vectors, so query and passage share one space and the
+        process holds a single copy."""
         try:
-            if self.device == "cpu":
-                try:
-                    from config import BGE_MODEL_NAME as _shared_name
-                    if self.model_name == _shared_name:
-                        from veda.runtime import _get_bge
-                        self.model = _get_bge()
-                        logger.info("✓ Model reused (shared BGE — no duplicate load)")
-                        return
-                except Exception:
-                    pass   # any issue → fall back to an own load below
-            logger.info(f"Loading {self.model_name} on {self.device}...")
-            self.model = SentenceTransformer(self.model_name, device=self.device,
-                                             local_files_only=True)
-            logger.info(f"✓ Model loaded ({self.model.get_sentence_embedding_dimension()} dims)")
+            from ingestion import m3_encoder
+            self.model = m3_encoder.get_dense_encoder()
+            logger.info("✓ Model reused (shared BGE-M3 — no duplicate load)")
         except Exception as e:
-            logger.error(f"Failed to load model: {e}")
+            logger.error(f"Failed to load BGE-M3 dense encoder: {e}")
             raise
 
-    def embed_query(self, tokens: List[str]) -> List[float]:
+    def embed_query(self, query: str) -> List[float]:
         """
-        Embed enriched query tokens to 1024-dimensional vector.
+        Embed the RAW natural-language query to a 1024-dimensional vector.
+
+        WP1 correctness fix: the prior path joined ENRICHED TOKENS with spaces and
+        encoded them with no query prefix and no normalization — a train/serve
+        mismatch against the column passages, which were doc-encoded and
+        L2-normalized. We now encode BIENCODER_QUERY_PREFIX + the raw query with
+        normalize_embeddings=True so the query vector lives in the SAME normalized
+        space as the stored passages. Enrichment moves to the sparse/value signals.
 
         Args:
-            tokens: List of query tokens (already enriched)
+            query: Raw natural-language query (NOT enriched tokens)
 
         Returns:
             1024-dimensional embedding as list of floats
         """
-        # Join tokens into query text
-        query_text = " ".join(tokens)
+        text = f"{BIENCODER_QUERY_PREFIX}{query}"
 
-        logger.info(f"Embedding query: {query_text}")
+        logger.info(f"Embedding query: {text}")
 
-        # Encode to 1024-dim vector
-        embedding = self.model.encode(query_text, convert_to_numpy=True)
+        # Encode to 1024-dim vector, normalized to match stored passages.
+        embedding = self.model.encode(
+            text, convert_to_numpy=True, normalize_embeddings=True,
+        )
 
         logger.info(f"✓ Query embedding: {len(embedding)}-dim vector")
 
@@ -134,6 +133,14 @@ class SemanticSearcher:
             # pgvector expects format: "[1.0, 0.5, ...]"
             embedding_str = "[" + ", ".join(str(x) for x in query_embedding) + "]"
 
+            # HNSW: pin ef_search for this transaction so the served ANN ordering matches
+            # the tuned recall target (WP2). Resolved per-source via the one shared helper;
+            # SET LOCAL is released at COMMIT (transaction-pool-safe).
+            from storage_adapters.reader import _resolve_ef_search
+            from veda_core.context import try_current
+            _c = try_current()
+            _ef = _resolve_ef_search(_c.source_id if _c is not None else None)
+
             # Execute cosine similarity search
             # <=> is pgvector's cosine distance operator
             # 1 - distance = similarity (0-1)
@@ -147,8 +154,11 @@ class SemanticSearcher:
                 LIMIT %s
             """
 
+            cur.execute("BEGIN")
+            cur.execute(f"SET LOCAL hnsw.ef_search = {int(_ef)}")
             cur.execute(query, (embedding_str, embedding_str, k))
             results = cur.fetchall()
+            cur.execute("COMMIT")
             cur.close()
 
             # Convert results: (col_id, similarity)
@@ -219,19 +229,20 @@ class SemanticSearchEngine:
             logger.error(f"Failed to connect to database: {e}")
             raise
 
-    def search(self, enriched_tokens: List[str], k: int = 50) -> List[Tuple[str, float]]:
+    def search(self, query: str, k: int = 50) -> List[Tuple[str, float]]:
         """
-        Semantic search given enriched tokens.
+        Semantic search given the RAW natural-language query (WP1).
 
         Args:
-            enriched_tokens: Enriched query tokens from query_enrichment
+            query: Raw natural-language query (NOT enriched tokens — enrichment now
+                lives only in the sparse/value signals)
             k: Number of results to return
 
         Returns:
             List of (col_id, similarity_score) tuples
         """
-        # Step 1: Embed query
-        embedding = self.searcher.embed_query(enriched_tokens)
+        # Step 1: Embed the raw query (prefixed + normalized)
+        embedding = self.searcher.embed_query(query)
 
         # Step 2: Search in pgvector
         results = self.searcher.retrieve_semantic(embedding, self.conn, k)
@@ -256,7 +267,7 @@ class SemanticSearchEngine:
 # ============================================================================
 
 def retrieve_semantic(
-    enriched_tokens: List[str],
+    query: str,
     db_config: dict,
     k: int = 50
 ) -> List[Tuple[str, float]]:
@@ -264,7 +275,7 @@ def retrieve_semantic(
     Standalone semantic search function.
 
     Args:
-        enriched_tokens: Enriched query tokens
+        query: Raw natural-language query (NOT enriched tokens)
         db_config: PostgreSQL config
         k: Number of results
 
@@ -273,7 +284,7 @@ def retrieve_semantic(
     """
     engine = SemanticSearchEngine(db_config)
     try:
-        results = engine.search(enriched_tokens, k)
+        results = engine.search(query, k)
         return results
     finally:
         engine.close()
@@ -292,15 +303,13 @@ if __name__ == "__main__":
         "password": "password"
     }
 
-    # Example enriched tokens (from phase 3a)
-    enriched_tokens = [
-        "show", "total", "payments", "amount", "sum", "last", "30", "days"
-    ]
+    # Example raw query
+    query = "show total payments amount last 30 days"
 
     # Search
     try:
         with SemanticSearchEngine(db_config) as engine:
-            results = engine.search(enriched_tokens, k=50)
+            results = engine.search(query, k=50)
             print(f"\nSemantic search results:")
             for i, (col_id, sim_score) in enumerate(results[:5], 1):
                 print(f"  {i}. {col_id}: {sim_score:.3f}")

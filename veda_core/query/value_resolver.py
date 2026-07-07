@@ -160,11 +160,10 @@ def _mirror_scope():
 
 
 def _mirror_lookup(token):
-    """Q-5: Redis-first value resolution → [(table, col, raw)] or None (Postgres fallback)."""
+    """Redis-first value resolution → [(table, col, raw)] or None. WP7: no flag —
+    Redis-first with the Postgres column_values fallback IS the design (Redis can be
+    cold/restarted, which the caller in column_values_lookup handles)."""
     try:
-        from config import VALUE_MIRROR_ENABLED
-        if not VALUE_MIRROR_ENABLED:
-            return None
         from ingestion.value_mirror import lookup_value
         sid, tenant = _mirror_scope()
         entries = lookup_value(token.lower(), source_id=sid, tenant=tenant)

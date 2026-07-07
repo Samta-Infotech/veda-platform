@@ -4,7 +4,9 @@
 #
 # Responsibility:
 #   - Embeds the user query, seeds top-K graph nodes via cosine ANN
-#   - BFS-expands the subgraph over edges (weighted, hop-decayed scoring)
+#   - Personalized-PageRank expansion over the source edge list (WP5): the seed
+#     similarities form the restart vector; PPR propagates relevance over a
+#     row-normalized transition matrix (row-normalization is the hub treatment)
 #   - Materializes columns / chunks / tables from the visited subgraph
 #   - Adapts column subgraph nodes back into RetrievalResult for L3/L4 reuse
 #
@@ -21,11 +23,6 @@ from typing import List, Dict, Optional
 
 from config import (
     GRAPH_SEED_TOP_K,
-    GRAPH_EXPAND_HOPS,
-    GRAPH_EXPAND_MAX_NODES,
-    GRAPH_HOP_DECAY,
-    GRAPH_EDGE_WEIGHTS,
-    GRAPH_HUB_DEGREE_CAP,
     GRAPH_SIBLING_SCORE_FACTOR,
     GRAPH_SIBLING_MAX_PER_TABLE,
     GRAPH_SINGLE_TABLE_SIM,
@@ -34,9 +31,126 @@ from config import (
     GRAPH_SEED_SIM_FLOOR,
     GRAPH_MAX_COLS_TO_L3,
     GRAPH_MAX_CHUNKS,
+    GRAPH_PPR_DAMPING,
+    GRAPH_PPR_TOL,
+    GRAPH_PPR_MAX_ITERS,
+    GRAPH_PPR_MAX_NODES,
+    GRAPH_CHUNK_SCORE_FACTOR,
 )
 
-_MAX_EDGE_WEIGHT = max(GRAPH_EDGE_WEIGHTS.values())  # 3.0 — used to normalise per spec
+
+# =============================================================================
+# WP5 — Personalized PageRank transition matrix (cached per source scope)
+# =============================================================================
+# (source_key) -> {"ids": [node_id...], "idx": {node_id: i}, "PT": scipy csr}
+_PPR_CACHE: Dict[tuple, dict] = {}
+
+
+def clear_ppr_cache() -> None:
+    """Drop the cached transition matrices. Hooked to the rehydrate fan-out (§8.4) —
+    the same subscriber that clears veda_hybrid._SM — so a re-ingest's new graph is
+    picked up without a process restart."""
+    _PPR_CACHE.clear()
+
+
+def _ppr_key(source_ids: Optional[List[str]]) -> tuple:
+    return tuple(sorted(str(s) for s in source_ids)) if source_ids else ("_all",)
+
+
+def _load_all_edges(source_ids: Optional[List[str]]):
+    """Full (src, dst, weight) edge list for the scope — one query per (source, process)."""
+    from ingestion.graph_persist import GRAPH_EDGES_TABLE
+    from ingestion.db_abstraction import (
+        INTERNAL_DB_AVAILABLE, get_internal_connection, release_internal_connection,
+    )
+    if not INTERNAL_DB_AVAILABLE:
+        return []
+    try:
+        conn = get_internal_connection()
+    except Exception:
+        return []
+    try:
+        cur = conn.cursor()
+        if source_ids:
+            ph = ",".join(["%s"] * len(source_ids))
+            cur.execute(f"SELECT src_node_id, dst_node_id, weight FROM {GRAPH_EDGES_TABLE} "
+                        f"WHERE source_id IN ({ph})", list(source_ids))
+        else:
+            cur.execute(f"SELECT src_node_id, dst_node_id, weight FROM {GRAPH_EDGES_TABLE}")
+        rows = cur.fetchall()
+        try: cur.close()
+        except Exception: pass
+        return rows
+    except Exception:
+        try: conn.rollback()
+        except Exception: pass
+        return []
+    finally:
+        release_internal_connection(conn)
+
+
+def _get_transition(source_ids: Optional[List[str]]):
+    """Build (once, cached) the row-normalized transition matrix Pᵀ for the scope.
+    Symmetric adjacency (edges are traversed both directions, as the BFS did), weighted
+    by edge weight; row-normalization dilutes high-degree hubs automatically."""
+    key = _ppr_key(source_ids)
+    cached = _PPR_CACHE.get(key)
+    if cached is not None:
+        return cached
+    edges = _load_all_edges(source_ids)
+    if not edges:
+        _PPR_CACHE[key] = {"ids": [], "idx": {}, "PT": None}
+        return _PPR_CACHE[key]
+    import numpy as np
+    import scipy.sparse as sp
+
+    node_set = set()
+    for s, d, _w in edges:
+        node_set.add(s); node_set.add(d)
+    ids = sorted(node_set)
+    idx = {nid: i for i, nid in enumerate(ids)}
+    n = len(ids)
+    rows, cols, data = [], [], []
+    for s, d, w in edges:
+        i, j = idx[s], idx[d]
+        wt = float(w) if w else 1.0
+        rows += [i, j]; cols += [j, i]; data += [wt, wt]   # symmetric
+    A = sp.csr_matrix((data, (rows, cols)), shape=(n, n))
+    deg = np.asarray(A.sum(axis=1)).ravel()
+    deg[deg == 0] = 1.0
+    P = sp.diags(1.0 / deg) @ A            # row-stochastic transition
+    result = {"ids": ids, "idx": idx, "PT": P.T.tocsr()}
+    _PPR_CACHE[key] = result
+    return result
+
+
+def _ppr_scores(seeds, source_ids: Optional[List[str]]) -> Dict[str, float]:
+    """Personalized PageRank over the cached transition matrix. Restart vector p0 is the
+    seed similarities (normalized to sum 1); returns {node_id: stationary score}."""
+    tr = _get_transition(source_ids)
+    if tr is None or not tr["ids"] or tr["PT"] is None:
+        return {}
+    import numpy as np
+    idx, PT, n = tr["idx"], tr["PT"], len(tr["ids"])
+    p0 = np.zeros(n, dtype=np.float64)
+    for (nid, _t, sim) in seeds:
+        i = idx.get(nid)
+        if i is not None:
+            p0[i] += max(float(sim), 0.0)
+    total = p0.sum()
+    if total <= 0:
+        return {}
+    p0 /= total
+    d = GRAPH_PPR_DAMPING
+    p = p0.copy()
+    for _ in range(GRAPH_PPR_MAX_ITERS):
+        p_next = (1.0 - d) * p0 + d * (PT @ p)
+        if np.abs(p_next - p).sum() < GRAPH_PPR_TOL:
+            p = p_next
+            break
+        p = p_next
+    ids = tr["ids"]
+    return {ids[i]: float(p[i]) for i in range(n) if p[i] > 0.0}
 
 
 # =============================================================================
@@ -139,7 +253,6 @@ def run_graph_retrieval(
     """
     t0 = time.time()
     seed_top_k = seed_top_k or GRAPH_SEED_TOP_K
-    hops = hops or GRAPH_EXPAND_HOPS
 
     from ingestion.graph_embedder import embed_text_bge, retrieve_graph_seeds
     from ingestion.graph_persist import get_neighbors, get_nodes
@@ -190,59 +303,28 @@ def run_graph_retrieval(
                       f"table_id={sc_table_id} sim={seeds[0][2]:.4f} gap={gap:.3f}")
 
     # ------------------------------------------------------------------
-    # Fix A — BFS with has_column restored + hub degree cap
+    # WP5 — Personalized PageRank expansion (replaces hop-decay BFS)
+    # Seed similarities are the restart vector; PPR propagates relevance over the
+    # whole (row-normalized) transition matrix, so 2-hop FK-reachable columns (the
+    # state.name-via-transition pattern) surface at their true relevance instead of a
+    # fixed hop-decay. Row-normalization dilutes hubs — no explicit degree cap needed.
     # ------------------------------------------------------------------
     if not short_circuited:
-        from ingestion.graph_persist import get_node_degrees
-        frontier = list(visited.keys())
-        stop = False
-        for hop in range(1, hops + 1):
-            if not frontier or stop:
+        seed_ids_present = set(visited.keys())
+        ppr = _ppr_scores(seeds, source_ids)
+        ranked = sorted(
+            ((nid, sc) for nid, sc in ppr.items() if nid not in seed_ids_present),
+            key=lambda kv: kv[1], reverse=True,
+        )
+        for nid, sc in ranked:
+            if len(visited) >= GRAPH_PPR_MAX_NODES:
                 break
-            degrees = get_node_degrees(frontier)
-            edges = get_neighbors(
-                frontier,
-                edge_types=["has_column", "fk_to", "discovered_fk", "mentions", "about"],
-                direction="both",
+            visited[nid] = SubgraphNode(
+                node_id   = nid,
+                node_type = "",
+                score     = float(sc),
+                hop       = 1,
             )
-            next_frontier: List[str] = []
-            for e in edges:
-                if e.src_node_id in visited:
-                    parent_id, neighbor_id = e.src_node_id, e.dst_node_id
-                elif e.dst_node_id in visited:
-                    parent_id, neighbor_id = e.dst_node_id, e.src_node_id
-                else:
-                    continue
-
-                # Hub guard: don't expand THROUGH high-degree nodes
-                if degrees.get(parent_id, 0) > GRAPH_HUB_DEGREE_CAP:
-                    continue
-
-                edges_used.append({
-                    "src":       e.src_node_id,
-                    "dst":       e.dst_node_id,
-                    "edge_type": e.edge_type,
-                    "weight":    e.weight,
-                    "evidence":  e.evidence,
-                })
-
-                if neighbor_id in visited:
-                    continue
-
-                if len(visited) >= GRAPH_EXPAND_MAX_NODES:
-                    stop = True
-                    break
-
-                parent_score = visited[parent_id].score
-                score = parent_score * GRAPH_HOP_DECAY * (e.weight / _MAX_EDGE_WEIGHT)
-                visited[neighbor_id] = SubgraphNode(
-                    node_id   = neighbor_id,
-                    node_type = "",
-                    score     = score,
-                    hop       = hop,
-                )
-                next_frontier.append(neighbor_id)
-            frontier = next_frontier
 
     # ------------------------------------------------------------------
     # Fix B — bounded sibling inclusion (correctly scored, budget-aware)
@@ -253,7 +335,7 @@ def run_graph_retrieval(
     seed_node_ids = [nid for nid, sub in visited.items()
                      if sub.hop == 0 and nid.startswith("col:")]
 
-    if seed_node_ids and len(visited) < GRAPH_EXPAND_MAX_NODES:
+    if seed_node_ids and len(visited) < GRAPH_PPR_MAX_NODES:
         from ingestion.graph_persist import GRAPH_NODES_TABLE
         from ingestion.db_abstraction import (
             INTERNAL_DB_AVAILABLE, get_internal_connection,
@@ -279,7 +361,7 @@ def run_graph_retrieval(
                             seed_tid_map[tid] = s
 
                     for tid, tbl_seed_score in seed_tid_map.items():
-                        if len(visited) >= GRAPH_EXPAND_MAX_NODES:
+                        if len(visited) >= GRAPH_PPR_MAX_NODES:
                             break
                         sibling_score = (
                             min(expanded_scores) * GRAPH_SIBLING_SCORE_FACTOR
@@ -294,7 +376,7 @@ def run_graph_retrieval(
                         # When short-circuited, include all columns of the
                         # focused table — it's a single small table, not a hub.
                         sibling_cap = (
-                            GRAPH_EXPAND_MAX_NODES if short_circuited and tid == sc_table_id
+                            GRAPH_PPR_MAX_NODES if short_circuited and tid == sc_table_id
                             else GRAPH_SIBLING_MAX_PER_TABLE
                         )
                         added = 0
@@ -302,7 +384,7 @@ def run_graph_retrieval(
                             nid = row["node_id"]
                             if nid in visited or added >= sibling_cap:
                                 continue
-                            if len(visited) >= GRAPH_EXPAND_MAX_NODES:
+                            if len(visited) >= GRAPH_PPR_MAX_NODES:
                                 break
                             visited[nid] = SubgraphNode(
                                 node_id   = nid,
@@ -347,7 +429,7 @@ def run_graph_retrieval(
                 visited[chunk_nid] = SubgraphNode(
                     node_id   = chunk_nid,
                     node_type = "chunk",
-                    score     = parent_score * GRAPH_HOP_DECAY,
+                    score     = parent_score * GRAPH_CHUNK_SCORE_FACTOR,
                     hop       = 1,
                 )
                 existing_chunks += 1

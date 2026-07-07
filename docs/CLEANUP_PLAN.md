@@ -281,3 +281,8 @@ API → dispatcher(SourceContext{tenant, source, type=relational})
 Removed vs today: GNN, synthetic gen, fine-tune, profiler, legacy CLI, dead modules, 69 config keys, `VEDA_SOURCES` + client exclude list + credential defaults, global artifact paths, subprocess orchestration, checkpoint-file resume.
 Added: layer contracts, versioned atomic publish, per-(tenant, source) scoping, six precompute artifacts, deterministic NL templates, exact-hash cache, stage-level Celery orchestration.
 Unchanged: both query tiers, the escalation ladder, all four firewall gates, read-only parameterized execution, tenancy fail-closed model.
+
+## Retrieval upgrade (WP1–WP7) — further removals
+
+Removed on top of the above: the relgt/light-text/hybrid/MiniLM encoders + `ENCODER_MODE` and its dim/label/ensemble config, BM25 (`bm25_ranker`/`bm25_index`), the `column_embeddings`/`_lt`/`_hybrid` stores + their substrate mirrors (migration 0006), `bge-large`/MiniLM from the model bake, the seven Track-4 `_env_flag` toggles + `NL_TEMPLATE_ENABLED`, the SignalBuilder live `information_schema` dual, the reranker runtime text assembly, and the hop-decay BFS (`GRAPH_HOP_DECAY`/`GRAPH_EXPAND_*`/`GRAPH_HUB_DEGREE_CAP`).
+Added: `ingestion/m3_encoder.py` (BGE-M3 dense + sparse), `column_sparse_v1`/`table_sparse_v1`, `retrieval/sparse_ranker.py`, weighted six-signal fusion + table prior, Personalized-PageRank graph expansion, HNSW on every vector table, and the `evaluation/` harness (`retrieval_eval.py`, `build_golden_set.py`, `tune_fusion_weights.py`).

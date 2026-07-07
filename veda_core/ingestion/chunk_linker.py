@@ -357,8 +357,11 @@ def link_chunks_to_graph(
     # ------------------------------------------------------------------
     if not GRAPH_EMBED_ENABLED and chunk_embeddings is not None and column_nodes:
         try:
-            from ingestion.chunk_embedder import get_minilm_model
-            model = get_minilm_model()
+            # WP3: BGE-M3 dense (1024-dim) for the column sentences — same space as the
+            # chunk embeddings passed in. NOTE: GRAPH_LINK_EMBED_SIM_MIN was tuned for
+            # MiniLM's cosine distribution; M3 cosines run tighter/higher, so re-validate
+            # that threshold against a histogram on one ingested doc source.
+            from ingestion import m3_encoder
             col_sentences = [
                 GRAPH_COLUMN_SENTENCE_TEMPLATE.format(
                     col_name      = n.name,
@@ -367,12 +370,7 @@ def link_chunks_to_graph(
                 )
                 for n in column_nodes
             ]
-            col_embs = model.encode(
-                col_sentences,
-                convert_to_numpy     = True,
-                normalize_embeddings = True,
-                show_progress_bar    = False,
-            ).astype(np.float32)
+            col_embs = m3_encoder.encode_dense(col_sentences)
 
             chunk_emb_mat = np.asarray(chunk_embeddings, dtype=np.float32)
             # cosine = chunk_emb @ col_embs.T (both normalized)

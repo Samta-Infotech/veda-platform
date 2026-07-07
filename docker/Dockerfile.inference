@@ -1,5 +1,5 @@
 # inference tier — Uvicorn/ASGI + torch/transformers/sentence-transformers.
-# Warm-loads BGE-M3, bge-reranker-v2-m3, MiniLM, and the 5-signal engine once per worker
+# Warm-loads BGE-M3 (dense + sparse), bge-reranker-v2-m3, and the 5-signal engine once per worker
 # (migration_plan.md §8.1). Model weights are baked/mounted so startup is offline — no
 # network calls at container start, matching the zero-egress constraint (§9, §2).
 
@@ -34,7 +34,7 @@ RUN pip install "django>=4.2,<5.1" djangorestframework celery django-environ
 
 COPY . /app
 
-# Model weights (BGE-M3, bge-reranker-v2-m3, MiniLM) are expected under /models — either
+# Model weights (BGE-M3, bge-reranker-v2-m3) are expected under /models — either
 # baked in here via a build-context COPY (uncomment below, pre-pulled at build time) or
 # mounted as the `model_cache` volume in docker-compose (§9 model cache). Either way,
 # HF_HUB_OFFLINE=1 above guarantees no network fetch is attempted at startup.

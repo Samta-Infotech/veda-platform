@@ -4,12 +4,12 @@
 #
 # Responsibility:
 #   - Accepts DocumentChunk objects from a document connector
-#   - Embeds each chunk using the shared MiniLM model singleton
+#   - Embeds each chunk using the shared BGE-M3 model singleton (WP3)
 #   - Persists chunk embeddings to the doc_chunks table in VEDA_INTERNAL_DB
 #   - Provides retrieve_top_k_chunks() for RAG retrieval at query time
 #
-# doc_chunks uses 384-dim MiniLM embeddings only (no RELGT structural component).
-# The model singleton is shared with relgt_encoder — one model load per process.
+# doc_chunks uses 1024-dim BGE-M3 embeddings (WP3), the same model + space as the
+# column/table/graph stores — one model load per process.
 #
 # Schema:
 #   doc_chunks (
@@ -20,7 +20,7 @@
 #       chunk_index INTEGER NOT NULL,
 #       text        TEXT NOT NULL,
 #       page_num    INTEGER,
-#       embedding   vector(384)
+#       embedding   vector(1024)
 #   )
 # =============================================================================
 
@@ -40,7 +40,7 @@ from ingestion.db_abstraction import (
     release_internal_connection,
     DICT_CURSOR,
 )
-from config import DOC_CHUNKS_TABLE_NAME, MINILM_EMBEDDING_DIM
+from config import DOC_CHUNKS_TABLE_NAME, BIENCODER_DIM
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -135,6 +135,18 @@ class ChunkRetrievalResult:
 
 def _create_doc_chunks_table(cursor) -> None:
     cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    # Drop the table if the embedding dimension changed (MiniLM 384 → BGE-M3 1024, WP3),
+    # mirroring the graph_embedder guard — a clean re-ingest recreates it at the new dim.
+    try:
+        cursor.execute(f"""
+            SELECT atttypmod - 4 AS dim FROM pg_attribute
+            WHERE attrelid = '{DOC_CHUNKS_TABLE_NAME}'::regclass AND attname = 'embedding'
+        """)
+        row = cursor.fetchone()
+        if row and row[0] != BIENCODER_DIM:
+            cursor.execute(f"DROP TABLE IF EXISTS {DOC_CHUNKS_TABLE_NAME};")
+    except Exception:
+        pass  # table absent → nothing to drop
     cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS {DOC_CHUNKS_TABLE_NAME} (
             chunk_id    TEXT PRIMARY KEY,
@@ -145,7 +157,7 @@ def _create_doc_chunks_table(cursor) -> None:
             text        TEXT NOT NULL,
             page_num    INTEGER,
             doc_date    TIMESTAMPTZ,
-            embedding   vector({MINILM_EMBEDDING_DIM})
+            embedding   vector({BIENCODER_DIM})
         );
     """)
     # Migrate tables created before doc_date was added to the schema.
@@ -160,8 +172,8 @@ def _create_doc_chunks_table(cursor) -> None:
     cursor.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_{DOC_CHUNKS_TABLE_NAME}_embedding
         ON {DOC_CHUNKS_TABLE_NAME}
-        USING ivfflat (embedding vector_cosine_ops)
-        WITH (lists = 10);
+        USING hnsw (embedding vector_cosine_ops)
+        WITH (m = 16, ef_construction = 200);
     """)
     cursor.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_{DOC_CHUNKS_TABLE_NAME}_doc_date
@@ -175,13 +187,10 @@ def _create_doc_chunks_table(cursor) -> None:
 # =============================================================================
 
 def _embed_chunks(texts: List[str]) -> np.ndarray:
-    """Embeds a list of texts using the shared MiniLM singleton."""
-    from ingestion.relgt_encoder import _get_minilm_model
-    model = _get_minilm_model()
-    embeddings = model.encode(texts, convert_to_numpy=True, show_progress_bar=False)
-    norms = np.linalg.norm(embeddings, axis=1, keepdims=True)
-    norms = np.where(norms == 0, 1.0, norms)
-    return (embeddings / norms).astype(np.float32)
+    """Embeds a list of texts using the shared BGE-M3 singleton (WP3, 1024-dim,
+    already L2-normalized)."""
+    from ingestion import m3_encoder
+    return m3_encoder.encode_dense(texts)
 
 
 # =============================================================================
@@ -234,7 +243,7 @@ def run_chunk_embedder(
         embeddings = _embed_chunks(texts)
     except Exception as e:
         if verbose:
-            print(f"  ⚠ MiniLM embedding failed ({e}) — chunks not stored")
+            print(f"  ⚠ BGE-M3 embedding failed ({e}) — chunks not stored")
         return ChunkEmbedderResult(
             chunks_embedded = 0,
             chunks_skipped  = len(chunks),
@@ -371,6 +380,14 @@ def retrieve_top_k_chunks(
         return _retrieve_from_memory(query_vector, list(source_ids or []), top_k)
     try:
         cur = conn.cursor(cursor_factory=DICT_CURSOR)
+        # HNSW: pin ef_search for THIS transaction so the served ANN ordering matches
+        # the tuned recall target (WP2). Resolved per-source via the one shared helper
+        # (env → SubstrateVersion → default 40); SET LOCAL is released at COMMIT, which
+        # is PgBouncer-transaction-pool-safe.
+        from storage_adapters.reader import _resolve_ef_search
+        _ef = _resolve_ef_search(source_ids[0] if source_ids else None)
+        cur.execute("BEGIN")
+        cur.execute(f"SET LOCAL hnsw.ef_search = {int(_ef)}")
         if source_ids:
             placeholders = ",".join(["%s"] * len(source_ids))
             cur.execute(f"""
@@ -395,6 +412,8 @@ def retrieve_top_k_chunks(
                 LIMIT %s;
             """, [vec_str] + temporal_params + [vec_str, top_k])
         rows = cur.fetchall()
+        try: cur.execute("COMMIT")
+        except Exception: pass
         try: cur.close()
         except Exception: pass
     except Exception as _e:

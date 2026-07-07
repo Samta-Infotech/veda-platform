@@ -105,7 +105,7 @@ def build_enriched_column_text(
     sibling_names : List[str] | None
         Other CATEGORY/TEMPORAL/METRIC column names in the same table.
     style : "minilm" | "light_text"
-        "minilm"     — comma-joined natural phrases (MiniLM, graph_embedder)
+        "minilm"     — comma-joined natural phrases (BGE-M3, graph_embedder)
         "light_text" — space-joined tokens         (TF-IDF)
     """
     gloss     = _expand_acronyms(_split_identifier(col_name))

@@ -46,10 +46,9 @@ def _dimension_cols(table):
 def _measure_metric(table, col, agg):
     """The PRE-MATERIALIZED SUM/AVG metric for (table, col, agg), or None. Never synthesizes,
     so grain_suspect / fanout_safe guarding is preserved (see contract §5/§9.4)."""
-    reg.load()
     want = agg.upper()
     ref = f"{table}.{col}".lower()
-    for _mid, mm in reg._STATE["metrics"].items():
+    for _mid, mm in reg.active()["metrics"].items():
         if mm.get("source_table") != table:
             continue
         if (mm.get("aggregation") or mm.get("kind") or "").upper() != want:
@@ -88,9 +87,8 @@ def map_envelope_to_intent(envelope, handle_map, tf=None) -> Optional[QueryInten
     intent = (envelope or {}).get("intent")
     if intent not in _INTENTS:
         return None
-    reg.load()
     table, _tcol = _resolve(envelope.get("entity"), handle_map)
-    if not table or table not in reg._STATE["concepts"]:
+    if not table or table not in reg.active()["concepts"]:
         return None
 
     filters = _build_filters(envelope, table, handle_map)
