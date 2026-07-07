@@ -4,7 +4,7 @@
 #
 # Components:
 #   embedding_layer.py    - BGE-M3 semantic embeddings (1024-dim)
-#   bm25_ranker.py        - BM25 keyword-based ranking
+#   sparse_ranker.py      - BGE-M3 learned-sparse ranking (Signal 2)
 #   signal_builder.py     - FK adjacency + Subgraph signals
 #   rrf_merger.py         - Reciprocal Rank Fusion (combine 4 signals)
 #   cross_encoder.py      - Cross-encoder reranking (final refinement)

@@ -11,7 +11,7 @@
 #   2. FK Adjacency Store     (ingestion/vector_store.py)
 #   3. Semantic type inference (ingestion/semantic_type_inference.py)
 #   4. REG builder            (ingestion/reg_builder.py)
-#   5. Encoder                (ingestion/relgt_encoder.py — mode set in config.py)
+#   5. Encoder                (ingestion/m3_encoder.py — BGE-M3 dense + sparse)
 #   6. Vector store           (ingestion/vector_store.py)
 #   7. Evaluation             (evaluation/evaluator.py — L1 + L2 + L3)
 #   8. Report                 (evaluation/report.py)
@@ -22,7 +22,7 @@
 #   --query "..."       Run a single NL query through L1 → L2 → L3
 #   --verbose           Print detailed progress for every step
 #
-# Encoder mode and all parameters are set in config.py (ENCODER_MODE).
+# Encoder and all parameters are set in config.py (EMBEDDING_MODEL_ID).
 # All outputs are written to evaluation/results/
 # =============================================================================
 
@@ -116,34 +116,8 @@ def check_ingestion_status() -> dict:
 
 
 def _load_query_singletons(verbose: bool = False) -> None:
-    """Load in-memory singletons for query pipeline without re-ingestion."""
-    # TF-IDF/SVD power only the light-text/ensemble retrieval
-    # (query/semantic_layer._encode_light_text), used by the Tier-2 fallback and the
-    # evaluator. The hybrid engine retrieves with BGE, so skip the eager load on the
-    # V2 path. get_light_text_models() is a lazy cached getter — the Tier-2/eval paths
-    # still load it on demand, so nothing is lost.
-    try:
-        from config import RETRIEVAL_V2_ENABLED
-        if not RETRIEVAL_V2_ENABLED:
-            from ingestion.relgt_encoder import get_light_text_models
-            get_light_text_models()
-            if verbose: print("  [Singletons] TF-IDF + SVD loaded ✅")
-        elif verbose:
-            print("  [Singletons] TF-IDF + SVD skipped (RETRIEVAL_V2 primary path)")
-    except Exception as e:
-        print(f"  [Singletons] TF-IDF warning: {e}")
-
-    try:
-        from config import RETRIEVAL_V2_ENABLED
-        if not RETRIEVAL_V2_ENABLED:
-            from ingestion.relgt_encoder import _get_minilm_model
-            _get_minilm_model()
-            if verbose: print("  [Singletons] MiniLM loaded ✅")
-        elif verbose:
-            print("  [Singletons] MiniLM skipped (RETRIEVAL_V2 primary path)")
-    except Exception as e:
-        if verbose: print(f"  [Singletons] MiniLM warning: {e}")
-
+    """Load in-memory singletons for the query pipeline without re-ingestion (WP3:
+    one BGE-M3 model for dense + sparse; the legacy TF-IDF/MiniLM encoders are gone)."""
     try:
         from ingestion.value_sampler import rebuild_value_index_from_db
         n = rebuild_value_index_from_db()
@@ -151,19 +125,18 @@ def _load_query_singletons(verbose: bool = False) -> None:
     except Exception as e:
         print(f"  [Singletons] Value index warning: {e}")
 
+    # Warm the ONE shared BGE-M3 dense encoder so the first query doesn't pay the load.
     try:
-        from config import BIENCODER_ENABLED, RETRIEVAL_V2_ENABLED
-        if RETRIEVAL_V2_ENABLED and BIENCODER_ENABLED:
-            from ingestion.biencoder import _get_biencoder
-            _get_biencoder()
-            if verbose: print("  [Singletons] BGE loaded ✅")
+        from ingestion import m3_encoder
+        m3_encoder.get_dense_encoder()
+        if verbose: print("  [Singletons] BGE-M3 ready ✅")
     except Exception as e:
-        print(f"  [Singletons] BGE warning: {e}")
+        print(f"  [Singletons] BGE-M3 warning: {e}")
 
 
 def _header() -> None:
-    from config import ENCODER_MODE, POC_LABEL, SLM_MODEL_NAME, SLM_ENABLED
-    encoder_line = f"Encoder: {ENCODER_MODE:<10}  L3 SLM: {'on · ' + SLM_MODEL_NAME if SLM_ENABLED else 'off'}"
+    from config import EMBEDDING_MODEL_ID, SLM_MODEL_NAME, SLM_ENABLED
+    encoder_line = f"Encoder: {EMBEDDING_MODEL_ID:<10}  L3 SLM: {'on · ' + SLM_MODEL_NAME if SLM_ENABLED else 'off'}"
     # Pad to fit the box (62 chars between ║ and ║)
     inner = f"  {encoder_line}"
     inner = inner[:60].ljust(60)
@@ -194,7 +167,7 @@ def _fail(label: str, error: Exception) -> None:
 
 def _print_query_summary(query: str, l2, l3, l4) -> None:
     """Print a compact per-query metric summary against POC baseline values."""
-    from config import TOP_K, POC_LABEL
+    from config import TOP_K, EMBEDDING_MODEL_ID
     from evaluation.report import BASELINE_ESTIMATES
     from evaluation.test_queries import get_all_queries
 
@@ -228,7 +201,7 @@ def _print_query_summary(query: str, l2, l3, l4) -> None:
     print()
     print(bar)
     print("  VEDA — Query Run Summary")
-    print(f"  {POC_LABEL}")
+    print(f"  Encoder: {EMBEDDING_MODEL_ID}")
     print(bar)
     print()
 
@@ -570,9 +543,9 @@ def run_single_query(query: str, verbose: bool = False, debug: bool = False) -> 
 # =============================================================================
 
 def _parse_args():
-    from config import ENCODER_MODE
+    from config import EMBEDDING_MODEL_ID
     parser = argparse.ArgumentParser(
-        description=f"VEDA POC — NL to SQL pipeline  [encoder={ENCODER_MODE}]",
+        description=f"VEDA POC — NL to SQL pipeline  [encoder={EMBEDDING_MODEL_ID}]",
         formatter_class=argparse.RawTextHelpFormatter,
     )
     parser.add_argument(

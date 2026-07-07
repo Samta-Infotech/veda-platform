@@ -84,6 +84,52 @@ def publish_sm(source_id: int, tenant: str, redis_url: str | None = None) -> int
     return len(payload)
 
 
+def registry_redis_key(source_id: int, tenant: str) -> str:
+    return f"veda:registry:{source_id}:{tenant}"
+
+
+def publish_registry(
+    source_id: int,
+    tenant: str,
+    data_dir: str,
+    redis_url: str | None = None,
+) -> int:
+    """Publish the compiled fast-path registries (concepts/dimensions/metrics) to
+    `redis-cache` keyed by (source, tenant), mirroring `publish_sm`.
+
+    Unlike the semantic model, these three are NOT normalized into the Sm* substrate
+    — they are pure compiled files (semantic/compile_semantic_layer). So this reads
+    them from `data_dir` (the directory the ingestion subprocess wrote them to) and
+    publishes them as ONE JSON blob so the inference tier (Django-free) can load them
+    scope-keyed without touching the ORM or a shared flat file. The query tier's
+    `semantic.registry` reads this key first, falling back to the on-disk files.
+
+    Best-effort: a missing file contributes an empty registry rather than failing the
+    warm stage. Returns the byte length written (0 if nothing was published).
+    """
+    import json
+    import os
+
+    import redis as _redis
+
+    blob: dict = {}
+    for name in ("concepts", "dimensions", "metrics"):
+        path = os.path.join(data_dir, f"{name}.json")
+        try:
+            with open(path) as f:
+                blob[name] = json.load(f)
+        except (OSError, ValueError):
+            blob[name] = {}
+
+    if not any(blob.values()):
+        return 0
+
+    payload = json.dumps(blob)
+    url = redis_url or os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
+    _redis.Redis.from_url(url).set(registry_redis_key(source_id, tenant), payload)
+    return len(payload)
+
+
 def rehydrate_channel(source_id: int, tenant: str, scope: str = "all") -> str:
     return f"veda:rehydrate:{source_id}:{tenant}:{scope}"
 

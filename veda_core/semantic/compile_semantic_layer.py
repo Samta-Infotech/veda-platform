@@ -18,16 +18,27 @@
 # =============================================================================
 
 import os
+import sys
 import json
 import hashlib
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
 _ROOT        = os.path.dirname(_HERE)
-SEMANTIC_MODEL_FILE = os.path.join(_ROOT, "data", "veda_semantic_model.json")
-CONCEPTS_FILE   = os.path.join(_HERE, "concepts.json")
-DIMENSIONS_FILE = os.path.join(_HERE, "dimensions.json")
-METRICS_FILE    = os.path.join(_HERE, "metrics.json")
-MANIFEST_FILE   = os.path.join(_HERE, "MANIFEST.json")
+sys.path.insert(0, _ROOT)
+
+# Resolve every path through config so this compiler honours artifact scoping
+# (VEDA_ARTIFACT_SCOPE) exactly like the rest of L5. Previously these were flat
+# _HERE/_ROOT paths that ignored scope entirely — reading a possibly-stale flat
+# semantic model and clobbering one global copy of the four registries, so a
+# second source's compile overwrote the first (the "prepared for source 1" bug).
+from config import (
+    SEMANTIC_MODEL_FILE,
+    RELATIONSHIP_GRAPH_FILE,
+    CONCEPTS_FILE,
+    DIMENSIONS_FILE,
+    METRICS_FILE,
+    MANIFEST_FILE,
+)
 
 VERSION = "1.0"
 
@@ -40,8 +51,8 @@ _ENTITY_TABLE_TYPES = {"TRANSACTION", "MASTER", "EVENT", "REFERENCE"}
 # discoverability report) — guard here so a scan-hygiene slip upstream cannot
 # turn the embedding index into an answerable entity.
 _VEDA_INTERNAL_TABLES = {
-    "table_embeddings", "column_embeddings", "column_embeddings_lt",
-    "column_embeddings_hybrid", "column_embeddings_v2", "table_embeddings_v2",
+    "column_embeddings_v2", "table_embeddings_v2",
+    "column_sparse_v1", "table_sparse_v1",
     "doc_chunks", "fk_adjacency", "table_metadata", "column_values",
     "graph_nodes", "graph_edges", "graph_node_embeddings", "source_registry",
 }
@@ -202,7 +213,7 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
     # that is a known FK to ANOTHER table is not an entity-key candidate.
     fk_sources = set()
     try:
-        _gpath = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
+        _gpath = RELATIONSHIP_GRAPH_FILE
         if os.path.exists(_gpath):
             for e in json.load(open(_gpath)).get("edges", []):
                 if e.get("source_table") != e.get("target_table"):
@@ -350,15 +361,11 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
                 "fanout_safe":          True,
             }
 
-    # Q-6: widen the fast path — emit a plain COUNT(*) metric for EVERY table that
-    # has no entity-count metric yet, so "how many <table>" is fast-path answerable
-    # (skips retrieval + rerank + LLM) for the whole schema, not just concept tables.
-    # Flag-gated; grain-suspect tables are marked so the fast path still declines them.
-    try:
-        from config import FAST_PATH_EXPANSION_ENABLED
-    except Exception:
-        FAST_PATH_EXPANSION_ENABLED = False
-    if FAST_PATH_EXPANSION_ENABLED:
+    # WP7: widen the fast path UNCONDITIONALLY — emit a plain COUNT(*) metric for EVERY
+    # table with no entity-count metric yet, so "how many <table>" is fast-path answerable
+    # (skips retrieval + rerank + LLM) for the whole schema. Grain-suspect tables are
+    # marked so the fast path still declines them.
+    if True:
         covered = {m.get("source_table") for m in out.values()}
         for t in tabs.keys():
             if t in covered:
@@ -442,8 +449,10 @@ def compile_all(write: bool = True) -> dict:
 
     if write:
         for path, payload in artifacts.items():
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w") as f:
                 json.dump(payload, f, indent=2)
+        os.makedirs(os.path.dirname(MANIFEST_FILE) or ".", exist_ok=True)
         with open(MANIFEST_FILE, "w") as f:
             json.dump(manifest, f, indent=2)
 
@@ -471,7 +480,8 @@ def _main():
         for d in ds:
             print(f"    DIM     {d['dimension_id']:<28} values={d['values'][:5]}")
     else:
-        print(f"  ✓ wrote concepts.json, dimensions.json, metrics.json, MANIFEST.json to {_HERE}")
+        print(f"  ✓ wrote concepts.json, dimensions.json, metrics.json, MANIFEST.json to "
+              f"{os.path.dirname(CONCEPTS_FILE) or '.'}")
 
 
 if __name__ == "__main__":

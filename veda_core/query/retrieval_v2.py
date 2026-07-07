@@ -25,6 +25,8 @@ from config import (
     RERANKER_TOP_TABLES,
     BIDIRECTIONAL_ENABLED,
     VEDA_INTERNAL_DB,
+    TABLE_PRIOR_BETA,
+    TABLE_PRIOR_TOP_M,
 )
 try:
     from config import GRAPH_EXPAND_ENABLED, GRAPH_EXPAND_MAX
@@ -46,28 +48,16 @@ except ImportError:
 
 
 def _get_query_encoder():
+    """The shared BGE-M3 dense facade (WP3) — one model for query + stored vectors."""
     global _QUERY_ENCODER
     if _QUERY_ENCODER is not None:
         return _QUERY_ENCODER
-    if not BIENCODER_QUERY_AVAILABLE:
-        return None
     try:
-        # Reuse the ONE shared BGE instance when it's the same model/device — avoid a
-        # duplicate ~1.3GB load of bge-large (same model as veda.runtime._get_bge).
-        try:
-            from config import BGE_MODEL_NAME as _shared_name
-            if BIENCODER_MODEL == _shared_name and str(BIENCODER_DEVICE) == "cpu":
-                from veda.runtime import _get_bge
-                _QUERY_ENCODER = _get_bge()
-                return _QUERY_ENCODER
-        except Exception:
-            pass
-        from sentence_transformers import SentenceTransformer
-        _QUERY_ENCODER = SentenceTransformer(BIENCODER_MODEL, device=BIENCODER_DEVICE,
-                                             local_files_only=True)
+        from ingestion import m3_encoder
+        _QUERY_ENCODER = m3_encoder.get_dense_encoder()
         return _QUERY_ENCODER
     except Exception as e:
-        warnings.warn(f"[RetrievalV2] Could not load bi-encoder '{BIENCODER_MODEL}': {e}")
+        warnings.warn(f"[RetrievalV2] Could not load BGE-M3 dense encoder: {e}")
         return None
 
 
@@ -123,6 +113,37 @@ def _cosine_search_v2(
         )
         for row in rows
     ]
+
+
+def table_prior_scores(query: str, source_ids: Optional[List[str]] = None,
+                       top_m: int = None) -> dict:
+    """WP4 dense table affinity {table_name: cosine_sim} — ANN the query against
+    table_embeddings_v2 (top-M). Reuses the shared BGE-M3 encoder + cosine search, so
+    the 5-signal engine gets the table prior without a second model or a bespoke query.
+    Returns {} on any failure (soft prior — never fatal)."""
+    top_m = top_m or TABLE_PRIOR_TOP_M
+    enc = _get_query_encoder()
+    if enc is None:
+        return {}
+    try:
+        q_vec = enc.encode([BIENCODER_QUERY_PREFIX + query], normalize_embeddings=True)[0]
+        q_vec = q_vec.tolist() if hasattr(q_vec, "tolist") else list(q_vec)
+    except Exception:
+        return {}
+    try:
+        conn = _get_pg_conn()
+    except Exception:
+        return {}
+    try:
+        rows = _cosine_search_v2(conn, BIENCODER_TABLE_TABLE, q_vec, top_m, source_ids)
+    except Exception:
+        rows = []
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return {r.table_name: float(r.similarity) for r in rows}
 
 
 @dataclass
@@ -333,6 +354,15 @@ def retrieve_v2(
     from query.reranker import rerank_columns, rerank_tables, RERANKER_AVAILABLE
 
     fs = first_stage_retrieve(query, source_ids=source_ids, verbose=verbose)
+
+    # WP4 — table-first prior: blend each candidate column's first-stage score with its
+    # table's dense affinity (reusing the candidate-table fetch first_stage already did —
+    # no second ANN). Soft prior only; columns are NEVER filtered to the top tables, so
+    # rare-table recall is preserved.
+    if fs.candidate_tables:
+        _table_sim = {t.table_name: float(t.similarity) for t in fs.candidate_tables}
+        for _c in fs.candidate_columns:
+            _c.similarity = float(_c.similarity) + TABLE_PRIOR_BETA * _table_sim.get(_c.table_name, 0.0)
 
     # Phase 4 — unified-graph recall booster (additive; reranker still cuts).
     fs.candidate_columns = graph_expand(

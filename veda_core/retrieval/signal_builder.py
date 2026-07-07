@@ -86,20 +86,10 @@ class SignalBuilder:
         """
         logger.info("Building relationship signals...")
 
-        # Load schema. Q-1: read the FK graph from the substrate (fk_adjacency, written
-        # at ingestion) instead of live information_schema on the CLIENT DB every warm —
-        # removes the source-DB dependency from the query tier. Flag-gated; falls back
-        # to the live introspection when the substrate FK store is empty/unavailable.
-        self.schema = None
-        try:
-            from config import SUBSTRATE_SIGNALS_ENABLED
-            if SUBSTRATE_SIGNALS_ENABLED:
-                self.schema = _load_schema_from_substrate()
-        except Exception as e:
-            logger.warning(f"Substrate signal load failed ({e}); using live schema")
-            self.schema = None
-        if not self.schema or not self.schema.get("tables"):
-            self.schema = get_real_schema()
+        # WP7: FK signals come ONLY from the substrate fk_adjacency store (written at
+        # ingestion). The live information_schema introspection dual was removed — the
+        # query tier now makes zero source-DB connections outside L7 execution.
+        self.schema = _load_schema_from_substrate() or {"tables": []}
         tables = self.schema.get("tables", [])
 
         # Build FK graph
