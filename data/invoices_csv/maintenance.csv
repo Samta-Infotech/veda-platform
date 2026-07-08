@@ -1,0 +1,9 @@
+ticket_id,asset_id,category,amount,status
+T-1001,20,Repair,1500,open
+T-1002,21,Rent,900,paid
+T-1003,6,Insurance,4200,paid
+T-1004,20,Repair,300,open
+T-1005,19,Society Charges,1200,unpaid
+T-1006,4,Taxes,800,paid
+T-1007,1,Rent,950,paid
+T-1008,22,Repair,640,open

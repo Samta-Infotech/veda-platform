@@ -24,10 +24,16 @@ def dispatch(
 ) -> Dict:
     """Route the given source to the matching pipeline. Returns a result dict with
     at least ``source_id``, ``source_type``, ``success``."""
-    if ctx.type == "relational":
+    # Cross-source plan P2.1: file-backed tabular sources (csv_lake/parquet/xlsx)
+    # run the FULL relational L1–L5 pipeline (via the DuckDB tabular connector),
+    # not the lighter datalake schema plan — so their columns become real tables
+    # (typed, sampled, embedded, graphed) indistinguishable from a Postgres table.
+    _TABULAR_ENGINES = ("csv", "csv_lake", "parquet", "xlsx", "excel")
+    if ctx.type == "relational" or (ctx.engine or "").lower() in _TABULAR_ENGINES:
         from ingestion.layers.pipeline import run_layered_ingestion
         state = run_layered_ingestion(ctx, verbose=verbose, on_stage=on_stage)
-        return {"source_id": ctx.source_id, "source_type": "relational",
+        return {"source_id": ctx.source_id,
+                "source_type": ctx.type if ctx.type == "relational" else "tabular",
                 "success": True, "state": state}
 
     # Non-relational: delegate to the existing type-aware source_dispatcher, which

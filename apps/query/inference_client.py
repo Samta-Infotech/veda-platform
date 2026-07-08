@@ -33,12 +33,17 @@ class InferenceClient:
             timeout_s=float(os.environ.get("INFERENCE_TIMEOUT_S", "300")),
         )
 
-    def _post(self, path: str, body: dict, source_id, tenant, request_id=None) -> dict:
+    def _post(self, path: str, body: dict, source_id, tenant, request_id=None, source_ids=None) -> dict:
         url = f"{self.config.base_url.rstrip('/')}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
         if source_id is not None:
             headers["X-Veda-Source-Id"] = str(source_id)
+        if source_ids:
+            # Server-validated scope SET (P5). Comma-separated, ownership already checked
+            # in the view — the inference tier trusts these because they arrive from the
+            # api tier, never from the end client (§6.2).
+            headers["X-Veda-Source-Ids"] = ",".join(str(s) for s in source_ids)
         if tenant is not None:
             headers["X-Veda-Tenant"] = str(tenant)
         if request_id:
@@ -53,11 +58,13 @@ class InferenceClient:
         except urllib.error.URLError as exc:
             raise InferenceUnavailable(f"inference unreachable at {url}: {exc}") from exc
 
-    def run_hybrid_query(self, query: str, source_id=None, tenant=None, flags=None, request_id=None) -> dict:
+    def run_hybrid_query(self, query: str, source_id=None, tenant=None, flags=None,
+                         request_id=None, source_ids=None) -> dict:
         return self._post(
             "/v1/run_hybrid_query",
-            {"query": query, "source_id": source_id, "tenant": tenant, "flags": flags},
-            source_id, tenant, request_id=request_id,
+            {"query": query, "source_id": source_id, "tenant": tenant,
+             "source_ids": source_ids, "flags": flags},
+            source_id, tenant, request_id=request_id, source_ids=source_ids,
         )
 
     def retrieve(self, query: str, source_id=None, tenant=None, top_k=None) -> dict:

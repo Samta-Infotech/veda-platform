@@ -110,9 +110,19 @@ services:
     environment:
       PYTHONPATH: /app
       HF_HOME: /models/hf_cache
+      # Pin the hub cache to the flat model dir explicitly: huggingface_hub >=0.30
+      # defaults HF_HUB_CACHE to HF_HOME/hub, but the baked/downloaded weights live
+      # directly under /models/hf_cache/models--*, so without this they aren't found
+      # offline (LocalEntryNotFoundError).
+      HF_HUB_CACHE: /models/hf_cache
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       VEDA_APP_DIR: /app
+      # Ingestion SLM → native host Ollama (Apple Metal GPU) instead of the CPU-only
+      # dockerized ollama. Docker-on-macOS has no GPU passthrough, so the in-container
+      # ollama runs the 7B on CPU (~5–8× slower). Overrides .env OLLAMA_URL for THIS
+      # service only; other services keep using the docker `ollama` service.
+      OLLAMA_URL: http://host.docker.internal:11434
     volumes:
       - ".:/app"
       - model_cache:/models:ro
@@ -127,7 +137,8 @@ services:
     environment:
       WORKERS: ${INFERENCE_WORKERS:-1}   # dev default; prod sizes from measured RSS (§8.1)
       PYTHONPATH: /app                    # so `inference.main` imports from the repo root
-      HF_HOME: /models                    # offline model cache (BGE / reranker / MiniLM)
+      HF_HOME: /models                    # offline model cache (BGE / reranker)
+      HF_HUB_CACHE: /models/hf_cache      # flat weights live here (see ingest-worker note)
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     volumes:

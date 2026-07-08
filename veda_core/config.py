@@ -375,6 +375,15 @@ VALUE_SAMPLE_SIZE            = 100
 VALUE_SAMPLER_ELIGIBLE_TYPES = ["CATEGORY", "FREE_TEXT", "IDENTIFIER"]
 VALUE_SAMPLER_MAX_VALUE_LEN  = 64
 COLUMN_VALUES_TABLE_NAME     = "column_values"
+# Cross-source plan Phase 2.4 / Phase 4.2 — per-column MinHash sketches for
+# tenant-wide value-overlap (cross_source_fk) discovery. The sketch table is
+# lazily created in the INTERNAL store by ingestion.column_sketches (same pattern
+# as column_values), so there is no migration to apply.
+COLUMN_SKETCHES_TABLE_NAME   = "column_sketches"
+MINHASH_NUM_PERM             = 128
+# Minimum rows for a table detected inside a PDF/Word doc to become a real
+# "derived table" (Phase 2.3); smaller/ragged tables stay as chunk text.
+DOC_TABLE_MIN_ROWS           = 5
 VALUE_EXPANSION_MIN_TOKEN_LEN = 3
 VALUE_EXPANSION_PARTIAL_MIN_TOKEN_LEN = 7  # partial substring match requires longer tokens to avoid noise
 VALUE_EXPANSION_MAX_COL_MATCHES = 8        # skip value tokens matching >N columns (too generic to be useful)
@@ -525,8 +534,31 @@ GRAPH_EDGE_WEIGHTS = {
     "mentions":      1.0,
     "name_match":    0.6,   # lower ceiling than value-overlap so it never dominates (B7 fix)
     "about":         1.5,
+    # --- Cross-source knowledge graph plan (docs/CROSSSOURCE_GRAPH.md) ---
+    "cross_source_fk": 2.0,   # P4.2 value-overlap join across sources (tier scales this)
+    "mentions_entity": 1.2,   # P4.1 chunk → entity
+    "value_of":        1.5,   # P4.1 entity → column
+    "has_section":     1.0,   # P3 doc → section
+    "in_section":      1.0,   # P3 chunk → section
+    "derived_from":    1.5,   # P2.3/P3 derived table → doc
+    "next_chunk":      0.4,   # P3 chunk → adjacent chunk
 }
 GRAPH_DISCOVERED_FK_TIER_WEIGHT = {"HIGH": 1.0, "MEDIUM": 0.6}
+
+# --- P4.2 cross-source join discovery (ingestion.cross_source_graph) ---
+# Candidate pairs: columns from DIFFERENT sources, same value_class, cardinality
+# ratio within [min,max]. Tiers mirror discovered_fk; HIGH is conservative so the
+# graph-guard can permit only HIGH edges for federated SQL joins (P5).
+CROSS_SOURCE_CARDINALITY_RATIO   = (0.01, 100.0)
+CROSS_SOURCE_FK_HIGH_CONTAINMENT = 0.8
+CROSS_SOURCE_FK_HIGH_MIN_DISTINCT = 25
+CROSS_SOURCE_FK_MEDIUM_CONTAINMENT = 0.5
+CROSS_SOURCE_FK_TIER_WEIGHT = {"HIGH": 2.0, "MEDIUM": 1.2}
+# Distinct values sampled per column when (re)building a sketch outside the normal
+# value-sampling pass — e.g. the backfill script sketching join keys (ids) that the
+# value sampler skips. Larger than VALUE_SAMPLE_SIZE because join-key containment
+# needs enough of the key domain to be reliable.
+CROSS_SOURCE_SKETCH_SAMPLE_SIZE = 5000
 
 GRAPH_CHUNK_LINKING_ENABLED   = True
 GRAPH_LINK_VALUE_OVERLAP_MIN  = 0.15
@@ -774,7 +806,7 @@ SEMANTIC_CHECKPOINT_FILE    = "data/veda_semantic_checkpoint.json"
 #     • 32–64 GB workstation ......... 4–8
 #     • Mac Mini / Mac Studio (ample RAM) → tune to Ollama throughput
 #   Workers are always capped at the number of tables (never one thread per table).
-SEMANTIC_PARALLEL_QWEN_ENABLED = False   # enable_parallel_qwen
+SEMANTIC_PARALLEL_QWEN_ENABLED = False   # enable_parallel_qwen — tested 2-way on M4: memory-bandwidth-bound, no throughput gain → kept sequential
 SEMANTIC_MAX_PARALLEL_REQUESTS = 2       # max_parallel_requests (validated: min 1) — 2 fits single-GPU compute
 
 # Resilience for Qwen/Ollama calls (applies to sequential AND parallel).

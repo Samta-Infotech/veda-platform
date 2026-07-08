@@ -329,16 +329,27 @@ def run_doc_ingestion(verbose: bool = False) -> None:
             from config import UNIFIED_GRAPH_ENABLED, GRAPH_CHUNK_LINKING_ENABLED
             if UNIFIED_GRAPH_ENABLED and GRAPH_CHUNK_LINKING_ENABLED:
                 try:
-                    from ingestion.chunk_linker import link_chunks_to_graph
-                    cl = link_chunks_to_graph(
-                        chunks           = chunks,
-                        chunk_embeddings = result.embeddings,
-                        source_id        = src["id"],
-                        verbose          = verbose,
+                    # Cross-source plan P4.1: entity_linker replaces chunk_linker —
+                    # it creates entity nodes that bridge chunks↔columns (mentions_entity
+                    # / value_of), which is what carries cross-source traversal to the
+                    # tabular side. Tenant resolved from the ambient context when set.
+                    from ingestion.entity_linker import link_entities
+                    try:
+                        from veda_core import context as _vctx
+                        _c = _vctx.try_current()
+                        _tenant = _c.tenant if _c is not None else "default"
+                    except Exception:
+                        _tenant = "default"
+                    cl = link_entities(
+                        chunks    = chunks,
+                        source_id = src["id"],
+                        tenant    = _tenant,
+                        verbose   = verbose,
                     )
                     print(
-                        f"  ✓  graph links: {cl.chunk_nodes_written} chunk nodes, "
-                        f"{cl.link_edges_written} edges {cl.stats}"
+                        f"  ✓  entity graph: {cl.chunk_nodes} chunk nodes, "
+                        f"{cl.entity_nodes} entities, {cl.mentions_entity} mentions_entity, "
+                        f"{cl.value_of} value_of"
                     )
 
                     from config import GRAPH_EMBED_ENABLED

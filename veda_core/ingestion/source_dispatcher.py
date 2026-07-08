@@ -329,46 +329,95 @@ def _dispatch_relational(source_config: dict, verbose: bool) -> DispatchResult:
         )
 
 
+def _run_tabular_cross_source(connector, source_config: dict, verbose: bool) -> None:
+    """Post-schema steps for a file-backed tabular source (Cross-source plan):
+    materialize Parquet (P2.2), sketch join keys via the connector (P2.4), and run
+    tenant-wide cross_source_fk discovery (P4.2). Each step is best-effort."""
+    import os
+    source_id = str(source_config["id"])
+    tenant = os.environ.get("VEDA_TENANT", "default")
+    try:
+        from config import ARTIFACT_ROOT
+        connector.materialize_parquet(os.path.join(ARTIFACT_ROOT, source_id, "tables"))
+    except Exception as e:
+        if verbose:
+            print(f"  [tabular] materialize skipped: {e}")
+    try:
+        from ingestion import column_sketches as CS
+        n = CS.sketch_columns_via_sampler(source_id, tenant, connector.sample_column_values)
+        if verbose:
+            print(f"  [tabular] sketched {n} join-key columns")
+    except Exception as e:
+        if verbose:
+            print(f"  [tabular] sketch pass skipped: {e}")
+    try:
+        from ingestion.cross_source_graph import discover_and_persist
+        stats = discover_and_persist(tenant, verbose=verbose)
+        if verbose:
+            print(f"  [tabular] cross_source_fk: {stats}")
+    except Exception as e:
+        if verbose:
+            print(f"  [tabular] cross_source discovery skipped: {e}")
+
+
 def _dispatch_datalake(source_config: dict, verbose: bool) -> DispatchResult:
     source_id = source_config["id"]
     t_start   = time.time()
     _slog(source_id, f"Datalake source  engine={source_config.get('engine', '?')}")
 
+    # Cross-source plan P2.1: CSV/Parquet/Excel run through the DuckDB TabularFile
+    # connector (deterministic ids) so their columns become REAL tables via the same
+    # schema pipeline as relational; then materialize Parquet (P2.2 exec surface),
+    # sketch join keys (P2.4) and discover cross-source links (P4.2). Non-tabular
+    # datalake engines (delta/iceberg) keep the generic connector + schema pipeline.
+    _TABULAR = ("csv", "csv_lake", "parquet", "xlsx", "excel")
+    engine = (source_config.get("engine") or "").lower()
     try:
-        from connectors.base import build_connector
-        from ingestion.schema_unifier import raw_schema_to_dict
-
-        connector = build_connector(source_config)
-        status    = connector.connect()
-        if not status.ok:
-            return DispatchResult(
-                source_id=source_id, source_type="datalake",
-                success=False, steps_run=[], steps_failed=[],
-                error=f"Connection failed: {status.message}",
-                duration_s=round(time.time() - t_start, 2),
-            )
-
-        raw_schema      = connector.get_schema()
-        connector.disconnect()
-        raw_schema_dict = raw_schema_to_dict(raw_schema)
+        if engine in _TABULAR:
+            from connectors.tabular_files import TabularFileConnector
+            connector = TabularFileConnector(source_config)
+            status = connector.connect()
+            if not status.ok:
+                return DispatchResult(
+                    source_id=source_id, source_type="datalake",
+                    success=False, steps_run=[], steps_failed=[],
+                    error=f"Connection failed: {status.message}",
+                    duration_s=round(time.time() - t_start, 2))
+            raw_schema_dict = connector.get_raw_schema_dict()
+        else:
+            from connectors.base import build_connector
+            from ingestion.schema_unifier import raw_schema_to_dict
+            connector = build_connector(source_config)
+            status = connector.connect()
+            if not status.ok:
+                return DispatchResult(
+                    source_id=source_id, source_type="datalake",
+                    success=False, steps_run=[], steps_failed=[],
+                    error=f"Connection failed: {status.message}",
+                    duration_s=round(time.time() - t_start, 2))
+            raw_schema_dict = raw_schema_to_dict(connector.get_schema())
 
         ctx = _run_schema_pipeline(
             raw_schema_dict   = raw_schema_dict,
             source_config     = source_config,
-            run_data_graph    = False,
-            run_value_sampler = False,
+            run_data_graph    = engine in _TABULAR,   # value-overlap FK discovery within the files
+            run_value_sampler = False,                 # files sampled via the connector below
             verbose           = verbose,
         )
+
+        steps = ["schema", "fk", "semantic", "metadata", "reg", "encoder", "vector_store"]
+        if engine in _TABULAR:
+            _run_tabular_cross_source(connector, source_config, verbose)
+            steps += ["materialize_parquet", "column_sketches", "cross_source_fk"]
+        try:
+            connector.disconnect()
+        except Exception:
+            pass
+
         return DispatchResult(
             source_id=source_id, source_type="datalake",
-            success=True,
-            steps_run=["schema", "fk", "semantic", "metadata",
-                       "reg", "encoder", "vector_store"],
-            steps_failed=[],
-            error=None,
-            duration_s=round(time.time() - t_start, 2),
-            context=ctx,
-        )
+            success=True, steps_run=steps, steps_failed=[], error=None,
+            duration_s=round(time.time() - t_start, 2), context=ctx)
     except Exception as e:
         return DispatchResult(
             source_id=source_id, source_type="datalake",
@@ -416,10 +465,31 @@ def _dispatch_document(source_config: dict, verbose: bool) -> DispatchResult:
              f"{result.docs_processed} docs, backend={result.backend}",
              time.time() - t0)
 
+        steps = ["connect", "chunk_extract", "chunk_embed"]
+        # Cross-source plan P4.1: entity linker bridges chunks → columns (mentions_entity
+        # / value_of), carrying cross-source traversal to the tabular side; then P4.2
+        # discovery. Best-effort — a failure here never fails the document ingest.
+        import os as _os
+        _tenant = _os.environ.get("VEDA_TENANT", "default")
+        try:
+            from ingestion.entity_linker import link_entities
+            el = link_entities(chunks, source_id, tenant=_tenant, verbose=verbose)
+            _sok(source_id, f"Entity linker — {el.entity_nodes} entities, "
+                            f"{el.value_of} value_of, {el.mentions_entity} mentions_entity", 0)
+            steps.append("entity_linker")
+        except Exception as e:
+            _slog(source_id, f"⚠  entity linker skipped: {e}")
+        try:
+            from ingestion.cross_source_graph import discover_and_persist
+            discover_and_persist(_tenant, verbose=verbose)
+            steps.append("cross_source_fk")
+        except Exception as e:
+            _slog(source_id, f"⚠  cross_source discovery skipped: {e}")
+
         return DispatchResult(
             source_id=source_id, source_type="document",
             success=True,
-            steps_run=["connect", "chunk_extract", "chunk_embed"],
+            steps_run=steps,
             steps_failed=[],
             error=None,
             duration_s=round(time.time() - t_start, 2),
