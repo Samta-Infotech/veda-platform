@@ -23,6 +23,8 @@ class ChatState(TypedDict, total=False):
     history: Annotated[List[Turn], operator.add]
     session_id: str
     tenant: str
+    source_id: Optional[int]           # forwarded to InferenceClient.stream_hybrid_query
+    request_id: str                    # forwarded as X-Request-Id (tracing across api->inference)
 
     # ── supervisor decision ─────────────────────────────────────────────────
     action: str                        # "smalltalk" | "answer" | "clarify" | "followup"
@@ -31,7 +33,10 @@ class ChatState(TypedDict, total=False):
 
     # ── engine result ───────────────────────────────────────────────────────
     engine_result: Dict[str, Any]      # raw run_hybrid_query() result (dict form)
-    status: str                        # "answered" | "refuse" | "clarify" | ... (engine status)
+    status: str                        # "answered" | "refuse" | "clarify" | "no_table" |
+                                       # "ungrounded" | "qualifier_dropped" | "ir_mismatch" |
+                                       # "error" | "unavailable" (transport/infra failure —
+                                       # distinct from a reachable engine's own refusal)
 
     # ── output ───────────────────────────────────────────────────────────────
     reply_text: str
@@ -39,3 +44,4 @@ class ChatState(TypedDict, total=False):
     clarification_question: Optional[str]
     sql: Optional[str]
     rows: Optional[list]
+    engine_unavailable: bool           # True only when status == "unavailable"

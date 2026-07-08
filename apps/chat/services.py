@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import logging
+import queue
+import threading
 from typing import Iterator
 
-from apps.query.inference_client import InferenceClient, InferenceUnavailable
+from chatbot.run import run_chat_turn
 
 from .models import ChatMessage, ChatSession, MessageType
 from .visualization import VisualizationRecommender
@@ -33,7 +35,7 @@ def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
 
 
 class ConversationQueryService:
-    """One assistant turn: resolve chat -> run the existing pipeline -> persist."""
+    """One assistant turn: resolve chat -> run the chatbot supervisor -> persist."""
 
     def __init__(self, user, source_id=None, tenant: str = "default"):
         self.user = user
@@ -89,76 +91,117 @@ class ConversationQueryService:
         """Yields: thinking (-> thinking*, when stream) -> content* -> visualization?
         -> explainability -> error?.
 
-        stream=True sources "thinking" from the inference tier's real SSE progress
-        events (classify / decompose / route / answer) as the pipeline actually
-        advances, instead of one blocking call that only reports "done" at the end."""
+        `chat.pk` doubles as the chatbot/LangGraph session_id (thread_id) — the
+        graph's own Redis checkpointer accumulates conversation history per
+        session automatically, so no history is threaded through manually here.
+
+        stream=True sources "thinking" from chatbot's own on_event callback,
+        which itself forwards the inference tier's real SSE progress events
+        (classify / decompose / route / answer) live as the pipeline advances,
+        via a background thread bridged through a queue (see _run_streamed)."""
         yield {"event": "thinking",
                "data": {"phase": "reasoning", "message": "Analyzing request..."}}
 
-        client = InferenceClient()
-        payload = None
-        try:
-            if stream:
-                for kind, data in client.stream_hybrid_query(
-                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
-                ):
-                    if kind == "progress":
-                        yield {"event": "thinking",
-                               "data": {"phase": data.get("phase", "progress"),
-                                        "message": data.get("message", "")}}
-                    elif kind == "error":
-                        logger.warning("conversation query pipeline error chat_id=%s: %s",
-                                       chat.pk, data)
-                        yield {"event": "error",
-                               "data": {"code": "MODEL_ERROR",
-                                        "message": data.get("message", "inference error")}}
-                        return
-                    elif kind == "result":
-                        payload = data
-            else:
-                payload = client.run_hybrid_query(
-                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
-                )
-        except InferenceUnavailable as exc:
-            logger.warning("conversation query pipeline unavailable chat_id=%s: %s", chat.pk, exc)
-            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
-            return
+        session_id = str(chat.pk)
+        kwargs = dict(tenant=self.tenant, source_id=self.source_id, request_id=request_id)
 
-        if payload is None:
-            logger.warning("conversation query pipeline returned no result chat_id=%s", chat.pk)
+        if stream:
+            response = yield from self._run_streamed(message, session_id, kwargs, chat)
+            if response is None:
+                return   # _run_streamed already yielded the error event
+        else:
+            try:
+                response = run_chat_turn(message, session_id, **kwargs)
+            except Exception as exc:
+                logger.exception("conversation query pipeline failed chat_id=%s", chat.pk)
+                yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
+                return
+
+        if response.get("engine_unavailable"):
+            logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)
             yield {"event": "error",
-                   "data": {"code": "MODEL_ERROR", "message": "No result from inference tier."}}
+                   "data": {"code": "MODEL_ERROR",
+                            "message": response.get("reply_text") or "Inference tier unavailable."}}
             return
 
-        res0, trace = self._first_item_result(payload)
+        yield from self._build_reply_events(response)
 
-        for block in self._build_content_blocks(res0):
+    def _run_streamed(self, message: str, session_id: str, kwargs: dict, chat: ChatSession):
+        """Bridges run_chat_turn's synchronous on_event callback (fired from
+        inside a blocking graph.invoke() call) into this generator's yield
+        contract, via a background thread + thread-safe queue — there's no
+        asyncio available here (unlike inference/routes/hybrid.py's SSE route),
+        so a plain thread+queue is the equivalent for a sync Django view.
+
+        Ordering is guaranteed: on_event(...) calls happen strictly BEFORE
+        run_chat_turn returns (invoked synchronously, nested inside
+        call_engine_node's iteration of the inference SSE stream), so every
+        "thinking" item is enqueued before the terminal "result"/"error" item.
+
+        Returns the final response dict via a StopIteration value (consumed
+        by `response = yield from self._run_streamed(...)` in run_turn), or
+        None if an error event was already yielded here.
+        """
+        q: "queue.Queue[tuple[str, object]]" = queue.Queue()
+
+        def on_event(phase: str, evt_message: str) -> None:
+            q.put(("thinking", {"phase": phase, "message": evt_message}))
+
+        def target() -> None:
+            try:
+                result = run_chat_turn(message, session_id, on_event=on_event, **kwargs)
+                q.put(("result", result))
+            except Exception as exc:
+                logger.exception("conversation query pipeline failed (thread) chat_id=%s", chat.pk)
+                q.put(("error", str(exc)))
+            finally:
+                # ALWAYS enqueued, even on exception above — this is what
+                # prevents the consumer loop below from blocking forever.
+                q.put(("done", None))
+
+        thread = threading.Thread(target=target, daemon=True, name=f"chatbot-turn-{chat.pk}")
+        thread.start()
+
+        result, error_message = None, None
+        while True:
+            kind, payload = q.get()
+            if kind == "done":
+                break
+            elif kind == "result":
+                result = payload
+            elif kind == "error":
+                error_message = payload
+            else:
+                yield {"event": kind, "data": payload}
+        thread.join(timeout=5)   # already finished by the time "done" was enqueued; bounds worst case
+
+        if error_message is not None:
+            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": error_message}}
+            return None
+        if result is None:
+            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": "No result from chatbot pipeline."}}
+            return None
+        return result
+
+    def _build_reply_events(self, response: dict):
+        res0 = response.get("engine_result") or {}
+        for block in self._build_content_blocks(response, res0):
             yield {"event": "content", "data": block}
-
         for viz in self._build_visualizations(res0):
             yield {"event": "visualization", "data": viz}
-
+        trace = res0.get("trace") or {}
         yield {"event": "explainability",
                "data": {"steps": self._build_explainability_steps(trace)}}
 
     @staticmethod
-    def _first_item_result(payload: dict) -> tuple[dict, dict]:
-        result = (payload or {}).get("result") or {}
-        items = result.get("items") or []
-        item0 = items[0] if items and isinstance(items[0], dict) else {}
-        res0 = item0.get("result") or {}
-        trace = res0.get("trace") or {}
-        return res0, trace
-
-    @staticmethod
-    def _build_content_blocks(res0: dict) -> list:
+    def _build_content_blocks(response: dict, res0: dict) -> list:
         blocks = []
-        answer = res0.get("answer")
-        if answer:
+        reply_text = response.get("reply_text")   # covers answer + smalltalk + clarify uniformly
+        if reply_text:
             # is_summary marks this as the primary answer (vs. supporting content like
             # the table below) so callers can surface it distinctly without a second
             # LLM call or re-deriving which block "is" the summary.
-            blocks.append({"type": "markdown", "content": str(answer), "is_summary": True})
+            blocks.append({"type": "markdown", "content": str(reply_text), "is_summary": True})
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
             blocks.append({"type": "markdown", "content": _rows_to_markdown_table(cols, rows)})

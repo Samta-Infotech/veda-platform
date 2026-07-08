@@ -19,12 +19,14 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 
 from langgraph.checkpoint.redis import RedisSaver
 
 logger = logging.getLogger(__name__)
 
 _CHECKPOINTER = None
+_LOCK = threading.Lock()
 
 # redis-stack-server (RediSearch-capable), separate from the project's
 # plain redis-cache/redis-broker instance on :6379.
@@ -35,20 +37,22 @@ def get_checkpointer() -> RedisSaver:
     """Returns the process-wide RedisSaver, building + `.setup()`-ing it on
     first call. Raises (does not swallow) if Redis is unreachable — a broken
     checkpointer means no conversation can be tracked at all, so failing loud
-    and immediately at startup is correct here, unlike call_ollama's
+    and immediately at startup is correct here, unlike call_slm's
     per-request soft-fail."""
     global _CHECKPOINTER
     if _CHECKPOINTER is None:
-        logger.info("get_checkpointer: connecting to %s", CHECKPOINTER_REDIS_URL)
-        try:
-            saver = RedisSaver(redis_url=CHECKPOINTER_REDIS_URL)
-            saver.setup()   # idempotent: creates the redis search indices on first run
-        except Exception:
-            logger.exception(
-                "get_checkpointer: could not initialize RedisSaver at %s "
-                "(is redis-stack-server running? see module docstring)",
-                CHECKPOINTER_REDIS_URL,
-            )
-            raise
-        _CHECKPOINTER = saver
+        with _LOCK:
+            if _CHECKPOINTER is None:
+                logger.info("get_checkpointer: connecting to %s", CHECKPOINTER_REDIS_URL)
+                try:
+                    saver = RedisSaver(redis_url=CHECKPOINTER_REDIS_URL)
+                    saver.setup()   # idempotent: creates the redis search indices on first run
+                except Exception:
+                    logger.exception(
+                        "get_checkpointer: could not initialize RedisSaver at %s "
+                        "(is redis-stack-server running? see module docstring)",
+                        CHECKPOINTER_REDIS_URL,
+                    )
+                    raise
+                _CHECKPOINTER = saver
     return _CHECKPOINTER

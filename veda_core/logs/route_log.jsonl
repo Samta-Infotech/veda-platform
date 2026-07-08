@@ -28,3 +28,21 @@
 {"t": 1783485543.432, "route": "metric.count", "latency_ms": 1372.4, "query": "count of user", "table": "users_user", "rows": 1}
 {"t": 1783489694.854, "route": "metric.count", "latency_ms": 1765.6, "query": "count of user", "table": "users_user", "rows": 1}
 {"t": 1783489718.626, "route": "metric.count", "latency_ms": 891.1, "query": "count of user", "table": "users_user", "rows": 1}
+{"t": 1783513878.171, "route": "full:SIMPLE.qualifier_dropped", "latency_ms": 39953.7, "query": "How many tickets are there in each status category?"}
+{"t": 1783515743.16, "route": "existence", "latency_ms": 33604.3, "query": "How many incidents have been escalated?", "table": "assets_renttransaction_history", "rows": 1}
+{"t": 1783515777.719, "route": "full:SIMPLE.qualifier_dropped", "latency_ms": 29260.9, "query": "waived_incidents: 0"}
+{"t": 1783515815.712, "route": "full:SIMPLE", "latency_ms": 14749.4, "query": "How many incidents are there in total?", "table": "advertisements_advertisement", "rows": 1}
+{"t": 1783515856.618, "route": "full:SIMPLE.ungrounded", "latency_ms": 18945.7, "query": "How many incidents are currently escalated?"}
+{"t": 1783515860.949, "route": "full:SIMPLE.qualifier_dropped", "latency_ms": 22356.5, "query": "How many tickets are there in each status category?"}
+{"t": 1783515981.761, "route": "full:SIMPLE.qualifier_dropped", "latency_ms": 32109.5, "query": "How many incidents are both escalated and waived?"}
+{"t": 1783515995.482, "route": "cache", "latency_ms": 422.6, "query": "How many incidents are there in total?", "table": "(cached)", "rows": 1}
+{"t": 1783516050.775, "route": "full:SIMPLE", "latency_ms": 14378.4, "query": "how many properties are there", "table": "assets_asset", "rows": 1}
+{"t": 1783516073.625, "route": "cache", "latency_ms": 942.6, "query": "How many properties are there?", "table": "(cached)", "rows": 1}
+{"t": 1783516083.475, "route": "full:SIMPLE.qualifier_dropped", "latency_ms": 43527.9, "query": "What was the last question I asked?"}
+{"t": 1783516089.095, "route": "metric.count", "latency_ms": 896.8, "query": "How many advertisements are there?", "table": "advertisements_advertisement", "rows": 1}
+{"t": 1783516123.906, "route": "full:SIMPLE", "latency_ms": 10172.4, "query": "how many are there", "table": "users_user", "rows": 1}
+{"t": 1783516151.314, "route": "full:SIMPLE", "latency_ms": 10541.5, "query": "how many complaints are there", "table": "comments_comment", "rows": 1}
+{"t": 1783516181.377, "route": "existence.ungrounded", "latency_ms": 16267.1, "query": "how many properties have status xyz123nonexistent"}
+{"t": 1783516255.158, "route": "cache", "latency_ms": 433.6, "query": "how many properties are there", "table": "(cached)", "rows": 1}
+{"t": 1783516289.637, "route": "full:SIMPLE.ungrounded", "latency_ms": 19650.6, "query": "How many active leases are there?"}
+{"t": 1783516332.227, "route": "full:SIMPLE.ungrounded", "latency_ms": 17358.1, "query": "How many active leases are there?"}

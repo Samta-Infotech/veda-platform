@@ -19,6 +19,7 @@ is a no-op rewrite when the message is already self-contained anyway.
 from __future__ import annotations
 
 import logging
+import threading
 
 from langgraph.graph import StateGraph, END
 
@@ -90,11 +91,14 @@ def build_graph():
 
 
 _GRAPH = None
+_LOCK = threading.Lock()
 
 
 def get_graph():
     """Process-wide compiled graph singleton — build_graph() runs once."""
     global _GRAPH
     if _GRAPH is None:
-        _GRAPH = build_graph()
+        with _LOCK:
+            if _GRAPH is None:
+                _GRAPH = build_graph()
     return _GRAPH
