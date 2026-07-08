@@ -35,14 +35,14 @@ def _is_reachable(adj, t, o, max_hops=4):
     to live shortest-path traversal for unmapped pairs or when the flag/map is absent.
     Reachability only — the actual join edges are still computed by _shortest_path."""
     global _JOIN_PATHS_MAP
+    # WP7: consult the precompiled join-path map first (unconditional), falling back to
+    # live shortest-path traversal for unmapped pairs or schema drift between ingestions.
     try:
-        from config import JOIN_PATHS_ENABLED
-        if JOIN_PATHS_ENABLED:
-            if _JOIN_PATHS_MAP is None:
-                from ingestion.join_paths import load_join_paths
-                _JOIN_PATHS_MAP = load_join_paths() or {}
-            if _JOIN_PATHS_MAP:
-                return f"{t}|{o}" in _JOIN_PATHS_MAP
+        if _JOIN_PATHS_MAP is None:
+            from ingestion.join_paths import load_join_paths
+            _JOIN_PATHS_MAP = load_join_paths() or {}
+        if _JOIN_PATHS_MAP:
+            return f"{t}|{o}" in _JOIN_PATHS_MAP
     except Exception:
         pass
     return _shortest_path(adj, t, o, max_hops=max_hops) is not None

@@ -1,7 +1,7 @@
 # ingestion/biencoder.py
 # VEDA — Bi-encoder ingestion: embeds columns + tables into v2 pgvector stores
 # Gate: RETRIEVAL_V2_ENABLED and BIENCODER_ENABLED
-# Uses BAAI/bge-large-en-v1.5 or intfloat/e5-large-v2 (configured in config.py)
+# Uses BAAI/bge-m3 dense (WP3) via ingestion/m3_encoder.py
 
 import sys
 import os
@@ -25,32 +25,10 @@ from config import (
 from ingestion.column_text import build_enriched_column_text
 
 # ---------------------------------------------------------------------------
-# Availability guard
+# Dense encoding is done by the shared BGE-M3 singleton (ingestion/m3_encoder.py) —
+# the SAME model that produces the learned-sparse weights (WP3). No separate
+# SentenceTransformer copy of a bge-large model is loaded anymore.
 # ---------------------------------------------------------------------------
-BIENCODER_AVAILABLE = False
-_BIENCODER_MODEL_INSTANCE = None
-
-try:
-    from sentence_transformers import SentenceTransformer
-    BIENCODER_AVAILABLE = True
-except ImportError:
-    pass
-
-
-def _get_biencoder():
-    global _BIENCODER_MODEL_INSTANCE
-    if _BIENCODER_MODEL_INSTANCE is not None:
-        return _BIENCODER_MODEL_INSTANCE
-    if not BIENCODER_AVAILABLE:
-        return None
-    try:
-        from sentence_transformers import SentenceTransformer
-        _BIENCODER_MODEL_INSTANCE = SentenceTransformer(BIENCODER_MODEL, device=BIENCODER_DEVICE,
-                                                        local_files_only=True)
-        return _BIENCODER_MODEL_INSTANCE
-    except Exception as e:
-        warnings.warn(f"[BiEncoder] Could not load model '{BIENCODER_MODEL}': {e}")
-        return None
 
 
 def _get_pg_conn():
@@ -88,8 +66,8 @@ def _ensure_v2_table(conn, table_name: str, dim: int):
         try:
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS {table_name}_emb_idx
-                ON {table_name} USING ivfflat (embedding vector_cosine_ops)
-                WITH (lists = 50)
+                ON {table_name} USING hnsw (embedding vector_cosine_ops)
+                WITH (m = 16, ef_construction = 200)
             """)
         except Exception:
             pass
@@ -152,10 +130,7 @@ def run_biencoder_ingestion(
     Falls back gracefully if model or DB unavailable.
     """
     t0 = time.time()
-    model = _get_biencoder()
-    if model is None:
-        warnings.warn("[BiEncoder] Model unavailable — skipping v2 embedding")
-        return BiEncoderResult(error="model_unavailable")
+    from ingestion import m3_encoder
 
     try:
         conn = _get_pg_conn()
@@ -195,13 +170,7 @@ def run_biencoder_ingestion(
             table_map[col.table_id]["col_names"].append(col.col_name)
 
         if col_texts:
-            col_embeddings = model.encode(
-                col_texts,
-                batch_size=BIENCODER_BATCH_SIZE,
-                normalize_embeddings=True,
-                device=BIENCODER_DEVICE,
-                show_progress_bar=verbose,
-            )
+            col_embeddings = m3_encoder.encode_dense(col_texts)
             with conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {BIENCODER_COL_TABLE} WHERE source_id = %s", (source_id,))
                 for meta, emb in zip(col_metas, col_embeddings):
@@ -234,13 +203,7 @@ def run_biencoder_ingestion(
             })
 
         if tbl_texts:
-            tbl_embeddings = model.encode(
-                tbl_texts,
-                batch_size=BIENCODER_BATCH_SIZE,
-                normalize_embeddings=True,
-                device=BIENCODER_DEVICE,
-                show_progress_bar=verbose,
-            )
+            tbl_embeddings = m3_encoder.encode_dense(tbl_texts)
             with conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {BIENCODER_TABLE_TABLE} WHERE source_id = %s", (source_id,))
                 for meta, emb in zip(tbl_metas, tbl_embeddings):

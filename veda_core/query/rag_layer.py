@@ -3,7 +3,7 @@
 # VEDA — RAG + Hybrid Query Layer
 #
 # Responsibility:
-#   - Embeds the user query using MiniLM (same model as chunk_embedder)
+#   - Embeds the user query using BGE-M3 (same model as chunk_embedder, WP3)
 #   - Improvement 1: Applies L1 temporal filter to restrict chunk retrieval
 #     by document date — documents outside the time window are excluded
 #   - Improvement 2: Applies value expansion (from value_sampler) before
@@ -92,7 +92,7 @@ class HybridResult:
 
 
 # =============================================================================
-# Query encoding — reuses MiniLM already loaded during ingestion
+# Query encoding — reuses the shared BGE-M3 model (WP3)
 # Improvement 2: value expansion applied before encoding
 # =============================================================================
 
@@ -101,32 +101,20 @@ def _encode_rag_query(
     verbose: bool = False,
 ) -> Optional[Any]:
     """
-    Encodes the query using MiniLM (384-dim).
-    Improvement 2: expands query tokens using the value sampler index before
-    encoding. If the query mentions a DB column value (e.g. 'escalated'),
-    the column name ('workflow_state') is injected as an additional token.
-    This boosts retrieval of document chunks that describe that column concept.
+    Encodes the query using BGE-M3 (1024-dim, WP3) — the SAME model that embedded the
+    document chunks, so query and chunk vectors share one space.
+
+    Document search runs over free text, so the SQL value-expansion (which maps a query
+    word to a DB COLUMN NAME, e.g. "document" → "workflow_state") injects an irrelevant
+    snake_case token into the embedding query and hurts chunk relevance. Use the raw
+    query for RAG; value-expansion stays in the SQL path.
     """
-    import numpy as np
-
-    # Document search runs over free text, so the SQL value-expansion (which maps
-    # a query word to a DB COLUMN NAME, e.g. "document" → "workflow_state") injects
-    # an irrelevant snake_case token into the embedding query and hurts chunk
-    # relevance. Use the raw query for RAG; value-expansion stays in the SQL path.
-    expanded_query = query
-
     try:
-        from ingestion.relgt_encoder import _get_minilm_model
-        model     = _get_minilm_model()
-        query_vec = model.encode(
-            [expanded_query],
-            convert_to_numpy    = True,
-            normalize_embeddings = True,
-        )[0].astype("float32")
-        return query_vec
+        from ingestion import m3_encoder
+        return m3_encoder.encode_dense([query])[0]
     except Exception as e:
         if verbose:
-            print(f"  [RAG] MiniLM encoding failed: {e}")
+            print(f"  [RAG] BGE-M3 encoding failed: {e}")
         return None
 
 
@@ -362,7 +350,7 @@ def run_rag_layer(
         return RAGResult(
             answer="", chunks=[], citations=[], confidence=0.0,
             duration_ms=round((time.time() - t0) * 1000, 2),
-            error="Query embedding failed — MiniLM not loaded",
+            error="Query embedding failed — BGE-M3 not loaded",
         )
 
     # Retrieve chunks (with temporal filter — Improvement 1)
@@ -463,7 +451,7 @@ def run_hybrid_layer(
         return HybridResult(
             answer="", sql_columns=[], doc_chunks=[], citations=[],
             confidence=0.0, duration_ms=round((time.time() - t0) * 1000, 2),
-            error="Query embedding failed — MiniLM not loaded",
+            error="Query embedding failed — BGE-M3 not loaded",
         )
 
     # Step 2 — Retrieve doc chunks (with temporal filter)

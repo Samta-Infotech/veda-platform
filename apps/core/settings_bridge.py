@@ -19,7 +19,7 @@ except ImportError:
 
 # (attribute name, fallback default, caster) — §9 env-overridable engine flags.
 _FLAGS: list[tuple[str, Any, type]] = [
-    ("ENCODER_MODE", "ensemble", str),
+    ("EMBEDDING_MODEL_ID", "bge-m3", str),
     ("TOP_K", 15, int),
     ("TOP_K_TO_LLM", 6, int),
     ("QUERY_ROUTER_ENABLED", True, bool),
@@ -32,16 +32,8 @@ _FLAGS: list[tuple[str, Any, type]] = [
     ("HNSW_M", 16, int),
     ("HNSW_EF_CONSTRUCTION", 200, int),
     ("HNSW_EF_SEARCH", 40, int),
-    # Track-4 precompute consumption flags (review Finding 3) — flip one at a time
-    # during the parity gate via VEDA_<FLAG> env; visible in Django settings for ops.
-    ("NL_TEMPLATE_ENABLED", True, bool),
-    ("BM25_PERSISTED_INDEX_ENABLED", True, bool),
-    ("ENRICHMENT_INDEX_ENABLED", True, bool),
-    ("JOIN_PATHS_ENABLED", True, bool),
-    ("VALUE_MIRROR_ENABLED", True, bool),
-    ("SUBSTRATE_SIGNALS_ENABLED", True, bool),
-    ("RERANK_DOCS_ENABLED", True, bool),
-    ("FAST_PATH_EXPANSION_ENABLED", True, bool),
+    # WP7: the Track-4 precompute consumption flags were removed — precompute is now the
+    # single path (fresh ingestion is the cutover), so there is nothing to bridge here.
 ]
 
 

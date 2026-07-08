@@ -69,36 +69,45 @@ class RetrievalCache:
             self.cache_dir.mkdir(parents=True, exist_ok=True)
             logger.info(f"✓ File cache initialized at {self.cache_dir}")
 
-    def _make_cache_key(self, enriched_tokens: List[str]) -> str:
+    def _make_cache_key(self, enriched_tokens: List[str], raw_query: str = "") -> str:
         """
-        Generate cache key from enriched tokens.
+        Generate cache key from the RAW query + enriched tokens (WP1).
+
+        Signal 1 now encodes the raw query while Signals 2/5 consume the enriched
+        tokens, so a cache entry is only valid for the same (raw_query, tokens) pair.
+        Keying on tokens alone would collide two different raw queries that enrich to
+        the same token set and serve one the other's dense ranking.
 
         Args:
             enriched_tokens: List of enriched tokens
+            raw_query: Raw natural-language query
 
         Returns:
-            MD5 hash of sorted tokens
+            MD5 hash of (raw_query, sorted tokens)
         """
-        # Sort tokens for consistency
+        # Sort tokens for consistency; prepend the raw query so it participates in the key.
         sorted_tokens = "|".join(sorted(enriched_tokens))
+        payload = f"{raw_query.strip().lower()}#{sorted_tokens}"
 
         # Hash to MD5
-        hash_obj = hashlib.md5(sorted_tokens.encode())
+        hash_obj = hashlib.md5(payload.encode())
         cache_key = f"retrieval:{hash_obj.hexdigest()}"
 
         return cache_key
 
-    def get(self, enriched_tokens: List[str]) -> Optional[List[Tuple[str, float]]]:
+    def get(self, enriched_tokens: List[str],
+            raw_query: str = "") -> Optional[List[Tuple[str, float]]]:
         """
         Get cached retrieval results.
 
         Args:
             enriched_tokens: List of enriched query tokens
+            raw_query: Raw natural-language query (participates in the key)
 
         Returns:
             Cached top-15 results or None (cache miss)
         """
-        cache_key = self._make_cache_key(enriched_tokens)
+        cache_key = self._make_cache_key(enriched_tokens, raw_query)
 
         if self.use_redis:
             return self._get_redis(cache_key)
@@ -147,7 +156,8 @@ class RetrievalCache:
     def set(
         self,
         enriched_tokens: List[str],
-        results: List[Tuple[str, float]]
+        results: List[Tuple[str, float]],
+        raw_query: str = ""
     ):
         """
         Cache retrieval results.
@@ -155,8 +165,9 @@ class RetrievalCache:
         Args:
             enriched_tokens: List of enriched tokens
             results: Top-K retrieval results
+            raw_query: Raw natural-language query (participates in the key)
         """
-        cache_key = self._make_cache_key(enriched_tokens)
+        cache_key = self._make_cache_key(enriched_tokens, raw_query)
 
         if self.use_redis:
             self._set_redis(cache_key, results)
