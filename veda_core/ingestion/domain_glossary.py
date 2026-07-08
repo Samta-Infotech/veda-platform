@@ -2,10 +2,10 @@
 ingestion/domain_glossary.py
 Builds and caches a domain-specific glossary for VEDA.
 
-Three layers:
+Three layers, all keyed by industry_vertical (bfsi/real_estate/healthcare/retail/generic):
   Layer A: SLM-generated — schema columns → business synonyms (via Ollama)
-  Layer B: HuggingFace datasets — BFSI/AML domain vocabulary
-  Layer C: Static AML/KYC patterns — hardcoded regulatory terms
+  Layer B: HuggingFace datasets — vertical-specific vocabulary (HF_DATASET_REGISTRY)
+  Layer C: Static vertical terms — hardcoded per-vertical glossaries (STATIC_GLOSSARY_REGISTRY)
 
 Output: glossary/domain_glossary.json
   {
@@ -23,10 +23,37 @@ import urllib.error
 from typing import Dict, List, Optional
 
 GLOSSARY_DIR  = "glossary"
+# Legacy flat paths — kept only as the "bfsi" defaults so pre-existing BFSI caches
+# on disk are still found; every other vertical is scoped via the _*_path() helpers
+# below (G5), keyed through the same artifact_path() mechanism used elsewhere.
 COMBINED_PATH = os.path.join(GLOSSARY_DIR, "domain_glossary.json")
 SLM_PATH      = os.path.join(GLOSSARY_DIR, "slm_glossary.json")
 HF_PATH       = os.path.join(GLOSSARY_DIR, "hf_glossary.json")
 STATIC_PATH   = os.path.join(GLOSSARY_DIR, "static_glossary.json")
+
+
+def _combined_path(industry_vertical: str) -> str:
+    if industry_vertical == "bfsi":
+        return COMBINED_PATH
+    return os.path.join(GLOSSARY_DIR, f"domain_glossary_{industry_vertical}.json")
+
+
+def _slm_path(industry_vertical: str) -> str:
+    if industry_vertical == "bfsi":
+        return SLM_PATH
+    return os.path.join(GLOSSARY_DIR, f"slm_glossary_{industry_vertical}.json")
+
+
+def _hf_path(industry_vertical: str) -> str:
+    if industry_vertical == "bfsi":
+        return HF_PATH
+    return os.path.join(GLOSSARY_DIR, f"hf_glossary_{industry_vertical}.json")
+
+
+def _static_path(industry_vertical: str) -> str:
+    if industry_vertical == "bfsi":
+        return STATIC_PATH
+    return os.path.join(GLOSSARY_DIR, f"static_glossary_{industry_vertical}.json")
 
 
 # ── Layer C: Static AML/KYC/BFSI terms ────────────────────────────────────
@@ -85,9 +112,61 @@ STATIC_AML_GLOSSARY: Dict[str, List[str]] = {
 }
 
 
+# ── Layer C: Static Real Estate terms ──────────────────────────────────────
+STATIC_REAL_ESTATE_GLOSSARY: Dict[str, List[str]] = {
+    "rera":               ["rera_number", "rera_status", "rera_registered"],
+    "carpet area":        ["carpet_area", "carpet_area_sqft", "usable_area"],
+    "built up area":      ["built_up_area", "super_area", "total_area"],
+    "possession date":    ["possession_date", "handover_date", "ready_date"],
+    "broker commission":  ["broker_commission", "agent_fee", "commission_rate"],
+    "lease term":         ["lease_term", "lease_duration", "tenancy_period"],
+    "security deposit":   ["security_deposit", "deposit_amount"],
+    "inventory":          ["unit_count", "available_units", "inventory_status"],
+    "listing status":     ["listing_status", "is_active", "is_sold", "is_rented"],
+    "sale type":          ["sale_type", "transaction_type", "listing_type"],
+    "property type":      ["property_type", "unit_type", "asset_type"],
+    "neighborhood":       ["neighborhood", "locality", "area_name"],
+}
+
+# ── Layer C: Static Healthcare terms ───────────────────────────────────────
+STATIC_HEALTHCARE_GLOSSARY: Dict[str, List[str]] = {
+    "icd code":         ["icd_code", "diagnosis_code", "icd10"],
+    "admission date":   ["admission_date", "admit_date", "encounter_date"],
+    "discharge date":   ["discharge_date", "release_date"],
+    "diagnosis":        ["diagnosis_code", "diagnosis_description", "condition"],
+    "emr":              ["emr_id", "medical_record_number", "chart_number"],
+    "hipaa":            ["hipaa_flag", "is_phi", "consent_status"],
+    "patient":          ["patient_id", "patient_name", "mrn"],
+    "provider":         ["provider_id", "physician_id", "attending_id"],
+    "prescription":     ["prescription_id", "medication_name", "dosage"],
+    "appointment":      ["appointment_date", "appointment_status", "visit_type"],
+}
+
+# ── Layer C: Static Retail terms ───────────────────────────────────────────
+STATIC_RETAIL_GLOSSARY: Dict[str, List[str]] = {
+    "sku":                ["sku", "product_sku", "item_code"],
+    "inventory count":    ["inventory_count", "stock_quantity", "on_hand_qty"],
+    "order status":       ["order_status", "fulfillment_status", "shipping_status"],
+    "refund status":      ["refund_status", "return_status", "is_refunded"],
+    "fulfillment":        ["fulfillment_center", "warehouse_id", "shipment_id"],
+    "pos":                ["pos_terminal_id", "register_id", "transaction_id"],
+    "discount code":      ["discount_code", "coupon_code", "promo_code"],
+    "customer":           ["customer_id", "customer_name", "loyalty_id"],
+}
+
+# ── Registry: vertical -> static glossary ──────────────────────────────────
+STATIC_GLOSSARY_REGISTRY: Dict[str, Dict[str, List[str]]] = {
+    "bfsi":        STATIC_AML_GLOSSARY,
+    "real_estate": STATIC_REAL_ESTATE_GLOSSARY,
+    "healthcare":  STATIC_HEALTHCARE_GLOSSARY,
+    "retail":      STATIC_RETAIL_GLOSSARY,
+    "generic":     {},
+}
+
+
 # ── Layer B: HuggingFace dataset extraction ────────────────────────────────
 
-def _build_hf_glossary() -> Dict[str, List[str]]:
+def _build_hf_glossary_bfsi() -> Dict[str, List[str]]:
     """Download and process HuggingFace datasets to extract BFSI vocabulary."""
     glossary: Dict[str, List[str]] = {}
 
@@ -165,6 +244,97 @@ def _build_hf_glossary() -> Dict[str, List[str]]:
         print(f"[Glossary] finance-alpaca failed: {e}")
 
     return glossary
+
+
+def _build_hf_glossary_real_estate() -> Dict[str, List[str]]:
+    """Extract real-estate vocabulary from divarofficial/real-estate-ads
+    (~1M listings with structured fields)."""
+    glossary: Dict[str, List[str]] = {}
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("[Glossary] datasets library not installed — skipping Real Estate HF layer")
+        return glossary
+    try:
+        print("[Glossary] Downloading divarofficial/real-estate-ads...")
+        ds = load_dataset("divarofficial/real-estate-ads", split="train", streaming=True)
+        field_names = ["property_type", "user_type", "cat2_slug", "cat3_slug"]
+        seen_values = {}
+        count = 0
+        for row in ds:
+            for f in field_names:
+                v = row.get(f)
+                if v and isinstance(v, str):
+                    key = v.strip().lower()
+                    if key and key not in seen_values:
+                        seen_values[key] = [key.replace(" ", "_"), f]
+            count += 1
+            if count > 5000:   # streaming sample cap — vocabulary extraction, not full-dataset training
+                break
+        glossary.update(seen_values)
+        print(f"[Glossary] real-estate-ads: {len(seen_values)} terms extracted")
+    except Exception as e:
+        print(f"[Glossary] real-estate-ads failed: {e}")
+    return glossary
+
+
+def _build_hf_glossary_retail() -> Dict[str, List[str]]:
+    """Extract retail/e-commerce vocabulary from the Bitext retail-ecommerce
+    intent dataset."""
+    glossary: Dict[str, List[str]] = {}
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("[Glossary] datasets library not installed — skipping Retail HF layer")
+        return glossary
+    try:
+        print("[Glossary] Downloading bitext/Bitext-retail-ecommerce-llm-chatbot-training-dataset...")
+        ds = load_dataset(
+            "bitext/Bitext-retail-ecommerce-llm-chatbot-training-dataset", split="train")
+        intents = set(ds["intent"]) if "intent" in ds.features else set()
+        for label in intents:
+            parts = [p for p in str(label).split("_") if len(p) > 3]
+            term = " ".join(parts).lower()
+            if term and len(term) > 4:
+                glossary[term] = parts
+        print(f"[Glossary] retail intents: {len(intents)} intents extracted")
+    except Exception as e:
+        print(f"[Glossary] retail HF dataset failed: {e}")
+    return glossary
+
+
+def _build_hf_glossary_healthcare() -> Dict[str, List[str]]:
+    """Extract healthcare vocabulary from gretelai/symptom_to_diagnosis
+    (22 diagnosis labels)."""
+    glossary: Dict[str, List[str]] = {}
+    try:
+        from datasets import load_dataset
+    except ImportError:
+        print("[Glossary] datasets library not installed — skipping Healthcare HF layer")
+        return glossary
+    try:
+        print("[Glossary] Downloading gretelai/symptom_to_diagnosis...")
+        ds = load_dataset("gretelai/symptom_to_diagnosis", split="train")
+        labels = set(ds["output_text"]) if "output_text" in ds.features else set(ds["label"])
+        for label in labels:
+            parts = [p for p in str(label).split() if len(p) > 3]
+            term = " ".join(parts).lower()
+            if term:
+                glossary[term] = parts
+        print(f"[Glossary] healthcare diagnoses: {len(labels)} labels extracted")
+    except Exception as e:
+        print(f"[Glossary] healthcare HF dataset failed: {e}")
+    return glossary
+
+
+# ── Registry: vertical -> HF glossary builder ──────────────────────────────
+HF_DATASET_REGISTRY = {
+    "bfsi":        _build_hf_glossary_bfsi,
+    "real_estate": _build_hf_glossary_real_estate,
+    "healthcare":  _build_hf_glossary_healthcare,
+    "retail":      _build_hf_glossary_retail,
+    "generic":     lambda: {},   # no HF layer for generic, by design
+}
 
 
 # ── Layer A: SLM-generated glossary ───────────────────────────────────────
@@ -266,37 +436,52 @@ def build_glossary(
     inference_result=None,
     ollama_url:    str  = "http://localhost:11434",
     force_rebuild: bool = False,
+    industry_vertical: str = "generic",
 ) -> Dict[str, List[str]]:
     """
-    Build and cache the domain glossary (one-time operation).
+    Build and cache the domain glossary (one-time operation per vertical).
     Returns combined glossary: {term: [col_name, ...]}
+
+    ``industry_vertical`` selects the Layer C static terms and Layer B HF
+    dataset (via STATIC_GLOSSARY_REGISTRY / HF_DATASET_REGISTRY) and scopes the
+    cache files so different verticals never collide. Defaults to "generic" —
+    matching every other default in this system (SourceContext.industry_vertical,
+    run_full_semantic_layer, etc.) — so a caller that forgets to pass a vertical
+    fails toward "no vertical injection" rather than silently toward BFSI.
+    All current callers (main.py, source_dispatcher.py) pass it explicitly.
     """
     os.makedirs(GLOSSARY_DIR, exist_ok=True)
+    combined_path = _combined_path(industry_vertical)
+    static_path = _static_path(industry_vertical)
+    hf_path = _hf_path(industry_vertical)
+    slm_path = _slm_path(industry_vertical)
 
-    if not force_rebuild and os.path.exists(COMBINED_PATH):
-        print(f"[Glossary] Loading from cache: {COMBINED_PATH}")
-        with open(COMBINED_PATH) as f:
+    if not force_rebuild and os.path.exists(combined_path):
+        print(f"[Glossary] Loading from cache: {combined_path}")
+        with open(combined_path) as f:
             return json.load(f)
 
-    print("[Glossary] Building domain glossary (one-time operation)...")
+    print(f"[Glossary] Building domain glossary for vertical={industry_vertical}...")
     combined: Dict[str, List[str]] = {}
 
     # Layer C: Static
-    print(f"[Glossary] Layer C: {len(STATIC_AML_GLOSSARY)} static AML/KYC terms")
-    for term, cols in STATIC_AML_GLOSSARY.items():
+    static_glossary = STATIC_GLOSSARY_REGISTRY.get(industry_vertical, {})
+    print(f"[Glossary] Layer C: {len(static_glossary)} static {industry_vertical} terms")
+    for term, cols in static_glossary.items():
         combined[term] = list(cols)
-    with open(STATIC_PATH, "w") as f:
-        json.dump(STATIC_AML_GLOSSARY, f, indent=2)
+    with open(static_path, "w") as f:
+        json.dump(static_glossary, f, indent=2)
 
     # Layer B: HuggingFace
-    if not os.path.exists(HF_PATH):
+    if not os.path.exists(hf_path):
         print("[Glossary] Layer B: Building HF glossary...")
-        hf_glossary = _build_hf_glossary()
-        with open(HF_PATH, "w") as f:
+        hf_builder = HF_DATASET_REGISTRY.get(industry_vertical, lambda: {})
+        hf_glossary = hf_builder()
+        with open(hf_path, "w") as f:
             json.dump(hf_glossary, f, indent=2)
     else:
         print("[Glossary] Layer B: Loading HF glossary from cache")
-        with open(HF_PATH) as f:
+        with open(hf_path) as f:
             hf_glossary = json.load(f)
 
     for term, cols in hf_glossary.items():
@@ -309,14 +494,14 @@ def build_glossary(
 
     # Layer A: SLM-generated
     if inference_result is not None:
-        if not os.path.exists(SLM_PATH):
+        if not os.path.exists(slm_path):
             print("[Glossary] Layer A: Generating SLM synonyms via Ollama...")
             slm_glossary = _build_slm_glossary(inference_result, ollama_url)
-            with open(SLM_PATH, "w") as f:
+            with open(slm_path, "w") as f:
                 json.dump(slm_glossary, f, indent=2)
         else:
             print("[Glossary] Layer A: Loading SLM glossary from cache")
-            with open(SLM_PATH) as f:
+            with open(slm_path) as f:
                 slm_glossary = json.load(f)
 
         for term, cols in slm_glossary.items():
@@ -329,18 +514,26 @@ def build_glossary(
     else:
         print("[Glossary] Layer A: Skipped (no inference_result provided)")
 
-    with open(COMBINED_PATH, "w") as f:
+    with open(combined_path, "w") as f:
         json.dump(combined, f, indent=2)
 
-    print(f"[Glossary] Built: {len(combined)} total terms → {COMBINED_PATH}")
+    print(f"[Glossary] Built: {len(combined)} total terms → {combined_path}")
     return combined
 
 
-def load_glossary() -> Dict[str, List[str]]:
-    """Load glossary from cache. Returns empty dict if not built yet."""
-    if not os.path.exists(COMBINED_PATH):
+def load_glossary(industry_vertical: str = "generic") -> Dict[str, List[str]]:
+    """Load glossary from cache. Returns empty dict if not built yet.
+
+    Defaults to "generic", matching every other vertical default in this
+    system. The only zero-arg caller (query/semantic_layer.py::_get_domain_glossary)
+    is currently dead code (defined, never invoked) — if it's wired up later,
+    it must resolve and pass the querying source's actual industry_vertical
+    rather than relying on this default.
+    """
+    combined_path = _combined_path(industry_vertical)
+    if not os.path.exists(combined_path):
         return {}
-    with open(COMBINED_PATH) as f:
+    with open(combined_path) as f:
         return json.load(f)
 
 

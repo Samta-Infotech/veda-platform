@@ -393,7 +393,8 @@ def _stage3_batch_worker(batch_tuples, batch_names, glossary):
     return list(zip(batch_names, metadatas))
 
 
-def _stage4_table_worker(table_name, columns, table_meta, glossary, profiling):
+def _stage4_table_worker(table_name, columns, table_meta, glossary, profiling,
+                          industry_vertical="generic"):
     """Thread worker — one table's Stage-4 column understanding, using the UNCHANGED
     per-batch calls + per-batch deterministic overrides (exactly as the sequential
     inner loop). Returns (table_name, [ColumnMetadata]). No shared-state mutation."""
@@ -403,6 +404,7 @@ def _stage4_table_worker(table_name, columns, table_meta, glossary, profiling):
         cm = stage4_column_understanding(
             columns_batch=batch, table_name=table_name,
             table_metadata=table_meta, glossary=glossary, profiling=profiling,
+            industry_vertical=industry_vertical,
         )
         if cm:
             cm = _apply_deterministic_overrides(cm)
@@ -789,6 +791,7 @@ def stage4_column_understanding(
     table_metadata: TableMetadata,
     glossary: Dict[str, str],
     profiling: Optional[Dict[str, Any]] = None,
+    industry_vertical: str = "generic",
 ) -> Optional[List[ColumnMetadata]]:
     """Stage 4 (hybrid): deterministic structure + leakage-safe value handling +
     slim LLM business pass + merge with per-field confidence.
@@ -802,7 +805,8 @@ def stage4_column_understanding(
     profiling = profiling or {}
     table_domain = (table_metadata.primary_entity or table_name.replace("_", " ")).strip()
     try:
-        from config import GLOSSARY_DOMAIN_DESCRIPTION as _DOMAIN_DESC
+        from config import domain_description_for
+        _DOMAIN_DESC = domain_description_for(industry_vertical)
     except Exception:
         _DOMAIN_DESC = ""
 
@@ -1223,6 +1227,7 @@ def run_full_semantic_layer(
     profiling: Optional[Dict[str, Any]] = None,
     glossary: Optional[Dict[str, str]] = None,
     force_glossary: bool = False,
+    industry_vertical: str = "generic",
 ) -> Dict[str, Any]:
     """
     Run full L2 semantic layer (Stages 1-5 + Post-processing).
@@ -1259,7 +1264,8 @@ def run_full_semantic_layer(
         try:
             table_names = list(schema_dict.keys())
             glossary = glossary_builder.load_or_generate_glossary(
-                table_names=table_names, force=force_glossary
+                table_names=table_names, force=force_glossary,
+                industry_vertical=industry_vertical,
             )
             if glossary is None:
                 glossary = {}
@@ -1406,6 +1412,7 @@ def run_full_semantic_layer(
                     table_metadata=table_metadata[table_name],
                     glossary=glossary,
                     profiling=profiling,
+                    industry_vertical=industry_vertical,
                 )
 
                 if col_metadata:
@@ -1435,7 +1442,7 @@ def run_full_semantic_layer(
             _pctx4 = _try_ctx4()  # carry ambient (source, tenant) into worker threads (§4.1)
             with ThreadPoolExecutor(max_workers=_workers4) as _ex:
                 _futs = {_ex.submit(_with_ctx4(_pctx4, _stage4_table_worker), _n, _info.get("columns", []),
-                                    table_metadata[_n], glossary, profiling): _n
+                                    table_metadata[_n], glossary, profiling, industry_vertical): _n
                          for _n, _info in _pending4}
                 for _fut in as_completed(_futs):
                     _n = _futs[_fut]

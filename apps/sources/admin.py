@@ -6,8 +6,8 @@ from .models import Source, SourceConnectionProfile
 
 @admin.register(Source)
 class SourceAdmin(admin.ModelAdmin):
-    list_display = ("name", "dialect", "status", "ready", "last_ingested_at")
-    list_filter = ("dialect", "status", "ready")
+    list_display = ("name", "dialect", "industry_vertical", "status", "ready", "last_ingested_at")
+    list_filter = ("dialect", "industry_vertical", "status", "ready")
     actions = ["ingest", "test_connection"]
 
     @admin.action(description="Ingest source (enqueue ingestion job)")

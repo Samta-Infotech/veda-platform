@@ -113,6 +113,7 @@ def _build_injected_source() -> dict:
             merged.append(t)
     src["exclude_tables"] = merged
     src.setdefault("id", "primary_db")
+    src.setdefault("industry_vertical", _os_src.environ.get("VEDA_INDUSTRY_VERTICAL", "generic"))
     return src
 
 
@@ -868,7 +869,27 @@ PROFILING_TOP_VALUES_LIMIT = 10     # keep top N values per column
 GLOSSARY_GENERATION_ENABLED = True
 GLOSSARY_TEMPERATURE = 0.5
 GLOSSARY_TIMEOUT = 120
-GLOSSARY_DOMAIN_DESCRIPTION = "Compliance and risk management, fraud detection, AML/KYC, incident investigation"
+
+# Vertical-keyed domain descriptions — drives LLM domain-framing (Stage 2 + Stage 4)
+# per Source.industry_vertical, instead of one hardcoded BFSI/AML string for every source.
+VERTICAL_DOMAIN_DESCRIPTIONS = {
+    "bfsi":        "Compliance and risk management, fraud detection, AML/KYC, incident investigation",
+    "real_estate": "Real estate transactions, property listings, leasing, sales pipeline, brokerage",
+    "healthcare":  "Patient care, clinical records, appointments, billing, compliance (HIPAA)",
+    "retail":      "Inventory, orders, customers, point-of-sale, merchandising, fulfillment",
+    "generic":     "General business operations",
+}
+# Backward-compat default for any code that hasn't been updated to pass
+# industry_vertical explicitly.
+GLOSSARY_DOMAIN_DESCRIPTION = VERTICAL_DOMAIN_DESCRIPTIONS["generic"]
+
+
+def domain_description_for(industry_vertical: str) -> str:
+    """Vertical-aware domain description for LLM prompts."""
+    return VERTICAL_DOMAIN_DESCRIPTIONS.get(
+        (industry_vertical or "generic").lower(),
+        VERTICAL_DOMAIN_DESCRIPTIONS["generic"],
+    )
 
 # One-line domain primer injected into the LLM SQL-generation prompt so it interprets
 # business terminology correctly. DESCRIPTIVE only — the prompt explicitly forbids

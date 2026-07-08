@@ -37,6 +37,7 @@ def dispatch(
         "id": ctx.source_id, "type": ctx.type, "engine": ctx.engine,
         "enabled": True, "role": "queryable", **ctx.connection,
         "exclude_tables": ctx.exclude_tables, "schema": ctx.schema_filter,
+        "industry_vertical": ctx.industry_vertical,
     }
     result = dispatch_ingestion(cfg, verbose=verbose)
     return {"source_id": ctx.source_id, "source_type": ctx.type,

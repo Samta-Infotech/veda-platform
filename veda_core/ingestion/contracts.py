@@ -36,6 +36,7 @@ class SourceContext:
     artifact_scope: Optional[tuple] = None
     skip_llm: bool = False
     resume: bool = False
+    industry_vertical: str = "generic"
 
     @classmethod
     def from_env(cls, skip_llm: bool = False, resume: bool = False) -> "SourceContext":
@@ -64,6 +65,8 @@ class SourceContext:
             artifact_scope=artifact_scope(),
             skip_llm=skip_llm or os.environ.get("VEDA_SKIP_LLM") == "1",
             resume=resume or os.environ.get("VEDA_RESUME") == "1",
+            industry_vertical=src.get("industry_vertical")
+                or os.environ.get("VEDA_INDUSTRY_VERTICAL", "generic"),
         )
 
 

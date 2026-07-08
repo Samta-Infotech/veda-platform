@@ -37,12 +37,26 @@ class SourceStatus(models.TextChoices):
     FAILED = "failed", "Failed"
 
 
+class IndustryVertical(models.TextChoices):
+    BFSI = "bfsi", "BFSI / Banking & Financial Services"
+    REAL_ESTATE = "real_estate", "Real Estate"
+    HEALTHCARE = "healthcare", "Healthcare"
+    RETAIL = "retail", "Retail"
+    GENERIC = "generic", "Generic / Other"
+
+
 class Source(models.Model):
     """One row per connectable database (§5 apps.sources)."""
 
     name = models.CharField(max_length=200, unique=True)
     dialect = models.CharField(max_length=20, choices=Dialect.choices)
     connector_type = models.CharField(max_length=64)
+    industry_vertical = models.CharField(
+        max_length=32, choices=IndustryVertical.choices,
+        default=IndustryVertical.GENERIC,
+        help_text="Drives which domain glossary and LLM domain-framing is used "
+                  "during L3 enrichment. Set once at registration; does not "
+                  "auto-detect.")
     # Connection config lives on the Source row (§5: "how to connect to it"), so onboarding a
     # new source is a data operation — register + trigger ingestion, no code/env edits.
     host = models.CharField(max_length=256, blank=True)
@@ -120,6 +134,7 @@ class Source(models.Model):
         }
         if self.schema_filter:
             env["VEDA_SOURCE_SCHEMA"] = str(self.schema_filter)
+        env["VEDA_INDUSTRY_VERTICAL"] = self.industry_vertical or "generic"
         return env
 
     # Dialect → (engine source-type vocabulary, connector engine name) for the engine's
@@ -160,6 +175,7 @@ class Source(models.Model):
             "enabled": True,
             # documents are chunk-retrieval (RAG) sources; the rest generate queries
             "role": "searchable" if stype == "document" else "queryable",
+            "industry_vertical": self.industry_vertical or "generic",
         }
         if stype in ("document", "datalake"):
             cfg["path"] = self.source_path or ""

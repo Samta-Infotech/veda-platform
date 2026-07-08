@@ -156,10 +156,12 @@ def _run_schema_pipeline(
     try:
         from ingestion.domain_glossary import build_glossary
         from config import SLM_OLLAMA_BASE_URL
+        industry_vertical = source_config.get("industry_vertical", "generic")
         _glossary = build_glossary(
             inference_result = inference_result,
             ollama_url       = SLM_OLLAMA_BASE_URL,
             force_rebuild    = False,
+            industry_vertical = industry_vertical,
         )
         _sok(source_id, f"Domain glossary — {len(_glossary)} terms", 0.0)
     except Exception as _e:

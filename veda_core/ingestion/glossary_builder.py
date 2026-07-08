@@ -31,7 +31,6 @@ from config import (
     GLOSSARY_TEMPERATURE,
     GLOSSARY_TIMEOUT,
     GLOSSARY_FILE,
-    GLOSSARY_DOMAIN_DESCRIPTION,
 )
 from utils.logger import get_logger
 
@@ -77,6 +76,7 @@ def generate_glossary(
     table_names: List[str] = None,
     model: str = None,
     temperature: float = None,
+    industry_vertical: str = "generic",
 ) -> Optional[Dict[str, str]]:
     """Call Qwen to generate domain glossary."""
     if not GLOSSARY_GENERATION_ENABLED:
@@ -84,7 +84,8 @@ def generate_glossary(
         return {}
 
     if domain_description is None:
-        domain_description = GLOSSARY_DOMAIN_DESCRIPTION
+        from config import domain_description_for
+        domain_description = domain_description_for(industry_vertical)
 
     if table_names is None:
         table_names = ["payment_transaction", "user", "transaction_status"]
@@ -135,10 +136,16 @@ def load_or_generate_glossary(
     table_names: List[str] = None,
     glossary_file: str = None,
     force: bool = False,
+    industry_vertical: str = "generic",
 ) -> Dict[str, str]:
-    """Load glossary from file if exists (unless force=True), otherwise generate and save."""
+    """Load glossary from file if exists (unless force=True), otherwise generate and save.
+
+    ``glossary_file`` is keyed by vertical (in addition to the existing source/tenant
+    artifact scope) so ingesting different verticals never collide on one cache file.
+    """
     if glossary_file is None:
-        glossary_file = GLOSSARY_FILE
+        from config import artifact_path
+        glossary_file = artifact_path(f"veda_glossary_{industry_vertical}.json")
 
     if not force and os.path.exists(glossary_file):
         try:
@@ -149,7 +156,8 @@ def load_or_generate_glossary(
         except Exception as e:
             logger.warning(f"Could not load glossary from {glossary_file}: {e}")
 
-    glossary = generate_glossary(domain_description=domain_description, table_names=table_names)
+    glossary = generate_glossary(domain_description=domain_description, table_names=table_names,
+                                  industry_vertical=industry_vertical)
     if glossary is None:
         logger.warning("Glossary generation failed, using empty glossary")
         glossary = {}

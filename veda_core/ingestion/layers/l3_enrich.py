@@ -39,7 +39,8 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
         }
         # force_glossary=True → regenerate the glossary every ingest (I-5).
         semantic_model = run_full_semantic_layer(
-            schema_dict=schema_dict, profiling=None, glossary=None, force_glossary=True)
+            schema_dict=schema_dict, profiling=None, glossary=None, force_glossary=True,
+            industry_vertical=ctx.industry_vertical)
         save_semantic_model(semantic_model, SEMANTIC_MODEL_FILE)
         state["semantic_model"] = semantic_model
         out.append(StageOutcome("semantic_layer", True, detail=(

@@ -660,16 +660,18 @@ def main():
         from ingestion.semantic_type_inference import run_semantic_type_inference
         from ingestion.domain_glossary import build_glossary
         from config import SLM_OLLAMA_BASE_URL
+        industry_vertical = os.environ.get("VEDA_INDUSTRY_VERTICAL", "generic")
         print("  Step 1/3 — Scanning schema...")
         raw_schema       = get_real_schema()
         scan_result      = run_schema_scanner(raw_schema=raw_schema, verbose=False)
         print(f"  Step 2/3 — Semantic type inference ({scan_result.stats['total_columns']} columns)...")
         inference_result = run_semantic_type_inference(scan_result=scan_result, verbose=False)
-        print("  Step 3/3 — Building glossary (Layer C → B → A)...")
+        print(f"  Step 3/3 — Building glossary (Layer C → B → A) for vertical={industry_vertical}...")
         glossary = build_glossary(
             inference_result = inference_result,
             ollama_url       = SLM_OLLAMA_BASE_URL,
             force_rebuild    = args.rebuild_glossary,
+            industry_vertical = industry_vertical,
         )
         print(f"\n  ✓  Glossary ready: {len(glossary)} terms")
         print(f"  Total time: {round(time.time() - t_start, 2)}s")
