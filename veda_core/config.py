@@ -438,7 +438,7 @@ QUERY_ROUTER_CONFIDENCE_THRESHOLD = 0.6
 # Toggle automatic routing — if False, always routes to SQL (backward compat)
 QUERY_ROUTER_ENABLED = True
 
-SEMANTIC_PARALLEL_QWEN_ENABLED = True
+SEMANTIC_PARALLEL_QWEN_ENABLED = False
 SEMANTIC_MAX_PARALLEL_REQUESTS = 6   # 3 backends × ~2 concurrent each
 # =============================================================================
 # DOCUMENT INGESTION
