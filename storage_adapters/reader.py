@@ -93,29 +93,52 @@ def source_connection() -> dict:
             "user": db_user, "password": password}
 
 
+_FK_ADJACENCY_CACHE: dict = {}   # (source_id, tenant) → List[FKEdge] (ALL edges); cleared on rehydrate
+
+
+def clear_fk_adjacency_cache() -> None:
+    """Called by the inference rehydrate subscriber so a re-ingest's edited FK graph
+    is picked up without a process restart (mirrors clear_ef_search_cache())."""
+    _FK_ADJACENCY_CACHE.clear()
+
+
+def _all_fk_edges(source_id, tenant) -> List[FKEdge]:
+    """The full FK edge set for (source, tenant), fetched once per process and
+    reused for every table_ids filter within/across requests. Tier2's select_retrieval
+    calls get_fk_adjacency up to 4x per query (semantic layer, PK injection, value-
+    filter expansion, join-path recompute) with different table_ids each time — this
+    cache turns those into one Postgres round trip instead of one per call."""
+    key = (str(source_id), str(tenant))
+    if key not in _FK_ADJACENCY_CACHE:
+        sql = """
+            SELECT fc.id, fc.name, ft.id, ft.name, tc.id, tc.name, tt.id, tt.name
+            FROM substrate_fkedge e
+            JOIN substrate_schemacolumn fc ON fc.id = e.from_col_id
+            JOIN substrate_schematable  ft ON ft.id = e.from_table_id
+            JOIN substrate_schemacolumn tc ON tc.id = e.to_col_id
+            JOIN substrate_schematable  tt ON tt.id = e.to_table_id
+            WHERE e.source_id = %s AND e.tenant = %s
+        """
+        with _connection().cursor() as cur:
+            cur.execute(sql, [source_id, tenant])
+            rows = cur.fetchall()
+        _FK_ADJACENCY_CACHE[key] = [
+            FKEdge(str(r[0]), r[1], str(r[2]), r[3], str(r[4]), r[5], str(r[6]), r[7]) for r in rows
+        ]
+    return _FK_ADJACENCY_CACHE[key]
+
+
 def get_fk_adjacency(table_ids: Optional[List[str]] = None) -> List[FKEdge]:
     """FK edges (legacy FKEdge shape) for the current (source, tenant), optionally
-    restricted to edges touching `table_ids`. Raw SQL join over the Django-owned
-    substrate tables — same return shape as `vector_store.get_fk_adjacency`."""
+    restricted to edges touching `table_ids`. Same return shape/filter semantics as
+    before — filtering now happens in-memory over the cached full edge set (see
+    _all_fk_edges) instead of a fresh SQL round trip per call."""
     source_id, tenant = _scope()
-    sql = """
-        SELECT fc.id, fc.name, ft.id, ft.name, tc.id, tc.name, tt.id, tt.name
-        FROM substrate_fkedge e
-        JOIN substrate_schemacolumn fc ON fc.id = e.from_col_id
-        JOIN substrate_schematable  ft ON ft.id = e.from_table_id
-        JOIN substrate_schemacolumn tc ON tc.id = e.to_col_id
-        JOIN substrate_schematable  tt ON tt.id = e.to_table_id
-        WHERE e.source_id = %s AND e.tenant = %s
-    """
-    params: list = [source_id, tenant]
-    if table_ids:
-        ids = tuple(str(t) for t in table_ids)
-        sql += " AND (e.from_table_id IN %s OR e.to_table_id IN %s)"
-        params += [ids, ids]
-    with _connection().cursor() as cur:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-    return [FKEdge(str(r[0]), r[1], str(r[2]), r[3], str(r[4]), r[5], str(r[6]), r[7]) for r in rows]
+    edges = _all_fk_edges(source_id, tenant)
+    if not table_ids:
+        return list(edges)
+    ids = {str(t) for t in table_ids}
+    return [e for e in edges if e.from_table_id in ids or e.to_table_id in ids]
 
 
 def glossary() -> dict:

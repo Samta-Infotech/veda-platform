@@ -368,7 +368,10 @@ def run_query(query, sm, all_cols, return_result=False):
                     from veda.runtime import _pg as _pgc_mh
                     from query.value_resolver import column_values_lookup as _cvl
                     _qtoks_mh = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2]
-                    _mh = resolve_fk_path(primary, _qtoks_mh, _gg_mh(), _cvl(_pgc_mh))
+                    _anchor_cols_mh = {c.split(".", 1)[1] for c in sm.get("columns", {})
+                                       if c.split(".", 1)[0] == primary}
+                    _mh = resolve_fk_path(primary, _qtoks_mh, _gg_mh(), _cvl(_pgc_mh),
+                                          anchor_cols=_anchor_cols_mh)
                     if _mh:
                         print(f"  [L4d] multi-hop FK  {' → '.join(_mh['path'])}  — deterministic, no LLM")
                 except Exception:

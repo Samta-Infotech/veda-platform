@@ -80,6 +80,7 @@ def _build_injected_source() -> dict:
         src.setdefault("role", "queryable")
         src.setdefault("engine", "postgresql")
         src.setdefault("schema", _os_src.environ.get("VEDA_SOURCE_SCHEMA") or None)
+        src.setdefault("sslmode", _os_src.environ.get("VEDA_SOURCE_SSLMODE") or None)
     else:
         src = {
             "id":       _os_src.environ.get("VEDA_SOURCE_ID", "primary_db"),
@@ -93,6 +94,7 @@ def _build_injected_source() -> dict:
             "password": _require_source_env("VEDA_SOURCE_PASSWORD"),
             "role":     "queryable",
             "schema":   _os_src.environ.get("VEDA_SOURCE_SCHEMA") or None,
+            "sslmode":  _os_src.environ.get("VEDA_SOURCE_SSLMODE") or None,
         }
     excludes = _parse_exclude_tables(
         src.get("exclude_tables") or _os_src.environ.get("VEDA_EXCLUDE_TABLES")
@@ -322,7 +324,7 @@ COL_ID_IDX_PATH = "schema/col_id_to_idx.pkl"
 # -----------------------------------------------------------------------------
 # NL Simplifier — Layer 0
 # -----------------------------------------------------------------------------
-NL_SIMPLIFIER_ENABLED = True
+NL_SIMPLIFIER_ENABLED = False
 
 # -----------------------------------------------------------------------------
 # SLM — Layer 3

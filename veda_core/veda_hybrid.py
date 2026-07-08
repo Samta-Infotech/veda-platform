@@ -364,7 +364,8 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         # builder → GRAPH-GUARDED firewall → execute. Flag-gated (needs Ollama); the
         # graph guard (now live in the firewall) keeps LLM-proposed joins honest.
         if isinstance(res, dict) and not res.get("ok") and res.get("status") in (
-                "refuse", "qualifier_dropped", "ungrounded", "no_table", "clarify"):
+                "refuse", "qualifier_dropped", "ungrounded", "no_table", "clarify",
+                "exec_error"):
             try:
                 from config import TIER2_LLM_FALLBACK
             except Exception:
@@ -517,6 +518,36 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     return True, ""
 
 
+def _repair_hint_for(error: str) -> str:
+    """Turn a firewall/execution error into a corrective instruction appended to the SLM
+    prompt on the NEXT IR attempt (execution-feedback self-repair, IR-level).
+
+    The LLM emits IR, never SQL, so the hint steers IR choices (columns/joins/grain) — it
+    never asks the model to 'fix SQL'. Classified for a targeted nudge; generic fallback
+    otherwise."""
+    e = (error or "").lower()
+    if "column" in e and any(k in e for k in ("unknown", "not exist", "does not exist", "no such")):
+        cls = ("The previous attempt referenced a column that does not exist. Use ONLY the "
+               "column UUIDs provided above — never invent column names.")
+    elif any(k in e for k in ("join", "fk", "cartesian", "edge", "not directly related")):
+        cls = ("The previous attempt proposed a join that is not a real foreign-key edge. "
+               "Only join tables that share a provided FK relationship; otherwise answer "
+               "with a single table.")
+    elif "ungrounded" in e or "value" in e:
+        cls = ("The previous attempt filtered on a value that is not present in the data. "
+               "Only filter on values that actually exist in the named column.")
+    elif "qualifier" in e or "dropped" in e:
+        cls = ("The previous attempt dropped a condition the question asked for. Represent "
+               "every filter/grouping/ordering the question mentions.")
+    elif "ambiguous" in e:
+        cls = "The previous attempt was ambiguous about which column or table was meant — be explicit."
+    elif "ir_mismatch" in e or "syntax" in e:
+        cls = "The previous attempt did not match the question's intent. Produce a simpler, faithful IR."
+    else:
+        cls = "The previous attempt failed validation/execution. Produce a simpler, correct IR."
+    return f"[REPAIR] {cls} (error: {str(error)[:180]})"
+
+
 def _tier2_sql(query, sm, all_cols, verbose=False):
     """Tier-2 SQL fallback (only when the deterministic head can't answer).
 
@@ -568,66 +599,97 @@ def _tier2_sql(query, sm, all_cols, verbose=False):
         except Exception as _ee:
             print(f"  [Tier2] envelope path skipped: {type(_ee).__name__}: {str(_ee)[:120]}")
 
-        l3 = run_slm_layer(query=query, temporal_filter=tf, top_k_columns=sel.columns,
-                           join_path=sel.join_path, verbose=verbose)
-        if getattr(l3, "error", None) or not getattr(l3, "ir_json", None):
-            print(f"  [Tier2] no usable IR from SLM "
-                  f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
-            return None
-
-        # ── ONE JOIN ENGINE (Phase 2) ─────────────────────────────────────────────
-        # If the LLM identified MULTIPLE entities, build the joins with the
-        # deterministic graph planner (plan_join_tree), NOT sql_builder's retrieval
-        # join_path. The LLM only NAMES entities; the graph-verified planner builds
-        # (or refuses) the joins — same engine the deterministic head uses.
+        # ── IR PATH with bounded EXECUTION-FEEDBACK REPAIR loop ───────────────────────
+        # The LLM emits IR (never SQL); on a firewall rejection or execution error we feed
+        # the classified error back into the SLM prompt (via _repair_hint_for) and retry a
+        # corrected IR, instead of refusing on the first miss. Bounded by
+        # VALIDATION_MAX_REPAIR_ATTEMPTS; on exhaustion the original rejection stands. The
+        # hint is appended to the QUERY so it reaches the prompt regardless of which
+        # run_slm_layer branch runs (both build the prompt from `query`) — no SLM-internal
+        # edits. Flag-gated, off by default: on any config miss the loop runs 0 extra times
+        # and behaves exactly as before.
+        try:
+            from config import VALIDATION_REPAIR_LOOP_ENABLED, VALIDATION_MAX_REPAIR_ATTEMPTS
+        except Exception:
+            VALIDATION_REPAIR_LOOP_ENABLED, VALIDATION_MAX_REPAIR_ATTEMPTS = False, 0
+        _max_repairs = int(VALIDATION_MAX_REPAIR_ATTEMPTS) if VALIDATION_REPAIR_LOOP_ENABLED else 0
+        _repair_hint = None
         from config import LANGGRAPH_SHARED_PLANNER
-        ents = (l3.ir_json or {}).get("entities", []) or []
-        id2name = {r.table_id: r.table_name for r in sel.columns}
-        ent_names = [n for n in dict.fromkeys(id2name.get(e.get("table_id")) for e in ents) if n]
-        if LANGGRAPH_SHARED_PLANNER and len(ent_names) >= 2:
-            from veda.planning import build_from_entities
-            act = build_from_entities(query, sm, all_cols, tf, ent_names[0], ent_names[1:])
-            if isinstance(act, dict) and act.get("sql"):
-                a_tables = set(act.get("tables", []))
-                a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
-                                                if k.split(".", 1)[0] in a_tables]
-                psql, params, err = validate_and_parameterize(act["sql"], a_tables, a_cols)
-                if err:
-                    print(f"  [Tier2] shared-planner firewall rejected (kept safe): {err}")
-                    return {"status": "tier2_rejected", "ok": False, "error": err}
-                cols, rows, eerr = execute_sql(psql, list(params))
-                if eerr:
-                    return {"status": "tier2_exec_error", "ok": False, "error": eerr}
-                print(f"  [Tier2] answered via SHARED planner (graph-verified joins) — {len(rows)} rows")
-                _print_rows(cols, rows, sql=psql)
-                return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
-                        "sql": psql, "source": "tier2_shared_planner"}
-            # planner refused/clarified the multi-table join → respect it (refuse-over-guess)
-            if isinstance(act, dict) and act.get("action") in ("refuse", "clarify"):
-                if verbose:
-                    print(f"  [Tier2] shared planner declined join: {act.get('msg','')}")
-                return None
-            # otherwise fall through to single-table sql_builder below
 
-        l4 = run_sql_builder(ir_json=l3.ir_json, top_k_columns=sel.columns,
-                             join_path=sel.join_path, verbose=verbose)
-        if getattr(l4, "error", None) or not getattr(l4, "sql", None):
-            return None
-        allowed_tables = set(getattr(l4, "tables_used", []) or [])
-        allowed_cols = [k.split(".", 1)[1] for k in all_cols
-                        if k.split(".", 1)[0] in allowed_tables]
-        # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
-        psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
-        if err:
-            print(f"  [Tier2] firewall rejected (kept safe): {err}")
-            return {"status": "tier2_rejected", "ok": False, "error": err}
-        cols, rows, eerr = execute_sql(psql, list(params))
-        if eerr:
-            return {"status": "tier2_exec_error", "ok": False, "error": eerr}
-        print(f"  [Tier2] answered via LLM-IR (graph-verified) — {len(rows)} rows")
-        _print_rows(cols, rows, sql=psql)
-        return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
-                "sql": psql, "source": "tier2"}
+        for _attempt in range(_max_repairs + 1):
+            _q_ir = query if not _repair_hint else f"{query}\n\n{_repair_hint}"
+            if _repair_hint:
+                print(f"  [Tier2] repair attempt {_attempt}/{_max_repairs}")
+            l3 = run_slm_layer(query=_q_ir, temporal_filter=tf, top_k_columns=sel.columns,
+                               join_path=sel.join_path, verbose=verbose)
+            if getattr(l3, "error", None) or not getattr(l3, "ir_json", None):
+                print(f"  [Tier2] no usable IR from SLM "
+                      f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
+                return None
+
+            # ── ONE JOIN ENGINE (Phase 2) ─────────────────────────────────────────
+            # If the LLM identified MULTIPLE entities, build the joins with the
+            # deterministic graph planner (plan_join_tree), NOT sql_builder's retrieval
+            # join_path. The LLM only NAMES entities; the graph-verified planner builds
+            # (or refuses) the joins — same engine the deterministic head uses.
+            ents = (l3.ir_json or {}).get("entities", []) or []
+            id2name = {r.table_id: r.table_name for r in sel.columns}
+            ent_names = [n for n in dict.fromkeys(id2name.get(e.get("table_id")) for e in ents) if n]
+            if LANGGRAPH_SHARED_PLANNER and len(ent_names) >= 2:
+                from veda.planning import build_from_entities
+                act = build_from_entities(query, sm, all_cols, tf, ent_names[0], ent_names[1:])
+                if isinstance(act, dict) and act.get("sql"):
+                    a_tables = set(act.get("tables", []))
+                    a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
+                                                    if k.split(".", 1)[0] in a_tables]
+                    psql, params, err = validate_and_parameterize(act["sql"], a_tables, a_cols)
+                    if err:
+                        if _attempt < _max_repairs:
+                            _repair_hint = _repair_hint_for(err); continue
+                        print(f"  [Tier2] shared-planner firewall rejected (kept safe): {err}")
+                        return {"status": "tier2_rejected", "ok": False, "error": err}
+                    cols, rows, eerr = execute_sql(psql, list(params))
+                    if eerr:
+                        if _attempt < _max_repairs:
+                            _repair_hint = _repair_hint_for(eerr); continue
+                        return {"status": "tier2_exec_error", "ok": False, "error": eerr}
+                    print(f"  [Tier2] answered via SHARED planner (graph-verified joins)"
+                          f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
+                    _print_rows(cols, rows, sql=psql)
+                    return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
+                            "sql": psql, "source": "tier2_shared_planner"}
+                # planner refused/clarified the multi-table join → respect it (refuse-over-guess)
+                if isinstance(act, dict) and act.get("action") in ("refuse", "clarify"):
+                    if verbose:
+                        print(f"  [Tier2] shared planner declined join: {act.get('msg','')}")
+                    return None
+                # otherwise fall through to single-table sql_builder below
+
+            l4 = run_sql_builder(ir_json=l3.ir_json, top_k_columns=sel.columns,
+                                 join_path=sel.join_path, verbose=verbose)
+            if getattr(l4, "error", None) or not getattr(l4, "sql", None):
+                return None
+            allowed_tables = set(getattr(l4, "tables_used", []) or [])
+            allowed_cols = [k.split(".", 1)[1] for k in all_cols
+                            if k.split(".", 1)[0] in allowed_tables]
+            # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
+            psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
+            if err:
+                if _attempt < _max_repairs:
+                    _repair_hint = _repair_hint_for(err); continue
+                print(f"  [Tier2] firewall rejected (kept safe): {err}")
+                return {"status": "tier2_rejected", "ok": False, "error": err}
+            cols, rows, eerr = execute_sql(psql, list(params))
+            if eerr:
+                if _attempt < _max_repairs:
+                    _repair_hint = _repair_hint_for(eerr); continue
+                return {"status": "tier2_exec_error", "ok": False, "error": eerr}
+            print(f"  [Tier2] answered via LLM-IR (graph-verified)"
+                  f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
+            _print_rows(cols, rows, sql=psql)
+            return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
+                    "sql": psql, "source": "tier2"}
+        return None   # repair attempts exhausted → keep the refusal
     except Exception as e:
         # Always surface WHY Tier-2 bailed (Ollama down, retrieval store missing, etc.) —
         # otherwise the path silently no-ops and looks like it never ran.
