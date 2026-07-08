@@ -113,16 +113,6 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       VEDA_APP_DIR: /app
-      OLLAMA_URL: http://host.docker.internal:11434   # native macOS Ollama (qwen2.5-coder:7b already pulled there) instead of the docker ollama service
-      # veda_core/config.py's own internal-DB vars (VEDA_INTERNAL_*) are a SEPARATE name-space
-      # from Django's PGBOUNCER_HOST/POSTGRES_* — nothing bridges them, so without these the
-      # engine subprocess defaults to localhost:5433 (a bare-metal dev default) and silently
-      # falls back to in-memory storage instead of writing through pgbouncer.
-      VEDA_INTERNAL_HOST: pgbouncer
-      VEDA_INTERNAL_PORT: "6432"
-      VEDA_INTERNAL_DBNAME: ${POSTGRES_DB:-veda}
-      VEDA_INTERNAL_USER: ${POSTGRES_USER:-veda}
-      VEDA_INTERNAL_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
     volumes:
       - ".:/app"
       - model_cache:/models:ro
@@ -140,7 +130,6 @@ services:
       HF_HOME: /models                    # offline model cache (BGE / reranker / MiniLM)
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
-      OLLAMA_URL: http://host.docker.internal:11434   # native macOS Ollama (qwen2.5-coder:7b already pulled there) instead of the docker ollama service
     volumes:
       - ".:/app"           # DEV: live code
       - model_cache:/models:ro
