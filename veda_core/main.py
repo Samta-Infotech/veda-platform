@@ -277,6 +277,15 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
     from ingestion.contracts import SourceContext
     from ingestion.dispatcher import dispatch
     ctx = SourceContext.from_env(skip_llm=skip_llm)
+    # Prewarm the SLM once at ingest start so the first Stage-2/3/4 call doesn't pay a
+    # cold model load (query runtime prewarms, but the ingestion path never did). No-op
+    # on skip_llm (no LLM stages run) and best-effort — never blocks ingestion.
+    if not skip_llm:
+        try:
+            from slm import prewarm
+            prewarm()
+        except Exception:
+            pass
     result = dispatch(ctx, verbose=verbose)
     return result.get("state", {"source_id": ctx.source_id})
 
