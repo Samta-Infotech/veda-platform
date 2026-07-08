@@ -104,16 +104,6 @@ def store_semantic_model(sm: dict, version: str | None = None) -> None:
     assembler.publish_sm(ctx.source_id, ctx.tenant)
 
 
-def store_column_embeddings(mode: str, rows: Iterable[Any]) -> None:
-    """Raw pgvector INSERT for `mode`'s table (§6.4), batched per table (§4.2a).
-    The engine's proven encoder→pgvector path already writes these tables in the
-    Django-managed Postgres; this hook exists for the Celery stage to route through
-    the seam. Delegates to the engine's vector_store for the actual batched write."""
-    raise NotImplementedError(
-        "store_column_embeddings: routed to engine vector_store batched writer (Phase 4 stage 6)."
-    )
-
-
 def sync_from_engine(internal_dsn: dict | None = None) -> dict:
     """Populate the Django-owned substrate from the engine's operational store
     (veda_engine) for the current (source, tenant): FK edges, glossary/synonyms,

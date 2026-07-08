@@ -6,7 +6,10 @@
 
 numpy<2
 torch
-transformers
+transformers<5   # FlagEmbedding 1.2.10's BiTrainer does `from transformers.trainer import *`
+                 # expecting Optional etc. to be re-exported — gone in transformers 5.x, which
+                 # crashes EVERY query (NameError: Optional) as soon as the retrieval engine
+                 # cold-inits its sparse ranker. Unpinned == whatever's latest on rebuild day.
 torch-geometric
 sentence-transformers
 FlagEmbedding==1.2.10   # WP3: BGE-M3 dense + learned-sparse (pulls peft)

@@ -14,3 +14,17 @@
 {"t": 1783360644.381, "route": "full:SIMPLE", "latency_ms": 3149.7, "query": "count annotations", "table": "annotation_record", "rows": 1}
 {"t": 1783360646.89, "route": "full:SIMPLE", "latency_ms": 2503.9, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
 {"t": 1783360649.081, "route": "full:SIMPLE", "latency_ms": 2183.8, "query": "list customers whose mood is turquoise", "table": "checklist", "rows": 0}
+{"t": 1783448587.97, "route": "metric.count", "latency_ms": 6283.8, "query": "How many users are there in total?", "table": "users_user", "rows": 1}
+{"t": 1783449005.008, "route": "full:SIMPLE", "latency_ms": 161853.8, "query": "How many payment transactions are there?", "table": "accounts_paymenttransaction", "rows": 1}
+{"t": 1783449115.862, "route": "cache", "latency_ms": 12480.0, "query": "how many payment transactions are there", "table": "(cached)", "rows": 1}
+{"t": 1783449265.175, "route": "full:SIMPLE", "latency_ms": 94556.5, "query": "how many properties", "table": "accounts_generalledger", "rows": 1}
+{"t": 1783451491.516, "route": "metric.count", "latency_ms": 1706.1, "query": "how many users are there", "table": "users_user", "rows": 1}
+{"t": 1783451980.283, "route": "cache", "latency_ms": 926.8, "query": "how many properties", "table": "(cached)", "rows": 1}
+{"t": 1783452024.754, "route": "metric.count", "latency_ms": 742.8, "query": "how many payment", "table": "payments_razorpaylinkedaccount", "rows": 1}
+{"t": 1783454773.722, "route": "full:SIMPLE.qualifier_dropped", "latency_ms": 335504.0, "query": "top 5 credit transaction"}
+{"t": 1783456553.512, "route": "metric.count", "latency_ms": 1867.5, "query": "count of user", "table": "users_user", "rows": 1}
+{"t": 1783457841.331, "route": "metric.count", "latency_ms": 834.4, "query": "count of user", "table": "users_user", "rows": 1}
+{"t": 1783457847.237, "route": "metric.count", "latency_ms": 707.2, "query": "count of user", "table": "users_user", "rows": 1}
+{"t": 1783485543.432, "route": "metric.count", "latency_ms": 1372.4, "query": "count of user", "table": "users_user", "rows": 1}
+{"t": 1783489694.854, "route": "metric.count", "latency_ms": 1765.6, "query": "count of user", "table": "users_user", "rows": 1}
+{"t": 1783489718.626, "route": "metric.count", "latency_ms": 891.1, "query": "count of user", "table": "users_user", "rows": 1}

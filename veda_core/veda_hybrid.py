@@ -41,6 +41,17 @@ from query.multi_result import (
 _SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (P5)
 
 
+def _emit(on_event, phase: str, message: str, **extra):
+    """Best-effort progress callback for SSE streaming (never breaks the pipeline —
+    a callback error must not sink the query it's merely reporting on)."""
+    if on_event is None:
+        return
+    try:
+        on_event(phase, message, extra)
+    except Exception:
+        pass
+
+
 def _sm_scope():
     """(source_id, tenant) for the semantic-model cache/Redis key. Prefers the
     ambient per-request context (set by the inference middleware from headers),
@@ -128,10 +139,15 @@ def _temporal(query):
         return None
 
 
-def run_hybrid_query(query, verbose=False):
+def run_hybrid_query(query, verbose=False, on_event=None):
     """Single entry point. Returns a MultiResult ALWAYS — a one-item MultiResult for a
     plain query, N items for a compound one. Callers branch on MultiResult, never on
     "is this compound", so everything downstream of here stays single-intent-dumb.
+
+    on_event(phase, message, extra: dict), optional: fired at real stage transitions
+    (classify, decompose, sub-query dispatch, per-modality routing, tier2 fallback,
+    answer produced) so an SSE caller can stream genuine progress instead of blocking
+    silently until the whole pipeline returns. Never required — None is a no-op.
 
     Compound handling (flag QUERY_DECOMPOSE_ENABLED): the DETERMINISTIC head
     self-certifies completeness (qualifier_completeness inside the fast path) — a clean
@@ -139,21 +155,38 @@ def run_hybrid_query(query, verbose=False):
     (zero added latency on the hot path). A non-deterministic head (RAG/hybrid/NoSQL)
     CANNOT cheaply self-certify — it could answer one clause of a compound query and
     silently drop the rest — so there we decompose FIRST. A deterministic refusal also
-    triggers decomposition (the utterance may have been several questions)."""
+    triggers decomposition (the utterance may have been several questions).
+
+    L0 — NL Simplifier runs first, here, so every consumer (CLI, inference API, demo)
+    shares identical pre-processing regardless of how the query arrived. Previously
+    only the CLI (main.py) applied this, so a query answered via the API could route
+    differently than the same text answered via `main.py --query`."""
+    try:
+        from query.nl_simplifier import run_nl_simplifier
+        _l0 = run_nl_simplifier(query, verbose=False)
+        if _l0.was_simplified:
+            print(f"  [L0] Simplified: '{_l0.simplified_query}' ({_l0.duration_ms}ms)")
+            _emit(on_event, "simplify", f"Simplified query to: {_l0.simplified_query}")
+        query = _l0.simplified_query
+    except Exception:
+        pass  # fall back to the original query silently
+
     try:
         from config import QUERY_DECOMPOSE_ENABLED
     except Exception:
         QUERY_DECOMPOSE_ENABLED = False
 
     if not QUERY_DECOMPOSE_ENABLED:
-        route, res = _dispatch_single(query, verbose=verbose)
+        route, res = _dispatch_single(query, verbose=verbose, on_event=on_event)
         return MultiResult(items=[_to_subresult(query, route, res)])
 
+    _emit(on_event, "classify", "Classifying query intent...")
     intent, _source_ids = classify(query, verbose=verbose)
 
     # Deterministic head: try it directly; a clean answer is complete-by-construction.
     if intent == "sql":
         import io, contextlib
+        _emit(on_event, "sql_probe", "Trying deterministic SQL...")
         sm, cols = _load_semantic_model()
         from veda.pipeline import run_query
         # Capture the probe's trace: if the head answers we replay it (hot path); if it
@@ -164,16 +197,17 @@ def run_hybrid_query(query, verbose=False):
             det = run_query(query, sm, cols, return_result=True)
         if isinstance(det, dict) and det.get("ok"):
             sys.stdout.write(probe.getvalue())
+            _emit(on_event, "answer", "Deterministic SQL answered the query")
             return MultiResult(items=[_to_subresult(query, "deterministic", det)])
         # Deterministic couldn't fully answer → maybe it was several questions.
         return _maybe_split(query, verbose=verbose, precomputed_sql=det,
-                            probe_trace=probe.getvalue())
+                            probe_trace=probe.getvalue(), on_event=on_event)
 
     # RAG/hybrid/NoSQL self-certify nothing → decompose before dispatching (silent-drop guard).
-    return _maybe_split(query, verbose=verbose)
+    return _maybe_split(query, verbose=verbose, on_event=on_event)
 
 
-def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
+def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, on_event=None):
     """Run the decomposer, then either fan out independent sub-queries or fall back to
     the single-query pipeline. dependent_nested → refuse (out of scope for v1).
 
@@ -182,6 +216,7 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
     or refuse-as-nested (there it would be a misleading 'couldn't answer' message)."""
     import io, contextlib
     from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
+    _emit(on_event, "decompose", "Checking whether this is a compound question...")
     # Capture the decomposer's own chatter so the on-screen order stays CHRONOLOGICAL. The
     # deterministic probe ran FIRST (its trace is in probe_trace); the decomposer runs AFTER.
     # Without capture, the decomposer prints live and appears BEFORE the replayed probe trace
@@ -196,7 +231,9 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
         # simply several questions — suppress it; show the split decision + its reasoning.
         sys.stdout.write(_decomp_trace)
         print(f"\n  [Hybrid] compound query → {len(decomp.sub_queries)} independent sub-queries")
-        return _fan_out(decomp.sub_queries, verbose=verbose)
+        _emit(on_event, "decompose", f"Split into {len(decomp.sub_queries)} sub-queries",
+              sub_queries=list(decomp.sub_queries))
+        return _fan_out(decomp.sub_queries, verbose=verbose, on_event=on_event)
 
     if decomp.type == DECOMP_DEPENDENT:
         # One part needs another's RESULT — these recompose into one query, which v1
@@ -220,22 +257,26 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
     if probe_trace:
         sys.stdout.write(probe_trace)
     sys.stdout.write(_decomp_trace)
-    route, res = _dispatch_single(query, verbose=verbose, precomputed_sql=precomputed_sql)
+    route, res = _dispatch_single(query, verbose=verbose, precomputed_sql=precomputed_sql,
+                                   on_event=on_event)
     return MultiResult(items=[_to_subresult(query, route, res)])
 
 
-def _run_sub(sq, verbose=False):
+def _run_sub(sq, verbose=False, on_event=None, index=None, total=None):
     """Dispatch one sub-query, never raising — a crash becomes an error SubResult so one
     bad sub-query can't sink the others."""
+    if index is not None and total is not None:
+        _emit(on_event, "sub_query", f"Running sub-query {index}/{total}: {sq}",
+              index=index, total=total, sub_query=sq)
     try:
-        route, res = _dispatch_single(sq, verbose=verbose)
+        route, res = _dispatch_single(sq, verbose=verbose, on_event=on_event)
     except Exception as e:
         print(f"  [Hybrid] sub-query crashed: {type(e).__name__}: {e}")
         route, res = "none", None
     return _to_subresult(sq, route, res)
 
 
-def _fan_out(sub_queries, verbose=False):
+def _fan_out(sub_queries, verbose=False, on_event=None):
     """Run independent sub-queries and assemble the MultiResult IN QUERY ORDER.
 
     Default (QUERY_DECOMPOSE_MAX_WORKERS == 1): SEQUENTIAL with LIVE output — each
@@ -255,11 +296,12 @@ def _fan_out(sub_queries, verbose=False):
     # Pre-warm shared read-only singletons ONCE so concurrent first access can't race.
     _load_semantic_model()
 
+    total = len(sub_queries)
     if workers == 1:
         items = []
-        for sq in sub_queries:
+        for i, sq in enumerate(sub_queries, start=1):
             print(f"\n  [Hybrid] ── sub-query: {sq!r}")
-            items.append(_run_sub(sq, verbose=verbose))
+            items.append(_run_sub(sq, verbose=verbose, on_event=on_event, index=i, total=total))
         return MultiResult(items=items)
 
     import io, sys, threading
@@ -279,17 +321,18 @@ def _fan_out(sub_queries, verbose=False):
     from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
     _parent_ctx = _try_ctx()
 
-    def _one(sq):
+    def _one(indexed_sq):
+        i, sq = indexed_sq
         if _parent_ctx is not None:
             _set_ctx(_parent_ctx)
         buffers[threading.get_ident()] = io.StringIO()
-        item = _run_sub(sq, verbose=verbose)
+        item = _run_sub(sq, verbose=verbose, on_event=on_event, index=i, total=total)
         return item, buffers[threading.get_ident()].getvalue()
 
     sys.stdout = _ThreadRouter()
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            pairs = list(ex.map(_one, sub_queries))     # ex.map preserves input order
+            pairs = list(ex.map(_one, enumerate(sub_queries, start=1)))  # ex.map preserves input order
     finally:
         sys.stdout = real_stdout
 
@@ -302,12 +345,13 @@ def _fan_out(sub_queries, verbose=False):
     return MultiResult(items=items)
 
 
-def _dispatch_single(query, verbose=False, precomputed_sql=None):
+def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     """The single-query pipeline: classify → best head → (Tier-2 for SQL). Returns
     (route, head_result). This is the UNCHANGED per-modality dispatch — every sub-query
     of a compound query runs through here exactly as a standalone query would."""
     intent, source_ids = classify(query, verbose=verbose)
     print(f"\n  [Hybrid] intent = {intent}   sources = {source_ids or 'default'}")
+    _emit(on_event, "route", f"Routed to {intent} engine", intent=intent)
 
     # ── SQL → DETERMINISTIC engine (the correctness brain) ────────────────────
     if intent == "sql":
@@ -327,20 +371,26 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None):
                 TIER2_LLM_FALLBACK = False
             if TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
+                _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
                 t2 = _tier2_sql(query, sm, cols, verbose=verbose)
                 if t2 is not None:
+                    _emit(on_event, "answer", "Tier-2 SQL answered the query")
                     return "deterministic", t2
+        else:
+            _emit(on_event, "answer", "SQL query executed")
         return "deterministic", res
 
     # ── RAG → integrated document retrieval + synthesis ───────────────────────
     if intent == "rag":
         from query.rag_layer import run_rag_layer
+        _emit(on_event, "rag", "Retrieving relevant documents...")
         rag = run_rag_layer(query, source_ids=source_ids,
                             temporal_filter=_temporal(query), verbose=verbose)
         if getattr(rag, "error", None):
             print(f"  [RAG] ✗ {rag.error}")
         else:
             print(f"\n  [RAG] {rag.answer}\n  citations: {rag.citations}")
+            _emit(on_event, "answer", "Synthesized answer from retrieved documents")
         return "rag", rag
 
     # ── HYBRID → DETERMINISTIC SQL rows ⊕ document fusion ─────────────────────
@@ -349,6 +399,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None):
         from veda.pipeline import run_query
         from query.rag_layer import run_hybrid_layer
         sm, cols = _load_semantic_model()
+        _emit(on_event, "hybrid", "Running SQL and document fusion...")
         # Run the DETERMINISTIC SQL head first and feed its EXECUTED rows into the
         # fusion (the correct-by-construction numbers), instead of letting the fusion
         # rely on LLM-written SQL. (Also supplies the previously-missing sql_columns.)
@@ -366,11 +417,15 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None):
             print(f"  [Hybrid] ✗ {hy.error}")
         else:
             print(f"\n  [Hybrid] {hy.answer}")
+            _emit(on_event, "answer", "Fused SQL and document results into an answer")
         return "hybrid", hy
 
     # ── NoSQL → integrated native-query builder + execution ───────────────────
     if intent == "nosql":
-        return "nosql", _run_nosql(query, source_ids, verbose=verbose)
+        _emit(on_event, "nosql", "Querying document store...")
+        result = _run_nosql(query, source_ids, verbose=verbose)
+        _emit(on_event, "answer", "NoSQL query executed")
+        return "nosql", result
 
     # ── default safety net ────────────────────────────────────────────────────
     sm, cols = _load_semantic_model()

@@ -196,7 +196,7 @@ class ConversationQueryView(APIView):
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
         content_blocks, explainability, thinking_text, summary_text = [], [], "", ""
         try:
-            for evt in service.run_turn(chat, message, request_id=rid):
+            for evt in service.run_turn(chat, message, request_id=rid, stream=True):
                 kind, payload = evt["event"], evt["data"]
                 if kind == "thinking":
                     thinking_text = payload.get("message", "")

@@ -198,11 +198,19 @@ def _resolve_ef_search(source_id) -> int:
 
 def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     """Raw pgvector cosine ANN over the HNSW index for `mode`'s table (§6.4),
-    scoped to the current (source, tenant)."""
-    source_id, tenant = _scope()
-    # WP3: one embedding space (BGE-M3) → one store. The legacy relgt/light_text/hybrid
-    # modes and their column_embeddings/_lt/_hybrid tables were removed.
-    table = "column_embeddings_bge"
+    scoped to the current source.
+
+    Reads `column_embeddings_v2` — the engine's live BGE-M3 column store
+    (`veda_core/ingestion/biencoder.py`) — directly, rather than the
+    `column_embeddings_bge` Django mirror: that mirror's writer
+    (`storage_adapters.writer.store_column_embeddings`) was never implemented,
+    so it stayed permanently empty and this function always returned zero
+    rows. `column_embeddings_v2` has no `tenant` column (single-tenant-per-
+    source, matching `veda_core/query/retrieval_v2.py`'s own query), so
+    filtering here is by `source_id` only.
+    """
+    source_id, _tenant = _scope()
+    table = "column_embeddings_v2"
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     # Pin hnsw.ef_search to the §7.1a-tuned value (recall@k=1.0 on the home-schema
     # fixtures) so the served ANN ordering matches exact cosine — the shipped index IS
@@ -212,8 +220,8 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     # changing the global (re-run scripts/hnsw_parity_sweep.py per source).
     ef_search = _resolve_ef_search(source_id)
     sql = (
-        f'SELECT column_uuid, 1 - (embedding <=> %s::vector) AS score FROM "{table}" '
-        f'WHERE source_id = %s AND tenant = %s ORDER BY embedding <=> %s::vector LIMIT %s'
+        f'SELECT col_id, 1 - (embedding <=> %s::vector) AS score FROM "{table}" '
+        f'WHERE source_id = %s::text ORDER BY embedding <=> %s::vector LIMIT %s'
     )
     # Explicit transaction so SET LOCAL is scoped to it and released at COMMIT — this is
     # PgBouncer-transaction-pool-safe (never leaks the GUC to the next pooled client),
@@ -221,7 +229,7 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     with _connection().cursor() as cur:
         cur.execute("BEGIN")
         cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search}")
-        cur.execute(sql, [vec, source_id, tenant, vec, top_k])
+        cur.execute(sql, [vec, source_id, vec, top_k])
         rows = cur.fetchall()
         cur.execute("COMMIT")
         return rows
