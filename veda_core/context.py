@@ -15,13 +15,31 @@ and the Django tiers, and must stay import-light.
 """
 
 from contextvars import ContextVar, copy_context
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 @dataclass(frozen=True)
 class RequestContext:
+    """Ambient (source, tenant) for one request.
+
+    ``source_id`` is the PRIMARY source — the single-source ingest/publish path
+    (dispatcher, writer, ingestion layers) reads it and its meaning is unchanged.
+    ``source_ids`` is the query-time source *SET* (P5 / cross-source): the scope a
+    served query traverses. It defaults to ``(source_id,)`` so every existing
+    single-source construction (all of ingestion) behaves byte-identically — the
+    set is only wider when the query tier explicitly passes a validated subset.
+    Frozen + a tuple field so the context stays hashable (engine-cache key)."""
     source_id: int
     tenant: str
+    source_ids: tuple = ()
+
+    def __post_init__(self):
+        # Normalize the set: default to the primary, dedupe preserving order, and
+        # guarantee the primary is a member (so `source_id` is always in scope).
+        ids = tuple(dict.fromkeys(int(s) for s in (self.source_ids or (self.source_id,))))
+        if int(self.source_id) not in ids:
+            ids = (int(self.source_id), *ids)
+        object.__setattr__(self, "source_ids", ids)
 
 
 _ctx: ContextVar["RequestContext | None"] = ContextVar("veda_ctx", default=None)

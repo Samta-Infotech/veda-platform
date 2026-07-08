@@ -75,4 +75,17 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
         except Exception as e:
             out.append(StageOutcome("unified_graph", False, fatal=False, error=str(e)))
 
+    # cross-source join discovery (P4.2/P4.3) — tenant-wide, runs at the END of every
+    # ingestion over ALL ready sources so ingesting ANY source (re)links it to the rest
+    # via cross_source_fk edges. Cheap (sketch comparisons only). Non-fatal + a no-op
+    # until ≥2 sources have sketches.
+    try:
+        from ingestion.cross_source_graph import discover_and_persist
+        stats = discover_and_persist(ctx.tenant, source_ids=None, verbose=verbose)
+        out.append(StageOutcome("cross_source_fk", True, detail=(
+            f"{stats.get('edges', 0)} edges across {stats.get('sources', 0)} sources "
+            f"{stats.get('tiers', {})}")))
+    except Exception as e:
+        out.append(StageOutcome("cross_source_fk", False, fatal=False, error=str(e)))
+
     return out

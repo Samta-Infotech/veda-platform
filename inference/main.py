@@ -86,11 +86,17 @@ def create_app():
 
     @app.middleware("http")
     async def _tenant_context(request: Request, call_next):
-        # api tier forwards server-resolved {source_id, tenant}; never client-supplied (§6.2).
+        # api tier forwards server-resolved {source_id, source_ids, tenant}; never
+        # client-supplied (§6.2). X-Veda-Source-Ids is the validated query SCOPE (P5);
+        # X-Veda-Source-Id is the primary member (single-source exec/audit path).
         source_id = request.headers.get("x-veda-source-id")
+        source_ids_hdr = request.headers.get("x-veda-source-ids")
         tenant = request.headers.get("x-veda-tenant")
         if source_id is not None and tenant is not None:
-            set_context(RequestContext(source_id=int(source_id), tenant=tenant))
+            source_ids = tuple(int(s) for s in source_ids_hdr.split(",") if s.strip()) \
+                if source_ids_hdr else ()
+            set_context(RequestContext(source_id=int(source_id), tenant=tenant,
+                                       source_ids=source_ids))
         return await call_next(request)
 
     from inference.routes import health, hybrid, retrieve

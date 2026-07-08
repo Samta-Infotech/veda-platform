@@ -6,9 +6,10 @@
 
 numpy<2
 torch
-transformers<4.41   # FlagEmbedding==1.2.10's bundled trainer does `from transformers.trainer import *`
-                    # and relies on Optional being re-exported from that wildcard import; newer
-                    # transformers dropped that re-export, so anything >=4.41 breaks the import.
+# Pin <5: FlagEmbedding 1.2.10's BGE_M3/trainer.py references Optional without
+# importing it, which only NameErrors under transformers 5.x. An unpinned rebuild
+# resolved transformers to 5.13.0 and broke the M3 encoder (dense+sparse) at import.
+transformers==4.49.0
 torch-geometric
 sentence-transformers
 FlagEmbedding==1.2.10   # WP3: BGE-M3 dense + learned-sparse (pulls peft)
@@ -24,3 +25,10 @@ redis
 langgraph
 langchain-core
 sqlglot
+# Cross-source knowledge graph plan (docs/CROSSSOURCE_GRAPH.md). This image also
+# runs the ingest-worker, so the ingest-time deps (P2/P3/P4) live here too.
+duckdb                  # P2 tabular lane + P5 federated execution (postgres_scanner)
+datasketch              # P2.4/P4.2 MinHash sketches → cross_source_fk discovery
+openpyxl                # P2 Excel sheet enumeration (xlsx tables)
+pymupdf4llm             # P3 layout-aware PDF parsing (headings + tables), pure-local
+python-docx             # P3 DOCX heading/table walk

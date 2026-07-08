@@ -52,6 +52,9 @@ class SourceContext:
             "host": src.get("host"), "port": src.get("port"),
             "dbname": src.get("dbname"), "user": src.get("user"),
             "password": src.get("password"),
+            # File-backed tabular/document sources carry a path instead of a DSN
+            # (Cross-source plan P2.1); harmless/empty for relational sources.
+            "path": src.get("path") or src.get("source_path"),
         }
         return cls(
             source_id=str(src.get("id", "primary_db")),

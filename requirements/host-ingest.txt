@@ -6,7 +6,7 @@ numpy==1.26.4
 torch==2.12.0
 torch_geometric==2.8.0
 sentence-transformers==5.5.1
-transformers<4.41       # FlagEmbedding==1.2.10 needs this cap — see requirements/inference.txt
+transformers==4.49.0    # pin <5: FlagEmbedding 1.2.10 NameErrors under transformers 5.x
 FlagEmbedding==1.2.10   # WP3: BGE-M3 dense + learned-sparse encoder
 scipy==1.11.4           # WP5: PPR transition matrix
 scikit-learn==1.9.0
@@ -15,3 +15,9 @@ psycopg2-binary
 sqlglot
 langgraph
 langchain-core
+# Cross-source knowledge graph plan (docs/CROSSSOURCE_GRAPH.md)
+duckdb                  # P2 tabular lane (read_csv_auto/read_parquet) + P5 federation
+datasketch              # P2.4/P4.2 MinHash sketches → cross_source_fk discovery
+openpyxl                # P2 Excel sheet enumeration (xlsx tables)
+pymupdf4llm             # P3 layout-aware PDF parsing (headings + tables), pure-local
+python-docx             # P3 DOCX heading/table walk

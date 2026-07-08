@@ -44,7 +44,12 @@ _SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (
 def _sm_scope():
     """(source_id, tenant) for the semantic-model cache/Redis key. Prefers the
     ambient per-request context (set by the inference middleware from headers),
-    falling back to the env pin (single-source dev / bare-metal runs)."""
+    falling back to the env pin (single-source dev / bare-metal runs).
+
+    `source_id` here is the PRIMARY source: the SQL head's per-source model is loaded
+    from the primary today; the multi-source merge for the SQL head arrives with
+    federated naming (Phase 5). The cache is keyed by the full scope (`_sm_cache_key`)
+    so a `{A}` request and an `{A,B}` request never share an sm entry."""
     try:
         from context import try_current
         ctx = try_current()
@@ -54,6 +59,20 @@ def _sm_scope():
         pass
     return (os.environ.get("VEDA_SM_SOURCE_ID", "1"),
             os.environ.get("VEDA_SM_TENANT", "default"))
+
+
+def _sm_cache_key():
+    """Scope-unique key for the inference-tier `_SM` cache: the full source SET +
+    tenant (P5), so distinct scopes over the same primary don't collide."""
+    try:
+        from context import try_current
+        ctx = try_current()
+        if ctx is not None:
+            return (frozenset(int(s) for s in ctx.source_ids), str(ctx.tenant))
+    except Exception:
+        pass
+    sid, tenant = _sm_scope()
+    return (frozenset({int(sid)}), tenant)
 
 
 def _load_sm_from_redis(scope=None):
@@ -88,8 +107,9 @@ def _load_semantic_model():
     scope-keyed so multiple ready sources are queryable from one warm worker (P5),
     and the rehydrate subscriber clears it on re-ingest.
     """
-    scope = _sm_scope()
-    entry = _SM.get(scope)
+    scope = _sm_scope()               # primary (source, tenant) — Redis sm key for the SQL head
+    cache_key = _sm_cache_key()       # full scope SET — cache identity (P5)
+    entry = _SM.get(cache_key)
     if entry is None:
         sm = _load_sm_from_redis(scope)
         if sm is None:
@@ -97,7 +117,7 @@ def _load_semantic_model():
             with open(SEMANTIC_MODEL_FILE) as f:
                 sm = json.load(f)
         entry = {"sm": sm, "cols": list(sm.get("columns", {}).keys())}
-        _SM[scope] = entry
+        _SM[cache_key] = entry
     return entry["sm"], entry["cols"]
 
 

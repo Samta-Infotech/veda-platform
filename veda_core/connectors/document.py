@@ -274,6 +274,25 @@ class FilesystemDocumentConnector(BaseConnector):
         doc_id  = str(uuid.uuid4())
         ext     = path.suffix.lower().lstrip(".")
 
+        # Cross-source plan P3: structure-aware parsing when the layout parser is
+        # available (PDF via pymupdf4llm, DOCX via python-docx). Chunks never cross a
+        # section boundary and carry the heading path (prefixed into the embedded text
+        # AND in metadata.section_path). Falls back to the flat extractors below.
+        from connectors import doc_parser as _dp
+        if _dp.parser_available(ext):
+            parsed = _dp.parse_document(str(path))
+            if parsed is not None:
+                for ch in _dp.chunk_sections(parsed, chunk_size, chunk_overlap):
+                    yield DocumentChunk(
+                        chunk_id=str(uuid.uuid4()), source_id=self._source_id, doc_id=doc_id,
+                        doc_name=path.name, doc_path=str(path), doc_format=ext,
+                        chunk_index=ch["chunk_index"], text=ch["embed_text"], page_num=None,
+                        metadata={"section_path": ch["section_path"],
+                                  "section_level": ch["section_level"],
+                                  "doc_author": parsed.metadata.get("author", ""),
+                                  "mime": parsed.metadata.get("mime", "")})
+                return
+
         if ext == "pdf":
             for page_num, page_text in _extract_pdf(path):
                 for idx, chunk_text in enumerate(_chunk_text(page_text, chunk_size, chunk_overlap)):
