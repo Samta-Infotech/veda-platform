@@ -34,14 +34,16 @@ def mirror_values_to_redis(source_id: str = "", tenant: str = "default",
     grouped: Dict[str, List[dict]] = {}
     try:
         with conn.cursor() as cur:
+            # column_values has no source_id column — value_sampler truncates and
+            # reloads this table per ingestion run, so it always holds exactly one
+            # source's rows already; no WHERE needed (see _create_column_values_table).
             cur.execute(
-                "SELECT value_norm, table_name, column_name, value_raw "
-                "FROM column_values WHERE source_id = %s",
-                [source_id],
+                "SELECT value_norm, table_name, col_name, value_raw "
+                "FROM column_values"
             )
-            for value_norm, table_name, column_name, value_raw in cur.fetchall():
+            for value_norm, table_name, col_name, value_raw in cur.fetchall():
                 grouped.setdefault(value_norm, []).append(
-                    {"table": table_name, "col": column_name, "raw": value_raw})
+                    {"table": table_name, "col": col_name, "raw": value_raw})
     finally:
         release_internal_connection(conn)
 

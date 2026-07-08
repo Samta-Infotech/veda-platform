@@ -122,11 +122,16 @@ def _build_injected_source() -> dict:
 import os as _os_env  # env overrides for containerized deploy (migration_plan.md §9)
 
 VEDA_INTERNAL_DB = {
-    "host":     _os_env.environ.get("VEDA_INTERNAL_HOST", "localhost"),
-    "port":     int(_os_env.environ.get("VEDA_INTERNAL_PORT", "5433")),
-    "dbname":   _os_env.environ.get("VEDA_INTERNAL_DBNAME", "veda"),  # embeddings + v2 tables
-    "user":     _os_env.environ.get("VEDA_INTERNAL_USER", "postgres"),
-    "password": _os_env.environ.get("VEDA_INTERNAL_PASSWORD", ""),
+    # Defaults match storage_adapters/writer.py + .env.example: reached THROUGH
+    # pgbouncer, dbname veda_engine. These two modules previously had diverging
+    # fallbacks (this one pointed at a bare-metal localhost:5433/veda that
+    # nothing in the container topology serves) which silently broke ingestion
+    # whenever VEDA_INTERNAL_* was left unset in .env.
+    "host":     _os_env.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
+    "port":     int(_os_env.environ.get("VEDA_INTERNAL_PORT", "6432")),
+    "dbname":   _os_env.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),  # embeddings + v2 tables
+    "user":     _os_env.environ.get("VEDA_INTERNAL_USER", "veda"),
+    "password": _os_env.environ.get("VEDA_INTERNAL_PASSWORD", "change-me"),
 }
 
 
@@ -433,6 +438,8 @@ QUERY_ROUTER_CONFIDENCE_THRESHOLD = 0.6
 # Toggle automatic routing — if False, always routes to SQL (backward compat)
 QUERY_ROUTER_ENABLED = True
 
+SEMANTIC_PARALLEL_QWEN_ENABLED = True
+SEMANTIC_MAX_PARALLEL_REQUESTS = 6   # 3 backends × ~2 concurrent each
 # =============================================================================
 # DOCUMENT INGESTION
 # Config for connectors/document.py and ingestion/chunk_embedder.py
@@ -777,8 +784,6 @@ SEMANTIC_CHECKPOINT_FILE    = "data/veda_semantic_checkpoint.json"
 #     • 32–64 GB workstation ......... 4–8
 #     • Mac Mini / Mac Studio (ample RAM) → tune to Ollama throughput
 #   Workers are always capped at the number of tables (never one thread per table).
-SEMANTIC_PARALLEL_QWEN_ENABLED = False   # enable_parallel_qwen
-SEMANTIC_MAX_PARALLEL_REQUESTS = 2       # max_parallel_requests (validated: min 1) — 2 fits single-GPU compute
 
 # Resilience for Qwen/Ollama calls (applies to sequential AND parallel).
 #   • Retry with exponential backoff recovers transient timeouts so a single slow call

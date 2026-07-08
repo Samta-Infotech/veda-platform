@@ -6,7 +6,9 @@
 
 numpy<2
 torch
-transformers
+transformers<4.41   # FlagEmbedding==1.2.10's bundled trainer does `from transformers.trainer import *`
+                    # and relies on Optional being re-exported from that wildcard import; newer
+                    # transformers dropped that re-export, so anything >=4.41 breaks the import.
 torch-geometric
 sentence-transformers
 FlagEmbedding==1.2.10   # WP3: BGE-M3 dense + learned-sparse (pulls peft)
