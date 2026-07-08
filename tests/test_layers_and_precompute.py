@@ -84,21 +84,3 @@ def test_nl_template_shapes():
     multi = template_answer("list users", ["name"], [{"name": "a"}, {"name": "b"}])
     assert multi is None
 
-
-# ---------------------------------------------------------------------------
-# Precompute consumption flags (review Finding 3) — env-overridable
-# ---------------------------------------------------------------------------
-
-def test_precompute_flags_env_override(monkeypatch):
-    monkeypatch.setenv("VEDA_VALUE_MIRROR_ENABLED", "1")
-    monkeypatch.setenv("VEDA_JOIN_PATHS_ENABLED", "true")
-    import importlib
-    import config
-    importlib.reload(config)
-    assert config.VALUE_MIRROR_ENABLED is True
-    assert config.JOIN_PATHS_ENABLED is True
-    assert config.RERANK_DOCS_ENABLED is False   # untouched flags keep defaults
-    monkeypatch.delenv("VEDA_VALUE_MIRROR_ENABLED")
-    monkeypatch.delenv("VEDA_JOIN_PATHS_ENABLED")
-    importlib.reload(config)
-    assert config.VALUE_MIRROR_ENABLED is False

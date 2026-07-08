@@ -186,3 +186,16 @@ class SignalBuilder:
         if col_id not in self.column_signals:
             return 0.0
         return self.column_signals[col_id].get(signal_name, 0.0)
+
+    def build_value_index(self, semantic_model: Dict) -> Dict[str, List[str]]:
+        """value_token (lowercased) -> [col_id, ...]. Built ONCE at engine
+        warm-load (F3) so Signal 5 becomes a set lookup, not a per-query
+        nested scan over every column's sampled values."""
+        index: Dict[str, List[str]] = {}
+        for col_id, col_meta in semantic_model.get("columns", {}).items():
+            for val in (col_meta.get("sample_values") or []):
+                token = str(val).strip().lower()
+                if not token:
+                    continue
+                index.setdefault(token, []).append(col_id)
+        return index
