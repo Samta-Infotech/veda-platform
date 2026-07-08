@@ -211,23 +211,39 @@ def run_query(query, sm, all_cols, return_result=False):
         # that caused mis-anchoring. Generic: reranker no longer carries a hardcoded business
         # map (it uses the generated domain_synonyms). Graceful: any failure keeps RRF order.
         try:
-            from config import PRIMARY_RERANK_ENABLED, RERANKER_BATCH_SIZE
+            from config import (PRIMARY_RERANK_ENABLED, RERANKER_BATCH_SIZE,
+                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES)
         except Exception:
             PRIMARY_RERANK_ENABLED = False
-        if PRIMARY_RERANK_ENABLED and results:
+
+        def _rrf_gap_unambiguous(_results) -> bool:
+            """True when candidate #1 clearly leads #2 AND both are the same table —
+            reranking would not change the anchor, so skip it (F4)."""
+            if len(_results) < 2:
+                return True
+            s0, s1 = _results[0].final_score, _results[1].final_score
+            same_table = _results[0].col_id.split(".")[0] == _results[1].col_id.split(".")[0]
+            return same_table and (s0 - s1) >= RERANK_SKIP_GAP
+
+        if PRIMARY_RERANK_ENABLED and results and not _rrf_gap_unambiguous(results):
             try:
                 from query.reranker import _get_reranker
                 _rk = _get_reranker()
                 if _rk is not None:
-                    _pairs = [[_search, f"{r.column_name} {r.table_name}"] for r in results]
+                    # F4: cap candidate width — the tail never wins anchor selection.
+                    _head = results[:RERANK_MAX_CANDIDATES]
+                    _tail = results[RERANK_MAX_CANDIDATES:]
+                    _pairs = [[_search, f"{r.column_name} {r.table_name}"] for r in _head]
                     _sc = _rk.predict(_pairs, batch_size=RERANKER_BATCH_SIZE)
-                    _ranked = sorted(zip(_sc, results), key=lambda x: float(x[0]), reverse=True)
+                    _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
                     for _s, _r in _ranked:
                         _r.final_score = float(_s)   # anchor reads final_score → now reranked
-                    results = [_r for _, _r in _ranked]
-                    print(f"  [L2b] Primary rerank (cross-encoder) → top: {results[0].col_id}")
+                    results = [_r for _, _r in _ranked] + _tail
+                    print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
             except Exception as _rr_e:
                 print(f"  [L2b] primary rerank skipped: {type(_rr_e).__name__}: {str(_rr_e)[:100]}")
+        elif PRIMARY_RERANK_ENABLED and results:
+            print(f"  [L2b] Primary rerank SKIPPED (unambiguous RRF gap) → top: {results[0].col_id}")
 
         _cand_tabs = []
         for r in results:
@@ -721,15 +737,20 @@ def run_query(query, sm, all_cols, return_result=False):
     # the local SLM with a deterministic row-count fallback if Ollama is unavailable.
     # execute_sql returns tuples → zip to the dicts run_nl_answer expects.
     try:
-        from config import NL_ANSWER_ENABLED
+        from config import NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS
     except Exception:
         NL_ANSWER_ENABLED = False
+        NL_ANSWER_FAST_TIMEOUT_MS = 800
     nl_answer_text = None
     if NL_ANSWER_ENABLED and cols is not None:
+        row_dicts = [dict(zip(cols, r)) for r in rows]
+        # F6: don't block on the SLM prose call. Compute the safe fallback now;
+        # the caller (run_query) still returns promptly even if the SLM is slow.
+        from query.nl_answer import run_nl_answer, deterministic_fallback_answer
+        nl_answer_text = deterministic_fallback_answer(query, list(cols), row_dicts)
         try:
-            from query.nl_answer import run_nl_answer
-            row_dicts = [dict(zip(cols, r)) for r in rows]
-            nl = run_nl_answer(query, list(cols), row_dicts)
+            nl = run_nl_answer(query, list(cols), row_dicts,
+                               timeout=NL_ANSWER_FAST_TIMEOUT_MS / 1000.0)
             if getattr(nl, "answer", None):
                 nl_answer_text = nl.answer
                 print(f"\n  [L7b] Answer       {nl.answer}")

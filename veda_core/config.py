@@ -637,6 +637,8 @@ RERANKER_BATCH_SIZE    = 64
 RERANKER_MAX_TEXT_LEN  = 512
 RERANKER_TOP_COLS      = 15
 RERANKER_TOP_TABLES    = 5
+RERANK_SKIP_GAP        = 0.15   # F4: skip L2b when top-2 RRF gap >= this and same table
+RERANK_MAX_CANDIDATES  = 20     # F4: cap candidates fed to the cross-encoder
 
 # --- Reranker: enriched text + dynamic cutoff (Gaps 1, 2, 3) ---
 # A/B data: bare names score sharper (0.89) than enriched text (0.15) for the cross-encoder;
@@ -725,6 +727,7 @@ IR_JOIN_FREE_ENABLED = True   # SLM omits joins[]; sql_builder derives from fk_a
 
 NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
+NL_ANSWER_FAST_TIMEOUT_MS = 800   # F6: bound worst-case NL-answer latency
 
 # =============================================================================
 # WP7: the Track-4 precompute consumption flags (_env_flag + the seven toggles and
