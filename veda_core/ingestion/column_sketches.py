@@ -23,11 +23,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import unicodedata
 from typing import Iterable, List, Optional, Tuple
 
-from config import COLUMN_SKETCHES_TABLE_NAME, MINHASH_NUM_PERM, SENSITIVE_PATTERNS
+from config import (
+    COLUMN_SKETCHES_TABLE_NAME, MINHASH_NUM_PERM, SENSITIVE_PATTERNS,
+    CROSS_SOURCE_EXACT_CONTAINMENT_CAP,
+)
 from ingestion.db_abstraction import (
     INTERNAL_DB_AVAILABLE as PSYCOPG2_AVAILABLE,
     get_internal_connection,
@@ -109,14 +113,43 @@ def value_class(semantic_type: str, data_type: str = "") -> str:
     return "text"
 
 
-def compute_sketch(values: Iterable[str], num_perm: int = MINHASH_NUM_PERM) -> Tuple[Optional[bytes], int]:
-    """Compute a MinHash sketch over normalized distinct ``values``.
+def _value_hash(value_norm: str) -> int:
+    """Stable 64-bit hash of a normalized value (process/version independent — unlike
+    Python's salted hash()). Used to build the compact exact value set for containment."""
+    return int.from_bytes(
+        hashlib.blake2b(value_norm.encode("utf-8"), digest_size=8).digest(), "little")
 
-    Returns (sketch_bytes, n_distinct). sketch_bytes is None when datasketch is
-    unavailable or there is nothing to sketch — callers skip persistence then.
+
+def pack_value_hashes(value_norms: Iterable[str],
+                      cap: int = CROSS_SOURCE_EXACT_CONTAINMENT_CAP) -> Optional[bytes]:
+    """Sorted uint64 blob of the DISTINCT value hashes, or None when the set exceeds
+    ``cap`` (fall back to the MinHash estimate above the cap)."""
+    hs = {_value_hash(v) for v in value_norms if v}
+    if not hs or len(hs) > cap:
+        return None
+    import numpy as np
+    return np.array(sorted(hs), dtype=np.uint64).tobytes()
+
+
+def unpack_value_hashes(blob: bytes):
+    """Rehydrate a packed value-hash blob to a numpy uint64 array (None if empty)."""
+    if not blob:
+        return None
+    import numpy as np
+    return np.frombuffer(blob, dtype=np.uint64)
+
+
+def compute_sketch(values: Iterable[str], num_perm: int = MINHASH_NUM_PERM
+                   ) -> Tuple[Optional[bytes], int, Optional[bytes]]:
+    """Compute a MinHash sketch AND (when small enough) an exact value-hash set over
+    normalized distinct ``values``.
+
+    Returns (sketch_bytes, n_distinct, value_hashes_bytes). sketch_bytes is None when
+    datasketch is unavailable or there is nothing to sketch; value_hashes_bytes is None
+    when the distinct set exceeds CROSS_SOURCE_EXACT_CONTAINMENT_CAP.
     """
     if not _DATASKETCH_AVAILABLE:
-        return None, 0
+        return None, 0, None
     seen = set()
     mh = _new_minhash(num_perm)
     for v in values:
@@ -125,9 +158,10 @@ def compute_sketch(values: Iterable[str], num_perm: int = MINHASH_NUM_PERM) -> T
             seen.add(nv)
             mh.update(nv.encode("utf-8"))
     if not seen:
-        return None, 0
+        return None, 0, None
     import numpy as np
-    return mh.hashvalues.astype(np.uint64).tobytes(), len(seen)
+    return (mh.hashvalues.astype(np.uint64).tobytes(), len(seen),
+            pack_value_hashes(seen))
 
 
 def sketch_from_bytes(blob: bytes, num_perm: int = MINHASH_NUM_PERM):
@@ -142,18 +176,22 @@ def sketch_from_bytes(blob: bytes, num_perm: int = MINHASH_NUM_PERM):
 def _create_table(cur) -> None:
     cur.execute(f"""
         CREATE TABLE IF NOT EXISTS {COLUMN_SKETCHES_TABLE_NAME} (
-            col_id      TEXT NOT NULL,
-            source_id   TEXT NOT NULL,
-            tenant      TEXT NOT NULL,
-            table_name  TEXT NOT NULL,
-            col_name    TEXT NOT NULL,
-            n_distinct  INTEGER NOT NULL,
-            value_class TEXT NOT NULL,
-            num_perm    INTEGER NOT NULL,
-            sketch      BYTEA NOT NULL,
+            col_id       TEXT NOT NULL,
+            source_id    TEXT NOT NULL,
+            tenant       TEXT NOT NULL,
+            table_name   TEXT NOT NULL,
+            col_name     TEXT NOT NULL,
+            n_distinct   INTEGER NOT NULL,
+            value_class  TEXT NOT NULL,
+            num_perm     INTEGER NOT NULL,
+            sketch       BYTEA NOT NULL,
+            value_hashes BYTEA,
             PRIMARY KEY (col_id, source_id, tenant)
         );
     """)
+    # Lazy migration for stores created before the exact-containment column landed.
+    cur.execute(f"ALTER TABLE {COLUMN_SKETCHES_TABLE_NAME} "
+                f"ADD COLUMN IF NOT EXISTS value_hashes BYTEA;")
     cur.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_{COLUMN_SKETCHES_TABLE_NAME}_tenant_class
         ON {COLUMN_SKETCHES_TABLE_NAME} (tenant, value_class);
@@ -181,21 +219,24 @@ def persist_sketches(rows: List[dict], source_id: str, tenant: str) -> int:
                 for r in rows:
                     if not r.get("sketch"):
                         continue
+                    vh = r.get("value_hashes")
                     cur.execute(f"""
                         INSERT INTO {COLUMN_SKETCHES_TABLE_NAME}
                             (col_id, source_id, tenant, table_name, col_name,
-                             n_distinct, value_class, num_perm, sketch)
-                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                             n_distinct, value_class, num_perm, sketch, value_hashes)
+                        VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                         ON CONFLICT (col_id, source_id, tenant) DO UPDATE SET
                             n_distinct = EXCLUDED.n_distinct,
                             value_class = EXCLUDED.value_class,
                             num_perm = EXCLUDED.num_perm,
-                            sketch = EXCLUDED.sketch;
+                            sketch = EXCLUDED.sketch,
+                            value_hashes = EXCLUDED.value_hashes;
                     """, (
                         str(r["col_id"]), str(source_id), str(tenant),
                         r.get("table_name", ""), r.get("col_name", ""),
                         int(r.get("n_distinct", 0)), r.get("value_class", "text"),
                         MINHASH_NUM_PERM, psycopg2.Binary(r["sketch"]),
+                        psycopg2.Binary(vh) if vh else None,
                     ))
                     written += 1
     finally:
@@ -256,12 +297,13 @@ def sketch_columns_via_sampler(source_id, tenant, sampler, sample_size=None) -> 
         if not _is_join_key_shaped(c):
             continue
         vals = sampler(c["table_name"], c["col_name"], n)
-        sketch, nd = compute_sketch(vals)
+        sketch, nd, vhashes = compute_sketch(vals)
         if sketch is None:
             continue
         rows.append({"col_id": c["col_id"], "table_name": c["table_name"],
                      "col_name": c["col_name"], "n_distinct": nd,
-                     "value_class": _column_value_class(c), "sketch": sketch})
+                     "value_class": _column_value_class(c), "sketch": sketch,
+                     "value_hashes": vhashes})
     return persist_sketches(rows, source_id=source_id, tenant=tenant)
 
 
@@ -280,7 +322,7 @@ def build_sketch_rows(sampled_columns, is_sensitive=None) -> List[dict]:
             any(p in name for p in SENSITIVE_PATTERNS)
         if sensitive:
             continue
-        sketch, n = compute_sketch(getattr(sc, "values", []) or [])
+        sketch, n, vhashes = compute_sketch(getattr(sc, "values", []) or [])
         if sketch is None:
             continue
         rows.append({
@@ -290,5 +332,6 @@ def build_sketch_rows(sampled_columns, is_sensitive=None) -> List[dict]:
             "n_distinct": n,
             "value_class": value_class(st, getattr(sc, "data_type", "")),
             "sketch": sketch,
+            "value_hashes": vhashes,
         })
     return rows

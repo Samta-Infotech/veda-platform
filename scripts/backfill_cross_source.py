@@ -111,12 +111,13 @@ def backfill_source(source_id: str, tenant: str, sample_size: int, verbose: bool
         with conn.cursor() as cur:
             for c in cols:
                 vals = sample_distinct(cur, c["table_name"], c["col_name"], sample_size)
-                sketch, n = CS.compute_sketch(vals)
+                sketch, n, vhashes = CS.compute_sketch(vals)
                 if sketch is None:
                     continue
                 rows.append({"col_id": c["col_id"], "table_name": c["table_name"],
                              "col_name": c["col_name"], "n_distinct": n,
-                             "value_class": _value_class(c), "sketch": sketch})
+                             "value_class": _value_class(c), "sketch": sketch,
+                             "value_hashes": vhashes})
                 if verbose:
                     print(f"    {c['table_name']}.{c['col_name']} "
                           f"[{_value_class(c)}] n_distinct(sampled)={n}")

@@ -558,7 +558,31 @@ CROSS_SOURCE_FK_TIER_WEIGHT = {"HIGH": 2.0, "MEDIUM": 1.2}
 # value-sampling pass — e.g. the backfill script sketching join keys (ids) that the
 # value sampler skips. Larger than VALUE_SAMPLE_SIZE because join-key containment
 # needs enough of the key domain to be reliable.
-CROSS_SOURCE_SKETCH_SAMPLE_SIZE = 5000
+# Exact-containment fix: MinHash Jaccard has ~1/num_perm resolution, so it reads 0 for
+# a small child column contained in a large parent (e.g. 7 asset ids ⊂ 5000 PKs → the
+# canonical FK) — exactly the asymmetric join we most want. When a column's distinct
+# count is <= this cap we additionally persist a packed sorted uint64 hash of ALL its
+# normalized values; discovery then computes EXACT set-containment for any pair where
+# both sides are within the cap, and only falls back to the MinHash estimate above it.
+CROSS_SOURCE_EXACT_CONTAINMENT_CAP = 20000
+# Distinct values sampled per column for the join-key sketch pass. MUST exceed the exact
+# cap by one so a stored value-hash set is always COMPLETE (<=cap distinct fully seen) or
+# absent (>cap → sampler returns cap+1 rows → pack_value_hashes returns None → MinHash
+# fallback). Anything between the old 5000 and the cap would store a truncated set and
+# make exact containment silently wrong.
+CROSS_SOURCE_SKETCH_SAMPLE_SIZE = CROSS_SOURCE_EXACT_CONTAINMENT_CAP + 1
+# Name-affinity gate: for id/numeric value classes, small integer key domains overlap
+# by coincidence (created_by_id vs asset_id), so a same-value signal alone is not enough
+# — require a shared meaningful column/table name token before emitting a cross-source
+# edge. A strong affinity also PROMOTES a high-containment edge to HIGH even below the
+# distinct-count floor, so a genuine FK becomes executable on small (dummy) corpora.
+CROSS_SOURCE_AFFINITY_REQUIRED_CLASSES = ("id", "numeric")
+# Generic tokens stripped before name-affinity matching (they carry no join identity).
+CROSS_SOURCE_GENERIC_NAME_TOKENS = frozenset({
+    "id", "ids", "name", "names", "code", "codes", "number", "num", "no", "key",
+    "keys", "fk", "pk", "ref", "type", "types", "date", "time", "at", "by", "uuid",
+    "guid", "value", "val", "desc", "description", "status", "flag", "count", "total",
+})
 
 GRAPH_CHUNK_LINKING_ENABLED   = True
 GRAPH_LINK_VALUE_OVERLAP_MIN  = 0.15
