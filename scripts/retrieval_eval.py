@@ -29,10 +29,13 @@ from pathlib import Path
 
 _REPO = Path(__file__).resolve().parents[1]
 # select_retrieval and the engine import their siblings as top-level modules
-# (``from config import ...``, ``from query... import ...``), so veda_core must be on
-# the path exactly as it is inside the inference container.
-sys.path.insert(0, str(_REPO / "veda_core"))
+# (``from config import ...``, ``from query... import ...``), so veda_core must resolve
+# FIRST — otherwise the repo-root Django ``config`` package shadows veda_core/config.py
+# and every engine import (db_abstraction → ``from config import VEDA_INTERNAL_DB``) breaks.
+# Insert veda_core LAST so it lands at sys.path[0]; the repo root stays available (index 1)
+# for the best-effort Django context in _setup_django.
 sys.path.insert(0, str(_REPO))
+sys.path.insert(0, str(_REPO / "veda_core"))
 
 
 def _git_sha() -> str:
@@ -114,6 +117,267 @@ def _load_golden(path: Path) -> list[dict]:
     return rows
 
 
+# ===========================================================================
+# Cross-source metrics (Cross-source plan, Phase 6.2)
+#
+# Four graph/answer-level metrics that the column-recall harness above cannot
+# express, computed over evaluation/golden_cross_source.jsonl:
+#   1. cross-source JOIN precision — discovered `cross_source_fk` edges audited
+#      against the golden join pairs (HIGH-tier precision is the plan's ≥0.9
+#      target; ALL-tier reported too since HIGH may be empty on small corpora),
+#      plus a negative check that `must_not_link` pairs never reach HIGH.
+#   2. entity-linking precision/recall — admitted entity nodes vs the hand
+#      labels in evaluation/cross_source_entity_labels.jsonl.
+#   3. subgraph source-coverage — for each cross-source query, the fraction of
+#      expected_sources represented in the retrieved subgraph.
+#   4. end-to-end federated accuracy — one real federated JOIN executed through
+#      query/federated_executor over the live sources, asserted to return rows.
+# All are read-only and degrade to {ok: false, reason} rather than crashing.
+# ===========================================================================
+
+def _norm_pair_member(ref: str) -> str:
+    """'maintenance.asset_id@4' -> 'maintenance.asset_id@4' (table.col@src, lowercased).
+    Tolerates a missing @src and extra dotted schema qualifiers."""
+    ref = str(ref).strip().lower()
+    src = ""
+    if "@" in ref:
+        ref, src = ref.rsplit("@", 1)
+    parts = [p for p in ref.split(".") if p]
+    tc = ".".join(parts[-2:]) if len(parts) >= 2 else (parts[0] if parts else "")
+    return f"{tc}@{src}" if src else tc
+
+
+def _pair_key(a: str, b: str) -> frozenset:
+    return frozenset({_norm_pair_member(a), _norm_pair_member(b)})
+
+
+def _load_discovered_cross_edges():
+    """[{pair: frozenset, tier, jaccard, containment, a, b}] for every persisted
+    cross_source_fk edge, labelled 'table.col@src' on both ends."""
+    from ingestion.db_abstraction import (
+        get_internal_connection, release_internal_connection)
+    conn = get_internal_connection()
+    out = []
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""
+                SELECT ns.table_name, ns.name, ns.source_id,
+                       nd.table_name, nd.name, nd.source_id,
+                       (e.attrs::jsonb->>'tier'), (e.attrs::jsonb->>'jaccard'),
+                       (e.attrs::jsonb->>'containment')
+                FROM graph_edges e
+                JOIN graph_nodes ns ON ns.node_id = e.src_node_id
+                JOIN graph_nodes nd ON nd.node_id = e.dst_node_id
+                WHERE e.edge_type = 'cross_source_fk'
+            """)
+            for st, sn, ssid, dt, dn, dsid, tier, jac, cont in cur.fetchall():
+                a = f"{st}.{sn}@{ssid}"
+                b = f"{dt}.{dn}@{dsid}"
+                out.append({"pair": _pair_key(a, b), "a": a, "b": b, "tier": tier,
+                            "jaccard": float(jac or 0), "containment": float(cont or 0)})
+    finally:
+        release_internal_connection(conn)
+    return out
+
+
+def eval_join_precision(golden: list[dict], discovered: list[dict]) -> dict:
+    gold_pairs, neg_pairs = set(), set()
+    for g in golden:
+        for e in g.get("gold_cross_source_edges", []) or []:
+            gold_pairs.add(_pair_key(e["a"], e["b"]))
+        for e in g.get("must_not_link", []) or []:
+            neg_pairs.add(_pair_key(e["a"], e["b"]))
+
+    high = [d for d in discovered if (d["tier"] or "").upper() == "HIGH"]
+    disc_all_pairs = {d["pair"] for d in discovered}
+    disc_high_pairs = {d["pair"] for d in high}
+
+    def _prec(disc_pairs):
+        if not disc_pairs:
+            return None
+        return round(len(disc_pairs & gold_pairs) / len(disc_pairs), 4)
+
+    return {
+        "ok": True,
+        "n_discovered": len(discovered),
+        "n_discovered_high": len(high),
+        "n_gold_pairs": len(gold_pairs),
+        "gold_pairs_found": sorted("|".join(sorted(p)) for p in (disc_all_pairs & gold_pairs)),
+        "recall_gold_pairs": (round(len(disc_all_pairs & gold_pairs) / len(gold_pairs), 4)
+                              if gold_pairs else None),
+        "precision_high": _prec(disc_high_pairs),          # plan target >= 0.9
+        "precision_all_tiers": _prec(disc_all_pairs),      # includes MEDIUM noise
+        "negative_violations_high": sorted(
+            "|".join(sorted(p)) for p in (disc_high_pairs & neg_pairs)),
+        "negative_violations_any": sorted(
+            "|".join(sorted(p)) for p in (disc_all_pairs & neg_pairs)),
+    }
+
+
+def eval_entity_linking(labels_path: Path) -> dict:
+    if not labels_path.exists():
+        return {"ok": False, "reason": f"labels not found: {labels_path}"}
+    labels = {}
+    for row in _load_golden(labels_path):
+        labels[str(row["name"]).lower()] = bool(row.get("is_bridge"))
+    from ingestion.db_abstraction import (
+        get_internal_connection, release_internal_connection)
+    conn = get_internal_connection()
+    admitted = {}
+    try:
+        with conn.cursor() as cur:
+            cur.execute("""SELECT gn.name, count(e.edge_id)
+                           FROM graph_nodes gn
+                           LEFT JOIN graph_edges e
+                             ON e.src_node_id = gn.node_id AND e.edge_type='value_of'
+                           WHERE gn.node_type='entity' GROUP BY gn.name""")
+            for name, nlinks in cur.fetchall():
+                admitted[str(name).lower()] = int(nlinks)
+    finally:
+        release_internal_connection(conn)
+
+    tp = sum(1 for n in admitted if labels.get(n) is True)
+    fp = sum(1 for n in admitted if labels.get(n) is False)
+    unlabeled = [n for n in admitted if n not in labels]
+    total_bridges = sum(1 for v in labels.values() if v)
+    zero_link_admits = sorted(n for n, k in admitted.items() if k == 0)
+    return {
+        "ok": True,
+        "n_admitted": len(admitted),
+        "n_labeled_bridges": total_bridges,
+        "true_positives": tp,
+        "false_positives": fp,
+        "precision": round(tp / (tp + fp), 4) if (tp + fp) else None,
+        "recall": round(tp / total_bridges, 4) if total_bridges else None,
+        "unlabeled_admitted": sorted(unlabeled),
+        "zero_link_admits": zero_link_admits,   # admission-rule violations (must-bridge)
+    }
+
+
+def eval_subgraph_coverage(golden: list[dict], all_source_ids: list[str],
+                           name_by_id: dict) -> dict:
+    """For each multi-source query, fraction of expected_sources whose columns/chunks
+    appear in the retrieved subgraph (retrieval run across ALL ready sources)."""
+    from query.retrieval_select import select_retrieval
+    id_by_name = {v: k for k, v in name_by_id.items()}
+    rows, covs = [], []
+    for g in golden:
+        exp = [id_by_name.get(s) for s in g.get("expected_sources", [])]
+        exp = [s for s in exp if s]
+        if len(exp) < 2:            # coverage only meaningful for cross-source queries
+            continue
+        try:
+            sel = select_retrieval(query=g["query"], source_ids=all_source_ids,
+                                   intent=g.get("intent", "sql"), verbose=False)
+            present = {str(getattr(c, "source_id", "") or "") for c in sel.columns}
+            gr = getattr(sel, "graph_result", None)
+            for ch in (getattr(gr, "chunks", None) or []):
+                present.add(str(getattr(ch, "source_id", "") or ""))
+            hit = [s for s in exp if s in present]
+            cov = len(hit) / len(exp)
+        except Exception as e:
+            rows.append({"query": g["query"], "error": str(e)})
+            continue
+        covs.append(cov)
+        rows.append({"query": g["query"], "expected": exp,
+                     "present": sorted(present), "coverage": round(cov, 4)})
+    return {"ok": True, "n_queries": len(covs),
+            "mean_source_coverage": round(sum(covs) / len(covs), 4) if covs else None,
+            "per_query": rows}
+
+
+def eval_federated_e2e(tenant: str) -> dict:
+    """Execute one real federated JOIN (maintenance CSV × homzhub assets_asset) through
+    the firewall + executor, asserting it validates and returns rows."""
+    try:
+        from query.cross_source_composer import resolve_surface
+        from query.federated_executor import FederatedExecutor, catalog_name
+    except Exception as e:
+        return {"ok": False, "reason": f"import failed: {e}"}
+    s_csv = resolve_surface("4", tenant)   # invoices_csv -> parquet (maintenance, vendors)
+    s_pg = resolve_surface("2", tenant)    # homzhub -> postgres
+    if not s_csv or not s_pg:
+        return {"ok": False, "reason": f"surface unresolved (csv={bool(s_csv)}, pg={bool(s_pg)})"}
+    ex = FederatedExecutor([s_csv, s_pg])
+    c4, c2 = catalog_name("4"), catalog_name("2")
+    sql = (f'SELECT a.city_name, count(*) AS n_tickets, sum(m.amount) AS total_amount '
+           f'FROM {c4}.maintenance m '
+           f'JOIN {c2}.public.assets_asset a ON CAST(m.asset_id AS BIGINT) = a.id '
+           f'GROUP BY a.city_name ORDER BY total_amount DESC')
+    try:
+        res = ex.execute(sql)
+        return {"ok": True, "sql": sql, "row_count": res["row_count"],
+                "columns": res["columns"], "catalogs": res.get("catalogs"),
+                "sample_rows": res["rows"][:5]}
+    except Exception as e:
+        return {"ok": False, "reason": str(e), "sql": sql}
+
+
+def run_cross_source(args) -> int:
+    _setup_django()
+    from context import RequestContext, set_context
+    set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant))
+
+    golden_path = Path(args.golden)
+    if not golden_path.exists():
+        print(f"[error] golden set not found: {golden_path}", file=sys.stderr)
+        return 2
+    golden = _load_golden(golden_path)
+
+    # source name<->id map from the registry (for coverage + reporting)
+    name_by_id: dict = {}
+    try:
+        from storage_adapters import reader
+        conn = reader._connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id, name, ready FROM sources_source ORDER BY id")
+            regrows = cur.fetchall()
+        name_by_id = {str(r[0]): r[1] for r in regrows}
+        ready_ids = [str(r[0]) for r in regrows if r[2]]
+    except Exception as e:
+        print(f"[warn] registry read failed ({e}); coverage will be limited", file=sys.stderr)
+        ready_ids = [str(args.source_id)]
+
+    discovered = _load_discovered_cross_edges()
+    report = {
+        "git_sha": _git_sha(),
+        "label": args.label,
+        "tenant": args.tenant,
+        "golden_set": str(golden_path.relative_to(_REPO)) if golden_path.is_relative_to(_REPO)
+                      else str(golden_path),
+        "ready_sources": {sid: name_by_id.get(sid) for sid in ready_ids},
+        "join_precision": eval_join_precision(golden, discovered),
+        "entity_linking": eval_entity_linking(
+            _REPO / "evaluation" / "cross_source_entity_labels.jsonl"),
+        "subgraph_coverage": eval_subgraph_coverage(golden, ready_ids, name_by_id),
+        "federated_e2e": eval_federated_e2e(args.tenant),
+        "generated_at_epoch": int(time.time()),
+    }
+    out_path = Path(args.out) if args.out else (
+        _REPO / "evaluation" / "results" / f"cross_source_{report['git_sha']}.json")
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    with out_path.open("w") as f:
+        json.dump(report, f, indent=2, sort_keys=True, default=str)
+
+    jp, el, sc, fe = (report["join_precision"], report["entity_linking"],
+                      report["subgraph_coverage"], report["federated_e2e"])
+    print("[cross_source_eval] join: %d edges (%d HIGH)  prec_high=%s prec_all=%s "
+          "recall_gold=%s  neg_violations_high=%d"
+          % (jp["n_discovered"], jp["n_discovered_high"], jp["precision_high"],
+             jp["precision_all_tiers"], jp["recall_gold_pairs"],
+             len(jp["negative_violations_high"])))
+    print("[cross_source_eval] entity: admitted=%s bridges=%s prec=%s recall=%s "
+          "zero_link_admits=%d" % (el.get("n_admitted"), el.get("n_labeled_bridges"),
+          el.get("precision"), el.get("recall"), len(el.get("zero_link_admits", []))))
+    print("[cross_source_eval] subgraph coverage (cross-source qs): mean=%s over %s queries"
+          % (sc.get("mean_source_coverage"), sc.get("n_queries")))
+    print("[cross_source_eval] federated e2e: ok=%s %s"
+          % (fe.get("ok"), (("rows=%s" % fe.get("row_count")) if fe.get("ok")
+                            else fe.get("reason"))))
+    print(f"[cross_source_eval] wrote {out_path}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="VEDA retrieval-quality eval (WP0)")
     ap.add_argument("--source-id", type=int, default=int(os.environ.get("VEDA_EVAL_SOURCE_ID", "1")))
@@ -121,7 +385,12 @@ def main() -> int:
     ap.add_argument("--golden", default=str(_REPO / "evaluation" / "golden_queries.jsonl"))
     ap.add_argument("--out", default="")
     ap.add_argument("--label", default="")
+    ap.add_argument("--cross-source", action="store_true",
+                    help="run the Phase 6 cross-source metric suite instead of WP0 column recall")
     args = ap.parse_args()
+
+    if args.cross_source:
+        return run_cross_source(args)
 
     _setup_django()
     from context import RequestContext, set_context  # veda_core/context.py

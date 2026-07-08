@@ -1,0 +1,40 @@
+# Hand-labeled entity gold for cross-source entity-linking precision/recall (Phase 6.2).
+# One row per entity node the linker ADMITTED (all 29). `is_bridge` = a genuine
+# real-world entity whose doc mention meaningfully bridges to the DB column it links to.
+# Rationale grounded in the actual doc corpus:
+#   generic_readme.txt is an EXPLICIT negative ("contains no property, asset, or
+#   financial records and should not link to any structured source") — anything from it
+#   is a false positive by design.  site_notes.md / maintenance_policy.docx /
+#   msa_green_tower.pdf carry the genuine amenity / city / financial bridges.
+# Metric: precision = |admitted ∩ is_bridge| / |admitted| ;
+#         recall    = |admitted ∩ is_bridge| / |is_bridge across corpus| (all present bridges
+#         are admitted here, so recall probes misses; precision is the headline number).
+{"name": "football", "is_bridge": true, "links": ["assets_amenity.name@2"], "why": "amenity in maintenance_policy.docx + DB amenity"}
+{"name": "basket ball", "is_bridge": true, "links": ["assets_amenity.name@2"], "why": "amenity bridge"}
+{"name": "squash", "is_bridge": true, "links": ["assets_amenity.name@2"], "why": "amenity bridge"}
+{"name": "intercom", "is_bridge": true, "links": ["assets_amenity.name@2"], "why": "amenity bridge"}
+{"name": "grocery store", "is_bridge": true, "links": ["assets_amenity.name@2"], "why": "amenity in site_notes + DB"}
+{"name": "green building", "is_bridge": true, "links": ["assets_amenity.name@2"], "why": "amenity in site_notes + DB"}
+{"name": "kochi", "is_bridge": true, "links": ["generics_city.name@2", "generics_location.city_name@2"], "why": "city in site_notes + DB city"}
+{"name": "insurance", "is_bridge": true, "links": ["accounts_generalledgercategory.name@2", "accounts_generalledgercategory.code@2"], "why": "financial category, 'Insurance renewal' in site_notes"}
+{"name": "repair", "is_bridge": true, "links": ["accounts_generalledger.label@2", "worklists_ticket.others_field_description@2"], "why": "'Repair request' in site_notes + ledger/ticket"}
+{"name": "rent", "is_bridge": true, "links": ["accounts_generalledger.label@2", "accounts_userinvoice.invoice_title@2"], "why": "financial concept in invoices/ledger"}
+{"name": "society charge", "is_bridge": true, "links": ["accounts_userinvoiceitem.item_name@2"], "why": "invoice line-item type"}
+{"name": "society charges", "is_bridge": true, "links": ["accounts_generalledgercategory.name@2"], "why": "ledger category"}
+{"name": "tower", "is_bridge": true, "links": ["level.name@2"], "why": "'Green Tower' MSA subject + building level"}
+{"name": "asset", "is_bridge": false, "links": ["notifications_notificationtype.name@2", "list_of_values_listofvalue.table_name@2"], "why": "generic word from the negative readme; links to metadata cols"}
+{"name": "document", "is_bridge": false, "links": ["notifications_notificationtype.label@2", "attachments_attachment.attachment_type@2"], "why": "generic word from negative readme"}
+{"name": "records", "is_bridge": false, "links": ["sub_module.sub_module_code@2"], "why": "generic word from negative readme"}
+{"name": "general", "is_bridge": false, "links": ["assets_amenitycategory.name@2"], "why": "generic word from negative readme"}
+{"name": "category", "is_bridge": false, "links": ["list_of_values_listofvalue.column_name@2"], "why": "generic metadata word"}
+{"name": "cent", "is_bridge": false, "links": ["generics_currency.sub_unit_currency@2"], "why": "too generic/short; coincidental currency match"}
+{"name": "building", "is_bridge": false, "links": ["level.name@2"], "why": "generic bare word (distinct from 'green building')"}
+{"name": "green", "is_bridge": false, "links": ["client_support_clientsupport.title@2"], "why": "bare 'green' coincidentally matched a support title"}
+{"name": "hall", "is_bridge": false, "links": ["assets_assetspace.description@2"], "why": "weak description substring match"}
+{"name": "invoices", "is_bridge": false, "links": ["sub_module.sub_module_code@2"], "why": "matched an internal module name, not an entity"}
+{"name": "main", "is_bridge": false, "links": ["notifications_homzhubfcmdevice.homzhub_app_type@2"], "why": "coincidental substring"}
+{"name": "maintenance", "is_bridge": false, "links": ["sub_module.sub_module_name@2", "reviews_pillar.name@2"], "why": "generic domain word linking to metadata cols"}
+{"name": "muddanahalli", "is_bridge": false, "links": [], "why": "admitted with ZERO column links — violates the must-bridge admission rule"}
+{"name": "pending", "is_bridge": false, "links": ["assets_listingvisit.status@2"], "why": "status word ('Pending' in site_notes), not an entity"}
+{"name": "service", "is_bridge": false, "links": ["leads_lead.last_name@2"], "why": "clearly wrong link (surname), generic word"}
+{"name": "society", "is_bridge": false, "links": ["level.name@2"], "why": "generic word"}
