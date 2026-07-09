@@ -86,7 +86,13 @@ def _pg():
                             password=cfg["password"])
 
 
-_ENGINES = {}
+_ENGINES = {}   # scope -> engine, insertion-ordered → used as an LRU (see ENGINE_CACHE_MAX)
+# Per-worker cap on distinct scope engines. An engine entry is index/signal state, NOT
+# model weights (the ~1.3GB BGE and the SLM are shared singletons), so the marginal RSS
+# of one entry is the per-source sparse/signal maps — bounded, but a multi-source tenant
+# can spawn one engine per requested subset ({A}, {B}, {A,B}, …), so cap + LRU-evict the
+# least-recently-used scope. Tune against measured worker RSS.
+ENGINE_CACHE_MAX = int(os.environ.get("ENGINE_CACHE_MAX", "4"))
 # ONE BGE searcher shared across all per-source engines. Signal-1's query embedding is
 # source-INDEPENDENT (the embedding STORE is source-scoped via storage_adapters.ann_search),
 # so the ~1.3GB model loads once, not once per source.
@@ -142,24 +148,30 @@ def _shared_searcher():
 
 
 def _engine_scope():
-    """The (source, tenant) key for the per-source engine cache, or a single "_global"
-    key when no request context is set (dev CLI / warm-load)."""
+    """The (tenant, source-SET) key for the per-scope engine cache, or a single
+    "_global" key when no request context is set (dev CLI / warm-load).
+
+    Keyed by `frozenset(source_ids)` (P5 / cross-source): one engine per distinct
+    request scope, so `{A}`, `{B}` and `{A,B}` are three separate engines — each
+    carrying that scope's merged semantic model + sparse/signal state. The models
+    (BGE-M3 etc.) are shared singletons, so an engine entry is index state, not
+    model weights (see ENGINE_CACHE_MAX)."""
     from veda_core import context
     ctx = context.try_current()
-    return (str(ctx.source_id), str(ctx.tenant)) if ctx is not None else ("_global", "_global")
+    if ctx is None:
+        return ("_global", frozenset())
+    return (str(ctx.tenant), frozenset(int(s) for s in ctx.source_ids))
 
 
-def _load_scoped_sm():
-    """This scope's semantic model for building the engine's BM25/signals. Redis-first
-    (the Django assembler publishes `veda:sm:{source}:{tenant}`, §3.6) so one warm
-    worker serves N sources; on-disk `SEMANTIC_MODEL_FILE` fallback (dev / cache miss)."""
-    from veda_core import context
-    ctx = context.try_current()
-    if ctx is not None and os.environ.get("VEDA_SM_REDIS", "").strip().lower() in ("1", "true", "yes", "on"):
+def _load_one_sm(source_id, tenant):
+    """One source's semantic model. Redis-first (the Django assembler publishes
+    `veda:sm:{source}:{tenant}`, §3.6) so one warm worker serves N sources; on-disk
+    `SEMANTIC_MODEL_FILE` fallback (dev / cache miss)."""
+    if os.environ.get("VEDA_SM_REDIS", "").strip().lower() in ("1", "true", "yes", "on"):
         try:
             import redis as _redis
             url = os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
-            raw = _redis.Redis.from_url(url).get(f"veda:sm:{ctx.source_id}:{ctx.tenant}")
+            raw = _redis.Redis.from_url(url).get(f"veda:sm:{source_id}:{tenant}")
             if raw:
                 return json.loads(raw)
         except Exception:
@@ -167,6 +179,61 @@ def _load_scoped_sm():
     from config import SEMANTIC_MODEL_FILE
     with open(SEMANTIC_MODEL_FILE) as f:
         return json.load(f)
+
+
+def _merge_scoped_sms(pairs):
+    """Merge per-source semantic models into ONE namespace for a multi-source scope
+    (§Phase 1.4). Table keys stay bare when unique across the set and are source-
+    qualified (`src{ID}.{table}`) only on collision — column keys follow their table.
+    Every table/column entry is tagged with `_source_id` so the SQL/federation tier
+    (Phase 5) can resolve the owning source. Single-source scopes never reach here."""
+    # Which bare table names collide across sources → those get qualified.
+    seen: dict = {}
+    for sid, sm in pairs:
+        for t in (sm.get("tables") or {}):
+            seen.setdefault(t, set()).add(sid)
+    ambiguous = {t for t, sids in seen.items() if len(sids) > 1}
+
+    def tkey(sid, t):
+        return f"src{sid}.{t}" if t in ambiguous else t
+
+    merged: dict = {"version": next((sm.get("version") for _, sm in pairs), "2.0"),
+                    "tables": {}, "columns": {}, "retrieval_documents": {},
+                    "domain_synonyms": {}, "concept_graph": {}}
+    for sid, sm in pairs:
+        remap: dict = {}  # bare table -> namespaced table (for this source)
+        for t, entry in (sm.get("tables") or {}).items():
+            nk = tkey(sid, t); remap[t] = nk
+            merged["tables"][nk] = {**entry, "_source_id": sid}
+        for ck, entry in (sm.get("columns") or {}).items():
+            t, _, col = ck.partition(".")
+            nck = f"{remap.get(t, t)}.{col}" if col else ck
+            merged["columns"][nck] = {**entry, "_source_id": sid}
+        for ck, doc in (sm.get("retrieval_documents") or {}).items():
+            t, _, col = ck.partition(".")
+            nck = f"{remap.get(t, t)}.{col}" if col else ck
+            merged["retrieval_documents"][nck] = doc
+        for term, v in (sm.get("domain_synonyms") or {}).items():
+            merged["domain_synonyms"].setdefault(term, v)
+        for concept, v in (sm.get("concept_graph") or {}).items():
+            merged["concept_graph"].setdefault(concept, v)
+    return merged
+
+
+def _load_scoped_sm():
+    """This scope's semantic model for building the engine's BM25/signals. A single-
+    source scope returns that source's model unchanged (byte-identical to the pre-P5
+    path); a multi-source scope returns the merged namespace (`_merge_scoped_sms`)."""
+    from veda_core import context
+    ctx = context.try_current()
+    if ctx is None:
+        from config import SEMANTIC_MODEL_FILE
+        with open(SEMANTIC_MODEL_FILE) as f:
+            return json.load(f)
+    ids = list(ctx.source_ids)
+    if len(ids) == 1:
+        return _load_one_sm(ids[0], ctx.tenant)
+    return _merge_scoped_sms([(sid, _load_one_sm(sid, ctx.tenant)) for sid in ids])
 
 
 def get_engine(sm=None):
@@ -179,19 +246,23 @@ def get_engine(sm=None):
     when given; otherwise it's loaded for this scope (Redis-first)."""
     scope = _engine_scope()
     eng = _ENGINES.get(scope)
-    if eng is None:
-        from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
-        try:
-            from config import RETRIEVAL_CACHE_ENABLED
-        except Exception:
-            RETRIEVAL_CACHE_ENABLED = False
-        eng = RetrievalEnginePhase3(
-            semantic_model=sm if sm is not None else _load_scoped_sm(),
-            db_config=_internal_db_config(),
-            semantic_searcher=_shared_searcher(),
-            use_cache=RETRIEVAL_CACHE_ENABLED,
-        )
-        _ENGINES[scope] = eng
+    if eng is not None:
+        _ENGINES[scope] = _ENGINES.pop(scope)   # touch → most-recently-used (move to end)
+        return eng
+    from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
+    try:
+        from config import RETRIEVAL_CACHE_ENABLED
+    except Exception:
+        RETRIEVAL_CACHE_ENABLED = False
+    eng = RetrievalEnginePhase3(
+        semantic_model=sm if sm is not None else _load_scoped_sm(),
+        db_config=_internal_db_config(),
+        semantic_searcher=_shared_searcher(),
+        use_cache=RETRIEVAL_CACHE_ENABLED,
+    )
+    _ENGINES[scope] = eng
+    while len(_ENGINES) > ENGINE_CACHE_MAX:        # evict least-recently-used scope(s)
+        _ENGINES.pop(next(iter(_ENGINES)))
     return eng
 
 

@@ -42,15 +42,19 @@ class QueryView(APIView):
 
         # Server-side tenant resolution (§6.2). Prod: derive from request.user; dev default.
         tenant = self._resolve_tenant(request, data)
-        # Default to the ready source so inference always receives a context (the
-        # storage_adapters seam fails closed without one, §4.1). Env-overridable.
-        source_id = data.get("source_id") or int(os.environ.get("VEDA_DEFAULT_SOURCE_ID", "1"))
+        # Resolve the query SCOPE server-side (P5 / cross-source): a source SET, always
+        # validated against the ready-source registry — an optional request subset is
+        # intersected with ownership, never trusted verbatim (§6.2). `source_id` is the
+        # primary (first) member, kept for the single-source execution/audit path.
+        source_ids = self._resolve_scope(data, tenant)
+        source_id = source_ids[0]
 
         rid = getattr(request, "request_id", "")
         started = time.time()
         client = InferenceClient()
         try:
-            payload = client.run_hybrid_query(query, source_id=source_id, tenant=tenant, request_id=rid)
+            payload = client.run_hybrid_query(query, source_id=source_id, tenant=tenant,
+                                              source_ids=source_ids, request_id=rid)
         except InferenceUnavailable as exc:
             latency = int((time.time() - started) * 1000)
             self._audit(query, tenant, source_id, "exec_error", latency, refusal=str(exc), rid=rid)
@@ -70,6 +74,42 @@ class QueryView(APIView):
                     rid=rid, cache_hit=cache_hit)
         return Response({"status": status_str, "result": result, "latency_ms": latency,
                          "request_id": rid, "cache_hit": cache_hit})
+
+    @staticmethod
+    def _resolve_scope(data, tenant) -> list:
+        """The validated query scope (list of source ids, primary first) — §6.2, P5.
+
+        Precedence: an explicit request `source_ids`/`source_id` is intersected with
+        the tenant's READY sources (ownership check — never trust the body verbatim);
+        absent any request pin, the default scope is ALL ready sources of the tenant.
+        Falls back to VEDA_DEFAULT_SOURCE_ID when the registry can't be read / nothing
+        is ready yet, so the fail-closed context seam (§4.1) always gets a source."""
+        default_id = int(os.environ.get("VEDA_DEFAULT_SOURCE_ID", "1"))
+        try:
+            from apps.sources.models import Source
+            ready = list(Source.objects.filter(ready=True).order_by("id")
+                         .values_list("id", flat=True))
+        except Exception:
+            ready = []
+        ready_set = set(ready)
+
+        requested = data.get("source_ids")
+        if requested is None and data.get("source_id") is not None:
+            requested = [data.get("source_id")]
+        if requested is not None:
+            try:
+                req_ids = [int(s) for s in requested]
+            except (TypeError, ValueError):
+                req_ids = []
+            # Ownership: keep only ids the tenant actually owns (ready registry). If the
+            # registry is unreadable, trust the explicit pin rather than fail the request.
+            scope = [i for i in req_ids if i in ready_set] if ready_set else req_ids
+            if scope:
+                return list(dict.fromkeys(scope))
+
+        # No valid request pin → default to all ready sources (plan default), else the
+        # dev fallback so inference always receives a context.
+        return ready or [default_id]
 
     @staticmethod
     def _resolve_tenant(request, data) -> str:

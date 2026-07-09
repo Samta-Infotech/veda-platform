@@ -111,7 +111,7 @@ class OllamaBackend:
 
         if endpoint == "generate":
             payload = {"model": model or self.model, "prompt": user_message,
-                       "stream": False, "options": options}
+                       "stream": False, "keep_alive": "24h", "options": options}
             body = _post_json(f"{self.base_url}/api/generate", payload, timeout)
             return (body.get("response") or "").strip()
 
