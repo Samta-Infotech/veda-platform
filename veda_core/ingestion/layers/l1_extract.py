@@ -174,12 +174,13 @@ def run_sketch_pass(ctx: SourceContext, state: Dict, verbose: bool = False) -> S
         try:
             for tc in cols:
                 vals = sampler(tc.table_name, tc.col_name, CROSS_SOURCE_SKETCH_SAMPLE_SIZE)
-                sketch, n = CS.compute_sketch(vals)
+                sketch, n, vhashes = CS.compute_sketch(vals)
                 if sketch is None:
                     continue
                 rows.append({"col_id": tc.col_id, "table_name": tc.table_name,
                              "col_name": tc.col_name, "n_distinct": n,
-                             "value_class": _vclass(tc), "sketch": sketch})
+                             "value_class": _vclass(tc), "sketch": sketch,
+                             "value_hashes": vhashes})
         finally:
             client = getattr(sampler, "_client", None)
             if client is not None:

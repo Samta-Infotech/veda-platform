@@ -54,7 +54,34 @@ logger = get_logger(__name__)
 ENTITY_CLASSES = ("id", "email", "name", "money", "date", "term")
 _ENTITY_SALT = os.environ.get("VEDA_ENTITY_SALT", "veda-entity")
 _MIN_VALUE_LEN = 4
-_STOPWORDS = {"true", "false", "none", "null", "n/a", "yes", "no", "the", "and", "for"}
+
+# Generic single tokens that are common words, not bridging entities. A one-word chunk
+# term that appears here is rejected by the dictionary detector (multi-word phrases —
+# "green building", "grocery store", "society charge" — bypass this and are admitted,
+# since a shared phrase across a doc and a column is almost always a real entity).
+# This is a deterministic precision heuristic; extend it as new noise words surface.
+_GENERIC_WORDS = frozenset({
+    # function / boolean words
+    "true", "false", "none", "null", "n/a", "yes", "no", "the", "and", "for", "with",
+    "from", "into", "this", "that", "have", "has", "will", "shall", "any", "all", "not",
+    # generic data / catalog nouns
+    "asset", "assets", "document", "documents", "record", "records", "general", "generic",
+    "category", "categories", "type", "types", "status", "code", "codes", "value", "values",
+    "item", "items", "detail", "details", "field", "fields", "list", "table", "column",
+    "module", "section", "title", "label", "name", "names", "number", "date", "time",
+    # generic business / domain nouns seen as noise
+    "invoice", "invoices", "service", "services", "maintenance", "building", "buildings",
+    "society", "main", "hall", "pending", "active", "inactive", "cent", "unit", "units",
+    "green", "level", "group", "user", "users", "role", "roles", "account", "accounts",
+})
+
+# Column-name tokens that mark enum / metadata / lookup columns, whose ".name"/"code"
+# values are schema vocabulary, not entities worth bridging. Columns matching these are
+# excluded from the entity value index (kept: name/label/title/description content cols).
+_METADATA_COL_PATTERNS = (
+    "_code", "code", "_type", "type", "_status", "status", "icon", "flag",
+    "_module", "module", "slug", "app_type", "table_name", "column_name", "_key",
+)
 
 # Typed pattern detectors → the value_class a matched entity should link columns on.
 _PATTERNS: List[Tuple[str, str, "re.Pattern"]] = [
@@ -97,6 +124,17 @@ def _is_sensitive_col(col_name: str) -> bool:
     return any(p in n for p in SENSITIVE_PATTERNS)
 
 
+def _is_metadata_col(col_name: str) -> bool:
+    """Enum/lookup/metadata column whose values are schema vocabulary, not entities."""
+    n = (col_name or "").lower()
+    return any(p in n for p in _METADATA_COL_PATTERNS)
+
+
+def _is_generic_single(value_norm: str) -> bool:
+    """A single-token common word is not a bridging entity; multi-word phrases pass."""
+    return (" " not in value_norm) and (value_norm in _GENERIC_WORDS)
+
+
 # --------------------------------------------------------------------------- load
 def _load_value_index() -> Dict[str, List[dict]]:
     """value_norm -> [{col_id, col_name, source_id, semantic_type, value_class}] from
@@ -123,13 +161,13 @@ def _load_value_index() -> Dict[str, List[dict]]:
     idx: Dict[str, List[dict]] = {}
     for r in rows:
         col = meta.get(r["col_id"])
-        if col is None or _is_sensitive_col(col["name"]):
+        if col is None or _is_sensitive_col(col["name"]) or _is_metadata_col(col["name"]):
             continue
         st = (col["semantic_type"] or "").upper()
         if st not in ("IDENTIFIER", "CATEGORY", "FREE_TEXT"):
             continue
         v = normalize_value(r["value_norm"])
-        if len(v) < _MIN_VALUE_LEN or v in _STOPWORDS:
+        if len(v) < _MIN_VALUE_LEN or _is_generic_single(v):
             continue
         cls = "id" if st == "IDENTIFIER" else ("name" if st == "FREE_TEXT" else "term")
         idx.setdefault(v, []).append({
@@ -150,6 +188,8 @@ def detect_entities(text: str, value_index: Dict[str, List[dict]]) -> Dict[str, 
     # Cheap first-token substring pre-gate before the full-value scan (a plain token
     # set fails when punctuation attaches, e.g. "inv-2024-0113." — so gate on substring).
     for value_norm, cols in value_index.items():
+        if _is_generic_single(value_norm):    # common single word → not an entity
+            continue
         first = value_norm.split(" ", 1)[0]
         if first not in norm:                 # cheap pre-gate before full-value scan
             continue
@@ -195,9 +235,50 @@ def _scoped_delete(source_id: str) -> None:
                             f"AND edge_type IN ({ph})", (source_id, *_ENTITY_EDGE_TYPES))
                 cur.execute(f"DELETE FROM {GRAPH_NODES_TABLE} WHERE source_id = %s "
                             f"AND node_type = 'chunk'", (source_id,))
-                # entity nodes are tenant-shared; leave them (idempotent upsert refreshes).
+                # entity nodes are tenant-shared; leave them (pruned post-link if orphaned).
     except Exception as e:
         logger.warning("entity_linker: scoped delete failed (%s)", e)
+    finally:
+        release_internal_connection(conn)
+
+
+def _prune_orphan_entities() -> int:
+    """Delete entity nodes with no remaining value_of edge (e.g. after a re-ingest drops
+    the links that admitted them). Tenant-wide and safe: an entity still referenced by
+    another source keeps its value_of edges and survives. Also clears their dangling
+    mentions_entity edges. Returns nodes pruned."""
+    if not INTERNAL_DB_AVAILABLE:
+        before = len(GP._IN_MEMORY_NODES)
+        linked = {e["dst_node_id"] if e["edge_type"] == "value_of" else None
+                  for e in GP._IN_MEMORY_EDGES}
+        srcd = {e["src_node_id"] for e in GP._IN_MEMORY_EDGES if e["edge_type"] == "value_of"}
+        GP._IN_MEMORY_NODES = [n for n in GP._IN_MEMORY_NODES
+                               if not (n["node_type"] == "entity" and n["node_id"] not in srcd)]
+        return before - len(GP._IN_MEMORY_NODES)
+    conn = get_internal_connection()
+    try:
+        with conn:
+            with conn.cursor() as cur:
+                cur.execute(f"""
+                    DELETE FROM {GRAPH_NODES_TABLE} gn
+                    WHERE gn.node_type = 'entity'
+                      AND NOT EXISTS (
+                        SELECT 1 FROM {GRAPH_EDGES_TABLE} e
+                        WHERE e.src_node_id = gn.node_id AND e.edge_type = 'value_of')
+                """)
+                pruned = cur.rowcount or 0
+                if pruned:
+                    # sweep their now-dangling mentions_entity edges
+                    cur.execute(f"""
+                        DELETE FROM {GRAPH_EDGES_TABLE} e
+                        WHERE e.edge_type = 'mentions_entity'
+                          AND NOT EXISTS (SELECT 1 FROM {GRAPH_NODES_TABLE} n
+                                          WHERE n.node_id = e.dst_node_id)
+                    """)
+                return pruned
+    except Exception as e:
+        logger.warning("entity_linker: orphan prune failed (%s)", e)
+        return 0
     finally:
         release_internal_connection(conn)
 
@@ -244,16 +325,23 @@ def link_entities(chunks, source_id: str, tenant: str = "default",
             edges.append(GraphEdge(str(uuid4()), cnode, eid, "mentions_entity", me_w,
                                    source_id, evidence=f"entity:{cls}",
                                    attrs={"class": cls}))
-            # entity --value_of--> column (per column whose sample set contains it)
+            # entity --value_of--> column (per column whose sample set contains it).
+            # Stamp the edge with the INGESTING (doc) source_id, not the column's source,
+            # so re-ingesting this doc source cleans its own value_of edges via
+            # _scoped_delete (idempotency). The column's real source is kept in attrs and
+            # the edge is loaded tenant-wide by the retriever, so traversal is unaffected.
             for col in info["columns"]:
                 edges.append(GraphEdge(str(uuid4()), eid, GP.col_node_id(col["col_id"]),
-                                       "value_of", vo_w, col["source_id"],
+                                       "value_of", vo_w, source_id,
                                        evidence=f"value_of:{col['col_name']}",
                                        attrs={"col_source": col["source_id"]}))
 
     cn = GP.upsert_nodes(chunk_nodes, verbose=verbose)
     en = GP.upsert_nodes(list(entity_nodes.values()), verbose=verbose)
     ew = GP.upsert_edges(edges, verbose=verbose)
+    pruned = _prune_orphan_entities()   # drop entities left unlinked by this re-ingest
+    if verbose and pruned:
+        logger.info("entity_linker: pruned %d orphan entity node(s)", pruned)
     me = sum(1 for e in edges if e.edge_type == "mentions_entity")
     vo = sum(1 for e in edges if e.edge_type == "value_of")
     dur = round(time.time() - t0, 3)

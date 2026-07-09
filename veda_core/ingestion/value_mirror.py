@@ -34,13 +34,12 @@ def mirror_values_to_redis(source_id: str = "", tenant: str = "default",
     grouped: Dict[str, List[dict]] = {}
     try:
         with conn.cursor() as cur:
-            # column_values has no source_id column — value_sampler truncates and
-            # reloads this table per ingestion run, so it always holds exactly one
-            # source's rows already; no WHERE needed (see _create_column_values_table).
+            # column_values is TRUNCATEd + rebuilt per ingestion (value_sampler), so it
+            # only ever holds the source just ingested — it has no source_id column.
+            # Mirror every row under the caller's source_id (matches the query-tier
+            # reader in value_resolver, which keys the Redis lookup by ctx.source_id).
             cur.execute(
-                "SELECT value_norm, table_name, col_name, value_raw "
-                "FROM column_values"
-            )
+                "SELECT value_norm, table_name, col_name, value_raw FROM column_values")
             for value_norm, table_name, col_name, value_raw in cur.fetchall():
                 grouped.setdefault(value_norm, []).append(
                     {"table": table_name, "col": col_name, "raw": value_raw})

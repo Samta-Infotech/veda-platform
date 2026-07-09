@@ -1,0 +1,432 @@
+{
+  "sar": [
+    "suspicious_activity",
+    "report_type",
+    "filing_date",
+    "sar"
+  ],
+  "ctr": [
+    "cash_transaction",
+    "currency_transaction",
+    "threshold"
+  ],
+  "pep": [
+    "politically_exposed",
+    "pep_flag",
+    "is_pep",
+    "pep_status"
+  ],
+  "kyc": [
+    "kyc_status",
+    "kyc_date",
+    "verification_status",
+    "due_diligence"
+  ],
+  "aml": [
+    "aml_flag",
+    "aml_score",
+    "risk_rating",
+    "aml_status"
+  ],
+  "cdd": [
+    "due_diligence",
+    "cdd_status",
+    "customer_risk",
+    "cdd_date"
+  ],
+  "edd": [
+    "enhanced_due_diligence",
+    "edd_status",
+    "edd_date"
+  ],
+  "ubo": [
+    "beneficial_owner",
+    "ownership_percentage",
+    "ubo_name"
+  ],
+  "sanction": [
+    "is_sanctioned",
+    "sanction_list",
+    "ofac_status",
+    "sanctioned"
+  ],
+  "ofac": [
+    "ofac_status",
+    "ofac_flag",
+    "sanction_list"
+  ],
+  "fatf": [
+    "risk_rating",
+    "jurisdiction_risk",
+    "country_risk"
+  ],
+  "risk score": [
+    "risk_score",
+    "risk_rating",
+    "fraud_score",
+    "risk_level"
+  ],
+  "risk rating": [
+    "risk_rating",
+    "risk_level",
+    "risk_score"
+  ],
+  "counterparty": [
+    "counterparty_name",
+    "counterparty_id",
+    "beneficiary",
+    "payee"
+  ],
+  "beneficiary": [
+    "beneficiary_name",
+    "beneficiary_id",
+    "counterparty"
+  ],
+  "transaction": [
+    "txn_amount",
+    "amount",
+    "debit_amount",
+    "credit_amount",
+    "transaction_id"
+  ],
+  "wire transfer": [
+    "wire_amount",
+    "transfer_amount",
+    "txn_type",
+    "transaction_type"
+  ],
+  "remittance": [
+    "remittance_amount",
+    "transfer_amount",
+    "txn_type"
+  ],
+  "flagged": [
+    "is_flagged",
+    "flag_reason",
+    "alert_type",
+    "workflow_state"
+  ],
+  "suspicious": [
+    "risk_score",
+    "alert_type",
+    "workflow_state",
+    "is_suspicious"
+  ],
+  "investigation": [
+    "incident",
+    "case_type",
+    "investigation_date",
+    "case_status"
+  ],
+  "alert": [
+    "incident",
+    "alert_type",
+    "alert_status",
+    "workflow_state"
+  ],
+  "case": [
+    "incident",
+    "case_id",
+    "case_status",
+    "case_type"
+  ],
+  "escalated": [
+    "workflow_state",
+    "escalation_status",
+    "is_escalated"
+  ],
+  "open": [
+    "workflow_state",
+    "status",
+    "is_open",
+    "is_active"
+  ],
+  "closed": [
+    "workflow_state",
+    "status",
+    "closed_date",
+    "resolution"
+  ],
+  "queue": [
+    "workflow_state",
+    "queue_name",
+    "assigned_queue"
+  ],
+  "sla": [
+    "sla_hours",
+    "sla_breach",
+    "due_date",
+    "sla_status"
+  ],
+  "threshold": [
+    "threshold_amount",
+    "limit_value",
+    "max_amount"
+  ],
+  "structuring": [
+    "txn_amount",
+    "transaction_type",
+    "structuring_flag"
+  ],
+  "layering": [
+    "transaction_type",
+    "transfer_count",
+    "layering_flag"
+  ],
+  "placement": [
+    "deposit_amount",
+    "cash_deposit",
+    "placement_flag"
+  ],
+  "npa": [
+    "is_npa",
+    "npa_date",
+    "npa_amount",
+    "asset_classification"
+  ],
+  "emi": [
+    "emi_amount",
+    "installment_amount",
+    "monthly_payment"
+  ],
+  "ltv": [
+    "loan_to_value",
+    "ltv_ratio",
+    "collateral_value"
+  ],
+  "cibil": [
+    "credit_score",
+    "cibil_score",
+    "bureau_score"
+  ],
+  "collateral": [
+    "collateral_type",
+    "collateral_value",
+    "security_type"
+  ],
+  "disbursement": [
+    "disbursement_date",
+    "disbursed_amount",
+    "release_date"
+  ],
+  "delinquent": [
+    "is_delinquent",
+    "days_past_due",
+    "dpd",
+    "overdue_amount"
+  ],
+  "write off": [
+    "write_off_date",
+    "write_off_amount",
+    "is_written_off"
+  ],
+  "recovery": [
+    "recovery_amount",
+    "recovery_date",
+    "recovery_status"
+  ],
+  "bhk": [
+    "bedroom_count",
+    "bhk_type",
+    "unit_type",
+    "configuration"
+  ],
+  "carpet area": [
+    "carpet_area_sqft",
+    "area_sqft",
+    "built_up_area"
+  ],
+  "possession": [
+    "possession_date",
+    "handover_date",
+    "completion_date"
+  ],
+  "rera": [
+    "rera_number",
+    "rera_status",
+    "project_approval"
+  ],
+  "facing": [
+    "facing_direction",
+    "facing",
+    "property_facing"
+  ],
+  "occupancy": [
+    "occupancy_rate",
+    "is_occupied",
+    "tenant_status"
+  ],
+  "stamp duty": [
+    "stamp_duty",
+    "registration_charges",
+    "stamp_value"
+  ],
+  "ticket number": [
+    "ticket_id"
+  ],
+  "work order id": [
+    "ticket_id"
+  ],
+  "maintenance case": [
+    "ticket_id"
+  ],
+  "service request id": [
+    "ticket_id"
+  ],
+  "repair ticket": [
+    "ticket_id"
+  ],
+  "find tickets for customer": [
+    "ticket_id"
+  ],
+  "list all maintenance cases from last month": [
+    "ticket_id"
+  ],
+  "track status of service request": [
+    "ticket_id"
+  ],
+  "asset identifier": [
+    "asset_id"
+  ],
+  "asset code": [
+    "asset_id"
+  ],
+  "item id": [
+    "asset_id"
+  ],
+  "property number": [
+    "asset_id"
+  ],
+  "security code": [
+    "asset_id"
+  ],
+  "find asset by id:": [
+    "asset_id"
+  ],
+  "list assets with id:": [
+    "asset_id"
+  ],
+  "search for item using id:": [
+    "asset_id"
+  ],
+  "risk category": [
+    "category"
+  ],
+  "compliance type": [
+    "category"
+  ],
+  "operation class": [
+    "category"
+  ],
+  "security level": [
+    "category"
+  ],
+  "transaction classification": [
+    "category"
+  ],
+  "transactions by risk category": [
+    "category"
+  ],
+  "operations within compliance type": [
+    "category"
+  ],
+  "security levels for transactions": [
+    "category"
+  ],
+  "active": [
+    "status"
+  ],
+  "inactive": [
+    "status"
+  ],
+  "pending": [
+    "status"
+  ],
+  "suspended": [
+    "status"
+  ],
+  "terminated": [
+    "status"
+  ],
+  "status is active": [
+    "status"
+  ],
+  "find suspended accounts": [
+    "status"
+  ],
+  "update status to inactive": [
+    "status"
+  ],
+  "supplier_id": [
+    "vendor_id"
+  ],
+  "client_id": [
+    "vendor_id"
+  ],
+  "business_partner_id": [
+    "vendor_id"
+  ],
+  "account_id": [
+    "vendor_id"
+  ],
+  "party_id": [
+    "vendor_id"
+  ],
+  "find vendor by id:": [
+    "vendor_id"
+  ],
+  "list vendors with ids:": [
+    "vendor_id"
+  ],
+  "search for vendor record:": [
+    "vendor_id"
+  ],
+  "case number": [
+    "ticket_id"
+  ],
+  "ticket reference": [
+    "ticket_id"
+  ],
+  "claim identifier": [
+    "ticket_id"
+  ],
+  "support case id": [
+    "ticket_id"
+  ],
+  "order tracking number": [
+    "ticket_id"
+  ],
+  "find ticket for order #123456": [
+    "ticket_id"
+  ],
+  "retrieve case details by id abcd-1234": [
+    "ticket_id"
+  ],
+  "search for support tickets related to customer xyz": [
+    "ticket_id"
+  ],
+  "metropolis": [
+    "city"
+  ],
+  "urban center": [
+    "city"
+  ],
+  "city proper": [
+    "city"
+  ],
+  "municipality": [
+    "city"
+  ],
+  "township": [
+    "city"
+  ],
+  "nearby cities": [
+    "city"
+  ],
+  "city of operation": [
+    "city"
+  ],
+  "local area": [
+    "city"
+  ]
+}
