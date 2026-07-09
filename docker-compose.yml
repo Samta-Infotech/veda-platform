@@ -140,6 +140,14 @@ services:
       HF_HOME: /models/hf_cache            # offline model cache (BGE / reranker) — matches ingest-worker + Dockerfile default
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
+      # Docker-on-macOS has no GPU passthrough, so the in-container `ollama` runs the 7B
+      # SLM on CPU (~5–8× slower → a single SQL-gen call measured 239s). Point the query
+      # tier at the host Metal-GPU ollama (model resident in VRAM), same as ingest-worker.
+      OLLAMA_URL: http://host.docker.internal:11434
+      # Multi-source serving: read the per-source assembled semantic models from redis
+      # (veda:sm:{source}:{tenant}) so a scoped/cross-source query uses each source's OWN
+      # model (and _merge_scoped_sms for multi-source), instead of the global homzhub file.
+      VEDA_SM_REDIS: "1"
     volumes:
       - ".:/app"           # DEV: live code
       - model_cache:/models:ro

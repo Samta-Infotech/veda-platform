@@ -44,6 +44,10 @@ FED_STATEMENT_TIMEOUT_MS = int(os.environ.get("FED_STATEMENT_TIMEOUT_MS", "15000
 FED_ROW_LIMIT = int(os.environ.get("FED_ROW_LIMIT", "10000"))
 
 
+import re as _re
+_IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # safe SQL identifier (group_by key)
+
+
 def catalog_name(source_id) -> str:
     """The DuckDB catalog/schema a source is attached under. Underscore form so it
     is a legal single identifier in generated SQL (`src_<id>`)."""
@@ -151,6 +155,61 @@ class FederatedExecutor:
             rows = [dict(zip(cols, r)) for r in allr[:row_limit]]
             return {"columns": cols, "rows": rows, "row_count": len(rows),
                     "truncated": truncated, "catalogs": sorted(info["catalogs"])}
+        finally:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+    def execute_plan(self, plan: dict, row_limit: int = FED_ROW_LIMIT) -> dict:
+        """Aggregate-pushdown execution (correctness for multi-metric cross-source queries).
+
+        ``plan`` = {group_by: <col-alias or None>, metrics: [{alias, sql}, ...]}. Each
+        metric.sql is an INDEPENDENT single-aggregate SELECT (its own join, GROUP BY the
+        group key AS <group_by>) — so no fan-out double-counting. We materialize each into a
+        DuckDB temp table then FULL JOIN them on the group key. Joining plain temp tables (not
+        postgres_scanner subqueries) sidesteps DuckDB's "non-inner join on subquery" limit AND
+        is semantically correct (each aggregate computed once, over its own rows).
+
+        A single-metric / non-grouped plan degrades to a plain execute()."""
+        metrics = plan.get("metrics") or []
+        group_by = plan.get("group_by")
+        if not metrics:
+            raise FederatedError("empty federated plan")
+        if not group_by or len(metrics) == 1:
+            return self.execute(metrics[0]["sql"], row_limit=row_limit)
+        if not _IDENT_RE.match(str(group_by)):
+            raise FederatedError(f"unsafe group_by identifier: {group_by!r}")
+        # Firewall each metric's source SELECT (SELECT-only, catalogs in scope).
+        cats: set = set()
+        for m in metrics:
+            info = validate_federated_sql(m["sql"], self.allowed_catalogs)
+            cats |= set(info["catalogs"])
+        conn = self._connect()
+        try:
+            try:
+                conn.execute(f"SET statement_timeout='{FED_STATEMENT_TIMEOUT_MS}ms';")
+            except Exception:
+                pass
+            names = []
+            for i, m in enumerate(metrics):
+                tn = f"agg_{i}"
+                # CREATE TEMP TABLE is a LOCAL duckdb object; the source access is the
+                # firewalled SELECT inside it (no source mutation).
+                conn.execute(f'CREATE TEMP TABLE {tn} AS {m["sql"]}')
+                names.append(tn)
+            gk = f'"{group_by}"'
+            join_sql = names[0]
+            for tn in names[1:]:
+                join_sql += f" FULL JOIN {tn} USING ({gk})"
+            final = f"SELECT * FROM {join_sql} ORDER BY 1 LIMIT {int(row_limit)}"
+            rel = conn.execute(final)
+            cols = [d[0] for d in rel.description]
+            allr = rel.fetchmany(row_limit + 1)
+            rows = [dict(zip(cols, r)) for r in allr[:row_limit]]
+            return {"columns": cols, "rows": rows, "row_count": len(rows),
+                    "truncated": len(allr) > row_limit, "catalogs": sorted(cats),
+                    "pushdown": True}
         finally:
             try:
                 conn.close()

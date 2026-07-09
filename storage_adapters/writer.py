@@ -286,6 +286,48 @@ def _sync_graph_from_engine(cur, ctx):
     return len(nodes), len(edges)
 
 
+def _is_relational_source(source_id) -> bool:
+    """True for a relational (DB) source; False for tabular/doc (csv_lake/parquet/xlsx/
+    filesystem). Tabular/doc sources have no semantic_layer_v2 output — their model is
+    built deterministically from their own columns (never the global homzhub file)."""
+    try:
+        from apps.sources.models import Source
+        src = Source.objects.filter(pk=int(source_id)).first()
+        return bool(src) and (getattr(src, "connector_type", "relational") == "relational")
+    except Exception:
+        return True   # fail safe to the legacy (relational) path
+
+
+def _build_lite_sm_from_graph(source_id, tenant) -> dict:
+    """Deterministic per-source semantic model from the engine's graph_nodes columns
+    (per-source correct) — for tabular/doc sources that don't run the relational
+    semantic layer. Mirrors scripts/backfill_semantic_model.py."""
+    import os
+
+    import psycopg2
+
+    from veda_core.ingestion.lite_semantic_model import build_lite_sm
+    dsn = dict(
+        host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
+        port=int(os.environ.get("VEDA_INTERNAL_PORT", "6432")),
+        dbname=os.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),
+        user=os.environ.get("VEDA_INTERNAL_USER", "veda"),
+        password=os.environ.get("VEDA_INTERNAL_PASSWORD", os.environ.get("POSTGRES_PASSWORD", "change-me")),
+    )
+    conn = psycopg2.connect(**dsn)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT table_name, name, semantic_type, data_type, is_pk, is_fk "
+                "FROM graph_nodes WHERE node_type='column' AND source_id=%s", [str(source_id)])
+            cols = [dict(table_name=r[0], col_name=r[1], semantic_type=(r[2] or "FREE_TEXT"),
+                         data_type=(r[3] or ""), is_pk=bool(r[4]), is_fk=bool(r[5]))
+                    for r in cur.fetchall()]
+    finally:
+        conn.close()
+    return build_lite_sm(cols)
+
+
 def warm() -> dict:
     """Ingestion warm stage (§7 stage 10): persist the semantic model the engine just
     produced into the Sm* substrate, sync the structural substrate from the engine
@@ -304,7 +346,14 @@ def warm() -> dict:
                      "veda_semantic_model.json"),
     )
     sm_cols = 0
-    if os.path.exists(sm_file):
+    if not _is_relational_source(ctx.source_id):
+        # Tabular/doc source: build its OWN model from graph columns, NOT the global
+        # (homzhub) sm_file — publishing the global under this source id is the bug that
+        # made tabular/cross-source queries validate against homzhub.
+        sm = _build_lite_sm_from_graph(ctx.source_id, ctx.tenant)
+        assembler.persist(sm, source_id=ctx.source_id, tenant=ctx.tenant, version="2.0-lite")
+        sm_cols = len(sm.get("columns", {}))
+    elif os.path.exists(sm_file):
         with open(sm_file) as f:
             sm = json.load(f)
         assembler.persist(sm, source_id=ctx.source_id, tenant=ctx.tenant)

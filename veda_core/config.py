@@ -195,6 +195,10 @@ BIENCODER_TABLE_TABLE = "table_embeddings_v2"
 # supply the sparse half of the WP4 table prior.
 COLUMN_SPARSE_TABLE = "column_sparse_v1"
 TABLE_SPARSE_TABLE  = "table_sparse_v1"
+# Safety cap on the query-time sparse fit() fallback: encoding every retrieval_document
+# live is only acceptable for a tiny dev model. Above this, the engine skips the sparse
+# signal (degrade, don't hang) and expects a persisted column_sparse_v1 instead.
+SPARSE_FIT_MAX_DOCS = 300
 
 VEDA_INTERNAL_TABLES = {
     # V2 retrieval stores
@@ -654,8 +658,8 @@ BIENCODER_BATCH_SIZE   = 32
 # query and passage are encoded verbatim so their vectors stay in the same space (WP3).
 BIENCODER_QUERY_PREFIX   = ""
 BIENCODER_PASSAGE_PREFIX = ""
-BIENCODER_CANDIDATE_COLS   = 80
-BIENCODER_CANDIDATE_TABLES = 10
+BIENCODER_CANDIDATE_COLS   = 24   # perf (query <30s): fewer candidates to sparse-encode +
+BIENCODER_CANDIDATE_TABLES = 10   # rerank on CPU; 24 still comfortably covers top-15 to L3
 
 # =============================================================================
 # TABLE-FIRST PRIOR (WP4) — table affinity as a soft prior on column scores.
@@ -697,7 +701,10 @@ PRIMARY_RERANK_ENABLED = True
 RERANKER_MODEL         = "BAAI/bge-reranker-v2-m3"
 RERANKER_DEVICE        = _RESOLVED_DEVICE
 RERANKER_BATCH_SIZE    = 64
-RERANKER_MAX_TEXT_LEN  = 512
+# perf (query <30s): cross-encoder cost is ~quadratic in sequence length. 512-token pairs
+# measured ~1.7s/pair on CPU; 160 chars keeps the col/table identity signal at a fraction
+# of the cost. On GPU/CUDA this can be raised back.
+RERANKER_MAX_TEXT_LEN  = 160
 RERANKER_TOP_COLS      = 15
 RERANKER_TOP_TABLES    = 5
 RERANK_SKIP_GAP        = 0.15   # F4: skip L2b when top-2 RRF gap >= this and same table

@@ -45,8 +45,39 @@ async def hydrate() -> dict:
     except Exception as exc:  # non-fatal: engine also lazy-loads on first query
         logger.warning("engine warm-load deferred to first query: %s", exc)
 
+    # 3) Explicitly warm the heavy per-query models (BGE-M3 dense+sparse, the cross-encoder
+    #    reranker, and the SLM). These lazy-init on first use, and cold BGE-M3 load alone is
+    #    ~22s on CPU — paying it at startup keeps the first real query inside the SLA.
+    def _p(msg):  # print so it lands in docker logs (the module logger isn't wired to stdout)
+        print(f"  [warmup] {msg}", flush=True)
+
+    try:
+        from veda_core.ingestion import m3_encoder
+        m3_encoder.encode_query("warm up the dense and sparse encoders")   # dense + sparse
+        m3_encoder.encode_sparse(["warm up the sparse index encoder"])
+        _p("✓ BGE-M3 (dense+sparse)")
+    except Exception as exc:
+        _p(f"BGE-M3 warm deferred: {exc}")
+    try:
+        from veda_core.query import reranker as _rr
+        _r = _rr._get_reranker()
+        if _r is not None:
+            # CrossEncoder → .predict; FlagReranker → .compute_score. Support both.
+            _score = getattr(_r, "predict", None) or getattr(_r, "compute_score", None)
+            if _score is not None:
+                _score([["warm up", "cross encoder reranker"]])
+                _p("✓ cross-encoder reranker")
+    except Exception as exc:
+        _p(f"reranker warm deferred: {exc}")
+    try:
+        from veda_core.slm._call_slm import prewarm
+        prewarm()               # loads + pins the SLM on the (host Metal) backend
+        _p("✓ SLM")
+    except Exception as exc:
+        _p(f"SLM warm deferred: {exc}")
+
     _STATE["ready"] = _STATE["semantic_model"]
-    logger.info("hydrate complete: %s", _STATE)
+    _p(f"hydrate complete: {_STATE}")
     return dict(_STATE)
 
 
