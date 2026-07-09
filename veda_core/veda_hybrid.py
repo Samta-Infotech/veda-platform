@@ -246,6 +246,11 @@ def run_hybrid_query(query, verbose=False):
     plain query, N items for a compound one. Callers branch on MultiResult, never on
     "is this compound", so everything downstream of here stays single-intent-dumb.
 
+    on_event(phase, message, extra: dict), optional: fired at real stage transitions
+    (classify, decompose, sub-query dispatch, per-modality routing, tier2 fallback,
+    answer produced) so an SSE caller can stream genuine progress instead of blocking
+    silently until the whole pipeline returns. Never required — None is a no-op.
+
     Compound handling (flag QUERY_DECOMPOSE_ENABLED): the DETERMINISTIC head
     self-certifies completeness (qualifier_completeness inside the fast path) — a clean
     SQL answer is known to cover the WHOLE utterance, so we skip the decomposer entirely
@@ -266,14 +271,16 @@ def run_hybrid_query(query, verbose=False):
         QUERY_DECOMPOSE_ENABLED = False
 
     if not QUERY_DECOMPOSE_ENABLED:
-        route, res = _dispatch_single(query, verbose=verbose)
+        route, res = _dispatch_single(query, verbose=verbose, on_event=on_event)
         return MultiResult(items=[_to_subresult(query, route, res)])
 
+    _emit(on_event, "classify", "Classifying query intent...")
     intent, _source_ids = classify(query, verbose=verbose)
 
     # Deterministic head: try it directly; a clean answer is complete-by-construction.
     if intent == "sql":
         import io, contextlib
+        _emit(on_event, "sql_probe", "Trying deterministic SQL...")
         sm, cols = _load_semantic_model()
         from veda.pipeline import run_query
         # Capture the probe's trace: if the head answers we replay it (hot path); if it
@@ -284,16 +291,17 @@ def run_hybrid_query(query, verbose=False):
             det = run_query(query, sm, cols, return_result=True)
         if isinstance(det, dict) and det.get("ok"):
             sys.stdout.write(probe.getvalue())
+            _emit(on_event, "answer", "Deterministic SQL answered the query")
             return MultiResult(items=[_to_subresult(query, "deterministic", det)])
         # Deterministic couldn't fully answer → maybe it was several questions.
         return _maybe_split(query, verbose=verbose, precomputed_sql=det,
-                            probe_trace=probe.getvalue())
+                            probe_trace=probe.getvalue(), on_event=on_event)
 
     # RAG/hybrid/NoSQL self-certify nothing → decompose before dispatching (silent-drop guard).
-    return _maybe_split(query, verbose=verbose)
+    return _maybe_split(query, verbose=verbose, on_event=on_event)
 
 
-def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
+def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, on_event=None):
     """Run the decomposer, then either fan out independent sub-queries or fall back to
     the single-query pipeline. dependent_nested → refuse (out of scope for v1).
 
@@ -302,6 +310,7 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
     or refuse-as-nested (there it would be a misleading 'couldn't answer' message)."""
     import io, contextlib
     from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
+    _emit(on_event, "decompose", "Checking whether this is a compound question...")
     # Capture the decomposer's own chatter so the on-screen order stays CHRONOLOGICAL. The
     # deterministic probe ran FIRST (its trace is in probe_trace); the decomposer runs AFTER.
     # Without capture, the decomposer prints live and appears BEFORE the replayed probe trace
@@ -316,7 +325,9 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
         # simply several questions — suppress it; show the split decision + its reasoning.
         sys.stdout.write(_decomp_trace)
         print(f"\n  [Hybrid] compound query → {len(decomp.sub_queries)} independent sub-queries")
-        return _fan_out(decomp.sub_queries, verbose=verbose)
+        _emit(on_event, "decompose", f"Split into {len(decomp.sub_queries)} sub-queries",
+              sub_queries=list(decomp.sub_queries))
+        return _fan_out(decomp.sub_queries, verbose=verbose, on_event=on_event)
 
     if decomp.type == DECOMP_DEPENDENT:
         # One part needs another's RESULT — these recompose into one query, which v1
@@ -340,22 +351,26 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None):
     if probe_trace:
         sys.stdout.write(probe_trace)
     sys.stdout.write(_decomp_trace)
-    route, res = _dispatch_single(query, verbose=verbose, precomputed_sql=precomputed_sql)
+    route, res = _dispatch_single(query, verbose=verbose, precomputed_sql=precomputed_sql,
+                                   on_event=on_event)
     return MultiResult(items=[_to_subresult(query, route, res)])
 
 
-def _run_sub(sq, verbose=False):
+def _run_sub(sq, verbose=False, on_event=None, index=None, total=None):
     """Dispatch one sub-query, never raising — a crash becomes an error SubResult so one
     bad sub-query can't sink the others."""
+    if index is not None and total is not None:
+        _emit(on_event, "sub_query", f"Running sub-query {index}/{total}: {sq}",
+              index=index, total=total, sub_query=sq)
     try:
-        route, res = _dispatch_single(sq, verbose=verbose)
+        route, res = _dispatch_single(sq, verbose=verbose, on_event=on_event)
     except Exception as e:
         print(f"  [Hybrid] sub-query crashed: {type(e).__name__}: {e}")
         route, res = "none", None
     return _to_subresult(sq, route, res)
 
 
-def _fan_out(sub_queries, verbose=False):
+def _fan_out(sub_queries, verbose=False, on_event=None):
     """Run independent sub-queries and assemble the MultiResult IN QUERY ORDER.
 
     Default (QUERY_DECOMPOSE_MAX_WORKERS == 1): SEQUENTIAL with LIVE output — each
@@ -375,11 +390,12 @@ def _fan_out(sub_queries, verbose=False):
     # Pre-warm shared read-only singletons ONCE so concurrent first access can't race.
     _load_semantic_model()
 
+    total = len(sub_queries)
     if workers == 1:
         items = []
-        for sq in sub_queries:
+        for i, sq in enumerate(sub_queries, start=1):
             print(f"\n  [Hybrid] ── sub-query: {sq!r}")
-            items.append(_run_sub(sq, verbose=verbose))
+            items.append(_run_sub(sq, verbose=verbose, on_event=on_event, index=i, total=total))
         return MultiResult(items=items)
 
     import io, sys, threading
@@ -399,17 +415,18 @@ def _fan_out(sub_queries, verbose=False):
     from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
     _parent_ctx = _try_ctx()
 
-    def _one(sq):
+    def _one(indexed_sq):
+        i, sq = indexed_sq
         if _parent_ctx is not None:
             _set_ctx(_parent_ctx)
         buffers[threading.get_ident()] = io.StringIO()
-        item = _run_sub(sq, verbose=verbose)
+        item = _run_sub(sq, verbose=verbose, on_event=on_event, index=i, total=total)
         return item, buffers[threading.get_ident()].getvalue()
 
     sys.stdout = _ThreadRouter()
     try:
         with ThreadPoolExecutor(max_workers=workers) as ex:
-            pairs = list(ex.map(_one, sub_queries))     # ex.map preserves input order
+            pairs = list(ex.map(_one, enumerate(sub_queries, start=1)))  # ex.map preserves input order
     finally:
         sys.stdout = real_stdout
 
@@ -422,12 +439,13 @@ def _fan_out(sub_queries, verbose=False):
     return MultiResult(items=items)
 
 
-def _dispatch_single(query, verbose=False, precomputed_sql=None):
+def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     """The single-query pipeline: classify → best head → (Tier-2 for SQL). Returns
     (route, head_result). This is the UNCHANGED per-modality dispatch — every sub-query
     of a compound query runs through here exactly as a standalone query would."""
     intent, source_ids = classify(query, verbose=verbose)
     print(f"\n  [Hybrid] intent = {intent}   sources = {source_ids or 'default'}")
+    _emit(on_event, "route", f"Routed to {intent} engine", intent=intent)
 
     # ── SQL → DETERMINISTIC engine (the correctness brain) ────────────────────
     if intent == "sql":
@@ -440,27 +458,34 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None):
         # builder → GRAPH-GUARDED firewall → execute. Flag-gated (needs Ollama); the
         # graph guard (now live in the firewall) keeps LLM-proposed joins honest.
         if isinstance(res, dict) and not res.get("ok") and res.get("status") in (
-                "refuse", "qualifier_dropped", "ungrounded", "no_table", "clarify"):
+                "refuse", "qualifier_dropped", "ungrounded", "no_table", "clarify",
+                "exec_error"):
             try:
                 from config import TIER2_LLM_FALLBACK
             except Exception:
                 TIER2_LLM_FALLBACK = False
             if TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
+                _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
                 t2 = _tier2_sql(query, sm, cols, verbose=verbose)
                 if t2 is not None:
+                    _emit(on_event, "answer", "Tier-2 SQL answered the query")
                     return "deterministic", t2
+        else:
+            _emit(on_event, "answer", "SQL query executed")
         return "deterministic", res
 
     # ── RAG → integrated document retrieval + synthesis ───────────────────────
     if intent == "rag":
         from query.rag_layer import run_rag_layer
+        _emit(on_event, "rag", "Retrieving relevant documents...")
         rag = run_rag_layer(query, source_ids=source_ids,
                             temporal_filter=_temporal(query), verbose=verbose)
         if getattr(rag, "error", None):
             print(f"  [RAG] ✗ {rag.error}")
         else:
             print(f"\n  [RAG] {rag.answer}\n  citations: {rag.citations}")
+            _emit(on_event, "answer", "Synthesized answer from retrieved documents")
         return "rag", rag
 
     # ── HYBRID → DETERMINISTIC SQL rows ⊕ document fusion ─────────────────────
@@ -469,6 +494,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None):
         from veda.pipeline import run_query
         from query.rag_layer import run_hybrid_layer
         sm, cols = _load_semantic_model()
+        _emit(on_event, "hybrid", "Running SQL and document fusion...")
         # Run the DETERMINISTIC SQL head first and feed its EXECUTED rows into the
         # fusion (the correct-by-construction numbers), instead of letting the fusion
         # rely on LLM-written SQL. (Also supplies the previously-missing sql_columns.)
@@ -486,11 +512,15 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None):
             print(f"  [Hybrid] ✗ {hy.error}")
         else:
             print(f"\n  [Hybrid] {hy.answer}")
+            _emit(on_event, "answer", "Fused SQL and document results into an answer")
         return "hybrid", hy
 
     # ── NoSQL → integrated native-query builder + execution ───────────────────
     if intent == "nosql":
-        return "nosql", _run_nosql(query, source_ids, verbose=verbose)
+        _emit(on_event, "nosql", "Querying document store...")
+        result = _run_nosql(query, source_ids, verbose=verbose)
+        _emit(on_event, "answer", "NoSQL query executed")
+        return "nosql", result
 
     # ── default safety net ────────────────────────────────────────────────────
     sm, cols = _load_semantic_model()
@@ -582,6 +612,36 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     return True, ""
 
 
+def _repair_hint_for(error: str) -> str:
+    """Turn a firewall/execution error into a corrective instruction appended to the SLM
+    prompt on the NEXT IR attempt (execution-feedback self-repair, IR-level).
+
+    The LLM emits IR, never SQL, so the hint steers IR choices (columns/joins/grain) — it
+    never asks the model to 'fix SQL'. Classified for a targeted nudge; generic fallback
+    otherwise."""
+    e = (error or "").lower()
+    if "column" in e and any(k in e for k in ("unknown", "not exist", "does not exist", "no such")):
+        cls = ("The previous attempt referenced a column that does not exist. Use ONLY the "
+               "column UUIDs provided above — never invent column names.")
+    elif any(k in e for k in ("join", "fk", "cartesian", "edge", "not directly related")):
+        cls = ("The previous attempt proposed a join that is not a real foreign-key edge. "
+               "Only join tables that share a provided FK relationship; otherwise answer "
+               "with a single table.")
+    elif "ungrounded" in e or "value" in e:
+        cls = ("The previous attempt filtered on a value that is not present in the data. "
+               "Only filter on values that actually exist in the named column.")
+    elif "qualifier" in e or "dropped" in e:
+        cls = ("The previous attempt dropped a condition the question asked for. Represent "
+               "every filter/grouping/ordering the question mentions.")
+    elif "ambiguous" in e:
+        cls = "The previous attempt was ambiguous about which column or table was meant — be explicit."
+    elif "ir_mismatch" in e or "syntax" in e:
+        cls = "The previous attempt did not match the question's intent. Produce a simpler, faithful IR."
+    else:
+        cls = "The previous attempt failed validation/execution. Produce a simpler, correct IR."
+    return f"[REPAIR] {cls} (error: {str(error)[:180]})"
+
+
 def _tier2_sql(query, sm, all_cols, verbose=False):
     """Tier-2 SQL fallback (only when the deterministic head can't answer).
 
@@ -633,66 +693,97 @@ def _tier2_sql(query, sm, all_cols, verbose=False):
         except Exception as _ee:
             print(f"  [Tier2] envelope path skipped: {type(_ee).__name__}: {str(_ee)[:120]}")
 
-        l3 = run_slm_layer(query=query, temporal_filter=tf, top_k_columns=sel.columns,
-                           join_path=sel.join_path, verbose=verbose)
-        if getattr(l3, "error", None) or not getattr(l3, "ir_json", None):
-            print(f"  [Tier2] no usable IR from SLM "
-                  f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
-            return None
-
-        # ── ONE JOIN ENGINE (Phase 2) ─────────────────────────────────────────────
-        # If the LLM identified MULTIPLE entities, build the joins with the
-        # deterministic graph planner (plan_join_tree), NOT sql_builder's retrieval
-        # join_path. The LLM only NAMES entities; the graph-verified planner builds
-        # (or refuses) the joins — same engine the deterministic head uses.
+        # ── IR PATH with bounded EXECUTION-FEEDBACK REPAIR loop ───────────────────────
+        # The LLM emits IR (never SQL); on a firewall rejection or execution error we feed
+        # the classified error back into the SLM prompt (via _repair_hint_for) and retry a
+        # corrected IR, instead of refusing on the first miss. Bounded by
+        # VALIDATION_MAX_REPAIR_ATTEMPTS; on exhaustion the original rejection stands. The
+        # hint is appended to the QUERY so it reaches the prompt regardless of which
+        # run_slm_layer branch runs (both build the prompt from `query`) — no SLM-internal
+        # edits. Flag-gated, off by default: on any config miss the loop runs 0 extra times
+        # and behaves exactly as before.
+        try:
+            from config import VALIDATION_REPAIR_LOOP_ENABLED, VALIDATION_MAX_REPAIR_ATTEMPTS
+        except Exception:
+            VALIDATION_REPAIR_LOOP_ENABLED, VALIDATION_MAX_REPAIR_ATTEMPTS = False, 0
+        _max_repairs = int(VALIDATION_MAX_REPAIR_ATTEMPTS) if VALIDATION_REPAIR_LOOP_ENABLED else 0
+        _repair_hint = None
         from config import LANGGRAPH_SHARED_PLANNER
-        ents = (l3.ir_json or {}).get("entities", []) or []
-        id2name = {r.table_id: r.table_name for r in sel.columns}
-        ent_names = [n for n in dict.fromkeys(id2name.get(e.get("table_id")) for e in ents) if n]
-        if LANGGRAPH_SHARED_PLANNER and len(ent_names) >= 2:
-            from veda.planning import build_from_entities
-            act = build_from_entities(query, sm, all_cols, tf, ent_names[0], ent_names[1:])
-            if isinstance(act, dict) and act.get("sql"):
-                a_tables = set(act.get("tables", []))
-                a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
-                                                if k.split(".", 1)[0] in a_tables]
-                psql, params, err = validate_and_parameterize(act["sql"], a_tables, a_cols)
-                if err:
-                    print(f"  [Tier2] shared-planner firewall rejected (kept safe): {err}")
-                    return {"status": "tier2_rejected", "ok": False, "error": err}
-                cols, rows, eerr = execute_sql(psql, list(params))
-                if eerr:
-                    return {"status": "tier2_exec_error", "ok": False, "error": eerr}
-                print(f"  [Tier2] answered via SHARED planner (graph-verified joins) — {len(rows)} rows")
-                _print_rows(cols, rows, sql=psql)
-                return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
-                        "sql": psql, "source": "tier2_shared_planner"}
-            # planner refused/clarified the multi-table join → respect it (refuse-over-guess)
-            if isinstance(act, dict) and act.get("action") in ("refuse", "clarify"):
-                if verbose:
-                    print(f"  [Tier2] shared planner declined join: {act.get('msg','')}")
-                return None
-            # otherwise fall through to single-table sql_builder below
 
-        l4 = run_sql_builder(ir_json=l3.ir_json, top_k_columns=sel.columns,
-                             join_path=sel.join_path, verbose=verbose)
-        if getattr(l4, "error", None) or not getattr(l4, "sql", None):
-            return None
-        allowed_tables = set(getattr(l4, "tables_used", []) or [])
-        allowed_cols = [k.split(".", 1)[1] for k in all_cols
-                        if k.split(".", 1)[0] in allowed_tables]
-        # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
-        psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
-        if err:
-            print(f"  [Tier2] firewall rejected (kept safe): {err}")
-            return {"status": "tier2_rejected", "ok": False, "error": err}
-        cols, rows, eerr = execute_sql(psql, list(params))
-        if eerr:
-            return {"status": "tier2_exec_error", "ok": False, "error": eerr}
-        print(f"  [Tier2] answered via LLM-IR (graph-verified) — {len(rows)} rows")
-        _print_rows(cols, rows, sql=psql)
-        return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
-                "sql": psql, "source": "tier2"}
+        for _attempt in range(_max_repairs + 1):
+            _q_ir = query if not _repair_hint else f"{query}\n\n{_repair_hint}"
+            if _repair_hint:
+                print(f"  [Tier2] repair attempt {_attempt}/{_max_repairs}")
+            l3 = run_slm_layer(query=_q_ir, temporal_filter=tf, top_k_columns=sel.columns,
+                               join_path=sel.join_path, verbose=verbose)
+            if getattr(l3, "error", None) or not getattr(l3, "ir_json", None):
+                print(f"  [Tier2] no usable IR from SLM "
+                      f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
+                return None
+
+            # ── ONE JOIN ENGINE (Phase 2) ─────────────────────────────────────────
+            # If the LLM identified MULTIPLE entities, build the joins with the
+            # deterministic graph planner (plan_join_tree), NOT sql_builder's retrieval
+            # join_path. The LLM only NAMES entities; the graph-verified planner builds
+            # (or refuses) the joins — same engine the deterministic head uses.
+            ents = (l3.ir_json or {}).get("entities", []) or []
+            id2name = {r.table_id: r.table_name for r in sel.columns}
+            ent_names = [n for n in dict.fromkeys(id2name.get(e.get("table_id")) for e in ents) if n]
+            if LANGGRAPH_SHARED_PLANNER and len(ent_names) >= 2:
+                from veda.planning import build_from_entities
+                act = build_from_entities(query, sm, all_cols, tf, ent_names[0], ent_names[1:])
+                if isinstance(act, dict) and act.get("sql"):
+                    a_tables = set(act.get("tables", []))
+                    a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
+                                                    if k.split(".", 1)[0] in a_tables]
+                    psql, params, err = validate_and_parameterize(act["sql"], a_tables, a_cols)
+                    if err:
+                        if _attempt < _max_repairs:
+                            _repair_hint = _repair_hint_for(err); continue
+                        print(f"  [Tier2] shared-planner firewall rejected (kept safe): {err}")
+                        return {"status": "tier2_rejected", "ok": False, "error": err}
+                    cols, rows, eerr = execute_sql(psql, list(params))
+                    if eerr:
+                        if _attempt < _max_repairs:
+                            _repair_hint = _repair_hint_for(eerr); continue
+                        return {"status": "tier2_exec_error", "ok": False, "error": eerr}
+                    print(f"  [Tier2] answered via SHARED planner (graph-verified joins)"
+                          f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
+                    _print_rows(cols, rows, sql=psql)
+                    return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
+                            "sql": psql, "source": "tier2_shared_planner"}
+                # planner refused/clarified the multi-table join → respect it (refuse-over-guess)
+                if isinstance(act, dict) and act.get("action") in ("refuse", "clarify"):
+                    if verbose:
+                        print(f"  [Tier2] shared planner declined join: {act.get('msg','')}")
+                    return None
+                # otherwise fall through to single-table sql_builder below
+
+            l4 = run_sql_builder(ir_json=l3.ir_json, top_k_columns=sel.columns,
+                                 join_path=sel.join_path, verbose=verbose)
+            if getattr(l4, "error", None) or not getattr(l4, "sql", None):
+                return None
+            allowed_tables = set(getattr(l4, "tables_used", []) or [])
+            allowed_cols = [k.split(".", 1)[1] for k in all_cols
+                            if k.split(".", 1)[0] in allowed_tables]
+            # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
+            psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
+            if err:
+                if _attempt < _max_repairs:
+                    _repair_hint = _repair_hint_for(err); continue
+                print(f"  [Tier2] firewall rejected (kept safe): {err}")
+                return {"status": "tier2_rejected", "ok": False, "error": err}
+            cols, rows, eerr = execute_sql(psql, list(params))
+            if eerr:
+                if _attempt < _max_repairs:
+                    _repair_hint = _repair_hint_for(eerr); continue
+                return {"status": "tier2_exec_error", "ok": False, "error": eerr}
+            print(f"  [Tier2] answered via LLM-IR (graph-verified)"
+                  f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
+            _print_rows(cols, rows, sql=psql)
+            return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
+                    "sql": psql, "source": "tier2"}
+        return None   # repair attempts exhausted → keep the refusal
     except Exception as e:
         # Always surface WHY Tier-2 bailed (Ollama down, retrieval store missing, etc.) —
         # otherwise the path silently no-ops and looks like it never ran.

@@ -6,9 +6,11 @@
 
 numpy<2
 torch
-# Pin <5: FlagEmbedding 1.2.10's BGE_M3/trainer.py references Optional without
-# importing it, which only NameErrors under transformers 5.x. An unpinned rebuild
-# resolved transformers to 5.13.0 and broke the M3 encoder (dense+sparse) at import.
+# Pin exact: FlagEmbedding 1.2.10's BiTrainer does `from transformers.trainer import *`
+# expecting Optional etc. to be re-exported — gone in transformers 5.x, which crashes
+# EVERY query (NameError: Optional) as soon as the retrieval engine cold-inits its sparse
+# ranker. An unpinned/range rebuild can still land on a breaking transformers 4.x release,
+# so pin the exact version validated against FlagEmbedding 1.2.10.
 transformers==4.49.0
 torch-geometric
 sentence-transformers

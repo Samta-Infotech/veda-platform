@@ -57,6 +57,11 @@ def _start_rehydrate_subscriber():
                         _reader.clear_ef_search_cache()
                     except Exception:
                         pass
+                    try:                       # re-ingest changes the FK graph — drop the cached edge set
+                        from storage_adapters import reader as _reader
+                        _reader.clear_fk_adjacency_cache()
+                    except Exception:
+                        pass
                     try:                       # re-ingest rebuilt the graph (WP5 PPR matrix)
                         from query import graph_retriever as _gr
                         _gr.clear_ppr_cache()

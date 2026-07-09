@@ -119,6 +119,7 @@ class RetrievalEnginePhase3:
         self.rrf_merger = None
         self.adaptive_cutoff = None
         self.cache = None
+        self.value_index = {}
 
         self._initialize()
 
@@ -208,6 +209,12 @@ class RetrievalEnginePhase3:
         self.signal_builder.build_signals(self.semantic_model)
         logger.info("✓ Signal builder ready")
 
+        # F3: Signal-5 inverted value index, built once at warm-load so Signal 5
+        # becomes a set lookup per query instead of a nested scan over every column's
+        # sampled values. Independent of self.column_signals (owned by signal_builder).
+        self.value_index = self.signal_builder.build_value_index(self.semantic_model)
+        logger.info(f"✓ Value index built ({len(self.value_index)} tokens)")
+
         logger.info("\n[6/8] Initializing intent booster...")
         self.intent_booster = IntentBooster(self.semantic_model)
         logger.info("✓ Intent booster ready")
@@ -280,38 +287,58 @@ class RetrievalEnginePhase3:
         # STEP 3: 5-SIGNAL RETRIEVAL
         logger.info("\n[STEP 3/7] 5-Signal Retrieval...")
 
-        # Signal 1: BGE-M3 semantic — encodes the RAW query (WP1). Enriched tokens
-        # feed only the sparse (Signal 2) and value (Signal 5) signals below.
-        signal1_semantic = []
-        if self.semantic_searcher:
-            logger.info("  - Signal 1: BGE-M3 semantic search (1024-dim)...")
-            signal1_semantic = self.semantic_searcher.search(query, k=50)
-            logger.info(f"    ✓ {len(signal1_semantic)} results")
+        # Signal 1 + Signal 2: independent — run concurrently (F1).
+        # RRF fusion is order-independent, so parallelizing changes wall-clock time
+        # only, never the fused result.
+        # Signal 1 encodes the RAW query (WP1); enriched tokens feed only the
+        # sparse (Signal 2) and value (Signal 5) signals.
+        from concurrent.futures import ThreadPoolExecutor
 
-        # Signal 2: learned-sparse (BGE-M3) — raw query + enriched expansions, max-pooled.
-        # This is where enrichment now lives (Signal 1 encodes the raw query only, WP1).
-        logger.info("  - Signal 2: learned-sparse (M3) matching...")
-        signal2_sparse = self.sparse_ranker.rank(
-            query, enriched_tokens=enriched_tokens, top_k=50) or []
-        logger.info(f"    ✓ {len(signal2_sparse)} results")
+        def _run_signal1():
+            signal1 = []
+            if self.semantic_searcher:
+                logger.info("  - Signal 1: BGE-M3 semantic search (1024-dim)...")
+                try:
+                    signal1 = self.semantic_searcher.search(query, k=50)
+                    logger.info(f"    ✓ {len(signal1)} results")
+                except Exception as e:
+                    logger.warning(f"Signal 1 failed: {e}")
+                    signal1 = []
+            return signal1
 
-        # Signal 3: FK subgraph
-        logger.info("  - Signal 3: FK subgraph signals...")
+        def _run_signal2():
+            # Learned-sparse (BGE-M3) — raw query + enriched expansions, max-pooled.
+            logger.info("  - Signal 2: learned-sparse (M3) matching...")
+            try:
+                signal2 = self.sparse_ranker.rank(
+                    query, enriched_tokens=enriched_tokens, top_k=50) or []
+                logger.info(f"    ✓ {len(signal2)} results")
+                return signal2
+            except Exception as e:
+                logger.warning(f"Signal 2 failed: {e}")
+                return []
+
+        with ThreadPoolExecutor(max_workers=2) as _ex:
+            _f1 = _ex.submit(_run_signal1)
+            _f2 = _ex.submit(_run_signal2)
+            signal1_semantic = _f1.result()
+            signal2_sparse   = _f2.result()
+
+        # Signal 3+4: FK subgraph + FK path bridges (merged loop, F2).
+        logger.info("  - Signal 3+4: FK subgraph + FK path bridges (merged loop)...")
         signal3_subgraph_signals = {}
-        for col_id in self.semantic_model.get("columns", {}).keys():
-            score = self.signal_builder.get_signal(col_id, "subgraph_signal") or 0.0
-            if score > 0:
-                signal3_subgraph_signals[col_id] = score
-        logger.info(f"    ✓ {len(signal3_subgraph_signals)} signals")
-
-        # Signal 4: FK path bridges
-        logger.info("  - Signal 4: FK path bridges...")
         signal4_fk_signals = {}
         for col_id in self.semantic_model.get("columns", {}).keys():
-            score = self.signal_builder.get_signal(col_id, "fk_signal") or 0.0
-            if score > 0:
-                signal4_fk_signals[col_id] = score
-        logger.info(f"    ✓ {len(signal4_fk_signals)} signals")
+            # --- Signal 3: FK subgraph ---
+            score3 = self.signal_builder.get_signal(col_id, "subgraph_signal") or 0.0
+            if score3 > 0:
+                signal3_subgraph_signals[col_id] = score3
+            # --- Signal 4: FK path bridges ---
+            score4 = self.signal_builder.get_signal(col_id, "fk_signal") or 0.0
+            if score4 > 0:
+                signal4_fk_signals[col_id] = score4
+        logger.info(f"    ✓ {len(signal3_subgraph_signals)} subgraph signals, "
+                    f"{len(signal4_fk_signals)} fk signals")
 
         # Signal 5: Value index (literals from query). When the user names a VALUE that
         # isn't a column NAME ("escalated", "level 1"), match it against each column's
@@ -320,20 +347,20 @@ class RetrievalEnginePhase3:
         # so it fuses with signals 3/4. Multi-word values ("level 1") are caught via the
         # n-gram tokenizer; values equal to the column's own table name are skipped
         # ("incident" → object_type='Incident' is an entity reference, not a filter value).
+        # F3: uses the precomputed value_index (built once at engine init) instead of a
+        # per-query nested scan over every column's sampled values.
         logger.info("  - Signal 5: Value index direct lookups...")
         signal5_value_signals = {}
         try:
             from query.value_filter import _query_value_tokens
             _qphrases = set(_query_value_tokens(query))
-            if _qphrases:
-                for _cid, _cm in self.semantic_model.get("columns", {}).items():
+            for _phrase in _qphrases:
+                for _cid in self.value_index.get(_phrase, []):
+                    _cm = self.semantic_model.get("columns", {}).get(_cid, {})
                     _tname = (_cm.get("table_name") or _cid.split(".")[0]).lower()
                     _tname_toks = set(_tname.replace("_", " ").split())
-                    for _v in (_cm.get("sample_values") or []):
-                        _vn = str(_v).lower().strip()
-                        if _vn and _vn in _qphrases and _vn not in _tname_toks:
-                            signal5_value_signals[_cid] = 1.0
-                            break
+                    if _phrase not in _tname_toks:
+                        signal5_value_signals[_cid] = 1.0
         except Exception as _e:
             logger.warning(f"    value signal skipped: {_e}")
         logger.info(f"    ✓ {len(signal5_value_signals)} signals")

@@ -112,7 +112,32 @@ class SignalBuilder:
         return self.column_signals
 
     def _build_fk_graph(self, tables: List[Dict]):
-        """Build foreign key graph from schema."""
+        """Build foreign key graph, preferring the canonical relationship graph.
+
+        The substrate `fk_adjacency` scan (below) only carries DECLARED FKs. The
+        relationship graph built at ingestion (ingestion/relationship_graph.py) also
+        includes data-inferred/polymorphic edges (no declared FK constraint, discovered
+        by cardinality + name-affinity) — real join paths this signal would otherwise
+        never see. `veda.runtime.get_graph()` is a local-file read (already loaded/cached
+        for query routing), so this adds no source-DB touch and keeps WP7's zero-warm-
+        connection guarantee. Falls back to the declared-only scan if the graph is
+        unavailable or empty."""
+        try:
+            from veda.runtime import get_graph
+            graph = get_graph() or {}
+            edges = graph.get("edges") or []
+        except Exception:
+            edges = []
+        if edges:
+            logger.info("Building FK graph from relationship graph...")
+            for e in edges:
+                s, sc = e.get("source_table"), e.get("source_column")
+                t, tc = e.get("target_table"), e.get("target_column")
+                if s and sc and t and tc:
+                    self.fk_graph[f"{s}.{sc}"] = f"{t}.{tc}"
+            logger.info(f"✓ Found {len(self.fk_graph)} foreign keys (relationship graph)")
+            return
+
         logger.info("Building FK graph...")
 
         for table_info in tables:
@@ -186,3 +211,16 @@ class SignalBuilder:
         if col_id not in self.column_signals:
             return 0.0
         return self.column_signals[col_id].get(signal_name, 0.0)
+
+    def build_value_index(self, semantic_model: Dict) -> Dict[str, List[str]]:
+        """value_token (lowercased) -> [col_id, ...]. Built ONCE at engine
+        warm-load (F3) so Signal 5 becomes a set lookup, not a per-query
+        nested scan over every column's sampled values."""
+        index: Dict[str, List[str]] = {}
+        for col_id, col_meta in semantic_model.get("columns", {}).items():
+            for val in (col_meta.get("sample_values") or []):
+                token = str(val).strip().lower()
+                if not token:
+                    continue
+                index.setdefault(token, []).append(col_id)
+        return index

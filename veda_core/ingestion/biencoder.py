@@ -100,6 +100,22 @@ def _load_retrieval_docs() -> dict:
     return {}
 
 
+def _load_table_purposes() -> dict:
+    """table_name -> business_purpose from the semantic model (semantic_layer_v2's
+    LLM-authored one-sentence table summary). Empty dict when the model is absent —
+    caller falls back to the bare column-list passage, same as before this existed."""
+    try:
+        from config import SEMANTIC_MODEL_FILE
+        import os
+        import json as _json
+        if os.path.exists(SEMANTIC_MODEL_FILE):
+            tables = _json.load(open(SEMANTIC_MODEL_FILE)).get("tables", {}) or {}
+            return {n: (m.get("business_purpose") or "") for n, m in tables.items()}
+    except Exception:
+        pass
+    return {}
+
+
 def _passage_text(col, rdocs: dict) -> str:
     """Build the BGE passage text per config.EMBED_TEXT_STRATEGY. Always falls back
     to the structural string when no retrieval_document exists for the column."""
@@ -170,28 +186,42 @@ def run_biencoder_ingestion(
             table_map[col.table_id]["col_names"].append(col.col_name)
 
         if col_texts:
+            from psycopg2.extras import execute_values
             col_embeddings = m3_encoder.encode_dense(col_texts)
             with conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {BIENCODER_COL_TABLE} WHERE source_id = %s", (source_id,))
-                for meta, emb in zip(col_metas, col_embeddings):
-                    cur.execute(
-                        f"INSERT INTO {BIENCODER_COL_TABLE} "
-                        f"(col_id, col_name, table_id, table_name, source_id, semantic_type, text, embedding) "
-                        f"VALUES (%s, %s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            meta["col_id"], meta["col_name"], meta["table_id"],
-                            meta["table_name"], meta["source_id"], meta["semantic_type"],
-                            meta["text"], emb.tolist(),
-                        )
-                    )
+                # F2: batched insert — was one execute() per column (thousands
+                # of round trips for a wide schema). Same rows, one statement.
+                col_rows = [
+                    (meta["col_id"], meta["col_name"], meta["table_id"],
+                     meta["table_name"], meta["source_id"], meta["semantic_type"],
+                     meta["text"], emb.tolist())
+                    for meta, emb in zip(col_metas, col_embeddings)
+                ]
+                execute_values(
+                    cur,
+                    f"INSERT INTO {BIENCODER_COL_TABLE} "
+                    f"(col_id, col_name, table_id, table_name, source_id, semantic_type, text, embedding) "
+                    f"VALUES %s",
+                    col_rows,
+                    page_size=500,   # embedding vectors are large — smaller pages than value inserts
+                )
             conn.commit()
 
         # --- Table embeddings ---
         tbl_texts = []
         tbl_metas = []
+        _tbl_purposes = _load_table_purposes()
         for tid, info in table_map.items():
             col_list = ", ".join(info["col_names"][:20])
-            text = BIENCODER_PASSAGE_PREFIX + f"{info['table_name']}: columns {col_list}"
+            purpose = _tbl_purposes.get(info["table_name"])
+            # Bare column names retrieve poorly for a semantic query ("who's overdue on
+            # rent" never lexically matches `columns tenant_id, due_date, amount`) — the
+            # one-sentence business purpose gives the table embedding an actual semantic
+            # anchor. Falls back to the old bare passage when the model has none.
+            text = BIENCODER_PASSAGE_PREFIX + (
+                f"{info['table_name']}: {purpose}. columns {col_list}" if purpose
+                else f"{info['table_name']}: columns {col_list}")
             tbl_texts.append(text)
             tbl_metas.append({
                 "col_id":     tid,
@@ -203,20 +233,25 @@ def run_biencoder_ingestion(
             })
 
         if tbl_texts:
+            from psycopg2.extras import execute_values
             tbl_embeddings = m3_encoder.encode_dense(tbl_texts)
             with conn.cursor() as cur:
                 cur.execute(f"DELETE FROM {BIENCODER_TABLE_TABLE} WHERE source_id = %s", (source_id,))
-                for meta, emb in zip(tbl_metas, tbl_embeddings):
-                    cur.execute(
-                        f"INSERT INTO {BIENCODER_TABLE_TABLE} "
-                        f"(col_id, col_name, table_id, table_name, source_id, text, embedding) "
-                        f"VALUES (%s, %s, %s, %s, %s, %s, %s)",
-                        (
-                            meta["col_id"], meta["col_name"], meta["table_id"],
-                            meta["table_name"], meta["source_id"], meta["text"],
-                            emb.tolist(),
-                        )
-                    )
+                # F3: batched insert — table count is small (≤ a few hundred),
+                # but batching costs nothing and keeps the pattern consistent.
+                tbl_rows = [
+                    (meta["col_id"], meta["col_name"], meta["table_id"],
+                     meta["table_name"], meta["source_id"], meta["text"], emb.tolist())
+                    for meta, emb in zip(tbl_metas, tbl_embeddings)
+                ]
+                execute_values(
+                    cur,
+                    f"INSERT INTO {BIENCODER_TABLE_TABLE} "
+                    f"(col_id, col_name, table_id, table_name, source_id, text, embedding) "
+                    f"VALUES %s",
+                    tbl_rows,
+                    page_size=500,
+                )
             conn.commit()
 
         conn.close()

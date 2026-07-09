@@ -11,7 +11,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from typing import Dict
+
+_TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 
 def _index_path() -> str:
@@ -61,7 +64,9 @@ def build_enrichment_index(source_id: str = "", verbose: bool = False) -> Dict:
                 _add(m, [concept])
     if isinstance(glossary, dict):
         for term, meaning in glossary.items():
-            toks = [t for t in str(meaning).lower().split() if len(t) > 2 and t.isalnum()]
+            # regex, not .split()+isalnum() — punctuation-adjacent tokens ("incident,",
+            # "state-changes") fail isalnum() and were silently dropped from the index.
+            toks = [t for t in _TOKEN_RE.findall(str(meaning).lower()) if len(t) > 2]
             _add(term, toks)
 
     index = {"inverted": {k: sorted(v) for k, v in inverted.items()},

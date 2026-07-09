@@ -102,10 +102,12 @@ class SemanticSearcher:
             List of (col_id, similarity_score) tuples
             Scores range from 0.0 (opposite) to 1.0 (identical)
         """
-        # Phase 8 (B#6): Signal 1 routes through storage_adapters.ann_search → Django-owned
-        # column_embeddings_bge (HNSW, per-(source,tenant), ef_search pinned to §7.1a
-        # recall@k=1.0). This is the ACTIVE, multi-source-correct Signal-1 path: the store is
-        # scoped to the request's ambient source_id, so one warm engine serves N sources.
+        # Phase 8 (B#6): Signal 1 routes through storage_adapters.ann_search → the engine's
+        # live column_embeddings_v2 store (HNSW, per-source SET, ef_search pinned to §7.1a
+        # recall@k=1.0) — NOT the Django column_embeddings_bge mirror, whose writer was never
+        # implemented and stayed permanently empty. This is the ACTIVE, multi-source-correct
+        # Signal-1 path: the store is scoped to the request's ambient source-id SET, so one
+        # warm engine serves N sources.
         #
         # ON by default; set VEDA_ANN_VIA_ADAPTER=0 to fall back to the engine's own db_config
         # store (single-source, no source filter — dev/CLI only). NOTE (was gated off historically):

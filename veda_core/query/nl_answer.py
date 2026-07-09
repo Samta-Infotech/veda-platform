@@ -74,11 +74,29 @@ def template_answer(query: str, columns: List[str], rows: List[dict]) -> Optiona
     return None
 
 
+def deterministic_fallback_answer(query: str, columns: List[str], rows: List[dict]) -> str:
+    """Row count + first rows summary — no SLM call. Used as the immediate answer
+    on the F6 fast-return path, and as the SLM-failure fallback in run_nl_answer."""
+    row_count = len(rows)
+    if row_count == 0:
+        return "No results found."
+    first_vals = []
+    if rows and columns:
+        for c in columns[:3]:
+            v = rows[0].get(c)
+            if v is not None:
+                first_vals.append(f"{c}={v}")
+    return f"Returned {row_count} row(s)." + (
+        f" First: {', '.join(first_vals)}." if first_vals else ""
+    )
+
+
 def run_nl_answer(
     query:   str,
     columns: List[str],
     rows:    List[dict],
     verbose: bool = False,
+    timeout: Optional[float] = None,
 ) -> NLAnswerResult:
     """
     Converts SQL result rows into a natural-language prose answer using the local SLM.
@@ -119,6 +137,7 @@ def run_nl_answer(
         f"Do not repeat the column names verbatim. No markdown."
     )
 
+    _slm_timeout = min(SLM_TIMEOUT_SECS, 60) if timeout is None else timeout
     try:
         from slm import call_slm
         answer = call_slm(
@@ -127,24 +146,12 @@ def run_nl_answer(
             temperature=0.1,
             num_predict=128,
             endpoint="generate",
-            timeout=min(SLM_TIMEOUT_SECS, 60),
+            timeout=_slm_timeout,
         ).strip()
         if not answer:
             raise ValueError("Empty response from SLM")
     except Exception as e:
-        # Deterministic fallback
-        if row_count == 0:
-            answer = "No results found."
-        else:
-            first_vals = []
-            if rows and columns:
-                for c in columns[:3]:
-                    v = rows[0].get(c)
-                    if v is not None:
-                        first_vals.append(f"{c}={v}")
-            answer = f"Returned {row_count} row(s)." + (
-                f" First: {', '.join(first_vals)}." if first_vals else ""
-            )
+        answer = deterministic_fallback_answer(query, columns, rows)
         if verbose:
             print(f"  [NLAnswer] SLM unavailable ({e}) — using fallback answer")
 

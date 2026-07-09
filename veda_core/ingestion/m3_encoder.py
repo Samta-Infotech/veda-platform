@@ -18,6 +18,7 @@ thin api image (which has no ML stack) — callers that never encode never pay f
 """
 from __future__ import annotations
 
+import functools
 import logging
 import os
 import threading
@@ -31,6 +32,15 @@ logger = logging.getLogger(__name__)
 
 _MODEL = None
 _LOCK = threading.Lock()
+
+# One user query is independently re-embedded by Tier1's 5-signal engine AND Tier2's
+# retrieve_v2 (first-stage bi-encoder + table-prior) within the SAME request — same
+# text, same model, same vector space, computed from scratch each time. This cache
+# collapses those repeat encodes to one BGE-M3 forward pass per distinct query text.
+# Bounded + immutable-tuple values so callers can't corrupt a shared numpy array by
+# mutating what they get back. Algorithm-agnostic: every caller gets byte-identical
+# output to an uncached call — only WHICH candidates each tier selects is untouched.
+_QUERY_ENCODE_CACHE_SIZE = 64
 
 
 def _get_model():
@@ -95,16 +105,27 @@ def encode_sparse(texts: List[str]) -> List[Dict[str, float]]:
     return [_clean_sparse(lw) for lw in out["lexical_weights"]]
 
 
-def encode_query(text: str) -> Tuple[np.ndarray, Dict[str, float]]:
-    """Encode one query → (1024-dim normalized dense vector, sparse weight dict) in a
-    SINGLE forward pass (dense + sparse share the encode call)."""
+@functools.lru_cache(maxsize=_QUERY_ENCODE_CACHE_SIZE)
+def _encode_single_cached(text: str) -> Tuple[Tuple[float, ...], Tuple[Tuple[str, float], ...]]:
+    """Single-text dense+sparse encode, memoized by exact text. Returns plain
+    immutable tuples (not numpy/dict) so the cached entry can't be mutated by a
+    caller holding a reference to a previous result."""
     out = _get_model().encode(
         [text], batch_size=1, max_length=512,
         return_dense=True, return_sparse=True, return_colbert_vecs=False,
     )
     dense = _l2_normalize(np.asarray(out["dense_vecs"], dtype=np.float32))[0]
     sparse = _clean_sparse(out["lexical_weights"][0])
-    return dense, sparse
+    return tuple(dense.tolist()), tuple(sparse.items())
+
+
+def encode_query(text: str) -> Tuple[np.ndarray, Dict[str, float]]:
+    """Encode one query → (1024-dim normalized dense vector, sparse weight dict) in a
+    SINGLE forward pass (dense + sparse share the encode call). Memoized per exact
+    query text (see _encode_single_cached) — a repeat call for the same text within
+    or across requests returns the cached vector instead of re-running BGE-M3."""
+    dense_t, sparse_t = _encode_single_cached(text)
+    return np.asarray(dense_t, dtype=np.float32), dict(sparse_t)
 
 
 class _DenseEncoder:
@@ -119,7 +140,14 @@ class _DenseEncoder:
                show_progress_bar=False, batch_size=None, device=None, **_kw):
         single = isinstance(sentences, str)
         texts = [sentences] if single else list(sentences)
-        out = encode_dense(texts)  # already L2-normalized (n, 1024)
+        if len(texts) == 1:
+            # Single query text (bare string OR a 1-element list, e.g. retrieve_v2's
+            # per-query calls) — route through the shared memoized encode so a query
+            # re-embedded by another retrieval path in the same request is free.
+            dense_t, _sparse_t = _encode_single_cached(texts[0])
+            out = np.asarray([dense_t], dtype=np.float32)
+        else:
+            out = encode_dense(texts)  # already L2-normalized (n, 1024)
         return out[0] if single else out
 
     def get_sentence_embedding_dimension(self) -> int:

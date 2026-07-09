@@ -1,0 +1,1395 @@
+{
+  "version": "1.0",
+  "kind": "concepts",
+  "source_hash": "fe66982dfc5fab18",
+  "count": 61,
+  "items": {
+    "annotation_record": {
+      "concept_id": "annotation_record",
+      "labels": [
+        "annotation record",
+        "annotation",
+        "record"
+      ],
+      "match_tokens": [
+        "annotation",
+        "record"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "annotation_record",
+        "primary_key": null
+      },
+      "primary_entity": "A record containing an annotation.",
+      "business_domain": "Annotation",
+      "default_metric": "annotation_record_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "change_request": {
+      "concept_id": "change_request",
+      "labels": [
+        "change request",
+        "change",
+        "request"
+      ],
+      "match_tokens": [
+        "change",
+        "request"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "change_request",
+        "primary_key": "change_request.id"
+      },
+      "primary_entity": "A change request for an asset, process, or system.",
+      "business_domain": "Change Request",
+      "default_metric": "change_request_count",
+      "default_display_columns": [
+        "change_request.created_by_id",
+        "change_request.updated_by_id"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "checklist": {
+      "concept_id": "checklist",
+      "labels": [
+        "checklist"
+      ],
+      "match_tokens": [
+        "checklist"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "checklist",
+        "primary_key": "checklist.id"
+      },
+      "primary_entity": "A checklist item or task.",
+      "business_domain": "Checklist",
+      "default_metric": "checklist_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "checklist_template": {
+      "concept_id": "checklist_template",
+      "labels": [
+        "checklist template",
+        "checklist",
+        "template"
+      ],
+      "match_tokens": [
+        "checklist",
+        "template"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "checklist_template",
+        "primary_key": "checklist_template.id"
+      },
+      "primary_entity": "A pre-defined template for creating checklists.",
+      "business_domain": "Checklist Template",
+      "default_metric": "checklist_template_count",
+      "default_display_columns": [
+        "checklist_template.name"
+      ],
+      "table_type": "MASTER"
+    },
+    "comment": {
+      "concept_id": "comment",
+      "labels": [
+        "comment"
+      ],
+      "match_tokens": [
+        "comment"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "comment",
+        "primary_key": "comment.id"
+      },
+      "primary_entity": "A note or remark made by an individual.",
+      "business_domain": "Comment",
+      "default_metric": "comment_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "counterparty_details": {
+      "concept_id": "counterparty_details",
+      "labels": [
+        "counterparty details",
+        "counterparty",
+        "detail"
+      ],
+      "match_tokens": [
+        "counterparty",
+        "detail"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "counterparty_details",
+        "primary_key": "counterparty_details.id"
+      },
+      "primary_entity": "Detailed information about a counterparty.",
+      "business_domain": "Record",
+      "default_metric": "counterparty_details_count",
+      "default_display_columns": [
+        "counterparty_details.title",
+        "counterparty_details.updated_by_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "counterparty_supplementary_info": {
+      "concept_id": "counterparty_supplementary_info",
+      "labels": [
+        "counterparty supplementary info",
+        "counterparty",
+        "supplementary",
+        "info"
+      ],
+      "match_tokens": [
+        "counterparty",
+        "supplementary",
+        "info"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "counterparty_supplementary_info",
+        "primary_key": "counterparty_supplementary_info.id"
+      },
+      "primary_entity": "A counterparty's supplementary information record.",
+      "business_domain": "Counterparty",
+      "default_metric": "counterparty_supplementary_info_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "dashboard_items": {
+      "concept_id": "dashboard_items",
+      "labels": [
+        "dashboard items",
+        "dashboard",
+        "item"
+      ],
+      "match_tokens": [
+        "dashboard",
+        "item"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "dashboard_items",
+        "primary_key": "dashboard_items.id"
+      },
+      "primary_entity": "An item displayed on a dashboard.",
+      "business_domain": "Dashboard Item",
+      "default_metric": "dashboard_items_count",
+      "default_display_columns": [
+        "dashboard_items.id",
+        "dashboard_items.title"
+      ],
+      "table_type": "MASTER"
+    },
+    "dashboards": {
+      "concept_id": "dashboards",
+      "labels": [
+        "dashboards",
+        "dashboard"
+      ],
+      "match_tokens": [
+        "dashboard"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "dashboards",
+        "primary_key": "dashboards.id"
+      },
+      "primary_entity": "A dashboard record.",
+      "business_domain": "Dashboard",
+      "default_metric": "dashboards_count",
+      "default_display_columns": [
+        "dashboards.title",
+        "dashboards.created_by_id",
+        "dashboards.owner_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "document_category_master": {
+      "concept_id": "document_category_master",
+      "labels": [
+        "document category master",
+        "document",
+        "category"
+      ],
+      "match_tokens": [
+        "document",
+        "category"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "document_category_master",
+        "primary_key": "document_category_master.id"
+      },
+      "primary_entity": "Document Category",
+      "business_domain": "Document Category",
+      "default_metric": "document_category_master_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "document_ingestion_registry": {
+      "concept_id": "document_ingestion_registry",
+      "labels": [
+        "document ingestion registry",
+        "document",
+        "ingestion",
+        "registry"
+      ],
+      "match_tokens": [
+        "document",
+        "ingestion",
+        "registry"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "document_ingestion_registry",
+        "primary_key": null
+      },
+      "primary_entity": "Document Ingestion Record",
+      "business_domain": "Customer",
+      "default_metric": "document_ingestion_registry_count",
+      "default_display_columns": [
+        "document_ingestion_registry.document_id"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "document_tags": {
+      "concept_id": "document_tags",
+      "labels": [
+        "document tags",
+        "document",
+        "tag"
+      ],
+      "match_tokens": [
+        "document",
+        "tag"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "document_tags",
+        "primary_key": "document_tags.id"
+      },
+      "primary_entity": "A tag used to describe or categorize a document.",
+      "business_domain": "Document",
+      "default_metric": "document_tags_count",
+      "default_display_columns": [
+        "document_tags.id"
+      ],
+      "table_type": "REFERENCE"
+    },
+    "document_type_master": {
+      "concept_id": "document_type_master",
+      "labels": [
+        "document type master",
+        "document",
+        "type"
+      ],
+      "match_tokens": [
+        "document",
+        "type"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "document_type_master",
+        "primary_key": "document_type_master.id"
+      },
+      "primary_entity": "A type of document with associated attributes like filename prefix and PII status.",
+      "business_domain": "Document Type",
+      "default_metric": "document_type_master_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "documents": {
+      "concept_id": "documents",
+      "labels": [
+        "documents",
+        "document"
+      ],
+      "match_tokens": [
+        "document"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "documents",
+        "primary_key": "documents.id"
+      },
+      "primary_entity": "A single document with various attributes such as name, size, and description.",
+      "business_domain": "Document",
+      "default_metric": "documents_count",
+      "default_display_columns": [
+        "documents.name"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "external_users": {
+      "concept_id": "external_users",
+      "labels": [
+        "external users",
+        "external",
+        "user"
+      ],
+      "match_tokens": [
+        "external",
+        "user"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "external_users",
+        "primary_key": "external_users.id"
+      },
+      "primary_entity": "External User",
+      "business_domain": "User",
+      "default_metric": "external_users_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "feature": {
+      "concept_id": "feature",
+      "labels": [
+        "feature"
+      ],
+      "match_tokens": [
+        "feature"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "feature",
+        "primary_key": "feature.id"
+      },
+      "primary_entity": "Feature",
+      "business_domain": "Feature",
+      "default_metric": "feature_count",
+      "default_display_columns": [
+        "feature.name"
+      ],
+      "table_type": "MASTER"
+    },
+    "group": {
+      "concept_id": "group",
+      "labels": [
+        "group"
+      ],
+      "match_tokens": [
+        "group"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "group",
+        "primary_key": "group.id"
+      },
+      "primary_entity": "Group",
+      "business_domain": "Group",
+      "default_metric": "group_count",
+      "default_display_columns": [
+        "group.name"
+      ],
+      "table_type": "MASTER"
+    },
+    "incident": {
+      "concept_id": "incident",
+      "labels": [
+        "incident"
+      ],
+      "match_tokens": [
+        "incident"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "incident",
+        "primary_key": "incident.id"
+      },
+      "primary_entity": "An incident that has been reported and recorded.",
+      "business_domain": "Incident",
+      "default_metric": "incident_count",
+      "default_display_columns": [
+        "incident.incident_no"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "incident_signal_score": {
+      "concept_id": "incident_signal_score",
+      "labels": [
+        "incident signal score",
+        "incident",
+        "signal",
+        "score"
+      ],
+      "match_tokens": [
+        "incident",
+        "signal",
+        "score"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "incident_signal_score",
+        "primary_key": "incident_signal_score.id"
+      },
+      "primary_entity": "A score for a set of signals related to an incident.",
+      "business_domain": "Incident Signal",
+      "default_metric": "incident_signal_score_count",
+      "default_display_columns": [
+        "incident_signal_score.id"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "investigation_and_research_counter_party": {
+      "concept_id": "investigation_and_research_counter_party",
+      "labels": [
+        "investigation and research counter party",
+        "investigation",
+        "research",
+        "counter",
+        "party"
+      ],
+      "match_tokens": [
+        "investigation",
+        "research",
+        "counter",
+        "party"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "investigation_and_research_counter_party",
+        "primary_key": "investigation_and_research_counter_party.id"
+      },
+      "primary_entity": "A counter-party associated with an incident.",
+      "business_domain": "Investigation Record",
+      "default_metric": "investigation_and_research_counter_party_count",
+      "default_display_columns": [
+        "investigation_and_research_counter_party.name"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "level": {
+      "concept_id": "level",
+      "labels": [
+        "level"
+      ],
+      "match_tokens": [
+        "level"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "level",
+        "primary_key": null
+      },
+      "primary_entity": "A level or category definition.",
+      "business_domain": "Category",
+      "default_metric": "level_count",
+      "default_display_columns": [
+        "level.level_id",
+        "level.display_name"
+      ],
+      "table_type": "MASTER"
+    },
+    "ml_predictions": {
+      "concept_id": "ml_predictions",
+      "labels": [
+        "ml predictions",
+        "prediction"
+      ],
+      "match_tokens": [
+        "prediction"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "ml_predictions",
+        "primary_key": null
+      },
+      "primary_entity": "A single prediction result.",
+      "business_domain": "Prediction",
+      "default_metric": "ml_predictions_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "ml_use_case": {
+      "concept_id": "ml_use_case",
+      "labels": [
+        "ml use case",
+        "use",
+        "case"
+      ],
+      "match_tokens": [
+        "use",
+        "case"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "ml_use_case",
+        "primary_key": null
+      },
+      "primary_entity": "A machine learning use case definition.",
+      "business_domain": "Use Case",
+      "default_metric": "ml_use_case_count",
+      "default_display_columns": [
+        "ml_use_case.use_case_id",
+        "ml_use_case.tenant_unique_id",
+        "ml_use_case.name"
+      ],
+      "table_type": "MASTER"
+    },
+    "module": {
+      "concept_id": "module",
+      "labels": [
+        "module"
+      ],
+      "match_tokens": [
+        "module"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "module",
+        "primary_key": "module.id"
+      },
+      "primary_entity": "A module or feature within the system.",
+      "business_domain": "Module",
+      "default_metric": "module_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "notification": {
+      "concept_id": "notification",
+      "labels": [
+        "notification"
+      ],
+      "match_tokens": [
+        "notification"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "notification",
+        "primary_key": "notification.id"
+      },
+      "primary_entity": "A notification event.",
+      "business_domain": "Notification",
+      "default_metric": "notification_count",
+      "default_display_columns": [],
+      "table_type": "EVENT"
+    },
+    "organizations": {
+      "concept_id": "organizations",
+      "labels": [
+        "organizations",
+        "organization"
+      ],
+      "match_tokens": [
+        "organization"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "organizations",
+        "primary_key": null
+      },
+      "primary_entity": "An organization within the system.",
+      "business_domain": "Organization",
+      "default_metric": "organizations_count",
+      "default_display_columns": [
+        "organizations.name"
+      ],
+      "table_type": "MASTER"
+    },
+    "party_research": {
+      "concept_id": "party_research",
+      "labels": [
+        "party research",
+        "party",
+        "research"
+      ],
+      "match_tokens": [
+        "party",
+        "research"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "party_research",
+        "primary_key": "party_research.id"
+      },
+      "primary_entity": "A specific research activity.",
+      "business_domain": "Research Activity",
+      "default_metric": "party_research_count",
+      "default_display_columns": [
+        "party_research.id",
+        "party_research.research_type_id",
+        "party_research.party_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "password_policy": {
+      "concept_id": "password_policy",
+      "labels": [
+        "password policy",
+        "password",
+        "policy"
+      ],
+      "match_tokens": [
+        "password",
+        "policy"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "password_policy",
+        "primary_key": "password_policy.id"
+      },
+      "primary_entity": "A password policy rule.",
+      "business_domain": "Password Policy",
+      "default_metric": "password_policy_count",
+      "default_display_columns": [
+        "password_policy.id"
+      ],
+      "table_type": "MASTER"
+    },
+    "password_rule": {
+      "concept_id": "password_rule",
+      "labels": [
+        "password rule",
+        "password",
+        "rule"
+      ],
+      "match_tokens": [
+        "password",
+        "rule"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "password_rule",
+        "primary_key": "password_rule.id"
+      },
+      "primary_entity": "A rule governing password complexity or content.",
+      "business_domain": "Rule",
+      "default_metric": "password_rule_count",
+      "default_display_columns": [
+        "password_rule.id",
+        "password_rule.policy_id"
+      ],
+      "table_type": "REFERENCE"
+    },
+    "password_security_questions": {
+      "concept_id": "password_security_questions",
+      "labels": [
+        "password security questions",
+        "password",
+        "security",
+        "question"
+      ],
+      "match_tokens": [
+        "password",
+        "security",
+        "question"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "password_security_questions",
+        "primary_key": null
+      },
+      "primary_entity": "A security question.",
+      "business_domain": "Security Question",
+      "default_metric": "password_security_questions_count",
+      "default_display_columns": [
+        "password_security_questions.question_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "permission": {
+      "concept_id": "permission",
+      "labels": [
+        "permission"
+      ],
+      "match_tokens": [
+        "permission"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "permission",
+        "primary_key": null
+      },
+      "primary_entity": "A permission level or role.",
+      "business_domain": "Permission",
+      "default_metric": "permission_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "research_type": {
+      "concept_id": "research_type",
+      "labels": [
+        "research type",
+        "research",
+        "type"
+      ],
+      "match_tokens": [
+        "research",
+        "type"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "research_type",
+        "primary_key": "research_type.id"
+      },
+      "primary_entity": "A type of research.",
+      "business_domain": "Research Type",
+      "default_metric": "research_type_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "rfi_comments": {
+      "concept_id": "rfi_comments",
+      "labels": [
+        "rfi comments",
+        "rfi",
+        "comment"
+      ],
+      "match_tokens": [
+        "rfi",
+        "comment"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rfi_comments",
+        "primary_key": "rfi_comments.id"
+      },
+      "primary_entity": "Comment made on a specific RFI instance.",
+      "business_domain": "Comment",
+      "default_metric": "rfi_comments_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "rfi_instance_questions": {
+      "concept_id": "rfi_instance_questions",
+      "labels": [
+        "rfi instance questions",
+        "rfi",
+        "instance",
+        "question"
+      ],
+      "match_tokens": [
+        "rfi",
+        "instance",
+        "question"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rfi_instance_questions",
+        "primary_key": "rfi_instance_questions.id"
+      },
+      "primary_entity": "Question in an RFI instance.",
+      "business_domain": "Question",
+      "default_metric": "rfi_instance_questions_count",
+      "default_display_columns": [
+        "rfi_instance_questions.updated_by_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "rfi_objects": {
+      "concept_id": "rfi_objects",
+      "labels": [
+        "rfi objects",
+        "rfi",
+        "object"
+      ],
+      "match_tokens": [
+        "rfi",
+        "object"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rfi_objects",
+        "primary_key": "rfi_objects.id"
+      },
+      "primary_entity": "Object associated with an RFI instance.",
+      "business_domain": "RFI Object",
+      "default_metric": "rfi_objects_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "rfi_questions": {
+      "concept_id": "rfi_questions",
+      "labels": [
+        "rfi questions",
+        "rfi",
+        "question"
+      ],
+      "match_tokens": [
+        "rfi",
+        "question"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rfi_questions",
+        "primary_key": "rfi_questions.id"
+      },
+      "primary_entity": "A single question in an RFI process.",
+      "business_domain": "RFI",
+      "default_metric": "rfi_questions_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "rfi_responses": {
+      "concept_id": "rfi_responses",
+      "labels": [
+        "rfi responses",
+        "rfi",
+        "respons"
+      ],
+      "match_tokens": [
+        "rfi",
+        "respons"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rfi_responses",
+        "primary_key": "rfi_responses.id"
+      },
+      "primary_entity": "A response to a single question in an RFI process.",
+      "business_domain": "RFI Response",
+      "default_metric": "rfi_responses_count",
+      "default_display_columns": [
+        "rfi_responses.id"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "rfi_templates": {
+      "concept_id": "rfi_templates",
+      "labels": [
+        "rfi templates",
+        "rfi",
+        "template"
+      ],
+      "match_tokens": [
+        "rfi",
+        "template"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rfi_templates",
+        "primary_key": "rfi_templates.id"
+      },
+      "primary_entity": "A template for an RFI process.",
+      "business_domain": "RFI Template",
+      "default_metric": "rfi_templates_count",
+      "default_display_columns": [
+        "rfi_templates.id",
+        "rfi_templates.name",
+        "rfi_templates.notification_template_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "role": {
+      "concept_id": "role",
+      "labels": [
+        "role"
+      ],
+      "match_tokens": [
+        "role"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "role",
+        "primary_key": null
+      },
+      "primary_entity": "A role with associated permissions.",
+      "business_domain": "Role",
+      "default_metric": "role_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "rule": {
+      "concept_id": "rule",
+      "labels": [
+        "rule"
+      ],
+      "match_tokens": [
+        "rule"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "rule",
+        "primary_key": "rule.id"
+      },
+      "primary_entity": "A rule with a condition, message, and description.",
+      "business_domain": "Rule",
+      "default_metric": "rule_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "sampling": {
+      "concept_id": "sampling",
+      "labels": [
+        "sampling"
+      ],
+      "match_tokens": [
+        "sampling"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "sampling",
+        "primary_key": "sampling.id"
+      },
+      "primary_entity": "A single sampling activity or instance.",
+      "business_domain": "Sampling Activity",
+      "default_metric": "sampling_count",
+      "default_display_columns": [
+        "sampling.name"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "signal_assignments": {
+      "concept_id": "signal_assignments",
+      "labels": [
+        "signal assignments",
+        "signal",
+        "assignment"
+      ],
+      "match_tokens": [
+        "signal",
+        "assignment"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "signal_assignments",
+        "primary_key": "signal_assignments.id"
+      },
+      "primary_entity": "A single signal assignment record.",
+      "business_domain": "Signal",
+      "default_metric": "signal_assignments_count",
+      "default_display_columns": [
+        "signal_assignments.signal_id"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "signal_categories": {
+      "concept_id": "signal_categories",
+      "labels": [
+        "signal categories",
+        "signal",
+        "category"
+      ],
+      "match_tokens": [
+        "signal",
+        "category"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "signal_categories",
+        "primary_key": "signal_categories.id"
+      },
+      "primary_entity": "A single signal category.",
+      "business_domain": "Signal Category",
+      "default_metric": "signal_categories_count",
+      "default_display_columns": [
+        "signal_categories.name"
+      ],
+      "table_type": "REFERENCE"
+    },
+    "signal_levels": {
+      "concept_id": "signal_levels",
+      "labels": [
+        "signal levels",
+        "signal",
+        "level"
+      ],
+      "match_tokens": [
+        "signal",
+        "level"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "signal_levels",
+        "primary_key": "signal_levels.id"
+      },
+      "primary_entity": "A level of signal importance or severity.",
+      "business_domain": "Signal",
+      "default_metric": "signal_levels_count",
+      "default_display_columns": [
+        "signal_levels.name"
+      ],
+      "table_type": "REFERENCE"
+    },
+    "signal_rules": {
+      "concept_id": "signal_rules",
+      "labels": [
+        "signal rules",
+        "signal",
+        "rule"
+      ],
+      "match_tokens": [
+        "signal",
+        "rule"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "signal_rules",
+        "primary_key": "signal_rules.id"
+      },
+      "primary_entity": "A rule for detecting a signal.",
+      "business_domain": "Rule",
+      "default_metric": "signal_rules_count",
+      "default_display_columns": [
+        "signal_rules.category_id",
+        "signal_rules.created_by_id",
+        "signal_rules.level_id"
+      ],
+      "table_type": "TRANSACTION"
+    },
+    "signal_score_assignments": {
+      "concept_id": "signal_score_assignments",
+      "labels": [
+        "signal score assignments",
+        "signal",
+        "score",
+        "assignment"
+      ],
+      "match_tokens": [
+        "signal",
+        "score",
+        "assignment"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "signal_score_assignments",
+        "primary_key": "signal_score_assignments.id"
+      },
+      "primary_entity": "An assignment of a score and weight to a signal.",
+      "business_domain": "Assignment",
+      "default_metric": "signal_score_assignments_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "signal_typologies": {
+      "concept_id": "signal_typologies",
+      "labels": [
+        "signal typologies",
+        "signal",
+        "typology"
+      ],
+      "match_tokens": [
+        "signal",
+        "typology"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "signal_typologies",
+        "primary_key": "signal_typologies.id"
+      },
+      "primary_entity": "A type of signal.",
+      "business_domain": "Signal",
+      "default_metric": "signal_typologies_count",
+      "default_display_columns": [
+        "signal_typologies.name"
+      ],
+      "table_type": "REFERENCE"
+    },
+    "sla_config": {
+      "concept_id": "sla_config",
+      "labels": [
+        "sla config",
+        "sla"
+      ],
+      "match_tokens": [
+        "sla"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "sla_config",
+        "primary_key": "sla_config.id"
+      },
+      "primary_entity": "A configured SLA.",
+      "business_domain": "SLA Configuration",
+      "default_metric": "sla_config_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "sla_instance": {
+      "concept_id": "sla_instance",
+      "labels": [
+        "sla instance",
+        "sla",
+        "instance"
+      ],
+      "match_tokens": [
+        "sla",
+        "instance"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "sla_instance",
+        "primary_key": "sla_instance.id"
+      },
+      "primary_entity": "An instance of an SLA.",
+      "business_domain": "SLA Instance",
+      "default_metric": "sla_instance_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "sla_scheduled_action": {
+      "concept_id": "sla_scheduled_action",
+      "labels": [
+        "sla scheduled action",
+        "sla",
+        "scheduled",
+        "action"
+      ],
+      "match_tokens": [
+        "sla",
+        "scheduled",
+        "action"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "sla_scheduled_action",
+        "primary_key": "sla_scheduled_action.id"
+      },
+      "primary_entity": "Scheduled action for an SLA on a database object.",
+      "business_domain": "Scheduled Action",
+      "default_metric": "sla_scheduled_action_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "state": {
+      "concept_id": "state",
+      "labels": [
+        "state"
+      ],
+      "match_tokens": [
+        "state"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "state",
+        "primary_key": "state.id"
+      },
+      "primary_entity": "State of an entity or process.",
+      "business_domain": "State",
+      "default_metric": "state_count",
+      "default_display_columns": [
+        "state.name"
+      ],
+      "table_type": "MASTER"
+    },
+    "tenant_info": {
+      "concept_id": "tenant_info",
+      "labels": [
+        "tenant info",
+        "tenant",
+        "info"
+      ],
+      "match_tokens": [
+        "tenant",
+        "info"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "tenant_info",
+        "primary_key": "tenant_info.id"
+      },
+      "primary_entity": "Configuration setting or piece of data for a tenant.",
+      "business_domain": "Configuration setting",
+      "default_metric": "tenant_info_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "transaction": {
+      "concept_id": "transaction",
+      "labels": [
+        "transaction"
+      ],
+      "match_tokens": [
+        "transaction"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "transaction",
+        "primary_key": "transaction.id"
+      },
+      "primary_entity": "Financial transaction.",
+      "business_domain": "Transaction",
+      "default_metric": "transaction_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "transition": {
+      "concept_id": "transition",
+      "labels": [
+        "transition"
+      ],
+      "match_tokens": [
+        "transition"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "transition",
+        "primary_key": "transition.id"
+      },
+      "primary_entity": "Transition or change in the system's state.",
+      "business_domain": "Transition",
+      "default_metric": "transition_count",
+      "default_display_columns": [
+        "transition.name"
+      ],
+      "table_type": "EVENT"
+    },
+    "user": {
+      "concept_id": "user",
+      "labels": [
+        "user"
+      ],
+      "match_tokens": [
+        "user"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "user",
+        "primary_key": null
+      },
+      "primary_entity": "A user in the system.",
+      "business_domain": "User",
+      "default_metric": "user_count",
+      "default_display_columns": [
+        "user.created_by_id",
+        "user.organization_id",
+        "user.updated_by_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "user_permissions": {
+      "concept_id": "user_permissions",
+      "labels": [
+        "user permissions",
+        "user",
+        "permission"
+      ],
+      "match_tokens": [
+        "user",
+        "permission"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "user_permissions",
+        "primary_key": "user_permissions.id"
+      },
+      "primary_entity": "A permission granted to a user.",
+      "business_domain": "Permission",
+      "default_metric": "user_permissions_count",
+      "default_display_columns": [
+        "user_permissions.permission_id",
+        "user_permissions.user_id"
+      ],
+      "table_type": "MASTER"
+    },
+    "user_profile": {
+      "concept_id": "user_profile",
+      "labels": [
+        "user profile",
+        "user",
+        "profile"
+      ],
+      "match_tokens": [
+        "user",
+        "profile"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "user_profile",
+        "primary_key": "user_profile.id"
+      },
+      "primary_entity": "User Profile",
+      "business_domain": "User Profile",
+      "default_metric": "user_profile_count",
+      "default_display_columns": [],
+      "table_type": "MASTER"
+    },
+    "user_prompt": {
+      "concept_id": "user_prompt",
+      "labels": [
+        "user prompt",
+        "user",
+        "prompt"
+      ],
+      "match_tokens": [
+        "user",
+        "prompt"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "user_prompt",
+        "primary_key": "user_prompt.id"
+      },
+      "primary_entity": "User Prompt",
+      "business_domain": "User Prompt",
+      "default_metric": "user_prompt_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "user_security_question": {
+      "concept_id": "user_security_question",
+      "labels": [
+        "user security question",
+        "user",
+        "security",
+        "question"
+      ],
+      "match_tokens": [
+        "user",
+        "security",
+        "question"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "user_security_question",
+        "primary_key": "user_security_question.id"
+      },
+      "primary_entity": "Security question for a user",
+      "business_domain": "Security Question Record",
+      "default_metric": "user_security_question_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "user_user_permissions": {
+      "concept_id": "user_user_permissions",
+      "labels": [
+        "user user permissions",
+        "user",
+        "permission"
+      ],
+      "match_tokens": [
+        "user",
+        "permission"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "user_user_permissions",
+        "primary_key": "user_user_permissions.id"
+      },
+      "primary_entity": "User permission record",
+      "business_domain": "User permission record",
+      "default_metric": "user_user_permissions_count",
+      "default_display_columns": [],
+      "table_type": "TRANSACTION"
+    },
+    "workflow": {
+      "concept_id": "workflow",
+      "labels": [
+        "workflow"
+      ],
+      "match_tokens": [
+        "workflow"
+      ],
+      "resolves_to": {
+        "type": "ENTITY",
+        "table": "workflow",
+        "primary_key": "workflow.id"
+      },
+      "primary_entity": "Workflow definition",
+      "business_domain": "Workflow",
+      "default_metric": "workflow_count",
+      "default_display_columns": [
+        "workflow.name"
+      ],
+      "table_type": "MASTER"
+    }
+  }
+}

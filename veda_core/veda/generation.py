@@ -2,6 +2,24 @@
 import os, re, sys, time, json, logging, threading
 from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
 
+_NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+              "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+
+_DEFAULT_ROW_LIMIT = 100
+
+
+def _extract_requested_limit(query: str) -> int:
+    """'top N' / 'first N' rows the user explicitly asked for, digit or spelled-out
+    ('top five', 'first 10'). Falls back to _DEFAULT_ROW_LIMIT when the query names
+    no count — the prompt previously hardcoded 'LIMIT 100' regardless of what was
+    asked, so "top five" silently returned 100 rows."""
+    m = re.search(r"\b(?:top|first)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b",
+                  query.lower())
+    if not m:
+        return _DEFAULT_ROW_LIMIT
+    tok = m.group(1)
+    return int(tok) if tok.isdigit() else _NUM_WORDS[tok]
+
 
 def _domain_line() -> str:
     """Optional domain primer for the SQL prompt — DESCRIPTIVE only (forbids inventing
@@ -86,13 +104,14 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
 
     system = ("You are a PostgreSQL expert. Output ONE read-only SELECT statement "
               "and nothing else — no markdown, no commentary, no semicolon." + _domain_line())
+    _limit = _extract_requested_limit(query)
     user = (f"Question: {query}\n"
             f"Table: {table}\n"
             f"Columns: {', '.join(columns)}{date_line}"
             f"{_column_glossary_block(col_glossary)}"
             f"{_term_directive_block(term_map)}\n"
             f"Rules: SELECT only, FROM {table}. Use only listed columns. "
-            f"Always end with LIMIT 100.")
+            f"Always end with LIMIT {_limit}.")
 
     # temperature 0 + fixed seed → greedy, reproducible decoding. SQL generation
     # must be DETERMINISTIC: the same question had been returning different WHERE
@@ -254,11 +273,12 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf):
             _t, _, _c = _ck.partition(".")
             if _t in _tbl_alias:
                 _join_term_map.append((_phrase, f"{_tbl_alias[_t]}.{_c}"))
+    _limit = _extract_requested_limit(query)
     user = (f"Question: {query}\n\nFIXED FROM/JOIN (use exactly):\n{skeleton}\n\n"
             f"Aliases → table: columns:\n" + "\n".join(blocks) + display_block
             + _join_glossary_block(alias_map, sm) + _term_directive_block(_join_term_map)
             + date_line +
-            "\nRules: prefix every column with its alias; SELECT only; end with LIMIT 100.")
+            f"\nRules: prefix every column with its alias; SELECT only; end with LIMIT {_limit}.")
     from slm import call_slm
     sql = call_slm(
         user, system=system, purpose="sql_join",

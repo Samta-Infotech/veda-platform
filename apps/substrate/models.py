@@ -237,24 +237,6 @@ class ColumnProfile(TenantScopedModel):
 # the tuned m / ef_construction from §7.1a. These mirror models exist ONLY for
 # admin visibility; ANN search is raw SQL in storage_adapters.reader.
 # ─────────────────────────────────────────────────────────────────────────────
-class _EmbeddingMirror(models.Model):
-    column_uuid = models.UUIDField()
-    source_id = models.IntegerField()
-    tenant = models.TextField()
-
-    class Meta:
-        abstract = True
-        managed = False
-
-
-# WP3: the legacy relgt/light-text/hybrid embedding mirrors (column_embeddings,
-# column_embeddings_lt, column_embeddings_hybrid) were removed — one embedding space
-# (BGE-M3) means one store. Migration 0006 drops the physical tables.
-class ColumnEmbeddingBGE(_EmbeddingMirror):
-    class Meta(_EmbeddingMirror.Meta):
-        db_table = "column_embeddings_bge"  # 1024-dim BGE-M3 (5-signal spine)
-
-
 class ChunkEmbedding(models.Model):
     chunk_id = models.UUIDField()
     source_id = models.IntegerField()
@@ -263,11 +245,6 @@ class ChunkEmbedding(models.Model):
     class Meta:
         managed = False
         db_table = "chunk_embeddings"  # 1024-dim doc chunks (RAG substrate)
-
-
-class RelgtStructural(_EmbeddingMirror):
-    class Meta(_EmbeddingMirror.Meta):
-        db_table = "relgt_structural"  # 256-dim RELGT structural encoder
 
 
 # ─────────────────────────────────────────────────────────────────────────────
