@@ -7,6 +7,16 @@
 # relgt/light_text/hybrid/ensemble vocabulary were removed — see EMBEDDING_MODEL_ID.
 # =============================================================================
 
+# Auto-load the repo-root .env so this module gives correct values regardless
+# of cwd or whether the shell manually exported them. Real env vars (already
+# set) always win — this only fills in what's missing.
+# from pathlib import Path as _Path_dotenv
+# try:
+#     from dotenv import load_dotenv as _load_dotenv
+#     _load_dotenv(_Path_dotenv(__file__).resolve().parent.parent / ".env")
+# except ImportError:
+#     pass
+
 # =============================================================================
 # SOURCE REGISTRY  (§3.1 — config-file registry eliminated)
 #
@@ -911,7 +921,7 @@ QUERY_LANGUAGE = {
                   "which", "who", "whom", "whose", "where", "there", "here", "please",
                   "their", "its", "about", "also", "only", "just", "much", "more",
                   "less", "than", "exactly", "them", "they", "not", "but", "have",
-                  "has", "had", "been", "being", "does", "per", "give"],
+                  "has", "had", "been", "being", "does", "per", "give", "along"],
     # temporal words (the temporal window itself is resolved by L1, so these tokens
     # are already consumed before SQL generation)
     "temporal": ["last", "past", "previous", "recent", "recently", "ago", "since",
@@ -1097,6 +1107,15 @@ VALUE_ARBITER_RETRIEVAL_FILTER = True
 # deterministic JOIN. Ships OFF — it builds a JOIN in the hot path, so validate on the real
 # env (SLM+DB) before enabling.
 ANSWER_ENTITY_DISCOVERY_ENABLED = True
+# Answer-Entity LLM fallback: when the deterministic pronoun cues (who/whom/their/its/
+# theirs/them) find nothing — e.g. "the assigned user's name", "each incident's owner",
+# "the person handling it" — ask the SLM for ONLY the relation word (e.g. "assigned").
+# The SLM never picks the table/column itself: the returned word still has to pass the
+# same deterministic _relation_named() match against the real FK graph as any other
+# cue, so grounding is unchanged — this only widens which PHRASINGS can trigger the
+# finder. Fails safe (timeout/error/unparseable → None → falls through to the next
+# resolver), same as every other LLM call in this codebase.
+ANSWER_ENTITY_LLM_FALLBACK_ENABLED = True
 # Multi-hop FK resolution: when 1-hop value resolution finds nothing, resolve an entity
 # filter through ONE unambiguous junction-membership path (tags on a document via
 # document_tags). Multiple paths (RBAC direct+role), shared dimensions, or provenance FKs →

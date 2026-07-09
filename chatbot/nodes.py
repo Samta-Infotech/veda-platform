@@ -14,8 +14,10 @@ from .llm import call_ollama
 from .prompts import (
     FALLBACK_REPLY,
     FOLLOWUP_SYSTEM_PROMPT,
+    STANDALONE_CHECK_SYSTEM,
     build_followup_user_prompt,
     build_smalltalk_system_prompt,
+    build_standalone_check_user_prompt,
     build_supervisor_system_prompt,
     build_supervisor_user_prompt,
 )
@@ -38,6 +40,18 @@ _DATA_QUESTION_HINTS = re.compile(
     r"table|report|number of|which|what was|remind me)\b",
     re.IGNORECASE,
 )
+
+def _depends_on_history(message: str, history: list) -> bool:
+    """Generic (non-keyword) second opinion for a "smalltalk" verdict when prior
+    turns exist. Real users phrase referential follow-ups countless ways ("need
+    more details", "aur bata", "what about the other one", ...) — no fixed word
+    list generalizes to production traffic, so this asks the LLM the underlying
+    semantic question directly instead of pattern-matching specific phrasings.
+    Fails closed to False (trust the original "smalltalk" verdict) on any error,
+    since this is only a second-opinion check, not the primary classifier."""
+    user_prompt = build_standalone_check_user_prompt(message, history)
+    verdict = call_ollama(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5)
+    return bool(verdict) and "dependent" in verdict.strip().lower()
 
 # veda_core's own data/schema/client_bge paths are cwd-relative to veda_core/
 # (same reason apps/ingestion/tasks.py runs the engine subprocess with
@@ -85,7 +99,13 @@ def classify_node(state: ChatState) -> dict:
             except Exception:
                 logger.warning("classify_node: could not parse LLM output: %r", raw)
 
-    if action == "smalltalk" and _DATA_QUESTION_HINTS.search(message):
+    if action == "smalltalk" and history and _depends_on_history(message, history):
+        logger.warning(
+            "classify_node: LLM said smalltalk but message depends on the prior "
+            "conversation, overriding to 'followup': %r", message,
+        )
+        action = "followup"
+    elif action == "smalltalk" and _DATA_QUESTION_HINTS.search(message):
         logger.warning(
             "classify_node: LLM said smalltalk but message looks data-related, "
             "overriding to 'answer': %r", message,
@@ -190,19 +210,38 @@ def call_engine_node(state: ChatState) -> dict:
 
 
 def ask_clarification_node(state: ChatState) -> dict:
-    """Turn a refusal into a conversational clarifying question — reuses the
-    engine's own deterministic explanation (veda/feedback.py), never invents
-    reasons of its own (refuse-over-guess, same as the rest of the codebase)."""
+    """Turn a refusal into a conversational clarifying question.
+
+    The engine (veda/pipeline.py::_feedback) already calls
+    veda_core.veda.feedback.explain_failure with the CORRECT per-status
+    context (missing=... for qualifier_dropped, column=/value=... for
+    ungrounded, candidates=... for no_table, etc.) and attaches the result
+    under engine_result["feedback"] — so we read that directly instead of
+    re-deriving it here. Re-calling explain_failure ourselves with only
+    msg=res0.get("refusal") was the bug that produced "...clarify if 'None'
+    is a column name..." messages: qualifier_dropped needs `missing`, which
+    that call never passed, so it silently fell back to the parameter
+    default (None) and the f-string in feedback.py rendered it verbatim.
+    Never invents reasons of its own (refuse-over-guess, same as the rest of
+    the codebase)."""
     res0 = state.get("engine_result", {})
     status = state.get("status", "refuse")
 
-    try:
-        from veda_core.veda.feedback import explain_failure
-        explanation = explain_failure(status, res0.get("sm"), msg=res0.get("refusal"))
-        question = explanation.get("text") or "Could you clarify what you're asking about?"
-    except Exception:
-        logger.exception("ask_clarification_node: explain_failure failed for status=%r", status)
-        question = "Could you clarify what you're asking about?"
+    feedback = res0.get("feedback")
+    if feedback:
+        question = feedback.get("text") or "Could you clarify what you're asking about?"
+    else:
+        # Rare fallback (e.g. FEEDBACK_ENABLED=False in the engine, so it
+        # never built one) — best-effort only, since we don't have the
+        # per-status context (missing/column/value/candidates) the engine
+        # itself has.
+        try:
+            from veda_core.veda.feedback import explain_failure
+            explanation = explain_failure(status, res0.get("sm"), msg=res0.get("refusal"))
+            question = explanation.get("text") or "Could you clarify what you're asking about?"
+        except Exception:
+            logger.exception("ask_clarification_node: explain_failure failed for status=%r", status)
+            question = "Could you clarify what you're asking about?"
 
     return {
         "reply_text": question,

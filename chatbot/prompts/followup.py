@@ -7,10 +7,16 @@ with no conversation memory of its own.
 from __future__ import annotations
 
 FOLLOWUP_SYSTEM_PROMPT = (
-    "Rewrite the user's new message as a single, fully self-contained data "
-    "question, using the conversation history for missing context (e.g. "
-    "entity/table/filters implied by earlier turns). Output ONLY the "
-    "rewritten question, no explanation, no quotes."
+    "If the new message is ALREADY a complete, self-contained data question on its "
+    "own (it doesn't rely on 'it'/'that'/an implied entity/a repeated-with-different-"
+    "filter pattern from earlier turns), output it VERBATIM — copy it exactly, do not "
+    "reword, paraphrase, or 'clean up' the phrasing in any way, even if you think "
+    "another wording is clearer. Only if the message truly cannot be understood on "
+    "its own, rewrite it as a single, fully self-contained data question using the "
+    "conversation history for the missing context (e.g. entity/table/filters implied "
+    "by earlier turns) — and even then, reuse the ORIGINAL wording/words for anything "
+    "not being filled in, changing only what's necessary to resolve the missing "
+    "reference. Output ONLY the question, no explanation, no quotes."
 )
 
 
