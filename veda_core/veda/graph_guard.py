@@ -25,7 +25,16 @@ _GRAPH = {"v": None, "edges": None, "card": None}
 
 def _load_graph():
     if _GRAPH["v"] is None:
-        path = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
+        # Route through config.RELATIONSHIP_GRAPH_FILE (tenant/source/version-scoped via
+        # artifact_path()) instead of a hardcoded repo-root path — the firewall must
+        # verify joins against the SAME graph the query tier resolved, not always the
+        # legacy default-scope file.
+        try:
+            from config import RELATIONSHIP_GRAPH_FILE
+            path = RELATIONSHIP_GRAPH_FILE if os.path.isabs(RELATIONSHIP_GRAPH_FILE) \
+                else os.path.join(_ROOT, RELATIONSHIP_GRAPH_FILE)
+        except Exception:
+            path = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
         g = json.load(open(path)) if os.path.exists(path) else {"edges": []}
         edge_set, card = set(), {}
         for e in g.get("edges", []):

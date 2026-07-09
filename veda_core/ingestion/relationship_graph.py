@@ -26,6 +26,9 @@ import re
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from config import get_primary_relational_source
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
 
@@ -247,7 +250,7 @@ def build_relationship_graph(tables=None, verbose=False):
     os.makedirs(os.path.dirname(RELATIONSHIP_GRAPH_FILE) or ".", exist_ok=True)
     json.dump(graph, open(RELATIONSHIP_GRAPH_FILE, "w"), indent=2)
     if verbose:
-        print(json.dumps(graph["stats"], indent=2))
+        logger.info("%s", json.dumps(graph["stats"], indent=2))
     return graph
 
 

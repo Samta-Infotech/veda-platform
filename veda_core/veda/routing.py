@@ -213,6 +213,34 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
         except Exception:
             pass
 
+    # Value-match re-rank (downstream of score_anchors, same rationale as the IDF re-rank
+    # above): a query token that exact-matches a sampled CATEGORY value on a candidate table
+    # ("debit" -> accounts_generalledger.entry_type) is boosted, since that's direct evidence
+    # the query is ABOUT that table's rows — evidence the lexical/position/retrieval/graph
+    # signals in score_anchors never see (they score table NAMES and column retrieval, not
+    # sampled cell values). Without this, a name-lexical tie is broken arbitrarily, the value
+    # filter ends up scoped to the wrong (unchosen) table, and qualifier_completeness
+    # correctly but unhelpfully refuses the whole query later instead of the anchor ever
+    # being fixed. Bounded, flag-guarded, try/except → on any issue the original ranking
+    # stands.
+    try:
+        from config import VALUE_ANCHOR_RERANK_ENABLED, VALUE_ANCHOR_RERANK_WEIGHT
+    except Exception:
+        VALUE_ANCHOR_RERANK_ENABLED, VALUE_ANCHOR_RERANK_WEIGHT = False, 0.25
+    if VALUE_ANCHOR_RERANK_ENABLED and len(ranked) > 1:
+        try:
+            from query.value_arbiter import arbitrate, column_values_typed_lookup
+            from veda.runtime import _pg as _pgc_anchor
+            _arb = arbitrate(query, column_values_typed_lookup(_pgc_anchor))
+            _value_tables = {t.table for t in _arb.value_filters if t.table}
+            if _value_tables:
+                for a in ranked:
+                    if a.table in _value_tables:
+                        a.score = round(a.score + VALUE_ANCHOR_RERANK_WEIGHT, 4)
+                ranked.sort(key=lambda a: a.score, reverse=True)
+        except Exception:
+            pass
+
     top = ranked[0]
     pscore = next((r.score for r in ranked if r.table == primary), 0.0)
     chosen, overrode = primary, False

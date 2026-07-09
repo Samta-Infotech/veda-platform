@@ -98,6 +98,14 @@ class RelationalConnector(BaseConnector):
         """Double-quote identifier. Override for engines that use backticks."""
         return f'"{name.replace(chr(34), "")}"'
 
+    def _qualified(self, table_name: str) -> str:
+        """Schema-qualified quoted table reference when self._schema is set — else the
+        row-count/sample-value queries below run unqualified and depend on whatever
+        schema the connection's default search_path happens to resolve to first."""
+        if self._schema:
+            return f"{self._q(self._schema)}.{self._q(table_name)}"
+        return self._q(table_name)
+
     def _get_tables_sql(self, schema: Optional[str]) -> Tuple[str, list]:
         """
         Returns (sql, params) to list all user tables.
@@ -246,7 +254,7 @@ class RelationalConnector(BaseConnector):
 
     def _get_row_count_sql(self, table_name: str) -> Tuple[str, list]:
         """Returns (sql, params) to count rows in a table."""
-        return f'SELECT COUNT(*) FROM {self._q(table_name)};', []
+        return f'SELECT COUNT(*) FROM {self._qualified(table_name)};', []
 
     def _get_sample_values_sql(
         self, table_name: str, col_name: str, n: int
@@ -254,7 +262,7 @@ class RelationalConnector(BaseConnector):
         """Returns (sql, params) to sample distinct non-null values."""
         return (
             f"SELECT DISTINCT {self._q(col_name)} "
-            f"FROM {self._q(table_name)} "
+            f"FROM {self._qualified(table_name)} "
             f"WHERE {self._q(col_name)} IS NOT NULL "
             f"LIMIT %s;",
             [n],
@@ -264,36 +272,47 @@ class RelationalConnector(BaseConnector):
     # Lifecycle
     # ------------------------------------------------------------------
 
+    _CONNECT_MAX_ATTEMPTS = 3
+    _CONNECT_BACKOFF_BASE = 0.5   # seconds; doubles each retry (0.5, 1.0)
+
     def connect(self) -> ConnectorStatus:
         t0 = time.time()
-        try:
-            self._conn = self._get_raw_connection()
-            # Quick ping — use direct execute for SQLite compatibility
-            cur = self._conn.cursor()
-            cur.execute("SELECT 1;")
+        last_err = None
+        for attempt in range(self._CONNECT_MAX_ATTEMPTS):
             try:
-                cur.close()
-            except Exception:
-                pass
-            self._state = ConnectorState.CONNECTED
-            return ConnectorStatus(
-                ok          = True,
-                source_id   = self._source_id,
-                source_type = "relational",
-                engine      = self._engine,
-                message     = "Connection successful",
-                latency_ms  = round((time.time() - t0) * 1000, 2),
-            )
-        except Exception as e:
-            self._state = ConnectorState.ERROR
-            return ConnectorStatus(
-                ok          = False,
-                source_id   = self._source_id,
-                source_type = "relational",
-                engine      = self._engine,
-                message     = f"Connection failed: {e}",
-                latency_ms  = round((time.time() - t0) * 1000, 2),
-            )
+                self._conn = self._get_raw_connection()
+                # Quick ping — use direct execute for SQLite compatibility
+                cur = self._conn.cursor()
+                cur.execute("SELECT 1;")
+                try:
+                    cur.close()
+                except Exception:
+                    pass
+                self._state = ConnectorState.CONNECTED
+                return ConnectorStatus(
+                    ok          = True,
+                    source_id   = self._source_id,
+                    source_type = "relational",
+                    engine      = self._engine,
+                    message     = "Connection successful",
+                    latency_ms  = round((time.time() - t0) * 1000, 2),
+                )
+            except Exception as e:
+                last_err = e
+                # Transient network blips (managed-DB failover, connection-limit spikes)
+                # shouldn't fail an entire ingestion run on the first hiccup — retry with
+                # backoff before giving up.
+                if attempt < self._CONNECT_MAX_ATTEMPTS - 1:
+                    time.sleep(self._CONNECT_BACKOFF_BASE * (2 ** attempt))
+        self._state = ConnectorState.ERROR
+        return ConnectorStatus(
+            ok          = False,
+            source_id   = self._source_id,
+            source_type = "relational",
+            engine      = self._engine,
+            message     = f"Connection failed: {last_err}",
+            latency_ms  = round((time.time() - t0) * 1000, 2),
+        )
 
     def disconnect(self) -> None:
         if self._conn:
@@ -632,13 +651,25 @@ class PostgreSQLConnector(RelationalConnector):
                 "psycopg2 is required for PostgreSQL: pip install psycopg2-binary"
             )
         cfg = self._config
-        return psycopg2.connect(
+        kw = dict(
             host     = cfg.get("host", "localhost"),
             port     = cfg.get("port", 5432),
             dbname   = cfg.get("dbname"),
             user     = cfg.get("user"),
             password = cfg.get("password"),
+            connect_timeout = cfg.get("connect_timeout", 10),
+            # TCP keepalives — managed Postgres (RDS/DigitalOcean/Cloud SQL) drops idle
+            # connections behind a load balancer well before psycopg2's own defaults
+            # notice, surfacing as an opaque "server closed the connection unexpectedly"
+            # mid-scan on a long ingestion run.
+            keepalives         = 1,
+            keepalives_idle    = 30,
+            keepalives_interval= 10,
+            keepalives_count   = 5,
         )
+        if cfg.get("sslmode"):
+            kw["sslmode"] = cfg["sslmode"]
+        return psycopg2.connect(**kw)
 
     # -- Fast batched introspection via pg_catalog --------------------------
     # information_schema's constraint views (referential_constraints +

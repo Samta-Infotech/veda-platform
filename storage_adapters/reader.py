@@ -93,29 +93,52 @@ def source_connection() -> dict:
             "user": db_user, "password": password}
 
 
+_FK_ADJACENCY_CACHE: dict = {}   # (source_id, tenant) → List[FKEdge] (ALL edges); cleared on rehydrate
+
+
+def clear_fk_adjacency_cache() -> None:
+    """Called by the inference rehydrate subscriber so a re-ingest's edited FK graph
+    is picked up without a process restart (mirrors clear_ef_search_cache())."""
+    _FK_ADJACENCY_CACHE.clear()
+
+
+def _all_fk_edges(source_id, tenant) -> List[FKEdge]:
+    """The full FK edge set for (source, tenant), fetched once per process and
+    reused for every table_ids filter within/across requests. Tier2's select_retrieval
+    calls get_fk_adjacency up to 4x per query (semantic layer, PK injection, value-
+    filter expansion, join-path recompute) with different table_ids each time — this
+    cache turns those into one Postgres round trip instead of one per call."""
+    key = (str(source_id), str(tenant))
+    if key not in _FK_ADJACENCY_CACHE:
+        sql = """
+            SELECT fc.id, fc.name, ft.id, ft.name, tc.id, tc.name, tt.id, tt.name
+            FROM substrate_fkedge e
+            JOIN substrate_schemacolumn fc ON fc.id = e.from_col_id
+            JOIN substrate_schematable  ft ON ft.id = e.from_table_id
+            JOIN substrate_schemacolumn tc ON tc.id = e.to_col_id
+            JOIN substrate_schematable  tt ON tt.id = e.to_table_id
+            WHERE e.source_id = %s AND e.tenant = %s
+        """
+        with _connection().cursor() as cur:
+            cur.execute(sql, [source_id, tenant])
+            rows = cur.fetchall()
+        _FK_ADJACENCY_CACHE[key] = [
+            FKEdge(str(r[0]), r[1], str(r[2]), r[3], str(r[4]), r[5], str(r[6]), r[7]) for r in rows
+        ]
+    return _FK_ADJACENCY_CACHE[key]
+
+
 def get_fk_adjacency(table_ids: Optional[List[str]] = None) -> List[FKEdge]:
     """FK edges (legacy FKEdge shape) for the current (source, tenant), optionally
-    restricted to edges touching `table_ids`. Raw SQL join over the Django-owned
-    substrate tables — same return shape as `vector_store.get_fk_adjacency`."""
+    restricted to edges touching `table_ids`. Same return shape/filter semantics as
+    before — filtering now happens in-memory over the cached full edge set (see
+    _all_fk_edges) instead of a fresh SQL round trip per call."""
     source_id, tenant = _scope()
-    sql = """
-        SELECT fc.id, fc.name, ft.id, ft.name, tc.id, tc.name, tt.id, tt.name
-        FROM substrate_fkedge e
-        JOIN substrate_schemacolumn fc ON fc.id = e.from_col_id
-        JOIN substrate_schematable  ft ON ft.id = e.from_table_id
-        JOIN substrate_schemacolumn tc ON tc.id = e.to_col_id
-        JOIN substrate_schematable  tt ON tt.id = e.to_table_id
-        WHERE e.source_id = %s AND e.tenant = %s
-    """
-    params: list = [source_id, tenant]
-    if table_ids:
-        ids = tuple(str(t) for t in table_ids)
-        sql += " AND (e.from_table_id IN %s OR e.to_table_id IN %s)"
-        params += [ids, ids]
-    with _connection().cursor() as cur:
-        cur.execute(sql, params)
-        rows = cur.fetchall()
-    return [FKEdge(str(r[0]), r[1], str(r[2]), r[3], str(r[4]), r[5], str(r[6]), r[7]) for r in rows]
+    edges = _all_fk_edges(source_id, tenant)
+    if not table_ids:
+        return list(edges)
+    ids = {str(t) for t in table_ids}
+    return [e for e in edges if e.from_table_id in ids or e.to_table_id in ids]
 
 
 def glossary() -> dict:
@@ -198,11 +221,19 @@ def _resolve_ef_search(source_id) -> int:
 
 def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     """Raw pgvector cosine ANN over the HNSW index for `mode`'s table (§6.4),
-    scoped to the current (source, tenant)."""
-    source_id, tenant = _scope()
-    # WP3: one embedding space (BGE-M3) → one store. The legacy relgt/light_text/hybrid
-    # modes and their column_embeddings/_lt/_hybrid tables were removed.
-    table = "column_embeddings_bge"
+    scoped to the current source.
+
+    Reads `column_embeddings_v2` — the engine's live BGE-M3 column store
+    (`veda_core/ingestion/biencoder.py`) — directly, rather than the
+    `column_embeddings_bge` Django mirror: that mirror's writer
+    (`storage_adapters.writer.store_column_embeddings`) was never implemented,
+    so it stayed permanently empty and this function always returned zero
+    rows. `column_embeddings_v2` has no `tenant` column (single-tenant-per-
+    source, matching `veda_core/query/retrieval_v2.py`'s own query), so
+    filtering here is by `source_id` only.
+    """
+    source_id, _tenant = _scope()
+    table = "column_embeddings_v2"
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     # Pin hnsw.ef_search to the §7.1a-tuned value (recall@k=1.0 on the home-schema
     # fixtures) so the served ANN ordering matches exact cosine — the shipped index IS
@@ -212,8 +243,8 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     # changing the global (re-run scripts/hnsw_parity_sweep.py per source).
     ef_search = _resolve_ef_search(source_id)
     sql = (
-        f'SELECT column_uuid, 1 - (embedding <=> %s::vector) AS score FROM "{table}" '
-        f'WHERE source_id = %s AND tenant = %s ORDER BY embedding <=> %s::vector LIMIT %s'
+        f'SELECT col_id, 1 - (embedding <=> %s::vector) AS score FROM "{table}" '
+        f'WHERE source_id = %s::text ORDER BY embedding <=> %s::vector LIMIT %s'
     )
     # Explicit transaction so SET LOCAL is scoped to it and released at COMMIT — this is
     # PgBouncer-transaction-pool-safe (never leaks the GUC to the next pooled client),
@@ -221,7 +252,7 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     with _connection().cursor() as cur:
         cur.execute("BEGIN")
         cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search}")
-        cur.execute(sql, [vec, source_id, tenant, vec, top_k])
+        cur.execute(sql, [vec, source_id, vec, top_k])
         rows = cur.fetchall()
         cur.execute("COMMIT")
         return rows

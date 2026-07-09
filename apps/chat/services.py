@@ -83,19 +83,51 @@ class ConversationQueryService:
             content=json.dumps(content_blocks), metadata=metadata,
         )
 
-    def run_turn(self, chat: ChatSession, message: str, request_id: str = "") -> Iterator[dict]:
-        """Yields: thinking -> content* -> visualization? -> explainability -> error?."""
+    def run_turn(
+        self, chat: ChatSession, message: str, request_id: str = "", stream: bool = False,
+    ) -> Iterator[dict]:
+        """Yields: thinking (-> thinking*, when stream) -> content* -> visualization?
+        -> explainability -> error?.
+
+        stream=True sources "thinking" from the inference tier's real SSE progress
+        events (classify / decompose / route / answer) as the pipeline actually
+        advances, instead of one blocking call that only reports "done" at the end."""
         yield {"event": "thinking",
                "data": {"phase": "reasoning", "message": "Analyzing request..."}}
 
         client = InferenceClient()
+        payload = None
         try:
-            payload = client.run_hybrid_query(
-                message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
-            )
+            if stream:
+                for kind, data in client.stream_hybrid_query(
+                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
+                ):
+                    if kind == "progress":
+                        yield {"event": "thinking",
+                               "data": {"phase": data.get("phase", "progress"),
+                                        "message": data.get("message", "")}}
+                    elif kind == "error":
+                        logger.warning("conversation query pipeline error chat_id=%s: %s",
+                                       chat.pk, data)
+                        yield {"event": "error",
+                               "data": {"code": "MODEL_ERROR",
+                                        "message": data.get("message", "inference error")}}
+                        return
+                    elif kind == "result":
+                        payload = data
+            else:
+                payload = client.run_hybrid_query(
+                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
+                )
         except InferenceUnavailable as exc:
             logger.warning("conversation query pipeline unavailable chat_id=%s: %s", chat.pk, exc)
             yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
+            return
+
+        if payload is None:
+            logger.warning("conversation query pipeline returned no result chat_id=%s", chat.pk)
+            yield {"event": "error",
+                   "data": {"code": "MODEL_ERROR", "message": "No result from inference tier."}}
             return
 
         res0, trace = self._first_item_result(payload)

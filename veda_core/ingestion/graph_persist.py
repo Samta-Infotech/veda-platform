@@ -40,6 +40,9 @@ from config import (
     GRAPH_EDGE_WEIGHTS,
     GRAPH_DISCOVERED_FK_TIER_WEIGHT,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 # =============================================================================
@@ -238,8 +241,7 @@ def upsert_nodes(nodes: List[GraphNode], verbose: bool = False) -> int:
                         ))
                         written += 1
                     except Exception:
-                        if verbose:
-                            print(f"  ⚠ [graph_persist] node insert skipped: {n.node_id}")
+                        logger.warning("node insert skipped: %s", n.node_id)
     finally:
         release_internal_connection(conn)
     return written
@@ -294,9 +296,7 @@ def upsert_edges(edges: List[GraphEdge], verbose: bool = False) -> int:
                         ))
                         written += 1
                     except Exception:
-                        if verbose:
-                            print(f"  ⚠ [graph_persist] edge insert skipped: "
-                                  f"{e.src_node_id}->{e.dst_node_id}")
+                        logger.warning("edge insert skipped: %s->%s", e.src_node_id, e.dst_node_id)
     finally:
         release_internal_connection(conn)
     return written
@@ -452,8 +452,7 @@ def persist_reg_graph(
                 release_internal_connection(conn)
             backend = "postgres"
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ [graph_persist] scoped delete failed ({e}) — in-memory fallback")
+            logger.warning("scoped delete failed (%s) — in-memory fallback", e)
             backend = "in_memory_fallback"
     else:
         # scoped delete in-memory
@@ -475,8 +474,10 @@ def persist_reg_graph(
 
     duration = round(time.time() - t0, 4)
     if verbose:
-        print(f"[GraphPersist] {nodes_written} nodes, {edges_written} edges "
-              f"({discovered_count} discovered_fk), backend={backend}, {duration}s")
+        logger.info(
+            "%d nodes, %d edges (%d discovered_fk), backend=%s, %ss",
+            nodes_written, edges_written, discovered_count, backend, duration,
+        )
 
     return GraphPersistResult(
         nodes_written = nodes_written,

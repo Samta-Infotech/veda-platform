@@ -34,8 +34,13 @@ _AVG_VERBS      = ("average ", "avg ", "mean ")
 _LIST_VERBS     = ("list", "show", "what are", "which", "distinct", "unique",
                    "possible", "available")
 # Words that imply a relationship to ANOTHER entity → a real join → fall through.
-_JOIN_HINTS     = {"with", "without", "their", "its", "whose", "per", "each",
+# "per" is NOT here — it's a grouping preposition ("sum of X per Y"), handled by the
+# group_dim/vals_hit/bucket checks below; treating it as a blanket join signal blocked
+# every grouped SUM/AVG/MAX/MIN query before group_dim was even resolved.
+_JOIN_HINTS     = {"with", "without", "their", "its", "whose", "each",
                    "having", "have", "has", "across", "joined"}
+_MAX_VERBS      = ("max ", "maximum ", "highest ", "largest ")
+_MIN_VERBS      = ("min ", "minimum ", "lowest ", "smallest ")
 
 # The query LANGUAGE layer comes from config (closed linguistic classes, per-language,
 # NOT schema vocabulary). Any query token left over AFTER removing these and the tokens
@@ -74,7 +79,16 @@ _GRAPH_CACHE = {"g": None}
 
 def _graph():
     if _GRAPH_CACHE["g"] is None:
-        p = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
+        # Route through config.RELATIONSHIP_GRAPH_FILE (tenant/source/version-scoped)
+        # instead of a hardcoded repo-root path, matching veda.runtime.get_graph() /
+        # veda.graph_guard — else a non-default-scope source silently falls back to the
+        # legacy default-scope file (or an empty graph).
+        try:
+            from config import RELATIONSHIP_GRAPH_FILE
+            p = RELATIONSHIP_GRAPH_FILE if os.path.isabs(RELATIONSHIP_GRAPH_FILE) \
+                else os.path.join(_ROOT, RELATIONSHIP_GRAPH_FILE)
+        except Exception:
+            p = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
         _GRAPH_CACHE["g"] = json.load(open(p)) if os.path.exists(p) else {"edges": []}
     return _GRAPH_CACHE["g"]
 
@@ -110,6 +124,12 @@ def log_route(route: str, query: str, latency_ms: float, **extra):
 
 def _q(ident: str) -> str:
     return '"' + ident.replace('"', '""') + '"'
+
+
+def _rewrite_agg(expr: str, func: str) -> str:
+    """Swap the aggregate function in an expression: AVG(col) → MAX(col)."""
+    m = re.match(r'[A-Z]+\((.+)\)', expr, re.I)
+    return f"{func}({m.group(1)})" if m else expr
 
 
 def _has(query_l: str, needles) -> bool:
@@ -447,7 +467,7 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     extra_tables=_extra_tables, extra_columns=_extra_columns,
                     route=route, why=base_why + why))
 
-    # ── 2. SUM / AVG measure metric (single table, no group) ──────────────────
+    # ── 2. SUM / AVG measure metric (single table, optionally grouped) ────────
     if _has(query_l, _SUM_VERBS) or _has(query_l, _AVG_VERBS):
         for metric, _ in reg.match_metric_labels(query_l):
             table = metric["source_table"]
@@ -462,10 +482,48 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                                               tf.end or "2999-12-31"]))
                 why.append("temporal window")
             expr = metric["expression"].replace(f"{table}.", "")
+            group_dim = None
+            if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
+                               "broken down", "distribution")):
+                group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
+            if group_dim is not None:
+                g = group_dim["col_name"]
+                return _finalize(query, QueryIntent(
+                    query_type="count", subject_table=table,
+                    select_expr=expr, metric_alias=metric["metric_id"],
+                    group_col=g, filters=filters,
+                    route="metric.measure.group", why=why + [f"group by {g}"]))
             return _finalize(query, QueryIntent(
                 query_type="measure", subject_table=table, metric_id=metric["metric_id"],
                 select_expr=expr, metric_alias=metric["metric_id"], filters=filters,
                 route="metric.measure", why=why))
+
+    # ── 2b. MAX / MIN metric (single table, optionally grouped) ───────────────
+    if _has(query_l, _MAX_VERBS) or _has(query_l, _MIN_VERBS):
+        func = "MAX" if _has(query_l, _MAX_VERBS) else "MIN"
+        for metric, _ in reg.match_metric_labels(query_l):
+            table = metric["source_table"]
+            if join_hint or metric.get("grain_suspect"):
+                continue
+            base_expr = metric["expression"].replace(f"{table}.", "")
+            expr  = _rewrite_agg(base_expr, func)
+            alias = f"{func.lower()}_{metric['metric_id']}"
+            filters, why = [], [f"{func}({metric['metric_id']})"]
+            group_dim = None
+            if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
+                               "broken down", "distribution")):
+                group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
+            if group_dim is not None:
+                g = group_dim["col_name"]
+                return _finalize(query, QueryIntent(
+                    query_type="count", subject_table=table,
+                    select_expr=expr, metric_alias=alias,
+                    group_col=g, filters=filters,
+                    route=f"metric.{func.lower()}.group", why=why + [f"group by {g}"]))
+            return _finalize(query, QueryIntent(
+                query_type="measure", subject_table=table,
+                select_expr=expr, metric_alias=alias, filters=filters,
+                route=f"metric.{func.lower()}", why=why))
 
     # ── 3. Dimension list ("what are the incident statuses") ──────────────────
     if _has(query_l, _LIST_VERBS) and not _count_intent(query_l, qtoks) and not join_hint:

@@ -361,10 +361,11 @@ def store_fk_adjacency(
     fk_edges = scan_result.fk_edges
 
     if verbose:
-        print("[FKAdjacency] Storing FK edges...")
-        print(f"  FK edges         : {len(fk_edges)}")
-        print(f"  Backend          : {'pgvector' if PSYCOPG2_AVAILABLE else 'in_memory_fallback'}")
-        print(f"  Table            : {FK_ADJACENCY_TABLE_NAME}")
+        logger.debug(
+            "Storing FK edges... count=%d backend=%s table=%s",
+            len(fk_edges), "pgvector" if PSYCOPG2_AVAILABLE else "in_memory_fallback",
+            FK_ADJACENCY_TABLE_NAME,
+        )
 
     t0 = time.time()
 
@@ -380,8 +381,7 @@ def store_fk_adjacency(
                 release_internal_connection(conn)
             backend = "pgvector"
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ pgvector failed ({e}) — using in-memory fallback")
+            logger.warning("pgvector failed (%s) — using in-memory fallback", e)
             _FK_ADJACENCY = list(fk_edges)
             written = len(fk_edges)
             backend = "in_memory_fallback"
@@ -392,12 +392,7 @@ def store_fk_adjacency(
 
     duration = round(time.time() - t0, 4)
 
-    logger.info("FK adjacency stored: %d edges, backend=%s", written, backend)
-
-    if verbose:
-        print(f"  Edges written    : {written}")
-        print(f"  Duration         : {duration}s")
-        print("[FKAdjacency] Done.\n")
+    logger.info("FK adjacency stored: %d edges, backend=%s, duration=%ss", written, backend, duration)
 
     return FKStoreResult(
         edges_written = written,
@@ -437,24 +432,22 @@ def get_fk_adjacency(
             from storage_adapters.reader import get_fk_adjacency as _adapter_fk
             edges = _adapter_fk(table_ids)
             if verbose:
-                print(f"[FKAdjacency] {len(edges)} edges via storage_adapters (Django substrate)")
+                logger.debug("%d edges via storage_adapters (Django substrate)", len(edges))
             return edges
     except Exception as _e:
-        if verbose:
-            print(f"  [FKAdjacency] adapter unavailable ({_e}) — engine store")
+        logger.debug("adapter unavailable (%s) — engine store", _e)
 
     if PSYCOPG2_AVAILABLE and not _FK_ADJACENCY:
         try:
             edges = _query_fk_edges_pgvector(table_ids)
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ FK pgvector query failed ({e}) — using in-memory")
+            logger.warning("FK pgvector query failed (%s) — using in-memory", e)
             edges = _query_fk_edges_memory(table_ids)
     else:
         edges = _query_fk_edges_memory(table_ids)
 
     if verbose:
-        print(f"[FKAdjacency] Found {len(edges)} FK edges for {len(table_ids)} tables")
+        logger.debug("Found %d FK edges for %d tables", len(edges), len(table_ids))
 
     return edges
 
@@ -515,9 +508,10 @@ def store_table_metadata(
     display_col_map = getattr(inference_result, "display_col_map", {})
 
     if verbose:
-        print("[TableMetadata] Storing display columns...")
-        print(f"  Entries          : {len(display_col_map)}")
-        print(f"  Backend          : {'pgvector' if PSYCOPG2_AVAILABLE else 'in_memory_fallback'}")
+        logger.debug(
+            "Storing display columns... entries=%d backend=%s",
+            len(display_col_map), "pgvector" if PSYCOPG2_AVAILABLE else "in_memory_fallback",
+        )
 
     t0 = time.time()
 
@@ -563,8 +557,7 @@ def store_table_metadata(
                 release_internal_connection(conn)
             backend = "pgvector"
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ pgvector failed ({e}) — using in-memory fallback")
+            logger.warning("pgvector failed (%s) — using in-memory fallback", e)
             _TABLE_METADATA_STORE = rows
             backend = "in_memory_fallback"
     else:
@@ -573,10 +566,7 @@ def store_table_metadata(
 
     duration = round(time.time() - t0, 4)
 
-    if verbose:
-        print(f"  Rows written     : {len(rows)}")
-        print(f"  Duration         : {duration}s")
-        print("[TableMetadata] Done.\n")
+    logger.info("Table metadata stored: %d rows, backend=%s, duration=%ss", len(rows), backend, duration)
 
     return TableMetadataStoreResult(
         rows_written = len(rows),
@@ -632,8 +622,7 @@ def get_display_columns(
                 if row["display_col_id"]
             }
         except Exception as e:
-            if verbose:
-                print(f"  ⚠ pgvector table_metadata query failed ({e}) — using in-memory")
+            logger.warning("pgvector table_metadata query failed (%s) — using in-memory", e)
 
     # In-memory fallback
     return {

@@ -1,0 +1,119 @@
+{
+  "version": "1.0",
+  "source_hash": "fe66982dfc5fab18",
+  "source_model": "data/veda_semantic_model.json",
+  "stats": {
+    "concepts": 61,
+    "dimensions": 229,
+    "metrics": 159,
+    "grain_suspects": 5,
+    "redacted_dimensions": 52,
+    "soft_delete_metrics": 47
+  },
+  "grain_suspects": {
+    "counterparty_details": {
+      "entity_key_candidate": "counterparty_details.counterparty_id",
+      "row_pk": "counterparty_details.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"counterparty_details\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"counterparty_details\"",
+        "SELECT COUNT(DISTINCT \"counterparty_id\") FROM \"counterparty_details\"",
+        "SELECT COUNT(*) FROM \"counterparty_details\" WHERE \"counterparty_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "counterparty_supplementary_info": {
+      "entity_key_candidate": "counterparty_supplementary_info.counterparty_id",
+      "row_pk": "counterparty_supplementary_info.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"counterparty_supplementary_info\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"counterparty_supplementary_info\"",
+        "SELECT COUNT(DISTINCT \"counterparty_id\") FROM \"counterparty_supplementary_info\"",
+        "SELECT COUNT(*) FROM \"counterparty_supplementary_info\" WHERE \"counterparty_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "investigation_and_research_counter_party": {
+      "entity_key_candidate": "investigation_and_research_counter_party.counterparty_id",
+      "row_pk": "investigation_and_research_counter_party.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"investigation_and_research_counter_party\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"investigation_and_research_counter_party\"",
+        "SELECT COUNT(DISTINCT \"counterparty_id\") FROM \"investigation_and_research_counter_party\"",
+        "SELECT COUNT(*) FROM \"investigation_and_research_counter_party\" WHERE \"counterparty_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "party_research": {
+      "entity_key_candidate": "party_research.research_type_id",
+      "row_pk": "party_research.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"party_research\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"party_research\"",
+        "SELECT COUNT(DISTINCT \"research_type_id\") FROM \"party_research\"",
+        "SELECT COUNT(*) FROM \"party_research\" WHERE \"research_type_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    },
+    "user_prompt": {
+      "entity_key_candidate": "user_prompt.prompt_id",
+      "row_pk": "user_prompt.id",
+      "probes": [
+        "SELECT COUNT(*) FROM \"user_prompt\"",
+        "SELECT COUNT(DISTINCT \"id\") FROM \"user_prompt\"",
+        "SELECT COUNT(DISTINCT \"prompt_id\") FROM \"user_prompt\"",
+        "SELECT COUNT(*) FROM \"user_prompt\" WHERE \"prompt_id\" IS NULL"
+      ],
+      "decision_rule": "all four equal-ish \u2192 1:1, keep row count; distinct entity_key < distinct id and no NULLs \u2192 entity grain differs, decide via override; NULLs present \u2192 human must decide orphan policy"
+    }
+  },
+  "low_discoverability": {
+    "count": 11,
+    "columns": [
+      {
+        "column": "table_embeddings.id",
+        "score": 0
+      },
+      {
+        "column": "table_embeddings.embedding",
+        "score": 0
+      },
+      {
+        "column": "user_user_permissions.id",
+        "score": 0
+      },
+      {
+        "column": "counterparty_details.website_url",
+        "score": 1
+      },
+      {
+        "column": "counterparty_details.offshore_bank_flag",
+        "score": 1
+      },
+      {
+        "column": "counterparty_details.pay_through_bank_flag",
+        "score": 1
+      },
+      {
+        "column": "counterparty_details.embassy_flag",
+        "score": 1
+      },
+      {
+        "column": "counterparty_details.foreign_government_flag",
+        "score": 1
+      },
+      {
+        "column": "table_embeddings.table_name",
+        "score": 1
+      },
+      {
+        "column": "user_user_permissions.user_id",
+        "score": 1
+      },
+      {
+        "column": "user_user_permissions.permission_id",
+        "score": 1
+      }
+    ]
+  }
+}

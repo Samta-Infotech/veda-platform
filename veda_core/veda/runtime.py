@@ -25,7 +25,8 @@ def get_db_config() -> dict:
     from config import get_primary_relational_source
     src = get_primary_relational_source()
     return {"host": src["host"], "port": src["port"], "database": src["dbname"],
-            "user": src["user"], "password": src["password"]}
+            "user": src["user"], "password": src["password"],
+            "schema": src.get("schema"), "sslmode": src.get("sslmode")}
 
 # Word-boundary match so column names like `updated_datetime` / `created_by_id`
 # don't trip the DML/DDL guard.

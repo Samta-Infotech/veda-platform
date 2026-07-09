@@ -1,0 +1,7333 @@
+{
+  "PERSON": [
+    {
+      "table": "accounts_generalledger",
+      "column": "payer_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger",
+      "column": "receiver_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "payer_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "receiver_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_generalledgerattachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_generalledgercategory",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "third_party_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "ops_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "payer_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "receiver_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "user_invoice_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "user_bank_info_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "third_party_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "ops_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "payer_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "receiver_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "user_invoice_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "user_bank_info_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_paymenttype",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "item_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "user_invoice_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "item_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "user_invoice_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "advertisements_advertisement_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "asset_assignment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_amenity",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_amenitycategory",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_amenitygroup",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "project_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "building_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "city_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "state_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "country_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "is_owner_verified",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "project_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "building_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "city_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "state_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "country_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "is_owner_verified",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetadditionalinfo",
+      "column": "society_contact_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo_history",
+      "column": "society_contact_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetdocument",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetdocument_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetdocument_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetdocumentleasetenant",
+      "column": "lease_tenant_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetdocumentleasetenant_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetdocumentleasetenant_history",
+      "column": "lease_tenant_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetgroup",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetgroupspacetype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "key_holder_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "is_approved_by_owner",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "key_holder_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "key_holder_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "is_approved_by_owner",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "key_holder_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetpayments_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetspace",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetspaceattachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assettype",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assettype_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assettype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "ownership_percentage",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "ownership_percentage",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetverificationdocument_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_carpetareaunit",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_closurereason_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead",
+      "column": "contact_person_type",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead",
+      "column": "lead_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead",
+      "column": "person_contacted_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead",
+      "column": "user_search_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "contact_person_type",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "lead_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "person_contacted_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "user_search_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistingtenantpreference",
+      "column": "tenant_preference_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinguser",
+      "column": "user_representative_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "user_representative_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasenegotiationtenantpreference",
+      "column": "tenant_preference_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasetermination_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaseunit",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_leaseunitdetail_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_listingreview_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_listingvisit_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_negotiationthreadcomment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_project",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_project_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_project_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospect",
+      "column": "tenant_type_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospect",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "tenant_type_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospectfeedback",
+      "column": "is_tenant_interested",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback",
+      "column": "is_tenant_shortlisted",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback",
+      "column": "visited_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "is_tenant_interested",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "is_tenant_shortlisted",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "visited_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_renttransaction_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead",
+      "column": "contact_person_type",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead",
+      "column": "lead_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead",
+      "column": "person_contacted_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead",
+      "column": "user_search_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "contact_person_type",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "lead_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "person_contacted_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "user_search_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinguser",
+      "column": "user_representative_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "user_representative_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_saletransaction_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_society",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_society",
+      "column": "contact_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "contact_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_societybankinfo",
+      "column": "beneficiary_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo",
+      "column": "bank_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "beneficiary_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "bank_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_societyuserconfirm",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_societyuserconfirm_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_societyuserconfirm_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_spacetype",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_spacetype_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_spacetype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_tenantpreference",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "user_location_latitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "user_location_longitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "user_location_latitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "user_location_longitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "attachments_attachment",
+      "column": "original_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "attachments_attachment",
+      "column": "unique_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "attachments_attachment_history",
+      "column": "original_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "attachments_attachment_history",
+      "column": "unique_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "attachments_attachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "auth_group",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "auth_permission",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "auth_permission",
+      "column": "codename",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "cascade_pms_deactivation_log",
+      "column": "affected_user_ids",
+      "role": "ATTRIBUTE"
+    },
+    {
+      "table": "chats_message_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messageattachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagegroup",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagegroupuser",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagegroupuser_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagegroupuser_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagerecipient",
+      "column": "message_group_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "message_group_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "client_support_clientsupport_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "client_support_clientsupportattachment",
+      "column": "client_support_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "client_support_clientsupportattachment_history",
+      "column": "client_support_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "client_support_clientsupportattachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "comments_comment",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "comments_comment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "comments_comment_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "communication_campaign_users",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "communications_comment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "django_admin_log",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "django_migrations",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "fcm_django_fcmdevice",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "fcm_django_fcmdevice",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "inspections_inspectionreportspace",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreportspace_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreportspace_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "inspections_spaceinspection_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_customsearch",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_customsearch",
+      "column": "user_location_latitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "leads_customsearch",
+      "column": "user_location_longitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "user_location_latitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "user_location_longitude",
+      "role": "MEASURE"
+    },
+    {
+      "table": "leads_customsearchassettype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_lead",
+      "column": "first_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "leads_lead",
+      "column": "last_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "leads_lead",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_lead",
+      "column": "user_rep_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "first_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "last_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "user_rep_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "leads_leadstage_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "level",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue",
+      "column": "table_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue",
+      "column": "column_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue_history",
+      "column": "table_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue_history",
+      "column": "column_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "module",
+      "column": "module_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "newsletters_subscription_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "notifications_homzhubfcmdevice",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "notifications_homzhubfcmdevice",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "notifications_notification",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "notifications_notification_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "notifications_notification_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "notifications_notificationtype",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "oauth2_provider_accesstoken",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "oauth2_provider_application",
+      "column": "client_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "oauth2_provider_application",
+      "column": "client_type",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_application",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_application",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "oauth2_provider_grant",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "oauth2_provider_idtoken",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "oauth2_provider_refreshtoken",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "organization_units",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount",
+      "column": "beneficiary_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "beneficiary_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "permission",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "pms_company",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "pms_user_role",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "payer_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "receiver_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "user_bank_info_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "payer_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "receiver_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "user_bank_info_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_remindercategory",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminderfrequency",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reviews_pillar",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "reviews_pillar_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "reviews_pillar_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reviews_pillarrating_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reviews_review_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reviews_reviewcomment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reviews_reviewreport_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "reviews_reviewtype_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "role",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "role_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "role_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_homzhubpointsdefinition_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "promotions_per_user",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "users_limit",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "user_role",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "promotions_per_user",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "users_limit",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "user_role",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_serviceplan",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_serviceplan_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_serviceplan_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_serviceplanbundle",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_serviceplanpricing",
+      "column": "user_country_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "user_country_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_user_value_bundle_attachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_user_value_bundle_attachment_history",
+      "column": "user_value_bundle_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_uservaluebundle",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_uservaluebundleattachment",
+      "column": "user_value_bundle_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_valuebundle",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_valuebundle_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_valuebundle_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_valuebundleitem",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "user_role",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "user_role",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "spatial_ref_sys",
+      "column": "auth_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "sub_module",
+      "column": "sub_module_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "user_module_permission",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "user_role_hierarchy_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "user_role_permission",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "user_role_permission_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "user_role_permission_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_markettrend_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_socialloginprovider_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_socialloginsetting",
+      "column": "client_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_socialloginsetting_history",
+      "column": "client_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_socialloginsetting_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_user",
+      "column": "is_superuser",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "first_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "last_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "emergency_contact_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user_groups",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_user_history",
+      "column": "is_superuser",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "first_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "last_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_user_history",
+      "column": "emergency_contact_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_user_user_permissions",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useraddress",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useraddress",
+      "column": "city_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useraddress",
+      "column": "country_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useraddress",
+      "column": "state_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "city_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "country_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "state_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo",
+      "column": "beneficiary_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo",
+      "column": "bank_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "beneficiary_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "bank_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "user_points_received",
+      "role": "MEASURE"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "referral_user_points_received",
+      "role": "MEASURE"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "referral_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "user_points_received",
+      "role": "MEASURE"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "referral_user_points_received",
+      "role": "MEASURE"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "referral_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useremployer",
+      "column": "company_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useremployer",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "company_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useridentitydocument",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useridentitydocument_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_useridentitydocument_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userpreference",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userpreference",
+      "column": "is_last_name_obfuscated",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userpreference",
+      "column": "user_currency_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "is_last_name_obfuscated",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "user_currency_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userrole",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userrole",
+      "column": "company_name_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userrole_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userrole_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userrole_history",
+      "column": "company_name_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userstatpreference",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userstatpreference_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userstatpreference_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userwithdrawal",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userwithdrawal_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userwithdrawal_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userworklocation",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userworklocation_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_userworklocation_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "city_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "state_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "country_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "city_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "state_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "country_name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quote",
+      "column": "user_billed_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "user_billed_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoteactivity_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoterequest",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoterequest_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoterequest_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quoterequestcategory",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quotesubmitgroup",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quotesubmitgroup_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_quotesubmitgroup_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticket_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketactivity_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketattachment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketcategory",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory_history",
+      "column": "name",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketpayment_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketreview_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketupdate_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "parent_ticket_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "is_ffm_user",
+      "role": "DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "history_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "parent_ticket_user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "user_id",
+      "role": "IDENTIFIER"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "is_ffm_user",
+      "role": "DIMENSION"
+    }
+  ],
+  "DATE": [
+    {
+      "table": "accounts_generalledger",
+      "column": "transaction_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "transaction_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgerattachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_generalledgercategory_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "processed_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "payment_schedule_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "payment_due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "payment_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "processed_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "payment_schedule_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "payment_due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "payment_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "settlement_schedule_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "settlement_due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "settlement_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "transfer_processed_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "settlement_schedule_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "settlement_due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "settlement_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "transfer_processed_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlementlog",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlementlog",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_paymenttype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "issue_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "issue_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement",
+      "column": "expire_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement_history",
+      "column": "expire_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "advertisements_advertisement_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "asset_assignment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "asset_assignment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "asset_assignment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "asset_assignment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "asset_assignment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_amenity",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_amenity",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_amenitycategory",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_amenitycategory",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_amenitygroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_amenitygroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetadditionalinfo_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetamenitygroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetamenitygroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetdocument",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetdocument",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetdocument_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetdocument_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetdocument_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetdocumentleasetenant_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetgroup_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetgroupspacetype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetkey_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayment",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayment",
+      "column": "payment_schedule_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayments_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayments_history",
+      "column": "payment_schedule_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayments_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayments_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetpayments_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspace",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspace",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspaceattachment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspaceattachment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspaceattachment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspaceattachment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetspaceattachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assettype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assettype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assettype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assettype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assettype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "verified_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "verified_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetuser_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument",
+      "column": "verified_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument_history",
+      "column": "verified_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocument_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_assetverificationdocumenttype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_carpetareaunit_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_closurereason",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_closurereason",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_closurereason_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_closurereason_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_closurereason_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting",
+      "column": "approved_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "approved_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinglead_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaselistinguser_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation",
+      "column": "proposed_move_in_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation",
+      "column": "expires_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation",
+      "column": "status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "proposed_move_in_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "expires_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasenegotiation_history",
+      "column": "status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "tenancy_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant",
+      "column": "invite_sent_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "tenancy_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetenant_history",
+      "column": "invite_sent_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetermination",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetermination",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetermination_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetermination_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetermination_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction",
+      "column": "lease_start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction",
+      "column": "lease_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction",
+      "column": "agreement_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction",
+      "column": "tentative_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "lease_start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "lease_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "agreement_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leasetransaction_history",
+      "column": "tentative_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunit_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_leaseunitdetail_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingreview",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingreview",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingreview_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingreview_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingreview_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_listingvisit_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_negotiationthreadcomment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_project_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_projectamenitygroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_projectamenitygroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospect_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_prospectfeedback_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_renttransaction",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_renttransaction",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_renttransaction_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_renttransaction_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_renttransaction_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "approved_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "approved_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinglead_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salelistinguser_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "expires_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "expires_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_saletransaction",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_saletransaction",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_saletransaction_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_saletransaction_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_saletransaction_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_society_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societybankinfo_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_societyuserconfirm_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_spacetype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_spacetype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_spacetype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_spacetype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_spacetype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_tenantpreference_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "attachments_attachment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "attachments_attachment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "attachments_attachment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "attachments_attachment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "attachments_attachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "cascade_org_deactivation_log",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "cascade_pms_deactivation_log",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_message_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messageattachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroup_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagegroupuser_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient",
+      "column": "read_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "read_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "chats_messagerecipient_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "client_support_clientsupport",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "client_support_clientsupport",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "client_support_clientsupport_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "client_support_clientsupport_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "client_support_clientsupport_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "client_support_clientsupportattachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "comments_comment_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "communication_campaign",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "communication_campaign",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "communications_comment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "communications_comment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "communications_comment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "django_admin_log",
+      "column": "action_time",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "django_session",
+      "column": "expire_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "fcm_django_fcmdevice",
+      "column": "date_created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "started_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "completed_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "verified_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "due_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "started_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "completed_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "verified_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreport_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreportspace",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreportspace_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_inspectionreportspace_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspection_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "inspections_spaceinspectionattachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearch_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearchassettype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearchassettype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearchassettype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearchassettype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_customsearchassettype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead",
+      "column": "assigned_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "available_from_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "assigned_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_leadstage",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_leadstage",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_leadstage_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_leadstage_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "leads_leadstage_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "level",
+      "column": "created_datetime",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "level",
+      "column": "updated_datetime",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "list_of_values_listofvalue_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "module_permission",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "module_permission",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "newsletters_subscription_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_homzhubfcmdevice",
+      "column": "date_created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notification",
+      "column": "read_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notification",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notification_history",
+      "column": "read_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notification_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notification_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "notifications_notificationtype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_accesstoken",
+      "column": "created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_accesstoken",
+      "column": "updated",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_application",
+      "column": "created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_application",
+      "column": "updated",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_grant",
+      "column": "created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_grant",
+      "column": "updated",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_idtoken",
+      "column": "created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_idtoken",
+      "column": "updated",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_refreshtoken",
+      "column": "created",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "oauth2_provider_refreshtoken",
+      "column": "updated",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "organization_units",
+      "column": "created_datetime",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "organization_units",
+      "column": "updated_datetime",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "organization_units",
+      "column": "deleted_datetime",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "organization_units",
+      "column": "contract_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "organization_units",
+      "column": "contract_start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "payments_razorpaylinkedaccount_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "pms_company",
+      "column": "contract_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "pms_company",
+      "column": "contract_start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "pms_company",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "pms_company",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "pms_user_role",
+      "column": "assigned_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "initial_start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "next_reminder_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "last_run_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "initial_start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "next_reminder_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "last_run_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_remindercategory_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderfrequency_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reminders_reminderpaymenttransaction_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillar",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillar",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillar_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillar_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillar_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillarrating",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillarrating",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillarrating_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillarrating_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_pillarrating_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_review",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_review",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_review_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_review_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_review_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewcomment_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport",
+      "column": "reviewed_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewreport_history",
+      "column": "reviewed_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewtype",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewtype",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewtype_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewtype_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "reviews_reviewtype_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "role_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_homzhubpointsdefinition_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplan_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanbundle_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanpricing",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanpricing",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_user_value_bundle_attachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "trial_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "start_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "trial_end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle",
+      "column": "expiry_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle",
+      "column": "status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "expiry_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundle_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleadditionalinfo_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundleitem_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_module_permission",
+      "column": "assigned_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_hierarchy",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_hierarchy",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_hierarchy_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_hierarchy_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_hierarchy_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_permission",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_permission",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_permission_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_permission_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "user_role_permission_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_markettrend",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_markettrend",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_markettrend_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_markettrend_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_markettrend_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginprovider",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginprovider",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginprovider_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginprovider_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginprovider_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginsetting",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginsetting",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginsetting_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginsetting_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_socialloginsetting_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "date_joined",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "date_of_birth",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user",
+      "column": "verified_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "date_joined",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "date_of_birth",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_user_history",
+      "column": "verified_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useraddress",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useraddress",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useraddress_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userbankinfo_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "referral_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "referral_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_usercoin_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useremployer_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useridentitydocument",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useridentitydocument",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useridentitydocument_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useridentitydocument_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_useridentitydocument_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userpreference_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userrole",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userrole",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userrole_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userrole_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userrole_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userstatpreference",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userstatpreference",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userstatpreference_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userstatpreference_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userstatpreference_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userwithdrawal",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userwithdrawal",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userwithdrawal_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userwithdrawal_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userwithdrawal_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userworklocation",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userworklocation",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userworklocation_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userworklocation_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_userworklocation_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "users_worklocation_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteactivity_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoteapprovedgroup_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequest_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quoterequestcategory_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_quotesubmitgroup_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket",
+      "column": "closed_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticket_history",
+      "column": "closed_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketactivity_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketattachment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketattachment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketattachment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketattachment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketattachment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketcategory_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketpayment_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketreview_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketupdate_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser",
+      "column": "ffm_status_updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "end_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "created_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "updated_at",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "history_date",
+      "role": "TIME_DIMENSION"
+    },
+    {
+      "table": "worklists_ticketuser_history",
+      "column": "ffm_status_updated_at",
+      "role": "TIME_DIMENSION"
+    }
+  ],
+  "AMOUNT": [
+    {
+      "table": "accounts_generalledger",
+      "column": "amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_generalledger",
+      "column": "base_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_generalledger_history",
+      "column": "base_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "expected_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "paid_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "balance_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction",
+      "column": "late_fee",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "expected_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "paid_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "balance_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransaction_history",
+      "column": "late_fee",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "expected_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "paid_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement",
+      "column": "balance_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "expected_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "paid_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttransactionsettlement_history",
+      "column": "balance_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttype",
+      "column": "convenience_fee",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_paymenttype_history",
+      "column": "convenience_fee",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "late_fee",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "total_discount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "total_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "tax_amount_1",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "tax_amount_2",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "tax_amount_3",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice",
+      "column": "total_price_payable",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "late_fee",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "total_discount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "total_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "tax_amount_1",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "tax_amount_2",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "tax_amount_3",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoice_history",
+      "column": "total_price_payable",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "unit_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoiceitem",
+      "column": "pos_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "unit_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "accounts_userinvoiceitem_history",
+      "column": "pos_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "advertisements_advertisement",
+      "column": "total_visits",
+      "role": "MEASURE"
+    },
+    {
+      "table": "advertisements_advertisement_history",
+      "column": "total_visits",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_asset",
+      "column": "total_floors",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_asset_history",
+      "column": "total_floors",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_assetadditionalinfo",
+      "column": "maintenance_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_assetadditionalinfo_history",
+      "column": "maintenance_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_leaselisting",
+      "column": "total_views",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_leaselisting_history",
+      "column": "total_views",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_renttransaction",
+      "column": "rent_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_renttransaction_history",
+      "column": "rent_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "expected_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "expected_booking_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "booking_amount_grace_period",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting",
+      "column": "total_views",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "expected_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "expected_booking_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "booking_amount_grace_period",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salelisting_history",
+      "column": "total_views",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "proposed_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salenegotiation",
+      "column": "proposed_booking_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "proposed_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_salenegotiation_history",
+      "column": "proposed_booking_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_saletransaction",
+      "column": "price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_saletransaction",
+      "column": "booking_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_saletransaction_history",
+      "column": "price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_saletransaction_history",
+      "column": "booking_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "min_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch",
+      "column": "max_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "min_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "assets_usersearch_history",
+      "column": "max_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "leads_lead",
+      "column": "expected_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "leads_lead_history",
+      "column": "expected_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "reminders_reminder",
+      "column": "amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "reminders_reminder_history",
+      "column": "amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_homzhubpointsdefinition",
+      "column": "unit_value_point",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_homzhubpointsdefinition_history",
+      "column": "unit_value_point",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "base_cart_value",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "discount_value",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule",
+      "column": "promotion_amount_total",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "base_cart_value",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "discount_value",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_promotionrule_history",
+      "column": "promotion_amount_total",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_serviceplanpricing",
+      "column": "actual_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_serviceplanpricing",
+      "column": "discounted_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "actual_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_serviceplanpricing_history",
+      "column": "discounted_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_userserviceplan",
+      "column": "pos_unit_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_userserviceplan_history",
+      "column": "pos_unit_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_uservaluebundle",
+      "column": "pos_unit_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_uservaluebundle_history",
+      "column": "pos_unit_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "bundle_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "discounted_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "min_invoice_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing",
+      "column": "price_percent",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "bundle_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "discounted_price",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "min_invoice_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "services_valuebundlepricing_history",
+      "column": "price_percent",
+      "role": "MEASURE"
+    },
+    {
+      "table": "users_markettrend",
+      "column": "total_visits",
+      "role": "MEASURE"
+    },
+    {
+      "table": "users_markettrend_history",
+      "column": "total_visits",
+      "role": "MEASURE"
+    },
+    {
+      "table": "worklists_quote",
+      "column": "tax_total",
+      "role": "MEASURE"
+    },
+    {
+      "table": "worklists_quote",
+      "column": "total_amount",
+      "role": "MEASURE"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "tax_total",
+      "role": "MEASURE"
+    },
+    {
+      "table": "worklists_quote_history",
+      "column": "total_amount",
+      "role": "MEASURE"
+    }
+  ]
+}

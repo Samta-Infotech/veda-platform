@@ -115,19 +115,42 @@ def resolve_fk_path(
     graph: dict,
     lookup: Lookup,
     max_hops: int = 4,
+    anchor_cols: Optional[set] = None,
 ) -> Optional[Dict]:
     """Single UNAMBIGUOUS multi-hop entity filter, or None (refuse → LLM).
 
     Returns {"kind": "multihop_subquery", "anchor_col", "subquery", "value_table",
              "path", "pairs"} only when exactly one grounded table is reachable by exactly
-    one membership path. Otherwise None (ungrounded, ambiguous target, or >1 path)."""
+    one membership path. Otherwise None (ungrounded, ambiguous target, or >1 path).
+
+    anchor_cols (optional, injected): the anchor table's COLUMN NAMES — same guard as
+    resolve_value_filter's anchor-column skip. A token naming an anchor column ("state" →
+    workflow_state) is a COLUMN REFERENCE to project, not a cross-table value filter — even
+    when it coincidentally exists as a value in some FK-reachable table (signal_levels.name=
+    'state'). Without this, a common word coincidentally stored as a value in a distant table
+    hijacks a single-table query into a fabricated multi-hop join."""
+    _ac = {str(c).lower() for c in (anchor_cols or set())}
+
+    def _names_anchor_col(t):
+        tl = t.lower()
+        sing = tl[:-1] if tl.endswith("s") and len(tl) > 3 else tl
+        return tl in _ac or sing in _ac
+
     # 1. EXACT-ground every token (same as value_resolver — never fuzzy/LIKE)
     hits, seen = [], set()
     for tok in qtoks:
+        if _names_anchor_col(tok):
+            continue
         try:
             found = lookup(tok) or []
         except Exception:
             found = []
+        # A token that ALSO grounds to a value on the anchor's own columns is a single-table
+        # value filter (handled by resolve_value_filter), never a multi-hop join trigger —
+        # skip the whole token so its coincidental match in another table can't collapse an
+        # ambiguous-refuse into a wrong join.
+        if any(tbl == anchor for tbl, _c, _v in found):
+            continue
         for tbl, col, val in found:
             if (tbl, col) not in seen:
                 seen.add((tbl, col))
