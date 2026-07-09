@@ -13,19 +13,54 @@ state in three places, and only two of them are in Postgres.
 
 | Store | Contents | Captured by `pg_dump`? |
 |---|---|---|
-| **`veda_engine` DB** (`VEDA_INTERNAL_DB`) | The embeddings/graphs the query path actually reads: `column_embeddings_v2`, `table_embeddings_v2`, `column_sparse_v1`, `table_sparse_v1`, `fk_adjacency`, `table_metadata`, `column_values`, `doc_chunks`, `graph_nodes/edges/embeddings`, `source_registry` | ✅ **yes — the critical dump** |
-| **`veda` DB** (Django substrate) | `apps.sources.Source` registry, auth tokens, `QueryLog` | ✅ yes — needed for the api/HTTP surface |
+| **`veda_engine` DB** (`VEDA_INTERNAL_DB`) | The embeddings/graphs the retrieval path reads: `column_embeddings_v2`, `table_embeddings_v2`, `column_sparse_v1`, `table_sparse_v1`, `fk_adjacency`, `table_metadata`, `column_values`, `doc_chunks`, `graph_nodes/edges/embeddings`, `source_registry` | ✅ **yes — required** |
+| **`veda` DB** (Django substrate) | `sources_source` registry (**the engine reads this at query time** to resolve scope, source kind, per-source FK edges, glossary, verified-cache — see `storage_adapters/reader.py`), plus auth tokens + `QueryLog` | ✅ **yes — required, not optional** |
 | **`veda_core/data/`** (~16 MB, git-ignored) | `veda_semantic_model.json`, glossary, synonyms, concept/relationship/unified graphs, bm25/hnsw/rerank indexes, **per-source parquet** (`data/4/tables/*.parquet`, `data/5/…`) | ❌ **no — plain files, must be tarred** |
 
 Plus two things that **cannot be dumped** and are provisioned on the demo box:
 
 - **Model weights** — BGE-M3 + `bge-reranker-v2-m3` (the `model_cache` Docker volume, offline HF cache).
-- **An SLM backend** — the query path does routing / decompose / NL-answer via `call_slm`, so the
-  demo needs **Ollama** with the SLM pulled (`qwen2.5-coder:7b` by default). Bundled as the
+- **An SLM backend** — the query path does routing / decompose / SQL-gen / NL-answer via `call_slm`, so
+  the demo needs **Ollama** with the SLM pulled (`qwen2.5-coder:7b` by default). Bundled as the
   `ollama_models` volume, or pulled fresh on first boot.
 
 > Without `veda_core/data/veda_semantic_model.json` present, the inference tier's `/readyz` reports
 > *"semantic model not found"* and queries won't run.
+
+---
+
+## What must be running (services)
+
+Traced end-to-end through `veda_hybrid.run_hybrid_query`. The query-only stack is:
+
+| Service | Why the query pipeline needs it |
+|---|---|
+| **postgres** | Holds both `veda_engine` (embeddings/graphs) and `veda` (registry/FK/glossary/cache). Required. |
+| **pgbouncer** | Both `VEDA_INTERNAL_HOST` and `PGBOUNCER_HOST` dial it. Required (or point both env vars straight at `postgres:5432`). |
+| **redis-cache** | Verified-query cache, `ef_search` cache, rehydrate pub/sub, Django cache/throttle. Required. |
+| **redis-broker** | Only present because the `api` container `depends_on` it; the query path never uses Celery. Started, unused. |
+| **ollama** | The SLM for routing / decompose / SQL generation / NL answer. Required. |
+| **inference** | The warm engine — BGE-M3 dense+sparse, reranker, 5-signal retrieval, DuckDB/psycopg2 execution. Required. |
+| **api** | HTTP `/api/v1/query`: resolves scope+tenant server-side, forwards to inference with context headers. Required for the HTTP surface. |
+
+**Never started** (query-only): `worker`, `beat`, `ingest-worker`, `vllm`, `nginx` (nginx optional — see gotchas).
+
+### ⚠️ The one thing that decides self-containment: source **dialect**
+
+SQL is executed differently per source kind (`veda_core/veda/execution.py`):
+
+- **Parquet / CSV / XLSX sources** (`dialect ∈ {parquet, csv, csv_lake, xlsx, excel}`) → executed by
+  **DuckDB over the materialized `data/<id>/tables/*.parquet`**. **Fully self-contained** — no live
+  database beyond the dump.
+- **Relational sources** (`dialect ∈ {postgres, mysql, sqlite, …}`) → executed by **psycopg2 against
+  the LIVE client source DB** (resolved from the `sources_source` row), and value-validation +
+  `postgres_scanner` federation also dial it. **A dump does not include this** — that live DB must be
+  reachable from the demo box, or you must re-materialize the source as parquet before exporting.
+
+**Your current sources 4 and 5 are parquet** (`maintenance.parquet`, `vendors.parquet`,
+`amenities_catalog.parquet`), so the cross-source example query runs entirely on DuckDB over parquet —
+**no live source DB required.** `restore.sh` prints a per-source dialect preflight so you catch any
+relational source before demoing.
 
 ---
 

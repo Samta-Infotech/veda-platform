@@ -39,6 +39,21 @@ docker compose exec -T postgres createdb -U veda veda_engine 2>/dev/null || echo
 docker compose exec -T postgres pg_restore -U veda -d veda_engine --clean --if-exists --no-owner < "$IN/veda_engine.dump"
 docker compose exec -T postgres pg_restore -U veda -d veda        --clean --if-exists --no-owner < "$IN/veda_django.dump"
 
+echo "==> source-kind preflight (relational sources need a LIVE source DB reachable from this box)"
+NEEDS_LIVE_DB=0
+while IFS='|' read -r sid dialect; do
+    [ -z "$sid" ] && continue
+    case "$dialect" in
+        parquet|csv|csv_lake|xlsx|excel)
+            echo "    source $sid ($dialect): self-contained — DuckDB over parquet ✓" ;;
+        *)
+            echo "    source $sid ($dialect): RELATIONAL — its live source DB must be reachable ⚠"
+            NEEDS_LIVE_DB=1 ;;
+    esac
+done < <(docker compose exec -T postgres psql -U veda -d veda -tA -F'|' \
+            -c "SELECT id, dialect FROM sources_source WHERE ready = true ORDER BY id;" 2>/dev/null)
+[ "$NEEDS_LIVE_DB" = "1" ] && echo "    !! at least one ready source is relational — ensure its DB is reachable, or re-materialize it as parquet before export."
+
 echo "==> [5/5] start the query-only stack"
 $COMPOSE up -d postgres pgbouncer redis-broker redis-cache ollama inference api
 
