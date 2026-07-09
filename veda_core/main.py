@@ -534,19 +534,8 @@ def run_single_query(query: str, verbose: bool = False, debug: bool = False) -> 
         _cfg.EXPLAIN_TRACE_ENABLED = True
         _cfg.EXPLAIN_TRACE_VERBOSE = True
 
-    # L0 — NL Simplifier (parity with the legacy path + the demo backend, which both
-    # simplify before retrieval). The hybrid engine itself does not run L0, so apply it
-    # here. NOTE: the cleaner long-term home is inside veda_hybrid.run_hybrid_query so
-    # every consumer (CLI, demo, hybrid suite) shares it — fold it in when unifying demo.
-    try:
-        from query.nl_simplifier import run_nl_simplifier
-        _l0 = run_nl_simplifier(query, verbose=False)
-        if _l0.was_simplified:
-            print(f"  [L0] Simplified: '{_l0.simplified_query}' ({_l0.duration_ms}ms)")
-        query = _l0.simplified_query
-    except Exception:
-        pass  # fall back to the original query silently
-
+    # L0 NL simplification now runs INSIDE veda_hybrid.run_hybrid_query itself, shared
+    # by every consumer (CLI, inference API, demo) — see its docstring.
     result = veda_hybrid.run_hybrid_query(query, verbose=verbose)
     veda_hybrid._render_multi(result)   # compound recap + refusal surfacing (per-head output already streamed)
 

@@ -13,6 +13,7 @@ import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from typing import Iterator
 
 
 @dataclass
@@ -33,10 +34,13 @@ class InferenceClient:
             timeout_s=float(os.environ.get("INFERENCE_TIMEOUT_S", "300")),
         )
 
-    def _post(self, path: str, body: dict, source_id, tenant, request_id=None, source_ids=None) -> dict:
+    def _request(self, path: str, body: dict, source_id, tenant, request_id=None,
+                 accept: str | None = None, source_ids=None) -> urllib.request.Request:
         url = f"{self.config.base_url.rstrip('/')}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
+        if accept:
+            headers["Accept"] = accept
         if source_id is not None:
             headers["X-Veda-Source-Id"] = str(source_id)
         if source_ids:
@@ -48,15 +52,18 @@ class InferenceClient:
             headers["X-Veda-Tenant"] = str(tenant)
         if request_id:
             headers["X-Request-Id"] = str(request_id)  # trace across api→inference (§6.3)
-        req = urllib.request.Request(url, data=data, headers=headers, method="POST")
+        return urllib.request.Request(url, data=data, headers=headers, method="POST")
+
+    def _post(self, path: str, body: dict, source_id, tenant, request_id=None, source_ids=None) -> dict:
+        req = self._request(path, body, source_id, tenant, request_id=request_id, source_ids=source_ids)
         try:
             with urllib.request.urlopen(req, timeout=self.config.timeout_s) as resp:
                 return json.loads(resp.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             detail = exc.read().decode("utf-8", "replace")[:500]
-            raise InferenceUnavailable(f"inference {exc.code} at {url}: {detail}") from exc
+            raise InferenceUnavailable(f"inference {exc.code} at {req.full_url}: {detail}") from exc
         except urllib.error.URLError as exc:
-            raise InferenceUnavailable(f"inference unreachable at {url}: {exc}") from exc
+            raise InferenceUnavailable(f"inference unreachable at {req.full_url}: {exc}") from exc
 
     def run_hybrid_query(self, query: str, source_id=None, tenant=None, flags=None,
                          request_id=None, source_ids=None) -> dict:
@@ -66,6 +73,45 @@ class InferenceClient:
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, source_ids=source_ids,
         )
+
+    def stream_hybrid_query(
+        self, query: str, source_id=None, tenant=None, flags=None, request_id=None,
+    ) -> Iterator[tuple[str, dict]]:
+        """Yields (event, data) as the inference tier's SSE stream delivers them
+        (progress events as the pipeline advances, then one final "result" event).
+        ``resp`` is read incrementally line-by-line — NOT buffered whole — so events
+        surface to the caller as soon as the inference tier flushes them (§ SSE)."""
+        req = self._request(
+            "/v1/run_hybrid_query/stream",
+            {"query": query, "source_id": source_id, "tenant": tenant, "flags": flags},
+            source_id, tenant, request_id=request_id, accept="text/event-stream",
+        )
+        try:
+            resp = urllib.request.urlopen(req, timeout=self.config.timeout_s)
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", "replace")[:500]
+            raise InferenceUnavailable(f"inference {exc.code} at {req.full_url}: {detail}") from exc
+        except urllib.error.URLError as exc:
+            raise InferenceUnavailable(f"inference unreachable at {req.full_url}: {exc}") from exc
+
+        try:
+            event, data_lines = None, []
+            for raw_line in resp:
+                line = raw_line.decode("utf-8").rstrip("\n").rstrip("\r")
+                if line.startswith("event:"):
+                    event = line[len("event:"):].strip()
+                elif line.startswith("data:"):
+                    data_lines.append(line[len("data:"):].strip())
+                elif line == "":  # blank line terminates one SSE frame
+                    if event is not None:
+                        try:
+                            data = json.loads("".join(data_lines)) if data_lines else {}
+                        except ValueError:
+                            data = {}
+                        yield event, data
+                    event, data_lines = None, []
+        finally:
+            resp.close()
 
     def retrieve(self, query: str, source_id=None, tenant=None, top_k=None) -> dict:
         return self._post(

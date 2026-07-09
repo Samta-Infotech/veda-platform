@@ -137,8 +137,7 @@ services:
     environment:
       WORKERS: ${INFERENCE_WORKERS:-1}   # dev default; prod sizes from measured RSS (§8.1)
       PYTHONPATH: /app                    # so `inference.main` imports from the repo root
-      HF_HOME: /models                    # offline model cache (BGE / reranker)
-      HF_HUB_CACHE: /models/hf_cache      # flat weights live here (see ingest-worker note)
+      HF_HOME: /models/hf_cache            # offline model cache (BGE / reranker) — matches ingest-worker + Dockerfile default
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
     volumes:

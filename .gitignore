@@ -23,6 +23,7 @@ docker/userlist.txt
 # Model weights & heavy artifacts — belong on a mounted volume (plan §9, §6.5)
 # (kept out of source control; mount at deploy time)
 model_cache/
+.hf_cache_host/
 *.safetensors
 *.gguf
 veda_core/ingestion/client_bge/model.safetensors

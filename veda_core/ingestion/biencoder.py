@@ -100,6 +100,22 @@ def _load_retrieval_docs() -> dict:
     return {}
 
 
+def _load_table_purposes() -> dict:
+    """table_name -> business_purpose from the semantic model (semantic_layer_v2's
+    LLM-authored one-sentence table summary). Empty dict when the model is absent —
+    caller falls back to the bare column-list passage, same as before this existed."""
+    try:
+        from config import SEMANTIC_MODEL_FILE
+        import os
+        import json as _json
+        if os.path.exists(SEMANTIC_MODEL_FILE):
+            tables = _json.load(open(SEMANTIC_MODEL_FILE)).get("tables", {}) or {}
+            return {n: (m.get("business_purpose") or "") for n, m in tables.items()}
+    except Exception:
+        pass
+    return {}
+
+
 def _passage_text(col, rdocs: dict) -> str:
     """Build the BGE passage text per config.EMBED_TEXT_STRATEGY. Always falls back
     to the structural string when no retrieval_document exists for the column."""
@@ -195,9 +211,17 @@ def run_biencoder_ingestion(
         # --- Table embeddings ---
         tbl_texts = []
         tbl_metas = []
+        _tbl_purposes = _load_table_purposes()
         for tid, info in table_map.items():
             col_list = ", ".join(info["col_names"][:20])
-            text = BIENCODER_PASSAGE_PREFIX + f"{info['table_name']}: columns {col_list}"
+            purpose = _tbl_purposes.get(info["table_name"])
+            # Bare column names retrieve poorly for a semantic query ("who's overdue on
+            # rent" never lexically matches `columns tenant_id, due_date, amount`) — the
+            # one-sentence business purpose gives the table embedding an actual semantic
+            # anchor. Falls back to the old bare passage when the model has none.
+            text = BIENCODER_PASSAGE_PREFIX + (
+                f"{info['table_name']}: {purpose}. columns {col_list}" if purpose
+                else f"{info['table_name']}: columns {col_list}")
             tbl_texts.append(text)
             tbl_metas.append({
                 "col_id":     tid,

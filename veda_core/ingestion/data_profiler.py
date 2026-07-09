@@ -35,6 +35,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 import psycopg2
 import psycopg2.extras
+import psycopg2.sql
 from config import (
     get_primary_relational_source,
     PROFILING_ENABLED,
@@ -76,13 +77,27 @@ class ColumnProfile:
 def _get_db_connection():
     """Get psycopg2 connection to primary relational source."""
     source = get_primary_relational_source()
-    conn = psycopg2.connect(
+    kw = dict(
         host=source["host"],
         port=source["port"],
         database=source["dbname"],
         user=source["user"],
         password=source["password"],
+        connect_timeout=source.get("connect_timeout", 10),
     )
+    if source.get("sslmode"):
+        kw["sslmode"] = source["sslmode"]
+    conn = psycopg2.connect(**kw)
+    # Profiling queries below are unqualified ("table_name" with no schema prefix) — make
+    # the configured schema authoritative for this connection instead of depending on the
+    # role's server-side search_path, else a non-default schema gets silently profiled
+    # against the wrong (usually empty/public) namespace.
+    schema = source.get("schema")
+    if schema:
+        with conn.cursor() as cur:
+            cur.execute(psycopg2.sql.SQL("SET search_path TO {}, public").format(
+                psycopg2.sql.Identifier(schema)))
+        conn.commit()
     return conn
 
 

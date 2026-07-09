@@ -22,6 +22,11 @@ import urllib.request
 import urllib.error
 from typing import Dict, List, Optional
 
+from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
+
 GLOSSARY_DIR  = "glossary"
 COMBINED_PATH = os.path.join(GLOSSARY_DIR, "domain_glossary.json")
 SLM_PATH      = os.path.join(GLOSSARY_DIR, "slm_glossary.json")
@@ -94,13 +99,13 @@ def _build_hf_glossary() -> Dict[str, List[str]]:
     try:
         from datasets import load_dataset
     except ImportError:
-        print("[Glossary] datasets library not installed — pip install datasets")
-        print("[Glossary] Skipping HF glossary layer")
+        logger.info("datasets library not installed — pip install datasets")
+        logger.info("Skipping HF glossary layer")
         return glossary
 
     # banking77: 77 banking intent labels
     try:
-        print("[Glossary] Downloading banking77...")
+        logger.info("Downloading banking77...")
         ds = load_dataset("PolyAI/banking77", split="train")
         label_names = ds.features["label"].names
         for label in label_names:
@@ -108,13 +113,13 @@ def _build_hf_glossary() -> Dict[str, List[str]]:
             term  = " ".join(parts).lower()
             if term and len(term) > 4:
                 glossary[term] = parts
-        print(f"[Glossary] banking77: {len(label_names)} intents extracted")
+        logger.info("banking77: %d intents extracted", len(label_names))
     except Exception as e:
-        print(f"[Glossary] banking77 failed: {e}")
+        logger.warning("banking77 failed: %s", e)
 
     # financial_phrasebank: extract financial nouns
     try:
-        print("[Glossary] Downloading financial_phrasebank...")
+        logger.info("Downloading financial_phrasebank...")
         import re
         ds2 = load_dataset("financial_phrasebank", "sentences_allagree", split="train")
         finance_nouns = set()
@@ -132,13 +137,13 @@ def _build_hf_glossary() -> Dict[str, List[str]]:
         for noun in finance_nouns:
             if noun not in glossary:
                 glossary[noun] = [noun, f"{noun}_id", f"{noun}_status", f"{noun}_type"]
-        print(f"[Glossary] financial_phrasebank: {len(finance_nouns)} terms extracted")
+        logger.info("financial_phrasebank: %d terms extracted", len(finance_nouns))
     except Exception as e:
-        print(f"[Glossary] financial_phrasebank failed: {e}")
+        logger.warning("financial_phrasebank failed: %s", e)
 
     # finance-alpaca: extract AML/compliance terms
     try:
-        print("[Glossary] Downloading finance-alpaca...")
+        logger.info("Downloading finance-alpaca...")
         ds3 = load_dataset("gbharti/finance-alpaca", split="train")
         alpaca_terms = set()
         AML_KEYWORDS = {
@@ -160,9 +165,9 @@ def _build_hf_glossary() -> Dict[str, List[str]]:
             if term not in glossary:
                 parts = term.split()
                 glossary[term] = parts + [p for p in parts if len(p) > 3]
-        print(f"[Glossary] finance-alpaca: {len(alpaca_terms)} AML terms extracted")
+        logger.info("finance-alpaca: %d AML terms extracted", len(alpaca_terms))
     except Exception as e:
-        print(f"[Glossary] finance-alpaca failed: {e}")
+        logger.warning("finance-alpaca failed: %s", e)
 
     return glossary
 
@@ -233,7 +238,7 @@ def _build_slm_glossary(
         and len(tc.col_name) > 3
     ][:max_cols]
 
-    print(f"[Glossary] SLM generating synonyms for {len(eligible)} columns...")
+    logger.info("SLM generating synonyms for %d columns...", len(eligible))
 
     for i, tc in enumerate(eligible):
         sample_vals = getattr(tc, "sample_values", []) or []
@@ -254,9 +259,9 @@ def _build_slm_glossary(
                         glossary[term_lower].append(tc.col_name)
 
         if (i + 1) % 10 == 0:
-            print(f"[Glossary] SLM progress: {i+1}/{len(eligible)}")
+            logger.info("SLM progress: %d/%d", i + 1, len(eligible))
 
-    print(f"[Glossary] SLM generated {len(glossary)} term mappings")
+    logger.info("SLM generated %d term mappings", len(glossary))
     return glossary
 
 
@@ -264,7 +269,7 @@ def _build_slm_glossary(
 
 def build_glossary(
     inference_result=None,
-    ollama_url:    str  = "http://localhost:11434",
+    ollama_url:    str  = SLM_OLLAMA_BASE_URL,
     force_rebuild: bool = False,
 ) -> Dict[str, List[str]]:
     """
@@ -274,15 +279,15 @@ def build_glossary(
     os.makedirs(GLOSSARY_DIR, exist_ok=True)
 
     if not force_rebuild and os.path.exists(COMBINED_PATH):
-        print(f"[Glossary] Loading from cache: {COMBINED_PATH}")
+        logger.info("Loading from cache: %s", COMBINED_PATH)
         with open(COMBINED_PATH) as f:
             return json.load(f)
 
-    print("[Glossary] Building domain glossary (one-time operation)...")
+    logger.info("Building domain glossary (one-time operation)...")
     combined: Dict[str, List[str]] = {}
 
     # Layer C: Static
-    print(f"[Glossary] Layer C: {len(STATIC_AML_GLOSSARY)} static AML/KYC terms")
+    logger.info("Layer C: %d static AML/KYC terms", len(STATIC_AML_GLOSSARY))
     for term, cols in STATIC_AML_GLOSSARY.items():
         combined[term] = list(cols)
     with open(STATIC_PATH, "w") as f:
@@ -290,12 +295,12 @@ def build_glossary(
 
     # Layer B: HuggingFace
     if not os.path.exists(HF_PATH):
-        print("[Glossary] Layer B: Building HF glossary...")
+        logger.info("Layer B: Building HF glossary...")
         hf_glossary = _build_hf_glossary()
         with open(HF_PATH, "w") as f:
             json.dump(hf_glossary, f, indent=2)
     else:
-        print("[Glossary] Layer B: Loading HF glossary from cache")
+        logger.info("Layer B: Loading HF glossary from cache")
         with open(HF_PATH) as f:
             hf_glossary = json.load(f)
 
@@ -310,12 +315,12 @@ def build_glossary(
     # Layer A: SLM-generated
     if inference_result is not None:
         if not os.path.exists(SLM_PATH):
-            print("[Glossary] Layer A: Generating SLM synonyms via Ollama...")
+            logger.info("Layer A: Generating SLM synonyms via Ollama...")
             slm_glossary = _build_slm_glossary(inference_result, ollama_url)
             with open(SLM_PATH, "w") as f:
                 json.dump(slm_glossary, f, indent=2)
         else:
-            print("[Glossary] Layer A: Loading SLM glossary from cache")
+            logger.info("Layer A: Loading SLM glossary from cache")
             with open(SLM_PATH) as f:
                 slm_glossary = json.load(f)
 
@@ -327,12 +332,12 @@ def build_glossary(
                     if col not in combined[term]:
                         combined[term].append(col)
     else:
-        print("[Glossary] Layer A: Skipped (no inference_result provided)")
+        logger.info("Layer A: Skipped (no inference_result provided)")
 
     with open(COMBINED_PATH, "w") as f:
         json.dump(combined, f, indent=2)
 
-    print(f"[Glossary] Built: {len(combined)} total terms → {COMBINED_PATH}")
+    logger.info("Built: %d total terms → %s", len(combined), COMBINED_PATH)
     return combined
 
 
