@@ -157,7 +157,44 @@ def compose_federated(query: str, sql: str, selected_columns, selected_chunks,
         # than silently dropping a source (Phase 5.2 §4).
         return {"status": "refused_federated", "reason": str(e), "sql": sql,
                 "sources": sources}
+    except Exception as e:
+        # Execution errors (e.g. a DuckDB feature the generated SQL used, unknown column)
+        # must NOT propagate — otherwise the caller's generic guard silently falls back to
+        # the (slow, single-source) deterministic head. Return a structured refusal with the
+        # engine error so the caller can retry or surface it.
+        return {"status": "exec_error_federated", "reason": str(e), "sql": sql,
+                "sources": sources}
     provenance = build_provenance(result, selected_chunks)
     return {"status": "ok", "sql": sql, "result": result,
+            "evidence": list(selected_chunks or []), "provenance": provenance,
+            "sources": sources}
+
+
+def compose_federated_plan(query: str, plan: dict, selected_columns, selected_chunks,
+                           tenant: str = "default") -> Dict:
+    """Aggregate-pushdown variant of compose_federated: executes a per-metric plan through
+    FederatedExecutor.execute_plan (each metric aggregated independently then joined on the
+    group key) — correct for multi-metric cross-source queries (no join fan-out). Same
+    surface resolution + refusal contract as compose_federated."""
+    sources = selected_source_ids(selected_columns)
+    surfaces: List[SourceSurface] = []
+    for sid in sources:
+        surf = resolve_surface(sid, tenant)
+        if surf is not None:
+            surfaces.append(surf)
+    if len(surfaces) < 2:
+        return {"status": "not_federated", "reason": "fewer than 2 resolvable sources",
+                "sources": sources}
+    try:
+        fx = FederatedExecutor(surfaces)
+        result = fx.execute_plan(plan)
+    except FederatedError as e:
+        return {"status": "refused_federated", "reason": str(e), "plan": plan,
+                "sources": sources}
+    except Exception as e:
+        return {"status": "exec_error_federated", "reason": str(e), "plan": plan,
+                "sources": sources}
+    provenance = build_provenance(result, selected_chunks)
+    return {"status": "ok", "plan": plan, "result": result,
             "evidence": list(selected_chunks or []), "provenance": provenance,
             "sources": sources}
