@@ -270,9 +270,71 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
 
 _NAME_CONNECTIVES = {"and", "or", "of", "to", "by"}
 
+_TABLE_VOCAB_CACHE = {"v": None}
+
+
+def _table_vocab():
+    """Domain vocabulary harvested from column-name tokens across the WHOLE semantic
+    model — schema-driven, not hardcoded, so it generalizes to any schema with this
+    pattern (not just Homzhub). Column names use normal snake_case even when the table
+    names they belong to don't (verification_document_type_id on
+    assets_assetverificationdocument), so this gives good coverage for segmenting the
+    compound table-name blobs in _name_toks. Cached for the process lifetime."""
+    if _TABLE_VOCAB_CACHE["v"] is None:
+        vocab = set()
+        try:
+            from config import SEMANTIC_MODEL_FILE
+            with open(SEMANTIC_MODEL_FILE) as f:
+                sm = json.load(f)
+            for col_id in sm.get("columns", {}):
+                _, _, col = col_id.partition(".")
+                for tok in col.split("_"):
+                    tok = tok.lower()
+                    if len(tok) > 2 and tok not in _NAME_CONNECTIVES:
+                        vocab.add(tok)
+        except Exception:
+            vocab = set()
+        _TABLE_VOCAB_CACHE["v"] = vocab
+    return _TABLE_VOCAB_CACHE["v"]
+
+
+def _segment_compound(word, vocab, min_len=3, max_len=20):
+    """DP word-break: decompose `word` into known `vocab` words, or None if no full
+    decomposition exists. Minimizes piece count (dynamic-programming shortest token
+    sequence) so 'leaselisting' -> ['lease', 'listing'], not spurious short chunks."""
+    n = len(word)
+    best = [None] * (n + 1)
+    best[0] = []
+    for i in range(1, n + 1):
+        for j in range(max(0, i - max_len), i):
+            if best[j] is None:
+                continue
+            seg = word[j:i]
+            if len(seg) < min_len or seg not in vocab:
+                continue
+            cand = best[j] + [seg]
+            if best[i] is None or len(cand) < len(best[i]):
+                best[i] = cand
+    return best[n]
+
 
 def _name_toks(table_name):
-    """Singularized entity tokens of a TABLE NAME, minus structural connectives."""
+    """Singularized entity tokens of a TABLE NAME, minus structural connectives.
+
+    ADDITIVE compound-segmentation: Django auto-generates table names by concatenating
+    a multi-word model name with NO internal underscore (assets_assetverificationdocument,
+    assets_leaselisting) — the plain split("_") below can never recover "document" or
+    "listing" from that blob. For any long (>8 char) segment, also try a vocabulary-driven
+    word-break (_segment_compound) and UNION its pieces in — the original blob token is
+    always kept too, so this can only add new matches, never remove an existing one."""
     from retrieval.query_enrichment import _singularize
-    return {_singularize(tok) for tok in table_name.split("_")
-            if len(tok) > 2 and tok not in _NAME_CONNECTIVES}
+    toks = set()
+    for tok in table_name.split("_"):
+        if len(tok) <= 2 or tok in _NAME_CONNECTIVES:
+            continue
+        toks.add(_singularize(tok))
+        if len(tok) > 8:
+            parts = _segment_compound(tok, _table_vocab())
+            if parts:
+                toks.update(_singularize(p) for p in parts)
+    return toks

@@ -45,7 +45,10 @@ def _post_json(url: str, payload: dict, timeout: int) -> dict | None:
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
             return json.loads(resp.read().decode("utf-8"))
-    except (urllib.error.URLError, ValueError) as exc:
+    except (OSError, ValueError) as exc:
+        # OSError covers both urllib.error.URLError (connect failures) and the bare
+        # TimeoutError a socket read timeout raises (not wrapped in URLError) — callers
+        # rely on None-on-any-failure to fall back gracefully (refuse-over-guess).
         logger.warning("chatbot.llm: request to %s failed: %s", url, exc)
         return None
 

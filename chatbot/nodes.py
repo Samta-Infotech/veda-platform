@@ -47,6 +47,40 @@ _DATA_QUESTION_HINTS = re.compile(
     re.IGNORECASE,
 )
 
+# Deterministic fast path for the overwhelming majority of smalltalk: pure
+# greetings/thanks/farewells with nothing else in the message. Tight, anchored
+# patterns (whole-message match, not substring) so they can never misfire on a
+# real question that merely starts with "hi" or ends with "thanks" — and
+# _DATA_QUESTION_HINTS is still checked as a second guard before trusting this.
+# Skips the classify LLM call entirely (classify_node) and lets smalltalk_node
+# skip its own LLM call too — on this deployment's hardware a single such call
+# alone can take ~20s, so a bare "hi" was paying 20-40+ seconds of pure LLM
+# round-trip time for something that should be instant.
+_GREETING_RE = re.compile(
+    r"^\s*(hi+|hello+|hey+|hiya|yo|good\s*(morning|afternoon|evening|day)|"
+    r"how\s*(are\s*(you|u)|'?s\s*it\s*going)( doing)?)\s*[.,!?]*\s*$", re.IGNORECASE)
+_THANKS_RE = re.compile(
+    r"^\s*(thanks?( you)?( very much| so much| a lot)?|thx|ty|appreciate it|"
+    r"much appreciated|cheers)\s*[.,!?]*\s*$", re.IGNORECASE)
+_BYE_RE = re.compile(
+    r"^\s*(bye|goodbye|see\s*(you|ya)( later| soon)?|take care|good\s*night)\s*[.,!?]*\s*$",
+    re.IGNORECASE)
+
+
+def _canned_smalltalk_reply(message: str) -> str | None:
+    """Instant reply for the fast-path patterns above — None means "not a fast
+    match, fall back to the LLM" (used by both classify_node and smalltalk_node
+    so the two stay in lockstep on what counts as trivial smalltalk)."""
+    if _DATA_QUESTION_HINTS.search(message):
+        return None
+    if _GREETING_RE.match(message):
+        return FALLBACK_REPLY
+    if _THANKS_RE.match(message):
+        return "You're welcome! Let me know if you have any other data questions."
+    if _BYE_RE.match(message):
+        return "Goodbye! Come back anytime you have data questions."
+    return None
+
 
 def _emit(config: RunnableConfig | None, phase: str, message: str) -> None:
     """Best-effort progress callback — a broken/absent UI callback must never
@@ -76,34 +110,42 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     """Decide what kind of message this is. Defaults to 'answer' (route to the
     engine) on any failure — refuse-over-guess: never silently short-circuit
     a real data question as smalltalk just because the classifier is down."""
-    _emit(config, "supervisor_classify", "Understanding your message...")
     message = state["message"]
     history = state.get("history", [])
 
-    raw = call_slm(
-        build_supervisor_system_prompt(),   # built fresh each call so "today" is always current
-        build_supervisor_user_prompt(message, history),
-    )
-    action = "answer"
-    if raw:
-        match = _JSON_RE.search(raw)
-        if match:
-            try:
-                parsed = json.loads(match.group())
-                candidate = parsed.get("action")
-                if candidate in _VALID_ACTIONS:
-                    action = candidate
-            except Exception:
-                logger.warning("classify_node: could not parse LLM output: %r", raw)
-
-    if action == "smalltalk" and _DATA_QUESTION_HINTS.search(message):
-        logger.warning(
-            "classify_node: LLM said smalltalk but message looks data-related, "
-            "overriding to 'answer': %r", message,
+    if _canned_smalltalk_reply(message) is not None:
+        # Deterministic fast path: a bare "hi"/"thanks"/"bye" needs no LLM call
+        # at all — skips both this classify round-trip AND smalltalk_node's own
+        # (each ~20s on this deployment's hardware). No "thinking" event either:
+        # there's nothing to think about for an instant, deterministic reply.
+        action = "smalltalk"
+        logger.info("classify_node: deterministic smalltalk match, message=%r", message)
+    else:
+        _emit(config, "supervisor_classify", "Understanding your message...")
+        raw = call_slm(
+            build_supervisor_system_prompt(),   # built fresh each call so "today" is always current
+            build_supervisor_user_prompt(message, history),
         )
         action = "answer"
+        if raw:
+            match = _JSON_RE.search(raw)
+            if match:
+                try:
+                    parsed = json.loads(match.group())
+                    candidate = parsed.get("action")
+                    if candidate in _VALID_ACTIONS:
+                        action = candidate
+                except Exception:
+                    logger.warning("classify_node: could not parse LLM output: %r", raw)
 
-    logger.info("classify_node: action=%s message=%r", action, message)
+        if action == "smalltalk" and _DATA_QUESTION_HINTS.search(message):
+            logger.warning(
+                "classify_node: LLM said smalltalk but message looks data-related, "
+                "overriding to 'answer': %r", message,
+            )
+            action = "answer"
+
+        logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state
     # across turns (that's the point, for history/context), but sql/rows/
     # status/engine_result/clarification are this-turn-only outputs. Without
@@ -124,11 +166,16 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
 def smalltalk_node(state: ChatState) -> dict:
     """Direct reply for greetings/thanks/chit-chat — engine bypassed entirely."""
     message = state["message"]
-    reply = call_slm(
-        build_smalltalk_system_prompt(),   # built fresh each call so "today" is always current
-        message,
-        max_tokens=60,
-    )
+    reply = _canned_smalltalk_reply(message)
+    if reply is None:
+        # classify_node routed here via the LLM (not the deterministic fast
+        # path above) — some smalltalk beyond a bare greeting/thanks/bye, so
+        # this is the one case that still needs its own LLM call.
+        reply = call_slm(
+            build_smalltalk_system_prompt(),   # built fresh each call so "today" is always current
+            message,
+            max_tokens=60,
+        )
     if not reply:
         reply = FALLBACK_REPLY
     return {

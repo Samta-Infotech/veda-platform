@@ -7,6 +7,9 @@ from veda.planning import existence_mode, try_multitable
 from veda.routing import select_primary_table, vet_primary
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _resolve_temporal_column(table, sm):
@@ -80,8 +83,18 @@ def run_query(query, sm, all_cols, return_result=False):
             tr.set("output", refusal=kw.get("msg") or kw.get("error") or kw.get("missing"))
         tr.finish(status)
         if return_result:
+            explain = None
+            if status == "answered":
+                try:
+                    from veda.business_explain import build_explain
+                    explain = build_explain(
+                        sql=kw.get("sql") or "", table=kw.get("table") or "", sm=sm,
+                        checks=tr.sections.get("validation", {}).get("checks", []),
+                    )
+                except Exception:
+                    logger.exception("business_explain failed — end-user explainability omitted")
             return {"status": status, "ok": (status == "answered"),
-                    "trace": tr.to_dict(), **kw}
+                    "trace": tr.to_dict(), "explain": explain, **kw}
         return rc
 
     def _rec_plan(p):
@@ -106,7 +119,9 @@ def run_query(query, sm, all_cols, return_result=False):
         from query_engine.intent_detector import IntentDetector
         ir = IntentDetector().detect(query)
         intent = ir.intent.value if hasattr(ir.intent, "value") else str(ir.intent)
-    except Exception:
+    except Exception as e:
+        logger.warning("IntentDetector unavailable (%s: %s) — defaulting intent=SIMPLE, "
+                        "join/aggregate detection degraded to existence-only", type(e).__name__, e)
         intent = "SIMPLE"
     print(f"  [L4] Intent       {intent}")
 

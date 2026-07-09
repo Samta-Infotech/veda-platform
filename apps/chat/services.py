@@ -17,6 +17,19 @@ DEFAULT_CONVERSATION_TITLE = "New Chat"
 
 _visualization_recommender = VisualizationRecommender()
 
+# Fixed-shape fallback when the engine has no "explain" for this turn (smalltalk,
+# clarify, refusal — no SQL ran) — lets the frontend render one schema unconditionally
+# instead of null-checking every field.
+_NO_EXPLAIN = {
+    "version": "1.0",
+    "understanding": {"summary": None},
+    "data_used": {"datasets": [], "fields": []},
+    "operations": [],
+    "filters": {"applied": [], "summary": "No filters applied."},
+    "validation": {"passed": None, "checks": []},
+    "sql": {"enabled": True, "query": None},
+}
+
 
 class ChatNotFound(Exception):
     """Raised when chat_id is provided but no matching, owned ChatSession exists."""
@@ -189,9 +202,10 @@ class ConversationQueryService:
             yield {"event": "content", "data": block}
         for viz in self._build_visualizations(res0):
             yield {"event": "visualization", "data": viz}
-        trace = res0.get("trace") or {}
-        yield {"event": "explainability",
-               "data": {"steps": self._build_explainability_steps(trace)}}
+        # veda_core (veda/business_explain.py) builds this deterministically from the
+        # final validated SQL + semantic model — never from retrieval/routing internals
+        # (those live only in res0["trace"], for our own debugging, never sent over SSE).
+        yield {"event": "explainability", "data": res0.get("explain") or _NO_EXPLAIN}
 
     @staticmethod
     def _build_content_blocks(response: dict, res0: dict) -> list:
@@ -216,10 +230,3 @@ class ConversationQueryService:
             return []
         return [spec.to_dict() for spec in _visualization_recommender.recommend(cols, rows)]
 
-    @staticmethod
-    def _build_explainability_steps(trace: dict) -> list:
-        sections = trace.get("sections") or {}
-        return [
-            {"step": name, **(data if isinstance(data, dict) else {"detail": data})}
-            for name, data in sections.items()
-        ]

@@ -889,6 +889,7 @@ QUERY_GRAMMAR = {
     "quantity":  ["more than", "at least", "fewer than", "less than", "greater than",
                   "exactly", "over"],
     "grouping":  ["per", "each", "grouped by"],
+    "ratio":     ["percentage", "percent", "%", "proportion", "share of", "ratio of"],
 }
 
 # Query LANGUAGE layer — the ONLY word-lists in the system. These are CLOSED
@@ -938,6 +939,11 @@ QUERY_LANGUAGE = {
                       "associated", "mapped", "connected", "tied", "attached", "held",
                       "containing", "contains", "including", "registered", "stored",
                       "tracked", "named", "called", "based", "using"],
+    # generic "this row exists / this event happened" verbs — carry no filter/value
+    # semantics of their own ("transactions that OCCURRED" == just "transactions").
+    # Kept narrow (vs. e.g. "recorded"/"logged") to avoid ever stripping a word that's
+    # a genuine status value in some schema.
+    "event_verbs": ["occurred", "happened"],
 }
 # --- Target selection (evidence-based, Stage 1 of the join pipeline) -------------
 # Feature-flagged so it can be benchmarked OLD-vs-NEW before adoption. When False the

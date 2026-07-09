@@ -355,7 +355,13 @@ def _query_tokens(query):
 
 
 def _table_tokens(table):
-    return {_singular(t) for t in table.split("_") if len(t) > 2}
+    """Delegates to veda.routing._name_toks — the canonical table-name tokenizer,
+    which additionally segments Django's concatenated compound model names
+    (assets_assetverificationdocument -> also 'asset'/'verification'/'document').
+    A local import avoids a module-load-time cycle (routing.py only imports this
+    module's score_anchors lazily, inside a function body)."""
+    from veda.routing import _name_toks
+    return _name_toks(table)
 
 
 def plan_join_tree(anchor, targets, graph, query="", allowed_intermediates=None,
