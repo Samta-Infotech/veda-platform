@@ -137,16 +137,17 @@ def _create_doc_chunks_table(cursor) -> None:
     cursor.execute("CREATE EXTENSION IF NOT EXISTS vector;")
     # Drop the table if the embedding dimension changed (MiniLM 384 → BGE-M3 1024, WP3),
     # mirroring the graph_embedder guard — a clean re-ingest recreates it at the new dim.
-    try:
-        cursor.execute(f"""
-            SELECT atttypmod - 4 AS dim FROM pg_attribute
-            WHERE attrelid = '{DOC_CHUNKS_TABLE_NAME}'::regclass AND attname = 'embedding'
-        """)
-        row = cursor.fetchone()
-        if row and row[0] != BIENCODER_DIM:
-            cursor.execute(f"DROP TABLE IF EXISTS {DOC_CHUNKS_TABLE_NAME};")
-    except Exception:
-        pass  # table absent → nothing to drop
+    # Use to_regclass (returns NULL for a missing table) rather than
+    # '<table>'::regclass (which RAISES UndefinedTable on first-ever ingestion and
+    # aborts the whole transaction, so the CREATE below then fails with "current
+    # transaction is aborted" → silent in-memory fallback, embeddings never stored).
+    cursor.execute(f"""
+        SELECT atttypmod - 4 AS dim FROM pg_attribute
+        WHERE attrelid = to_regclass('{DOC_CHUNKS_TABLE_NAME}') AND attname = 'embedding'
+    """)
+    row = cursor.fetchone()
+    if row and row[0] != BIENCODER_DIM:
+        cursor.execute(f"DROP TABLE IF EXISTS {DOC_CHUNKS_TABLE_NAME};")
     cursor.execute(f"""
         CREATE TABLE IF NOT EXISTS {DOC_CHUNKS_TABLE_NAME} (
             chunk_id    TEXT PRIMARY KEY,

@@ -135,7 +135,11 @@ def _load_overrides():
     """semantic/overrides.json — human-declared facts, highest authority.
     Cached per process; absent file is fine (empty overrides)."""
     if _OVERRIDES_CACHE["v"] is None:
-        path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+        # The file lives at veda_core/semantic/overrides.json. This module is at
+        # veda_core/veda/generation.py, so go UP one dir (to veda_core/) — the previous
+        # __file__-relative path pointed at veda_core/veda/semantic/, which never existed,
+        # so the human overrides were silently never loaded.
+        path = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                             "semantic", "overrides.json")
         try:
             _OVERRIDES_CACHE["v"] = json.load(open(path)) if os.path.exists(path) else {}

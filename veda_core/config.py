@@ -124,11 +124,16 @@ def _build_injected_source() -> dict:
 import os as _os_env  # env overrides for containerized deploy (migration_plan.md §9)
 
 VEDA_INTERNAL_DB = {
-    "host":     _os_env.environ.get("VEDA_INTERNAL_HOST", "localhost"),
-    "port":     int(_os_env.environ.get("VEDA_INTERNAL_PORT", "5433")),
-    "dbname":   _os_env.environ.get("VEDA_INTERNAL_DBNAME", "veda"),  # embeddings + v2 tables
-    "user":     _os_env.environ.get("VEDA_INTERNAL_USER", "postgres"),
-    "password": _os_env.environ.get("VEDA_INTERNAL_PASSWORD", ""),
+    # Defaults match storage_adapters/writer.py + .env.example: reached THROUGH
+    # pgbouncer, dbname veda_engine. These two modules previously had diverging
+    # fallbacks (this one pointed at a bare-metal localhost:5433/veda that
+    # nothing in the container topology serves) which silently broke ingestion
+    # whenever VEDA_INTERNAL_* was left unset in .env.
+    "host":     _os_env.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
+    "port":     int(_os_env.environ.get("VEDA_INTERNAL_PORT", "6432")),
+    "dbname":   _os_env.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),  # embeddings + v2 tables
+    "user":     _os_env.environ.get("VEDA_INTERNAL_USER", "veda"),
+    "password": _os_env.environ.get("VEDA_INTERNAL_PASSWORD", "change-me"),
 }
 
 
@@ -190,6 +195,10 @@ BIENCODER_TABLE_TABLE = "table_embeddings_v2"
 # supply the sparse half of the WP4 table prior.
 COLUMN_SPARSE_TABLE = "column_sparse_v1"
 TABLE_SPARSE_TABLE  = "table_sparse_v1"
+# Safety cap on the query-time sparse fit() fallback: encoding every retrieval_document
+# live is only acceptable for a tiny dev model. Above this, the engine skips the sparse
+# signal (degrade, don't hang) and expects a persisted column_sparse_v1 instead.
+SPARSE_FIT_MAX_DOCS = 300
 
 VEDA_INTERNAL_TABLES = {
     # V2 retrieval stores
@@ -377,6 +386,15 @@ VALUE_SAMPLE_SIZE            = 100
 VALUE_SAMPLER_ELIGIBLE_TYPES = ["CATEGORY", "FREE_TEXT", "IDENTIFIER"]
 VALUE_SAMPLER_MAX_VALUE_LEN  = 64
 COLUMN_VALUES_TABLE_NAME     = "column_values"
+# Cross-source plan Phase 2.4 / Phase 4.2 — per-column MinHash sketches for
+# tenant-wide value-overlap (cross_source_fk) discovery. The sketch table is
+# lazily created in the INTERNAL store by ingestion.column_sketches (same pattern
+# as column_values), so there is no migration to apply.
+COLUMN_SKETCHES_TABLE_NAME   = "column_sketches"
+MINHASH_NUM_PERM             = 128
+# Minimum rows for a table detected inside a PDF/Word doc to become a real
+# "derived table" (Phase 2.3); smaller/ragged tables stay as chunk text.
+DOC_TABLE_MIN_ROWS           = 5
 VALUE_EXPANSION_MIN_TOKEN_LEN = 3
 VALUE_EXPANSION_PARTIAL_MIN_TOKEN_LEN = 7  # partial substring match requires longer tokens to avoid noise
 VALUE_EXPANSION_MAX_COL_MATCHES = 8        # skip value tokens matching >N columns (too generic to be useful)
@@ -435,6 +453,16 @@ QUERY_ROUTER_CONFIDENCE_THRESHOLD = 0.6
 # Toggle automatic routing — if False, always routes to SQL (backward compat)
 QUERY_ROUTER_ENABLED = True
 
+# Parallel Qwen fan-out for the ingestion semantic layer (Stage 3/4). Env-driven so the
+# concurrency is gated on the DEPLOYMENT: the "6" (≈2 concurrent × 3 backends) only makes
+# sense behind scripts/ollama_proxy.py fanning across ≥3 Ollama hosts. Against a SINGLE
+# Ollama backend (the default topology) 6 concurrent 7B calls just oversubscribe one GPU —
+# validated as memory-bandwidth-bound with no throughput gain — so the safe default is OFF
+# (sequential) / 2. Turn on only after deploying the proxy (docker compose --profile proxy)
+# and pointing OLLAMA_URL at it.
+SEMANTIC_PARALLEL_QWEN_ENABLED = _os_env.environ.get(
+    "SEMANTIC_PARALLEL_QWEN_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+SEMANTIC_MAX_PARALLEL_REQUESTS = int(_os_env.environ.get("SEMANTIC_MAX_PARALLEL_REQUESTS", "2"))
 # =============================================================================
 # DOCUMENT INGESTION
 # Config for connectors/document.py and ingestion/chunk_embedder.py
@@ -527,8 +555,55 @@ GRAPH_EDGE_WEIGHTS = {
     "mentions":      1.0,
     "name_match":    0.6,   # lower ceiling than value-overlap so it never dominates (B7 fix)
     "about":         1.5,
+    # --- Cross-source knowledge graph plan (docs/CROSSSOURCE_GRAPH.md) ---
+    "cross_source_fk": 2.0,   # P4.2 value-overlap join across sources (tier scales this)
+    "mentions_entity": 1.2,   # P4.1 chunk → entity
+    "value_of":        1.5,   # P4.1 entity → column
+    "has_section":     1.0,   # P3 doc → section
+    "in_section":      1.0,   # P3 chunk → section
+    "derived_from":    1.5,   # P2.3/P3 derived table → doc
+    "next_chunk":      0.4,   # P3 chunk → adjacent chunk
 }
 GRAPH_DISCOVERED_FK_TIER_WEIGHT = {"HIGH": 1.0, "MEDIUM": 0.6}
+
+# --- P4.2 cross-source join discovery (ingestion.cross_source_graph) ---
+# Candidate pairs: columns from DIFFERENT sources, same value_class, cardinality
+# ratio within [min,max]. Tiers mirror discovered_fk; HIGH is conservative so the
+# graph-guard can permit only HIGH edges for federated SQL joins (P5).
+CROSS_SOURCE_CARDINALITY_RATIO   = (0.01, 100.0)
+CROSS_SOURCE_FK_HIGH_CONTAINMENT = 0.8
+CROSS_SOURCE_FK_HIGH_MIN_DISTINCT = 25
+CROSS_SOURCE_FK_MEDIUM_CONTAINMENT = 0.5
+CROSS_SOURCE_FK_TIER_WEIGHT = {"HIGH": 2.0, "MEDIUM": 1.2}
+# Distinct values sampled per column when (re)building a sketch outside the normal
+# value-sampling pass — e.g. the backfill script sketching join keys (ids) that the
+# value sampler skips. Larger than VALUE_SAMPLE_SIZE because join-key containment
+# needs enough of the key domain to be reliable.
+# Exact-containment fix: MinHash Jaccard has ~1/num_perm resolution, so it reads 0 for
+# a small child column contained in a large parent (e.g. 7 asset ids ⊂ 5000 PKs → the
+# canonical FK) — exactly the asymmetric join we most want. When a column's distinct
+# count is <= this cap we additionally persist a packed sorted uint64 hash of ALL its
+# normalized values; discovery then computes EXACT set-containment for any pair where
+# both sides are within the cap, and only falls back to the MinHash estimate above it.
+CROSS_SOURCE_EXACT_CONTAINMENT_CAP = 20000
+# Distinct values sampled per column for the join-key sketch pass. MUST exceed the exact
+# cap by one so a stored value-hash set is always COMPLETE (<=cap distinct fully seen) or
+# absent (>cap → sampler returns cap+1 rows → pack_value_hashes returns None → MinHash
+# fallback). Anything between the old 5000 and the cap would store a truncated set and
+# make exact containment silently wrong.
+CROSS_SOURCE_SKETCH_SAMPLE_SIZE = CROSS_SOURCE_EXACT_CONTAINMENT_CAP + 1
+# Name-affinity gate: for id/numeric value classes, small integer key domains overlap
+# by coincidence (created_by_id vs asset_id), so a same-value signal alone is not enough
+# — require a shared meaningful column/table name token before emitting a cross-source
+# edge. A strong affinity also PROMOTES a high-containment edge to HIGH even below the
+# distinct-count floor, so a genuine FK becomes executable on small (dummy) corpora.
+CROSS_SOURCE_AFFINITY_REQUIRED_CLASSES = ("id", "numeric")
+# Generic tokens stripped before name-affinity matching (they carry no join identity).
+CROSS_SOURCE_GENERIC_NAME_TOKENS = frozenset({
+    "id", "ids", "name", "names", "code", "codes", "number", "num", "no", "key",
+    "keys", "fk", "pk", "ref", "type", "types", "date", "time", "at", "by", "uuid",
+    "guid", "value", "val", "desc", "description", "status", "flag", "count", "total",
+})
 
 GRAPH_CHUNK_LINKING_ENABLED   = True
 GRAPH_LINK_VALUE_OVERLAP_MIN  = 0.15
@@ -591,8 +666,8 @@ BIENCODER_BATCH_SIZE   = 32
 # query and passage are encoded verbatim so their vectors stay in the same space (WP3).
 BIENCODER_QUERY_PREFIX   = ""
 BIENCODER_PASSAGE_PREFIX = ""
-BIENCODER_CANDIDATE_COLS   = 80
-BIENCODER_CANDIDATE_TABLES = 10
+BIENCODER_CANDIDATE_COLS   = 24   # perf (query <30s): fewer candidates to sparse-encode +
+BIENCODER_CANDIDATE_TABLES = 10   # rerank on CPU; 24 still comfortably covers top-15 to L3
 
 # =============================================================================
 # TABLE-FIRST PRIOR (WP4) — table affinity as a soft prior on column scores.
@@ -634,11 +709,24 @@ PRIMARY_RERANK_ENABLED = True
 RERANKER_MODEL         = "BAAI/bge-reranker-v2-m3"
 RERANKER_DEVICE        = _RESOLVED_DEVICE
 RERANKER_BATCH_SIZE    = 64
-RERANKER_MAX_TEXT_LEN  = 512
+# perf (query <30s): cross-encoder cost is ~quadratic in sequence length. 512-token pairs
+# measured ~1.7s/pair on CPU; 160 chars keeps the col/table identity signal at a fraction
+# of the cost. On GPU/CUDA this can be raised back.
+RERANKER_MAX_TEXT_LEN  = 160
 RERANKER_TOP_COLS      = 15
 RERANKER_TOP_TABLES    = 5
-RERANK_SKIP_GAP        = 0.15   # F4: skip L2b when top-2 RRF gap >= this and same table
+RERANK_SKIP_GAP        = 0.02   # F4: skip L2b when top-2 RRF gap >= this and same table.
+                                # RRF totals are typically < 0.1, so the old 0.15 threshold
+                                # almost never fired; 0.02 matches the RRF scale so the skip
+                                # (latency) path actually triggers on unambiguous top-1s.
 RERANK_MAX_CANDIDATES  = 20     # F4: cap candidates fed to the cross-encoder
+
+# Value-anchor re-rank (routing.vet_primary): boost a candidate table whose sampled
+# CATEGORY values exact-match a query token ("debit" → accounts_generalledger.entry_type)
+# — direct evidence the query is ABOUT that table's rows. Bounded, try/except-guarded.
+# (These flags were referenced by routing.py but never defined, so the feature was inert.)
+VALUE_ANCHOR_RERANK_ENABLED = True
+VALUE_ANCHOR_RERANK_WEIGHT  = 0.25
 
 # --- Reranker: enriched text + dynamic cutoff (Gaps 1, 2, 3) ---
 # A/B data: bare names score sharper (0.89) than enriched text (0.15) for the cross-encoder;
@@ -779,8 +867,6 @@ SEMANTIC_CHECKPOINT_FILE    = "data/veda_semantic_checkpoint.json"
 #     • 32–64 GB workstation ......... 4–8
 #     • Mac Mini / Mac Studio (ample RAM) → tune to Ollama throughput
 #   Workers are always capped at the number of tables (never one thread per table).
-SEMANTIC_PARALLEL_QWEN_ENABLED = False   # enable_parallel_qwen
-SEMANTIC_MAX_PARALLEL_REQUESTS = 2       # max_parallel_requests (validated: min 1) — 2 fits single-GPU compute
 
 # Resilience for Qwen/Ollama calls (applies to sequential AND parallel).
 #   • Retry with exponential backoff recovers transient timeouts so a single slow call
@@ -1128,6 +1214,15 @@ GRAPH_GUARD_ENABLED = True
 # SELECT/COUNT/AGGREGATE — ratio/trend/compare paraphrases are NOT expressible here and
 # stay fast-path-only until the IR is extended.
 TIER2_LLM_FALLBACK = True
+
+# Tier-2 execution-feedback repair loop (veda_hybrid._tier2_sql): on a firewall rejection
+# or execution error, feed the CLASSIFIED error back into the SLM prompt (via
+# _repair_hint_for) and retry a corrected IR, bounded by MAX_REPAIR_ATTEMPTS, instead of
+# refusing on the first miss. Each attempt is a full SLM round-trip, so keep the bound low
+# to stay inside the latency budget. (These flags were referenced by veda_hybrid but never
+# defined, so the loop always ran 0 extra attempts — i.e. never repaired.)
+VALIDATION_REPAIR_LOOP_ENABLED = True
+VALIDATION_MAX_REPAIR_ATTEMPTS = 1
 # Phase 2 unification — ONE JOIN ENGINE. When the LLM (LangGraph) path identifies a
 # MULTI-table query, build joins via the deterministic graph planner (plan_join_tree
 # + build_skeleton) instead of sql_builder's retrieval-provided join_path. The LLM

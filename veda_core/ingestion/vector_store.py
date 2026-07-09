@@ -246,16 +246,13 @@ def _upsert_fk_edges(cursor, fk_edges: list) -> int:
     Truncates and reinserts all FK edges.
     Truncate + insert is safe here — FK schema doesn't change between runs
     and it's simpler than upserting without a stable PK.
+
+    Batched via execute_values (F4) — was one INSERT per edge.
     """
+    from psycopg2.extras import execute_values
     cursor.execute(f"TRUNCATE TABLE {FK_ADJACENCY_TABLE_NAME};")
-    written = 0
-    for edge in fk_edges:
-        cursor.execute(f"""
-            INSERT INTO {FK_ADJACENCY_TABLE_NAME}
-                (from_col_id, from_col_name, from_table_id, from_table_name,
-                 to_col_id,   to_col_name,   to_table_id,   to_table_name)
-            VALUES (%s, %s, %s, %s, %s, %s, %s, %s);
-        """, (
+    rows = [
+        (
             edge.get("from_col_id",   ""),
             edge.get("from_col_name", ""),
             edge.get("from_table_id", ""),
@@ -264,9 +261,20 @@ def _upsert_fk_edges(cursor, fk_edges: list) -> int:
             edge.get("to_col_name",   ""),
             edge.get("to_table_id",   ""),
             edge.get("to_table",      ""),   # key is "to_table" not "to_table_name"
-        ))
-        written += 1
-    return written
+        )
+        for edge in fk_edges
+    ]
+    if not rows:
+        return 0
+    execute_values(
+        cursor,
+        f"""INSERT INTO {FK_ADJACENCY_TABLE_NAME}
+            (from_col_id, from_col_name, from_table_id, from_table_name,
+             to_col_id,   to_col_name,   to_table_id,   to_table_name)
+            VALUES %s""",
+        rows,
+    )
+    return len(rows)
 
 
 def _query_fk_edges_pgvector(
@@ -542,17 +550,21 @@ def store_table_metadata(
                         """)
                         # Truncate + reinsert — deterministic per ingestion run
                         cur.execute(f"TRUNCATE TABLE {TABLE_METADATA_TABLE_NAME};")
-                        for row in rows:
-                            cur.execute(f"""
-                                INSERT INTO {TABLE_METADATA_TABLE_NAME}
+                        # F5: batched insert — was one execute() per table row.
+                        from psycopg2.extras import execute_values
+                        _tm_rows = [
+                            (row["table_id"], row["table_name"],
+                             row["display_col_id"], row["display_col_name"])
+                            for row in rows
+                        ]
+                        if _tm_rows:
+                            execute_values(
+                                cur,
+                                f"""INSERT INTO {TABLE_METADATA_TABLE_NAME}
                                     (table_id, table_name, display_col_id, display_col_name)
-                                VALUES (%s, %s, %s, %s);
-                            """, (
-                                row["table_id"],
-                                row["table_name"],
-                                row["display_col_id"],
-                                row["display_col_name"],
-                            ))
+                                    VALUES %s""",
+                                _tm_rows,
+                            )
             finally:
                 release_internal_connection(conn)
             backend = "pgvector"

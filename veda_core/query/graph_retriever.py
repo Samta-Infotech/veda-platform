@@ -73,8 +73,17 @@ def _load_all_edges(source_ids: Optional[List[str]]):
         cur = conn.cursor()
         if source_ids:
             ph = ",".join(["%s"] * len(source_ids))
+            # Cross-source plan P4.3: cross_source_fk edges are tenant-wide bridges —
+            # always load them so PPR traversal reaches other sources in the scope by
+            # construction, even though their stored source_id is only the child's.
+            # value_of / mentions_entity are the entity bridge (doc-entity ↔ column):
+            # inherently cross-source, so load them tenant-wide too — a query scoped to
+            # the relational source still traverses doc→entity→column even though those
+            # edges are now stamped with the ingesting doc source (for idempotent cleanup).
             cur.execute(f"SELECT src_node_id, dst_node_id, weight FROM {GRAPH_EDGES_TABLE} "
-                        f"WHERE source_id IN ({ph})", list(source_ids))
+                        f"WHERE source_id IN ({ph}) OR edge_type IN "
+                        f"('cross_source_fk', 'value_of', 'mentions_entity')",
+                        list(source_ids))
         else:
             cur.execute(f"SELECT src_node_id, dst_node_id, weight FROM {GRAPH_EDGES_TABLE}")
         rows = cur.fetchall()

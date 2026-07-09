@@ -253,6 +253,18 @@ def run_query(query, sm, all_cols, return_result=False):
                     _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
                     for _s, _r in _ranked:
                         _r.final_score = float(_s)   # anchor reads final_score → now reranked
+                    # SCALE GUARD: the reranked head now carries CROSS-ENCODER scores (raw
+                    # logits, often negative), while the tail still carries RRF scores (small
+                    # positive). select_primary_table/score_anchors pick the anchor by
+                    # max(final_score) across BOTH — so without this a weak tail column (RRF
+                    # 0.05) would outrank a reranked head column scored -3 and hijack the
+                    # anchor. Floor every tail score strictly below the lowest reranked head
+                    # score (preserving the tail's own relative order) so the tail can never
+                    # win anchoring — matching this block's stated intent.
+                    if _ranked and _tail:
+                        _floor = min(float(_s) for _s, _ in _ranked)
+                        for _i, _r in enumerate(_tail):
+                            _r.final_score = _floor - 1.0 - _i * 1e-6
                     results = [_r for _, _r in _ranked] + _tail
                     print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
             except Exception as _rr_e:

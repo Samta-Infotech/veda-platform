@@ -283,7 +283,13 @@ def _create_column_values_table(cursor) -> None:
 
 
 def _store_values_pgvector(sampled_columns: List[SampledColumn]) -> int:
-    """Persists sampled values to the internal pgvector store. Returns rows written."""
+    """Persists sampled values to the internal pgvector store. Returns rows written.
+
+    Batched via execute_values (F1) — was one INSERT per (column × sampled
+    value), i.e. potentially tens of thousands of round trips for a wide
+    schema. Same rows, same order-independent result, one bulk statement.
+    """
+    from psycopg2.extras import execute_values
     conn = get_internal_connection()
     written = 0
     try:
@@ -291,19 +297,24 @@ def _store_values_pgvector(sampled_columns: List[SampledColumn]) -> int:
             with conn.cursor() as cur:
                 _create_column_values_table(cur)
                 cur.execute(f"TRUNCATE TABLE {COLUMN_VALUES_TABLE_NAME};")
-                for sc in sampled_columns:
-                    for raw, norm in zip(sc.raw_values, sc.values):
-                        cur.execute(f"""
-                            INSERT INTO {COLUMN_VALUES_TABLE_NAME}
-                                (col_id, col_name, table_id, table_name,
-                                 semantic_type, value_norm, value_raw)
-                            VALUES (%s, %s, %s, %s, %s, %s, %s);
-                        """, (
-                            sc.col_id, sc.col_name,
-                            sc.table_id, sc.table_name,
-                            sc.semantic_type, norm, raw,
-                        ))
-                        written += 1
+
+                rows = [
+                    (sc.col_id, sc.col_name, sc.table_id, sc.table_name,
+                     sc.semantic_type, norm, raw)
+                    for sc in sampled_columns
+                    for raw, norm in zip(sc.raw_values, sc.values)
+                ]
+                if rows:
+                    execute_values(
+                        cur,
+                        f"""INSERT INTO {COLUMN_VALUES_TABLE_NAME}
+                            (col_id, col_name, table_id, table_name,
+                             semantic_type, value_norm, value_raw)
+                            VALUES %s""",
+                        rows,
+                        page_size=1000,   # chunk very large value sets
+                    )
+                    written = len(rows)
     finally:
         release_internal_connection(conn)
     return written

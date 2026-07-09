@@ -41,30 +41,50 @@ from query.multi_result import (
 _SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (P5)
 
 
-def _emit(on_event, phase: str, message: str, **extra):
-    """Best-effort progress callback for SSE streaming (never breaks the pipeline —
-    a callback error must not sink the query it's merely reporting on)."""
-    if on_event is None:
-        return
-    try:
-        on_event(phase, message, extra)
-    except Exception:
-        pass
+def _current_ctx():
+    """The ambient RequestContext, read from whichever context MODULE holds it.
+
+    The engine is imported both as bare `context` (cwd=veda_core) and as
+    `veda_core.context` (inference tier, PYTHONPATH=/app) — Python loads these as TWO
+    module objects with SEPARATE thread-locals. The inference middleware sets the scope
+    on `veda_core.context`, so a read of bare `context` alone silently misses it and the
+    SQL head falls back to source 1 (global model). Try both so the request scope is
+    seen regardless of which name set it."""
+    import importlib
+    for modname in ("veda_core.context", "context"):
+        try:
+            ctx = importlib.import_module(modname).try_current()
+            if ctx is not None:
+                return ctx
+        except Exception:
+            continue
+    return None
 
 
 def _sm_scope():
     """(source_id, tenant) for the semantic-model cache/Redis key. Prefers the
     ambient per-request context (set by the inference middleware from headers),
-    falling back to the env pin (single-source dev / bare-metal runs)."""
-    try:
-        from context import try_current
-        ctx = try_current()
-        if ctx is not None:
-            return (str(ctx.source_id), str(ctx.tenant))
-    except Exception:
-        pass
+    falling back to the env pin (single-source dev / bare-metal runs).
+
+    `source_id` here is the PRIMARY source: the SQL head's per-source model is loaded
+    from the primary today; the multi-source merge for the SQL head arrives with
+    federated naming (Phase 5). The cache is keyed by the full scope (`_sm_cache_key`)
+    so a `{A}` request and an `{A,B}` request never share an sm entry."""
+    ctx = _current_ctx()
+    if ctx is not None:
+        return (str(ctx.source_id), str(ctx.tenant))
     return (os.environ.get("VEDA_SM_SOURCE_ID", "1"),
             os.environ.get("VEDA_SM_TENANT", "default"))
+
+
+def _sm_cache_key():
+    """Scope-unique key for the inference-tier `_SM` cache: the full source SET +
+    tenant (P5), so distinct scopes over the same primary don't collide."""
+    ctx = _current_ctx()
+    if ctx is not None:
+        return (frozenset(int(s) for s in ctx.source_ids), str(ctx.tenant))
+    sid, tenant = _sm_scope()
+    return (frozenset({int(sid)}), tenant)
 
 
 def _load_sm_from_redis(scope=None):
@@ -99,8 +119,9 @@ def _load_semantic_model():
     scope-keyed so multiple ready sources are queryable from one warm worker (P5),
     and the rehydrate subscriber clears it on re-ingest.
     """
-    scope = _sm_scope()
-    entry = _SM.get(scope)
+    scope = _sm_scope()               # primary (source, tenant) — Redis sm key for the SQL head
+    cache_key = _sm_cache_key()       # full scope SET — cache identity (P5)
+    entry = _SM.get(cache_key)
     if entry is None:
         sm = _load_sm_from_redis(scope)
         if sm is None:
@@ -108,13 +129,63 @@ def _load_semantic_model():
             with open(SEMANTIC_MODEL_FILE) as f:
                 sm = json.load(f)
         entry = {"sm": sm, "cols": list(sm.get("columns", {}).keys())}
-        _SM[scope] = entry
+        _SM[cache_key] = entry
     return entry["sm"], entry["cols"]
+
+
+import re as _re_mod
+
+# A document is referenced (nouns) + the utterance is asking what it SAYS (verbs). Used to
+# route doc-scope queries to the fast RAG/hybrid lanes instead of the SQL head + 30s LLM-IR
+# fallback (which ignores the document and dumps DB rows).
+_DOC_REF_RE = _re_mod.compile(
+    r"\b(document|agreement|contract|policy|policies|msa|sla|clause|section|terms|"
+    r"report|readme|notes?|memo|memorandum|pdf|docx?|paper|letter|manual|handbook)\b",
+    _re_mod.I)
+_DB_AGG_RE = _re_mod.compile(
+    r"\b(how many|count|total|sum|average|avg|per |group by|number of|top \d|highest|"
+    r"lowest|most|least|ranked?)\b", _re_mod.I)
+
+
+def _scope_has_doc_source() -> bool:
+    """True when the request scope includes a source with document chunks (cheap indexed
+    lookup)."""
+    ctx = _current_ctx()
+    sids = [str(s) for s in (getattr(ctx, "source_ids", ()) or ())] if ctx is not None else []
+    if not sids:
+        return False
+    try:
+        from ingestion.db_abstraction import (
+            get_internal_connection, release_internal_connection)
+        conn = get_internal_connection()
+        try:
+            with conn.cursor() as cur:
+                ph = ",".join(["%s"] * len(sids))
+                cur.execute(f"SELECT 1 FROM graph_nodes WHERE node_type='chunk' "
+                            f"AND source_id IN ({ph}) LIMIT 1", sids)
+                return cur.fetchone() is not None
+        finally:
+            release_internal_connection(conn)
+    except Exception:
+        return False
 
 
 def classify(query, verbose=False):
     """Return (intent, source_ids). Falls back to 'sql' if the router is off/unavailable
     — the deterministic SQL head is the safe default."""
+    # Deterministic doc-intent override (fast, before the SLM router): a document-referencing
+    # question over a scope that actually has doc chunks routes to the RAG lane (pure doc ask)
+    # or the HYBRID lane (doc + a DB clause), never the SQL head that would ignore the doc.
+    q = query or ""
+    if _DOC_REF_RE.search(q) and _scope_has_doc_source():
+        # Prefer the fast RAG lane (retrieve chunks + one synthesis call, ~6-8s). Only take
+        # the heavier HYBRID lane (RAG ⊕ deterministic SQL head) when the utterance clearly
+        # needs a DB aggregation (count/total/per-group) the documents can't supply.
+        intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
+        if verbose:
+            print(f"  [router] doc-intent override → {intent}")
+        return intent, None
+
     try:
         from config import QUERY_ROUTER_ENABLED
     except Exception:
@@ -139,6 +210,49 @@ def _temporal(query):
         return None
 
 
+def _emit(on_event, phase, message, **extra):
+    """Fire the optional SSE progress callback (see run_hybrid_query's on_event contract):
+    ``on_event(phase, message, extra: dict)``. A no-op when on_event is None, and it never
+    raises into the pipeline — progress reporting must not be able to fail a query."""
+    if on_event is None:
+        return
+    try:
+        on_event(phase, message, extra)
+    except Exception:
+        pass
+
+
+def _maybe_federated(query, verbose=False):
+    """If the request scope spans ≥2 sources, try the cross-source federated route.
+    Returns a MultiResult on a federated answer/refusal, or None to use the normal path."""
+    ctx = _current_ctx()
+    sids = list(getattr(ctx, "source_ids", ()) or ()) if ctx is not None else []
+    if len(sids) < 2:
+        return None
+    try:
+        from query.federated_route import run_federated
+        payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
+                                source_ids=sids, verbose=verbose)
+    except Exception as e:
+        if verbose:
+            print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
+        return None
+    if payload is None:
+        return None                      # single-source plan → normal path
+    if payload.get("status") == "ok":
+        r = payload.get("result") or {}
+        result = {"ok": True, "status": "answered", "route": "federated",
+                  "sql": payload.get("sql"), "cols": r.get("columns"), "rows": r.get("rows"),
+                  "table": "federated", "answer": payload.get("answer"),
+                  "provenance": payload.get("provenance"), "sources": payload.get("sources")}
+        return MultiResult(items=[_to_subresult(query, "federated", result)])
+    # refused/blocked federation is a real, explained outcome — surface it, don't silently
+    # fall back to a single-source answer that would drop a source.
+    result = {"ok": False, "status": "federated_refused",
+              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql")}
+    return MultiResult(items=[_to_subresult(query, "federated", result)])
+
+
 def run_hybrid_query(query, verbose=False, on_event=None):
     """Single entry point. Returns a MultiResult ALWAYS — a one-item MultiResult for a
     plain query, N items for a compound one. Callers branch on MultiResult, never on
@@ -157,19 +271,31 @@ def run_hybrid_query(query, verbose=False, on_event=None):
     silently drop the rest — so there we decompose FIRST. A deterministic refusal also
     triggers decomposition (the utterance may have been several questions).
 
-    L0 — NL Simplifier runs first, here, so every consumer (CLI, inference API, demo)
-    shares identical pre-processing regardless of how the query arrived. Previously
-    only the CLI (main.py) applied this, so a query answered via the API could route
-    differently than the same text answered via `main.py --query`."""
+    L0 — the NL simplifier runs HERE (flag-gated by NL_SIMPLIFIER_ENABLED) so every
+    consumer (CLI, inference API, demo) shares one simplification pass instead of each
+    caller applying it (or not) itself. Off by default → zero added hot-path latency."""
+    # L0 — NL simplifier (shared front-door step). No-op when the flag is off or the
+    # simplifier is unavailable, so the original query flows through unchanged.
     try:
-        from query.nl_simplifier import run_nl_simplifier
-        _l0 = run_nl_simplifier(query, verbose=False)
-        if _l0.was_simplified:
-            print(f"  [L0] Simplified: '{_l0.simplified_query}' ({_l0.duration_ms}ms)")
-            _emit(on_event, "simplify", f"Simplified query to: {_l0.simplified_query}")
-        query = _l0.simplified_query
+        from config import NL_SIMPLIFIER_ENABLED
     except Exception:
-        pass  # fall back to the original query silently
+        NL_SIMPLIFIER_ENABLED = False
+    if NL_SIMPLIFIER_ENABLED:
+        try:
+            from query.nl_simplifier import run_nl_simplifier
+            _l0 = run_nl_simplifier(query, verbose=verbose)
+            if getattr(_l0, "was_simplified", False):
+                print(f"  [L0] Simplified: {_l0.simplified_query!r} ({_l0.duration_ms}ms)")
+                query = _l0.simplified_query
+        except Exception:
+            pass  # fall back to the original query silently
+
+    # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
+    # selects columns from more than one, no single-DB head can join them — generate + run
+    # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.
+    fed = _maybe_federated(query, verbose=verbose)
+    if fed is not None:
+        return fed
 
     try:
         from config import QUERY_DECOMPOSE_ENABLED

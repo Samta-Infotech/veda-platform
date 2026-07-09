@@ -6,10 +6,12 @@
 
 numpy<2
 torch
-transformers<5   # FlagEmbedding 1.2.10's BiTrainer does `from transformers.trainer import *`
-                 # expecting Optional etc. to be re-exported — gone in transformers 5.x, which
-                 # crashes EVERY query (NameError: Optional) as soon as the retrieval engine
-                 # cold-inits its sparse ranker. Unpinned == whatever's latest on rebuild day.
+# Pin exact: FlagEmbedding 1.2.10's BiTrainer does `from transformers.trainer import *`
+# expecting Optional etc. to be re-exported — gone in transformers 5.x, which crashes
+# EVERY query (NameError: Optional) as soon as the retrieval engine cold-inits its sparse
+# ranker. An unpinned/range rebuild can still land on a breaking transformers 4.x release,
+# so pin the exact version validated against FlagEmbedding 1.2.10.
+transformers==4.49.0
 torch-geometric
 sentence-transformers
 FlagEmbedding==1.2.10   # WP3: BGE-M3 dense + learned-sparse (pulls peft)
@@ -25,3 +27,10 @@ redis
 langgraph
 langchain-core
 sqlglot
+# Cross-source knowledge graph plan (docs/CROSSSOURCE_GRAPH.md). This image also
+# runs the ingest-worker, so the ingest-time deps (P2/P3/P4) live here too.
+duckdb                  # P2 tabular lane + P5 federated execution (postgres_scanner)
+datasketch              # P2.4/P4.2 MinHash sketches → cross_source_fk discovery
+openpyxl                # P2 Excel sheet enumeration (xlsx tables)
+pymupdf4llm             # P3 layout-aware PDF parsing (headings + tables), pure-local
+python-docx             # P3 DOCX heading/table walk

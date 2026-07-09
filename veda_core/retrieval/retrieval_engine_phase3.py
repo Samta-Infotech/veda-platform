@@ -181,13 +181,27 @@ class RetrievalEnginePhase3:
         try:
             from veda_core import context
             _ctx = context.try_current()
-            _sids = [str(_ctx.source_id)] if _ctx is not None else []
+            _sids = [str(s) for s in _ctx.source_ids] if _ctx is not None else []
             _loaded = self.sparse_ranker.warm_from_store(_sids)
         except Exception as e:
             logger.warning(f"sparse warm-load failed ({e}); falling back to fit()")
             _loaded = 0
         if not _loaded:
-            self.sparse_ranker.fit(self.semantic_model)
+            # fit() encodes EVERY retrieval_document with BGE-M3 sparse in-process. On a
+            # real model (1900+ long passages) that is ~50 min on CPU and hangs the query
+            # (the persisted column_sparse_v1 is meant to make this a no-op). Only allow the
+            # live fallback for a small dev/test model; above the cap, degrade to the other
+            # signals rather than hang, and tell the operator to build the sparse index.
+            from config import SPARSE_FIT_MAX_DOCS
+            rd = (self.semantic_model or {}).get("retrieval_documents", {}) or {}
+            if len(rd) <= SPARSE_FIT_MAX_DOCS:
+                self.sparse_ranker.fit(self.semantic_model)
+            else:
+                logger.warning(
+                    "sparse index empty for scope and %d retrieval_documents exceed the "
+                    "live-fit cap (%d) — SKIPPING sparse signal to avoid a multi-minute "
+                    "encode. Run ingestion.sparse_index.build_sparse_index for this source.",
+                    len(rd), SPARSE_FIT_MAX_DOCS)
         logger.info("✓ Sparse ranker ready")
 
         logger.info("\n[5/8] Initializing signal builder...")
@@ -359,7 +373,7 @@ class RetrievalEnginePhase3:
             from query.retrieval_v2 import table_prior_scores
             from veda_core import context as _context
             _ctx = _context.try_current()
-            _sids = [str(_ctx.source_id)] if _ctx is not None else None
+            _sids = [str(s) for s in _ctx.source_ids] if _ctx is not None else None
             table_prior = dict(table_prior_scores(query, source_ids=_sids))  # dense, [0,1]
         except Exception as _e:
             logger.warning(f"    table prior (dense) skipped: {_e}")
