@@ -210,6 +210,18 @@ def _temporal(query):
         return None
 
 
+def _emit(on_event, phase, message, **extra):
+    """Fire the optional SSE progress callback (see run_hybrid_query's on_event contract):
+    ``on_event(phase, message, extra: dict)``. A no-op when on_event is None, and it never
+    raises into the pipeline — progress reporting must not be able to fail a query."""
+    if on_event is None:
+        return
+    try:
+        on_event(phase, message, extra)
+    except Exception:
+        pass
+
+
 def _maybe_federated(query, verbose=False):
     """If the request scope spans ≥2 sources, try the cross-source federated route.
     Returns a MultiResult on a federated answer/refusal, or None to use the normal path."""
@@ -241,7 +253,7 @@ def _maybe_federated(query, verbose=False):
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
-def run_hybrid_query(query, verbose=False):
+def run_hybrid_query(query, verbose=False, on_event=None):
     """Single entry point. Returns a MultiResult ALWAYS — a one-item MultiResult for a
     plain query, N items for a compound one. Callers branch on MultiResult, never on
     "is this compound", so everything downstream of here stays single-intent-dumb.
@@ -257,7 +269,27 @@ def run_hybrid_query(query, verbose=False):
     (zero added latency on the hot path). A non-deterministic head (RAG/hybrid/NoSQL)
     CANNOT cheaply self-certify — it could answer one clause of a compound query and
     silently drop the rest — so there we decompose FIRST. A deterministic refusal also
-    triggers decomposition (the utterance may have been several questions)."""
+    triggers decomposition (the utterance may have been several questions).
+
+    L0 — the NL simplifier runs HERE (flag-gated by NL_SIMPLIFIER_ENABLED) so every
+    consumer (CLI, inference API, demo) shares one simplification pass instead of each
+    caller applying it (or not) itself. Off by default → zero added hot-path latency."""
+    # L0 — NL simplifier (shared front-door step). No-op when the flag is off or the
+    # simplifier is unavailable, so the original query flows through unchanged.
+    try:
+        from config import NL_SIMPLIFIER_ENABLED
+    except Exception:
+        NL_SIMPLIFIER_ENABLED = False
+    if NL_SIMPLIFIER_ENABLED:
+        try:
+            from query.nl_simplifier import run_nl_simplifier
+            _l0 = run_nl_simplifier(query, verbose=verbose)
+            if getattr(_l0, "was_simplified", False):
+                print(f"  [L0] Simplified: {_l0.simplified_query!r} ({_l0.duration_ms}ms)")
+                query = _l0.simplified_query
+        except Exception:
+            pass  # fall back to the original query silently
+
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
     # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.

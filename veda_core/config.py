@@ -453,8 +453,16 @@ QUERY_ROUTER_CONFIDENCE_THRESHOLD = 0.6
 # Toggle automatic routing — if False, always routes to SQL (backward compat)
 QUERY_ROUTER_ENABLED = True
 
-SEMANTIC_PARALLEL_QWEN_ENABLED = True
-SEMANTIC_MAX_PARALLEL_REQUESTS = 6   # 3 backends × ~2 concurrent each
+# Parallel Qwen fan-out for the ingestion semantic layer (Stage 3/4). Env-driven so the
+# concurrency is gated on the DEPLOYMENT: the "6" (≈2 concurrent × 3 backends) only makes
+# sense behind scripts/ollama_proxy.py fanning across ≥3 Ollama hosts. Against a SINGLE
+# Ollama backend (the default topology) 6 concurrent 7B calls just oversubscribe one GPU —
+# validated as memory-bandwidth-bound with no throughput gain — so the safe default is OFF
+# (sequential) / 2. Turn on only after deploying the proxy (docker compose --profile proxy)
+# and pointing OLLAMA_URL at it.
+SEMANTIC_PARALLEL_QWEN_ENABLED = _os_env.environ.get(
+    "SEMANTIC_PARALLEL_QWEN_ENABLED", "0").strip().lower() in ("1", "true", "yes", "on")
+SEMANTIC_MAX_PARALLEL_REQUESTS = int(_os_env.environ.get("SEMANTIC_MAX_PARALLEL_REQUESTS", "2"))
 # =============================================================================
 # DOCUMENT INGESTION
 # Config for connectors/document.py and ingestion/chunk_embedder.py
@@ -707,8 +715,18 @@ RERANKER_BATCH_SIZE    = 64
 RERANKER_MAX_TEXT_LEN  = 160
 RERANKER_TOP_COLS      = 15
 RERANKER_TOP_TABLES    = 5
-RERANK_SKIP_GAP        = 0.15   # F4: skip L2b when top-2 RRF gap >= this and same table
+RERANK_SKIP_GAP        = 0.02   # F4: skip L2b when top-2 RRF gap >= this and same table.
+                                # RRF totals are typically < 0.1, so the old 0.15 threshold
+                                # almost never fired; 0.02 matches the RRF scale so the skip
+                                # (latency) path actually triggers on unambiguous top-1s.
 RERANK_MAX_CANDIDATES  = 20     # F4: cap candidates fed to the cross-encoder
+
+# Value-anchor re-rank (routing.vet_primary): boost a candidate table whose sampled
+# CATEGORY values exact-match a query token ("debit" → accounts_generalledger.entry_type)
+# — direct evidence the query is ABOUT that table's rows. Bounded, try/except-guarded.
+# (These flags were referenced by routing.py but never defined, so the feature was inert.)
+VALUE_ANCHOR_RERANK_ENABLED = True
+VALUE_ANCHOR_RERANK_WEIGHT  = 0.25
 
 # --- Reranker: enriched text + dynamic cutoff (Gaps 1, 2, 3) ---
 # A/B data: bare names score sharper (0.89) than enriched text (0.15) for the cross-encoder;
@@ -1190,6 +1208,15 @@ GRAPH_GUARD_ENABLED = True
 # SELECT/COUNT/AGGREGATE — ratio/trend/compare paraphrases are NOT expressible here and
 # stay fast-path-only until the IR is extended.
 TIER2_LLM_FALLBACK = True
+
+# Tier-2 execution-feedback repair loop (veda_hybrid._tier2_sql): on a firewall rejection
+# or execution error, feed the CLASSIFIED error back into the SLM prompt (via
+# _repair_hint_for) and retry a corrected IR, bounded by MAX_REPAIR_ATTEMPTS, instead of
+# refusing on the first miss. Each attempt is a full SLM round-trip, so keep the bound low
+# to stay inside the latency budget. (These flags were referenced by veda_hybrid but never
+# defined, so the loop always ran 0 extra attempts — i.e. never repaired.)
+VALIDATION_REPAIR_LOOP_ENABLED = True
+VALIDATION_MAX_REPAIR_ATTEMPTS = 1
 # Phase 2 unification — ONE JOIN ENGINE. When the LLM (LangGraph) path identifies a
 # MULTI-table query, build joins via the deterministic graph planner (plan_join_tree
 # + build_skeleton) instead of sql_builder's retrieval-provided join_path. The LLM
