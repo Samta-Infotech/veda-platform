@@ -14,14 +14,26 @@ Given (query, anchor, graph, semantic_model) it returns a descriptor:
 or None when there is no person-answer ask, no person-FK on the anchor, or the relation is
 ambiguous (several person-FKs and none/many named) — refuse-over-guess, like value_resolver.
 
-Pure and DB-free: the graph, semantic model, and display resolver are all injected, so the
-finder is unit-testable with no DB and no Ollama.
+DB-free: the graph, semantic model, and display resolver are all injected, so the finder
+is unit-testable with no DB. It IS allowed to reach Ollama, but only for one narrow,
+fail-safe judgment — see _llm_relation_word(): when no closed-class pronoun cue (who/
+their/its/theirs/them) matches, it asks the SLM for the relation word ONLY (e.g.
+"assigned" for "the assigned user's name"). The SLM never picks the table/column itself;
+that word still has to pass the same deterministic _relation_named() match against the
+real FK graph as any hard-coded cue, so grounding/refuse-over-guess is unchanged — the
+LLM only widens which phrasings can reach that check, and any failure (disabled, timeout,
+network error) degrades to the pre-existing "no cue found" behaviour.
 """
 
 from __future__ import annotations
 
+import json
 import re
+import urllib.request
 from typing import Callable, Dict, List, Optional
+
+from config import ANSWER_ENTITY_LLM_FALLBACK_ENABLED, SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
+from query.lg_prompts import ANSWER_ENTITY_RELATION_PROMPT
 
 try:
     from retrieval.query_enrichment import _singularize as _sing
@@ -33,10 +45,11 @@ except Exception:                                    # pragma: no cover
 # not a domain list. ("by whom" is covered: "whom" is in the set.)
 _WH_PERSON = {"who", "whom", "whose", "whos"}
 
-# Possessive / projection cues — "incidents and THEIR handler", "show ITS owner". Grammar,
-# not a domain list. These ask to SHOW the related person as a column (projection), as opposed
-# to a value-filter ("incidents assigned to raj" has no possessive cue → stays a filter).
-_PROJECTION_CUE = {"their", "its", "theirs"}
+# Possessive / projection cues — "incidents and THEIR handler", "show ITS owner", "the
+# user assigned to THEM". Grammar, not a domain list. These ask to SHOW the related
+# person as a column (projection), as opposed to a value-filter ("incidents assigned to
+# raj" has no possessive cue → stays a filter).
+_PROJECTION_CUE = {"their", "its", "theirs", "them"}
 
 DisplayResolver = Callable[[str, dict], Optional[str]]
 
@@ -78,6 +91,42 @@ def _relation_named(qtoks: List[str], rel_words: set) -> bool:
     return False
 
 
+def _llm_relation_word(query: str) -> Optional[str]:
+    """LLM fallback for when NO closed-class cue (who/whom/their/its/theirs/them) is
+    present — e.g. "the assigned user's name", "each incident's owner", "the person
+    handling it". Asks the SLM for ONLY the relation word (e.g. "assigned"); it never
+    picks the table/column itself, so the word returned still has to pass the exact
+    same deterministic _relation_named() match against the real FK graph as any other
+    cue below — grounding is unchanged, this only widens which phrasings can reach that
+    check. Fails safe: any timeout, network error, or unparseable response returns
+    None, which the caller treats identically to "no cue found"."""
+    if not ANSWER_ENTITY_LLM_FALLBACK_ENABLED:
+        return None
+    try:
+        payload = {
+            "model": SLM_MODEL_NAME,
+            "stream": False,
+            "messages": [
+                {"role": "system", "content": ANSWER_ENTITY_RELATION_PROMPT},
+                {"role": "user", "content": query},
+            ],
+            "options": {"temperature": 0.0, "num_predict": 8},
+        }
+        req = urllib.request.Request(
+            f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat",
+            data=json.dumps(payload).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            body = json.loads(resp.read().decode("utf-8"))
+        word = (body.get("message", {}).get("content") or "").strip().lower()
+        word = re.sub(r"[^a-z]", "", word)
+        return word if word and word != "none" else None
+    except Exception:
+        return None
+
+
 def find_answer_entity(
     query: str,
     anchor: str,
@@ -91,7 +140,15 @@ def find_answer_entity(
     is_wh = bool(qset & _WH_PERSON)
     is_projection = bool(qset & _PROJECTION_CUE)
     if not (is_wh or is_projection):
-        return None
+        # No closed-class cue matched — try the LLM fallback for phrasings with no
+        # pronoun at all ("the assigned user's name", "each incident's owner"). The
+        # hint word is folded into qtoks so it still has to pass _relation_named()
+        # against the real FK graph below, same as a deterministic cue would.
+        hint = _llm_relation_word(query)
+        if hint is None:
+            return None
+        is_projection = True
+        qtoks = qtoks + [hint]
 
     person_tables = _person_tables(sm)
     if not person_tables:

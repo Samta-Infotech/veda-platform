@@ -193,8 +193,13 @@ def validate_ir_equivalence(query, sql, sm, *, allowed_tables=None,
     if ir.groupings and not _has(query, r"\b(per|by|each|every|group|breakdown|split)\b"):
         v.append(f"GROUP BY {ir.groupings} not requested")
 
-    # Rule 4 — no extra ordering
-    if ir.orderings and not _has(query, r"\b(top|highest|lowest|most|least|largest|"
+    # Rule 4 — no extra ordering. Exempt when the SQL is already grouped
+    # (Rule 3 licensed that): ordering a "for each X" breakdown by its own
+    # metric is a safe, expected default that never changes WHICH rows/values
+    # come back, only their presentation order — unlike a hallucinated filter
+    # or join, it carries no risk of a factually wrong answer, so it doesn't
+    # need an explicit sort-word cue the way a plain (non-aggregate) query does.
+    if ir.orderings and not ir.groupings and not _has(query, r"\b(top|highest|lowest|most|least|largest|"
                                         r"smallest|sorted?|rank|order|first|last|recent)\b"):
         v.append(f"ORDER BY {ir.orderings} not requested")
 

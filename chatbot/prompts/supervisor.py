@@ -22,11 +22,15 @@ EXACTLY one action:
                  asks for or references NO data, count, entity, table, or fact \
                  whatsoever (e.g. "hi", "thanks a lot", "how are you", "bye").
 - "followup"   — the message only makes sense combined with the previous turn(s), \
-                 e.g. it references "it"/"that"/an implied entity, or asks for the \
+                 e.g. it references "it"/"that"/"this"/an implied entity, or asks for the \
                  same kind of thing again with a different filter \
                  (e.g. after "escalated incidents count", user says "and waived ones?", \
                  or after answering a count, user asks "what was my incident count" \
-                 to recall/re-ask it).
+                 to recall/re-ask it). This INCLUDES short vague replies with NO named \
+                 entity or metric of their own — e.g. "need more details about this", \
+                 "tell me more", "more info?", "what else" — said right after the \
+                 assistant discussed a specific record/entity: these are followup, \
+                 NEVER smalltalk, because "this"/"it" refers back to that record.
 - "clarify_reply" — the previous assistant turn asked a clarifying question, and \
                  this message is the user's answer to it.
 - "answer"     — a new, self-contained data question.
@@ -44,6 +48,9 @@ Output ONLY a JSON object, no markdown, no explanation:
 
 
 def build_supervisor_user_prompt(message: str, history: list) -> str:
+    """User turn for classify_node's LLM call: the new message plus the last
+    6 turns of conversation history, so the model can tell "answer" apart
+    from "followup"/"clarify_reply" (which depend on that history)."""
     hist_lines = []
     for turn in history[-6:]:            # last 6 turns is plenty of context
         role = turn.get("role", "user")
