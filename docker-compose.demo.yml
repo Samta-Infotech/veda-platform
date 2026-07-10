@@ -25,6 +25,8 @@
 # scripts/demo/export.sh (source PC) and scripts/demo/restore.sh (this box).
 
 services:
+  postgres:
+    image: pgvector/pgvector:pg17
   inference:
     environment:
       WORKERS: ${INFERENCE_WORKERS:-1}      # demo: one warm engine is plenty

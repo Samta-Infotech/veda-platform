@@ -19,6 +19,18 @@ CSRF_TRUSTED_ORIGINS = [
     "http://127.0.0.1:8080",
 ]
 
+CSRF_TRUSTED_ORIGINS = [
+    "http://0.0.0.0:8000",
+    "http://127.0.0.1:8080",
+        # React/Vite frontend
+    "http://localhost:4001",
+    "http://127.0.0.1:4001"
+]
+
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:4001"
+]
+
 if os.environ.get("VEDA_DB_HOST") is None and os.environ.get("PGBOUNCER_HOST") is None:
     DATABASES["default"] = {  # noqa: F405
         "ENGINE": "django.db.backends.sqlite3",
