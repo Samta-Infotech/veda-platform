@@ -149,7 +149,16 @@ class VisualizationRecommender:
     # --- chart builders ------------------------------------------------------
 
     def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> VisualizationSpec | None:
-        pairs = [(str(row[cat_idx]), _to_number(row[val_idx])) for row in rows if _is_numeric(row[val_idx])]
+        # SQL upstream doesn't guarantee GROUP BY on the category column, so the
+        # same category name can appear across multiple rows — sum them here
+        # rather than plotting one slice/bar per raw row.
+        totals: dict[str, float] = {}
+        for row in rows:
+            if not _is_numeric(row[val_idx]):
+                continue
+            name = str(row[cat_idx])
+            totals[name] = totals.get(name, 0) + _to_number(row[val_idx])
+        pairs = list(totals.items())
         if not pairs:
             return None  # the "numeric" column turned out to be unusable for this row set
 
@@ -179,11 +188,14 @@ class VisualizationRecommender:
 
     @staticmethod
     def _line(cols: list, rows: list, x_idx: int, y_idx: int) -> VisualizationSpec:
+        # SQL upstream doesn't guarantee ORDER BY on the temporal column, so
+        # rows can arrive in arbitrary DB order — sort here or the line zig-zags.
+        ordered = sorted(rows, key=lambda row: (row[x_idx] is None, row[x_idx]))
         return VisualizationSpec(
             type=ChartType.LINE, title=f"{cols[y_idx]} over {cols[x_idx]}",
             x_axis_title=cols[x_idx], y_axis_title=cols[y_idx],
-            chart_data={"labels": [str(row[x_idx]) for row in rows],
-                       "values": [_to_number(row[y_idx]) for row in rows]},
+            chart_data={"labels": [str(row[x_idx]) for row in ordered],
+                       "values": [_to_number(row[y_idx]) for row in ordered]},
         )
 
     @staticmethod
