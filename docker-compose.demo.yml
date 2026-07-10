@@ -1,32 +1,44 @@
-# VEDA Platform — QUERY-ONLY DEMO override.
+# VEDA Platform — QUERY-ONLY DEMO override (mini 3 / application host).
 #
-# Runs the query layer against a DUMP of pre-ingested data + models. NO ingestion:
-# worker / beat / ingest-worker / vllm are never started. Applied on top of the dev
-# base (which bind-mounts .:/app, so a restored veda_core/data is visible in-container):
+# Runs the query layer against a DUMP of pre-ingested data, OFFLOADING the two heavy
+# model tiers to dedicated hosts (the demo box itself runs no models):
+#   • SLM (qwen2.5-coder:7b)     → mini 1 Ollama         (OLLAMA_URL in .env)
+#   • BGE-M3 + reranker (Metal)  → mini 2 embed server   (METAL_EMBED_URL in .env)
 #
-#   docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d \
-#       postgres pgbouncer redis-broker redis-cache ollama inference api
+# NO ingestion: worker / beat / ingest-worker / vllm / ollama are never started here.
+# Applied on top of the dev base (which bind-mounts .:/app, so a restored veda_core/data
+# is visible in-container):
 #
-# See docs/DEMO_QUERY_ONLY.md. Use scripts/demo/export.sh (on the source PC) and
-# scripts/demo/restore.sh (on the demo box) to move the bundle.
+#   COMPOSE="docker compose -f docker-compose.yml -f docker-compose.demo.yml"
+#   $COMPOSE up -d postgres pgbouncer redis-broker redis-cache     # infra first
+#   $COMPOSE up -d --no-deps inference api                         # app (--no-deps: no local ollama)
+#
+# --no-deps is REQUIRED: the base compose's inference.depends_on still lists `ollama`
+# (compose MERGES depends_on, it can't be removed by override), so without --no-deps
+# `up` would try to start a local ollama that doesn't belong on this box.
+#
+# .env must set the LAN IPs (NOT host.docker.internal — mini 1/2 are separate machines):
+#   OLLAMA_URL=http://<mini1-ip>:11434
+#   METAL_EMBED_URL=http://<mini2-ip>:11435
+#
+# See docs/DEMO_QUERY_ONLY.md + docs/MAC3_APP_HOST_SETUP.md. Move the data bundle with
+# scripts/demo/export.sh (source PC) and scripts/demo/restore.sh (this box).
 
 services:
   inference:
     environment:
-      WORKERS: "1"                          # demo: one warm engine is plenty
+      WORKERS: ${INFERENCE_WORKERS:-1}      # demo: one warm engine is plenty
       DJANGO_SETTINGS_MODULE: config.settings.dev
-      SLM_BACKEND: ollama                   # demo SLM backend (no vLLM/GPU-batching tier)
+      SLM_BACKEND: ollama
+      # OVERRIDE the base compose's hardcoded host.docker.internal — mini 1 is a
+      # DIFFERENT machine, so the SLM URL must come from .env (its LAN IP).
+      OLLAMA_URL: ${OLLAMA_URL:?set OLLAMA_URL to the mini-1 LAN IP in .env}
+      METAL_EMBED_URL: ${METAL_EMBED_URL:?set METAL_EMBED_URL to the mini-2 LAN IP in .env}
+      METAL_EMBED_TIMEOUT: ${METAL_EMBED_TIMEOUT:-60}
 
   api:
     environment:
+      ROLE: api
       DJANGO_SETTINGS_MODULE: config.settings.dev
       VEDA_ALLOW_ANONYMOUS: "1"             # demo: hit /api/v1/query with no token
     ports: ["8000:8000"]                    # query the API directly — no nginx/TLS needed
-
-  # GPU (optional): the dev base runs ollama on CPU. If the demo box has an NVIDIA GPU,
-  # uncomment to accelerate the SLM + drop query latency substantially.
-  # ollama:
-  #   deploy:
-  #     resources:
-  #       reservations:
-  #         devices: [{driver: nvidia, count: 1, capabilities: [gpu]}]
