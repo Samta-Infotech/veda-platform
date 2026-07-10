@@ -72,6 +72,7 @@ class QueryIntent:
     # shaping
     filters: List[Filter] = field(default_factory=list)
     group_col: Optional[str] = None
+    group_col2: Optional[str] = None             # 2nd grouping dim ("<metric> per X by Y")
     time_bucket: Optional[str] = None            # day|week|month|quarter|year
     time_col: Optional[str] = None               # column the bucket/compare runs on
     # ratio / compare specifics (resolved values, never English)
@@ -114,6 +115,7 @@ def validate_intent(intent: QueryIntent, ground_fn=None):
     # every referenced column must exist on the subject table
     refs = []
     if intent.group_col:  refs.append(intent.group_col)
+    if intent.group_col2: refs.append(intent.group_col2)
     if intent.time_col:   refs.append(intent.time_col)
     if intent.ratio_col:  refs.append(intent.ratio_col)
     refs += intent.display_cols
@@ -182,6 +184,17 @@ def build_sql(intent: QueryIntent):
         return None
     _pk = _grain_pk()
 
+    def _expr_cols(expr):
+        """Column identifiers referenced INSIDE an aggregate select_expr, e.g.
+        "MAX(amount)" → ["amount"], "SUM(amount)" → ["amount"]. Measure metrics
+        (SUM/AVG/MAX/MIN over a value column) reference a column the AST fanout
+        validator must see in the allowed set — otherwise it rejects it as an
+        unknown column (the grain pk covers COUNT, not the measure column)."""
+        import re as _re
+        inner = _re.sub(r"^[A-Za-z_]+\s*\((.*)\)$", r"\1", (expr or "").strip())
+        return [c for c in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", inner)
+                if c.upper() != "DISTINCT"]
+
     if qt == "ratio":
         col = _q(intent.ratio_col)
         sql = (f"SELECT ROUND(SUM(CASE WHEN {col} = '{intent.ratio_value}' "
@@ -212,15 +225,24 @@ def build_sql(intent: QueryIntent):
 
     elif qt == "count" and intent.group_col:
         g = _q(intent.group_col)
-        sql = (f"SELECT {g}, {intent.select_expr} AS {intent.metric_alias} "
-               f"FROM {_q(t)}{w} GROUP BY {g} ORDER BY {intent.metric_alias} DESC")
-        ref_cols = [f.col for f in intent.filters if f.col] + [intent.group_col]
+        if intent.group_col2:
+            # Two-dimension grouping: "<metric> per X by Y" → GROUP BY g1, g2.
+            g2 = _q(intent.group_col2)
+            sql = (f"SELECT {g}, {g2}, {intent.select_expr} AS {intent.metric_alias} "
+                   f"FROM {_q(t)}{w} GROUP BY {g}, {g2} "
+                   f"ORDER BY {g}, {intent.metric_alias} DESC")
+            ref_cols = [f.col for f in intent.filters if f.col] + [intent.group_col, intent.group_col2]
+        else:
+            sql = (f"SELECT {g}, {intent.select_expr} AS {intent.metric_alias} "
+                   f"FROM {_q(t)}{w} GROUP BY {g} ORDER BY {intent.metric_alias} DESC")
+            ref_cols = [f.col for f in intent.filters if f.col] + [intent.group_col]
+        ref_cols += _expr_cols(intent.select_expr)
         if _pk:
             ref_cols.append(_pk)
 
     elif qt in ("count", "measure"):
         sql = f"SELECT {intent.select_expr} AS {intent.metric_alias} FROM {_q(t)}{w}"
-        ref_cols = [f.col for f in intent.filters if f.col]
+        ref_cols = [f.col for f in intent.filters if f.col] + _expr_cols(intent.select_expr)
         if _pk:
             ref_cols = [_pk] + ref_cols
 

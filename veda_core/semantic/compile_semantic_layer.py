@@ -20,6 +20,7 @@
 import os
 import sys
 import json
+import re
 import hashlib
 
 _HERE        = os.path.dirname(os.path.abspath(__file__))
@@ -163,6 +164,18 @@ def build_concepts(sm: dict) -> dict:
                 picks.append(k)
         return picks[:3]
 
+    # Entity-level business synonyms: the enrichment pass (scripts/enrich_synonyms.py)
+    # writes phrase -> ["<table>.id"]. Fold ONLY those pk-targeted phrases into the
+    # concept's match tokens/labels, so business terms ("property"→assets_asset,
+    # "listing"→assets_salelisting) resolve to the entity — WITHOUT polluting concepts
+    # with the many column-level paraphrases (those stay for retrieval + metric labels).
+    entity_syn_by_table: dict = {}
+    for _phrase, _cids in (sm.get("domain_synonyms") or {}).items():
+        for _cid in (_cids if isinstance(_cids, list) else [_cids]):
+            _cid = str(_cid)
+            if _cid.endswith(".id"):
+                entity_syn_by_table.setdefault(_cid[:-3], set()).add(str(_phrase).lower())
+
     out = {}
     for t, m in tabs.items():
         if m.get("table_type") not in _ENTITY_TABLE_TYPES or _is_internal(t):
@@ -170,7 +183,11 @@ def build_concepts(sm: dict) -> dict:
         toks = _name_tokens(t)
         if not toks:
             continue
-        labels = [t.replace("_", " ")] + toks
+        _syns = entity_syn_by_table.get(t, set())
+        # phrase WORDS (singularised, >2 chars) become match tokens; full phrases become labels.
+        _syn_toks = [_singularize(w) for s in _syns for w in re.findall(r"[a-z]+", s) if len(w) > 2]
+        toks = list(dict.fromkeys(toks + _syn_toks))
+        labels = [t.replace("_", " ")] + toks + list(_syns)
         labels = list(dict.fromkeys(l.lower() for l in labels))
         out[t] = {
             "concept_id":      t,
@@ -327,7 +344,28 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
             "fanout_safe":          True,
         }
 
-    # ── MEASURE column metrics (SUM/AVG) ──────────────────────────────────
+    # ── MEASURE column metrics (SUM/AVG/MAX/MIN) ──────────────────────────
+    # Reverse the ingestion-built domain_synonyms (business phrase → [col_ids]) into
+    # col_id → [phrases], so each measure metric inherits the GLOSSARY's business
+    # vocabulary as labels ("payment amount", "expected price") rather than only the
+    # mechanical column name. This is WIRING, not new data — it reuses what Stage 2
+    # already produced, so a natural query ("average payment amount") resolves to the
+    # deterministic metric instead of falling through to the LLM. (Fix 2.)
+    _syn_by_col: dict = {}
+    for _phrase, _cids in (sm.get("domain_synonyms") or {}).items():
+        for _cid in (_cids if isinstance(_cids, list) else [_cids]):
+            _syn_by_col.setdefault(str(_cid), []).append(str(_phrase).lower())
+
+    # Aggregate verbs the fast path recognises (mirror fast_path._{SUM,AVG,MAX,MIN}_VERBS)
+    # so a metric labelled "highest <x>" is matched by "what is the highest <x>". (Fix 1
+    # adds MAX/MIN, which the generator previously never emitted.)
+    _AGG_VERBS = {
+        "SUM": ("total", "sum of"),
+        "AVG": ("average", "avg", "mean"),
+        "MAX": ("maximum", "highest", "largest", "max"),
+        "MIN": ("minimum", "smallest", "lowest", "min"),
+    }
+
     for col_id, c in cols.items():
         if c.get("analytics_role") != "MEASURE":
             continue
@@ -337,28 +375,39 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
         cname = c.get("col_name", "")
         aggs = [a.upper() for a in (c.get("allowed_aggregations") or [])]
         defn = (c.get("business_definition") or cname.replace("_", " ")).lower()
-        for agg, verb in (("SUM", "total"), ("AVG", "average")):
+        # Base nouns for this column: the column name, its business definition, and every
+        # glossary synonym pointing at THIS column.
+        _syns = _syn_by_col.get(col_id, [])
+        _nouns = list(dict.fromkeys(n for n in [cname.replace("_", " "), defn] + _syns if n))
+        # Multi-word synonym phrases ("financial value", "payment amount") are specific
+        # enough to be BARE labels — this matches "maximum FINANCIAL VALUE" where an
+        # adjective sits between the agg verb and the noun (the verb is detected separately
+        # by the fast path, so a "verb noun" label like "maximum value" would miss it).
+        _bare = [s for s in _syns if " " in s and len(s) >= 6]
+        for agg in ("SUM", "AVG", "MAX", "MIN"):
             if agg not in aggs:
                 continue
+            labels = [f"{v} {n}" for v in _AGG_VERBS[agg] for n in _nouns] + _bare
             mid = f"{agg.lower()}_{t}_{cname}"
             out[mid] = {
                 "metric_id":            mid,
                 "kind":                 agg,
-                "labels":               [f"{verb} {cname.replace('_',' ')}",
-                                          f"{verb} {defn}"],
+                "labels":               list(dict.fromkeys(l.lower() for l in labels)),
                 "entity_concept":       t,
                 "expression":           f"{agg}({col_id})",
                 "source_table":         t,
                 "grain":                concepts[t]["resolves_to"].get("primary_key") or f"{t}.*",
-                # SUM/AVG over a duplicate-entry table double-counts exactly like
-                # COUNT does — suspect tables decline the fast path for these too.
-                "grain_suspect":        t in grain_report,
+                # SUM/AVG over a duplicate-entry table double-counts exactly like COUNT —
+                # suspect tables decline the fast path for those. MAX/MIN are fanout-SAFE
+                # (the extreme value is unchanged by row duplication), so they are NOT
+                # suppressed by grain-suspect.
+                "grain_suspect":        (t in grain_report) and agg in ("SUM", "AVG"),
                 "soft_delete_filter":   _soft_delete_filter(t),
                 "default_filters":      [],
                 "allowed_dimensions":   dims_by_table.get(t, []),
                 "allowed_time_dimension": _time_dim(t),
                 "aggregation":          agg,
-                "fanout_safe":          True,
+                "fanout_safe":          agg in ("MAX", "MIN") or True,
             }
 
     # WP7: widen the fast path UNCONDITIONALLY — emit a plain COUNT(*) metric for EVERY
@@ -402,6 +451,25 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
 def compile_all(write: bool = True) -> dict:
     with open(SEMANTIC_MODEL_FILE) as f:
         sm = json.load(f)
+
+    # The authoritative domain_synonyms live in DOMAIN_SYNONYMS_FILE (retrieval reads it,
+    # and scripts/enrich_synonyms.py writes it). The semantic-model file also embeds a
+    # (possibly stale) copy under "domain_synonyms". Merge the file INTO sm so concept +
+    # metric label compilation sees the same enriched vocabulary retrieval does — otherwise
+    # newly-added business synonyms ("financial value"→amount) never reach the fast path.
+    try:
+        from config import DOMAIN_SYNONYMS_FILE as _DSF
+        if os.path.exists(_DSF):
+            _ext = json.load(open(_DSF))
+            _merged = dict(sm.get("domain_synonyms") or {})
+            for _p, _cids in (_ext or {}).items():
+                _cur = _merged.setdefault(_p, [])
+                for _c in (_cids if isinstance(_cids, list) else [_cids]):
+                    if _c not in _cur:
+                        _cur.append(_c)
+            sm["domain_synonyms"] = _merged
+    except Exception:
+        pass
 
     src_hash   = _source_hash(sm)
     dimensions = build_dimensions(sm)

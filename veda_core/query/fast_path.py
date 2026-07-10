@@ -34,10 +34,12 @@ _AVG_VERBS      = ("average ", "avg ", "mean ")
 _LIST_VERBS     = ("list", "show", "what are", "which", "distinct", "unique",
                    "possible", "available")
 # Words that imply a relationship to ANOTHER entity → a real join → fall through.
-# "per" is NOT here — it's a grouping preposition ("sum of X per Y"), handled by the
-# group_dim/vals_hit/bucket checks below; treating it as a blanket join signal blocked
-# every grouped SUM/AVG/MAX/MIN query before group_dim was even resolved.
-_JOIN_HINTS     = {"with", "without", "their", "its", "whose", "each",
+# "per" and "each" are NOT here — they're grouping prepositions ("sum of X per/each Y"),
+# handled by the group_dim/vals_hit/bucket checks below; treating them as a blanket join
+# signal blocked every grouped SUM/AVG/MAX/MIN/COUNT query ("<metric> per/for each Y")
+# before the grouping dimension was even resolved — the query then fell to the full
+# pipeline, mis-anchored, and refused (qualifier_dropped).
+_JOIN_HINTS     = {"with", "without", "their", "its", "whose",
                    "having", "have", "has", "across", "joined"}
 _MAX_VERBS      = ("max ", "maximum ", "highest ", "largest ")
 _MIN_VERBS      = ("min ", "minimum ", "lowest ", "smallest ")
@@ -130,6 +132,93 @@ def _rewrite_agg(expr: str, func: str) -> str:
     """Swap the aggregate function in an expression: AVG(col) → MAX(col)."""
     m = re.match(r'[A-Z]+\((.+)\)', expr, re.I)
     return f"{func}({m.group(1)})" if m else expr
+
+
+def _measure_col(expr: str):
+    """The bare measure column inside an aggregate expression: 'MAX(amount)' → 'amount'."""
+    m = re.match(r'[A-Z]+\(\s*(?:DISTINCT\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*\)', expr or "", re.I)
+    if not m:
+        return None
+    col = m.group(1)
+    return col.split(".")[-1]
+
+
+def _fk_to(a_table: str, b_table: str, graph: dict):
+    """(fk_col_on_A, pk_col_on_B) if table A has a DIRECT FK to B, else None."""
+    for e in graph.get("edges", []):
+        if e.get("source_table") == a_table and e.get("target_table") == b_table:
+            return e.get("source_column"), e.get("target_column")
+    return None
+
+
+def _metric_entity_group(query, query_l, qtoks, table_a, agg_func, measure_col,
+                         malias, why):
+    """MULTI-TABLE metric aggregation (one FK hop): an <AGG> of a measure on table A,
+    grouped by an ENTITY on table B that the query NAMES and that A reaches via a single
+    FK (A.fk → B.pk), plus an optional dimension ON A. Deterministic — the join is a real
+    FK edge (the firewall's graph-guard re-verifies it). Returns a FastPathResult, or None
+    to fall back to the single-table path.
+
+      "maximum financial value per property by entry type"
+      → SELECT b."<name>", a."entry_type", MAX(a."amount")
+        FROM accounts_generalledger a JOIN assets_asset b ON a.asset_id = b.id
+        GROUP BY b."<name>", a."entry_type"
+    """
+    if not measure_col:
+        return None
+    graph = _graph()
+    if not graph.get("edges"):
+        return None
+    # grouping entity named in the query, reachable from A by ONE FK, and not A itself
+    edge = disp = b_table = None
+    for concept, _score in reg.match_concepts(qtoks):
+        bt = (concept.get("resolves_to") or {}).get("table")
+        if not bt or bt == table_a:
+            continue
+        e = _fk_to(table_a, bt, graph)
+        if e is None:
+            continue
+        dcols = [c.split(".", 1)[1] for c in (concept.get("default_display_columns") or [])
+                 if "." in c]
+        disp = dcols[0] if dcols else None
+        if not disp:
+            # prefer a human label column on B over the bare pk (id) for a readable group
+            _cols = _sm().get("columns", {})
+            disp = next((cn for cn in ("name", "project_name", "title", "display_name",
+                                        "full_name", "label")
+                         if f"{bt}.{cn}" in _cols), (e[1] or "id"))
+        edge, b_table = e, bt
+        break
+    if edge is None:
+        return None
+    fk_col, pk_col = edge
+
+    # optional dimension ON A ("... by entry type")
+    dim = None
+    if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
+                       "broken down", "distribution")):
+        gd = [d for d in reg.match_dimensions_in_table(table_a, qtoks, query_l, k=2)
+              if d["col_name"] not in (fk_col, measure_col, pk_col)]
+        if gd:
+            dim = gd[0]["col_name"]
+
+    a, b = "a", "b"
+    entity_alias = b_table.split("_")[-1]
+    ref_cols = [measure_col, fk_col, pk_col, disp]
+    sel = [f'{b}.{_q(disp)} AS {_q(entity_alias)}']
+    grp = [f'{b}.{_q(disp)}']
+    if dim:
+        sel.append(f'{a}.{_q(dim)}')
+        grp.append(f'{a}.{_q(dim)}')
+        ref_cols.append(dim)
+    sel.append(f'{agg_func}({a}.{_q(measure_col)}) AS {_q(malias)}')
+    sql = (f'SELECT {", ".join(sel)} FROM {_q(table_a)} {a} '
+           f'JOIN {_q(b_table)} {b} ON {a}.{_q(fk_col)} = {b}.{_q(pk_col)} '
+           f'GROUP BY {", ".join(grp)} ORDER BY {_q(malias)} DESC LIMIT 100')
+    return FastPathResult(
+        sql=sql, tables={table_a, b_table}, columns=list(dict.fromkeys(ref_cols)),
+        primary=table_a, route=f"metric.{agg_func.lower()}.entitygroup",
+        why=why + [f"{agg_func}({measure_col}) per {b_table}" + (f" by {dim}" if dim else "")])
 
 
 def _has(query_l: str, needles) -> bool:
@@ -337,10 +426,13 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     bucket = None
 
                 group_dim = None
+                group_dim2 = None
                 if bucket is None and _has(query_l, (" by ", " per ", " each ",
                                                      "grouped", "breakdown",
                                                      "broken down", "distribution")):
-                    group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
+                    _gds = reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+                    group_dim = _gds[0] if _gds else None
+                    group_dim2 = _gds[1] if len(_gds) > 1 else None
 
                 vals_hit = reg.match_values_in_table(table, qtoks)
                 # Registry sample missed → optionally resolve the value against the
@@ -407,6 +499,10 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     consumed |= set(group_dim["col_name"].split("_"))
                     for _lab in group_dim.get("labels", []):
                         consumed |= set(re.findall(r"[a-z0-9]+", _lab.lower()))
+                if group_dim2 is not None:
+                    consumed |= set(group_dim2["col_name"].split("_"))
+                    for _lab in group_dim2.get("labels", []):
+                        consumed |= set(re.findall(r"[a-z0-9]+", _lab.lower()))
                 if bucket is not None:
                     consumed |= {bucket, "daily", "weekly", "monthly", "quarterly",
                                  "yearly", "trend", "over"}
@@ -441,6 +537,14 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                 select_expr = metric["expression"].replace(f"{table}.", "")
                 alias = metric["metric_id"]
                 base_why = [f"metric {alias}"]
+                # multi-table: "how many <A> per <entity on B via FK> [by <dim on A>]"
+                # (only when no value filter is in play, so we never drop a WHERE clause).
+                if not filters and not vals_hit:
+                    _mtc = _metric_entity_group(query, query_l, qtoks, table, "COUNT",
+                                                _measure_col(select_expr) or "id", alias,
+                                                base_why + why)
+                    if _mtc is not None:
+                        return _mtc
                 if bucket is not None:
                     tcol = metric["allowed_time_dimension"].split(".", 1)[1]
                     return _finalize(query, QueryIntent(
@@ -452,13 +556,14 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                         why=base_why + why + [f"bucket by {bucket} on {tcol}"]))
                 if group_dim is not None:
                     g = group_dim["col_name"]
+                    g2 = group_dim2["col_name"] if group_dim2 is not None else None
                     return _finalize(query, QueryIntent(
                         query_type="count", subject_table=table, metric_id=alias,
                         select_expr=select_expr, metric_alias=alias,
-                        group_col=g, filters=filters,
+                        group_col=g, group_col2=g2, filters=filters,
                         extra_tables=_extra_tables, extra_columns=_extra_columns,
                         route="metric.count.group",
-                        why=base_why + why + [f"group by {g}"]))
+                        why=base_why + why + [f"group by {g}" + (f", {g2}" if g2 else "")]))
                 route = ("metric.count" + (".filter" if (vals_hit or _extra_tables) else "")
                          + (".temporal" if has_temporal else ""))
                 return _finalize(query, QueryIntent(
@@ -482,17 +587,24 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                                               tf.end or "2999-12-31"]))
                 why.append("temporal window")
             expr = metric["expression"].replace(f"{table}.", "")
-            group_dim = None
+            # multi-table: "<total/average X> per <entity on another table> [by <dim>]"
+            _mt = _metric_entity_group(query, query_l, qtoks, table, metric.get("kind", "SUM"),
+                                       _measure_col(expr), metric["metric_id"], why)
+            if _mt is not None:
+                return _mt
+            group_dims = []
             if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
                                "broken down", "distribution")):
-                group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
-            if group_dim is not None:
-                g = group_dim["col_name"]
+                group_dims = reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+            if group_dims:
+                g = group_dims[0]["col_name"]
+                g2 = group_dims[1]["col_name"] if len(group_dims) > 1 else None
                 return _finalize(query, QueryIntent(
                     query_type="count", subject_table=table,
                     select_expr=expr, metric_alias=metric["metric_id"],
-                    group_col=g, filters=filters,
-                    route="metric.measure.group", why=why + [f"group by {g}"]))
+                    group_col=g, group_col2=g2, filters=filters,
+                    route="metric.measure.group",
+                    why=why + [f"group by {g}" + (f", {g2}" if g2 else "")]))
             return _finalize(query, QueryIntent(
                 query_type="measure", subject_table=table, metric_id=metric["metric_id"],
                 select_expr=expr, metric_alias=metric["metric_id"], filters=filters,
@@ -509,17 +621,24 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
             expr  = _rewrite_agg(base_expr, func)
             alias = f"{func.lower()}_{metric['metric_id']}"
             filters, why = [], [f"{func}({metric['metric_id']})"]
-            group_dim = None
+            # multi-table: "<AGG> per <entity on another table> [by <dim>]" (one FK hop)
+            _mt = _metric_entity_group(query, query_l, qtoks, table, func,
+                                       _measure_col(base_expr), alias, why)
+            if _mt is not None:
+                return _mt
+            group_dims = []
             if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
                                "broken down", "distribution")):
-                group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
-            if group_dim is not None:
-                g = group_dim["col_name"]
+                group_dims = reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+            if group_dims:
+                g = group_dims[0]["col_name"]
+                g2 = group_dims[1]["col_name"] if len(group_dims) > 1 else None
                 return _finalize(query, QueryIntent(
                     query_type="count", subject_table=table,
                     select_expr=expr, metric_alias=alias,
-                    group_col=g, filters=filters,
-                    route=f"metric.{func.lower()}.group", why=why + [f"group by {g}"]))
+                    group_col=g, group_col2=g2, filters=filters,
+                    route=f"metric.{func.lower()}.group",
+                    why=why + [f"group by {g}" + (f", {g2}" if g2 else "")]))
             return _finalize(query, QueryIntent(
                 query_type="measure", subject_table=table,
                 select_expr=expr, metric_alias=alias, filters=filters,

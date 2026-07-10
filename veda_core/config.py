@@ -1247,10 +1247,14 @@ TIER2_LLM_FALLBACK = True
 # Tier-2 execution-feedback repair loop (veda_hybrid._tier2_sql): on a firewall rejection
 # or execution error, feed the CLASSIFIED error back into the SLM prompt (via
 # _repair_hint_for) and retry a corrected IR, bounded by MAX_REPAIR_ATTEMPTS, instead of
-# refusing on the first miss. Each attempt is a full SLM round-trip, so keep the bound low
-# to stay inside the latency budget. (These flags were referenced by veda_hybrid but never
-# defined, so the loop always ran 0 extra attempts — i.e. never repaired.)
-VALIDATION_REPAIR_LOOP_ENABLED = True
+# refusing on the first miss.
+#
+# DEFAULT OFF: the NL query suite (evaluation/nl_query_suite.py) showed each repair attempt
+# is a full extra SLM round-trip that roughly DOUBLES the latency of every refusal (refused
+# queries measured 88–114s with the loop on) for ~zero answerability gain on analytical
+# queries the IR schema can't express anyway. Well over the <30s SLA. Keep the code (flag
+# defined) but off by default; enable per-deployment only if answerability > latency there.
+VALIDATION_REPAIR_LOOP_ENABLED = False
 VALIDATION_MAX_REPAIR_ATTEMPTS = 1
 # Phase 2 unification — ONE JOIN ENGINE. When the LLM (LangGraph) path identifies a
 # MULTI-table query, build joins via the deterministic graph planner (plan_join_tree
