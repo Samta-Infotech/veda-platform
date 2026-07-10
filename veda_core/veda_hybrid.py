@@ -246,6 +246,19 @@ def _maybe_federated(query, verbose=False):
                   "table": "federated", "answer": payload.get("answer"),
                   "provenance": payload.get("provenance"), "sources": payload.get("sources")}
         return MultiResult(items=[_to_subresult(query, "federated", result)])
+    # A federated EXECUTION/planning FAILURE (the generated cross-source SQL was invalid —
+    # binder error, hallucinated column, unparseable, no plan) means the LLM mis-planned,
+    # NOT that the question genuinely spans sources. Degrade to the normal single-source
+    # path rather than hard-refusing the whole query. Only a PRINCIPLED refusal (truly
+    # can't be answered across the scoped sources) is surfaced.
+    _reason = str(payload.get("reason") or "").lower()
+    if any(k in _reason for k in (
+            "binder error", "does not have a column", "unparseable", "syntax error",
+            "exec_error", "could not build", "no select generated", "does not exist",
+            "unknown column", "not exist", "catalog error", "referenced column")):
+        if verbose:
+            print(f"  [federated] plan failed ({_reason[:80]}) — falling back to single-source")
+        return None
     # refused/blocked federation is a real, explained outcome — surface it, don't silently
     # fall back to a single-source answer that would drop a source.
     result = {"ok": False, "status": "federated_refused",
