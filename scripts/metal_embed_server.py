@@ -156,13 +156,15 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--host", default=os.environ.get("EMBED_HOST", "0.0.0.0"),
+                    help="bind address (default 0.0.0.0 — reachable from other hosts on the LAN)")
     ap.add_argument("--port", type=int, default=11435)
     ap.add_argument("--device", default=os.environ.get("EMBED_DEVICE", "mps"))
     args = ap.parse_args()
 
     device = _resolve_device(args.device)
     Handler.models = Models(device)
-    log.info("Metal embed server on 0.0.0.0:%d  device=%s", args.port, device)
+    log.info("Metal embed server on %s:%d  device=%s", args.host, args.port, device)
     log.info("BGE_MODEL=%s  RERANKER_MODEL=%s", BGE_MODEL, RERANKER_MODEL)
     log.info("Point the container at:  METAL_EMBED_URL=http://host.docker.internal:%d", args.port)
     # warm both so the first real query is hot
@@ -174,7 +176,9 @@ def main():
     except Exception as e:
         log.warning("warm-up deferred: %s", e)
 
-    ThreadingHTTPServer(("0.0.0.0", args.port), Handler).serve_forever()
+    server = ThreadingHTTPServer((args.host, args.port), Handler)
+    server.daemon_threads = True   # threads don't block a clean shutdown/kickstart restart
+    server.serve_forever()
 
 
 if __name__ == "__main__":
