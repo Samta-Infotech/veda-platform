@@ -237,6 +237,34 @@ def match_dimension_in_table(table: str, qtoks: set, query_l: str):
     return best if best_score > 0 else None
 
 
+def match_dimensions_in_table(table: str, qtoks: set, query_l: str, k: int = 2):
+    """Up to `k` DISTINCT dimensions on `table` named by the query, best-scoring first.
+    Powers multi-dimension grouping ("<metric> per X by Y") in the deterministic fast
+    path — a strict superset of match_dimension_in_table (k=1 returns the same single
+    best dimension). Only dimensions that actually score (named by the query) are
+    returned, so a single-dimension query still yields exactly one."""
+    scored = []
+    for d in dimensions_for_table(table):
+        score = 0
+        for lab in d.get("labels", []):
+            if lab and lab in query_l:
+                score = max(score, len(lab.split()) + 1)
+        dtoks = {_singularize(t) for t in d["col_name"].split("_") if len(t) > 2}
+        score = max(score, len(dtoks & qtoks))
+        if score > 0:
+            scored.append((score, d))
+    scored.sort(key=lambda sd: sd[0], reverse=True)
+    out, seen = [], set()
+    for _, d in scored:
+        if d["col_name"] in seen:
+            continue
+        seen.add(d["col_name"])
+        out.append(d)
+        if len(out) >= k:
+            break
+    return out
+
+
 def match_values_in_table(table: str, qtoks: set):
     """ALL dimension VALUES on `table` named by the query → (dimension, [values]).
     Multiple matched values on one dimension = an OR filter ("open or new" →
