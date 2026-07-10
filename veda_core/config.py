@@ -346,6 +346,16 @@ COL_ID_IDX_PATH = "schema/col_id_to_idx.pkl"
 NL_SIMPLIFIER_ENABLED = False
 
 # -----------------------------------------------------------------------------
+# Runtime Context Provider — Layer 0 (query/runtime_context.py)
+# -----------------------------------------------------------------------------
+# Pure system-value questions ("what's the current date", "what time is it") need
+# no table, no SQL, no LLM — they were previously falling through to retrieval,
+# which could match unrelated columns (e.g. "current" -> an is_current flag) and
+# select a real table, producing "SELECT CURRENT_DATE FROM <table> LIMIT 100"
+# (today's date duplicated once per row instead of answered once).
+RUNTIME_CONTEXT_ENABLED = True
+
+# -----------------------------------------------------------------------------
 # SLM — Layer 3
 # -----------------------------------------------------------------------------
 SLM_MODEL_NAME       = "qwen2.5-coder:7b"

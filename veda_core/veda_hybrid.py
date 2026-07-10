@@ -290,6 +290,23 @@ def run_hybrid_query(query, verbose=False, on_event=None):
         except Exception:
             pass  # fall back to the original query silently
 
+    # Runtime Context Provider (L0): pure system-value questions ("what's the
+    # current date") need no table/SQL/LLM — answer directly before retrieval
+    # ever runs, so a stray lexical match (e.g. "current" -> an is_current
+    # column) can never select a table for a question that references no data.
+    try:
+        from config import RUNTIME_CONTEXT_ENABLED
+    except Exception:
+        RUNTIME_CONTEXT_ENABLED = False
+    if RUNTIME_CONTEXT_ENABLED:
+        from query.runtime_context import answer_runtime_context
+        _rc = answer_runtime_context(query)
+        if _rc is not None:
+            # No on_event/"thinking" emit here — same as classify_node's smalltalk
+            # fast path: an instant, deterministic answer has nothing to narrate.
+            print(f"  [L0] Runtime context: {_rc['answer']!r}")
+            return MultiResult(items=[_to_subresult(query, "runtime_context", _rc)])
+
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
     # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.

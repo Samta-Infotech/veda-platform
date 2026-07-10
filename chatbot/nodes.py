@@ -58,7 +58,7 @@ def _depends_on_history(message: str, history: list) -> bool:
     Fails closed to False (trust the original "smalltalk" verdict) on any error,
     since this is only a second-opinion check, not the primary classifier."""
     user_prompt = build_standalone_check_user_prompt(message, history)
-    verdict = call_ollama(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5)
+    verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5)
     return bool(verdict) and "dependent" in verdict.strip().lower()
 
 # Deterministic fast path for the overwhelming majority of smalltalk: pure
@@ -79,6 +79,27 @@ _THANKS_RE = re.compile(
 _BYE_RE = re.compile(
     r"^\s*(bye|goodbye|see\s*(you|ya)( later| soon)?|take care|good\s*night)\s*[.,!?]*\s*$",
     re.IGNORECASE)
+
+# Deterministic fast path for pure runtime-value questions ("what's the current
+# date", "what time is it") — skips the classify LLM call (and its thinking event)
+# the same way the smalltalk patterns above do. Deliberately a SEPARATE, minimal
+# duplicate of query/runtime_context.py's patterns, not an import of it — chatbot/
+# runs in the api container and must never import veda_core directly (same
+# boundary chatbot/llm.py's call_slm already documents). The actual answer is
+# still computed exactly once, downstream, by query/runtime_context.py in the
+# inference tier — this only decides whether to skip the LLM classify round-trip.
+_RUNTIME_CONTEXT_RE = re.compile(
+    r"^\s*what(?:'s| is) (?:the )?(?:current )?date and time\s*\??\s*$"
+    r"|^\s*current date and time\s*\??\s*$"
+    r"|^\s*what(?:'s| is) (?:the )?(?:current date|today'?s? date|date(?: today)?)\s*\??\s*$"
+    r"|^\s*(?:today'?s? date|current date)\s*\??\s*$"
+    r"|^\s*what date is it(?: today)?\s*\??\s*$"
+    r"|^\s*what day (?:is it|of the week is it)(?: today)?\s*\??\s*$"
+    r"|^\s*what(?:'s| is) (?:the )?current time\s*\??\s*$"
+    r"|^\s*current time\s*\??\s*$"
+    r"|^\s*what time is it(?: now)?\s*\??\s*$",
+    re.IGNORECASE,
+)
 
 
 def _canned_smalltalk_reply(message: str) -> str | None:
@@ -134,6 +155,14 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # there's nothing to think about for an instant, deterministic reply.
         action = "smalltalk"
         logger.info("classify_node: deterministic smalltalk match, message=%r", message)
+    elif _RUNTIME_CONTEXT_RE.match(message):
+        # Same idea, for pure system-value questions ("what's the current
+        # date") — no LLM classify call, no thinking event. _route_after_classify
+        # also sends this straight to call_engine_node, bypassing
+        # resolve_followup_node's LLM call too, since the question is always
+        # self-contained regardless of history.
+        action = "runtime_context"
+        logger.info("classify_node: deterministic runtime-context match, message=%r", message)
     else:
         _emit(config, "supervisor_classify", "Understanding your message...")
         raw = call_slm(
@@ -325,6 +354,7 @@ def ask_clarification_node(state: ChatState) -> dict:
             logger.exception("ask_clarification_node: explain_failure failed for status=%r", status)
             question = "Could you clarify what you're asking about?"
 
+    unavailable = status == "unavailable"
     update = {
         "reply_text": question,
         "needs_clarification": not unavailable,

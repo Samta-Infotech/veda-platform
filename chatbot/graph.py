@@ -2,8 +2,9 @@
 
     classify
        |-- smalltalk ------------------------------------> smalltalk_node -> END
-       |-- (else) history non-empty -> resolve_followup_node -.
-       |-- (else) history empty ------------------------------+--> call_engine_node
+       |-- runtime_context -------------------------------------------.
+       |-- (else) history non-empty -> resolve_followup_node -.       |
+       |-- (else) history empty ------------------------------+-------+--> call_engine_node
                                                                        |-- answered -> format_reply_node -> END
                                                                        `-- (else)   -> ask_clarification_node -> END
 
@@ -15,6 +16,9 @@ state instead. This avoids a real question (e.g. "what was my incident
 count") silently skipping history-aware resolution just because the
 classifier called it "answer" instead of "followup" — resolve_followup_node
 is a no-op rewrite when the message is already self-contained anyway.
+"runtime_context" (classify_node's deterministic current-date/time match) is
+the one exception: always self-contained, so it skips resolve_followup_node
+regardless of history.
 """
 from __future__ import annotations
 
@@ -43,10 +47,16 @@ def _route_after_classify(state: ChatState) -> str:
     """Edge function after classify_node: smalltalk bypasses the engine
     entirely; any real question goes through resolve_followup_node whenever
     there's history to resolve against (checkpoint-based, not label-based —
-    see module docstring), straight to the engine otherwise (first turn)."""
-    if state.get("action") == "smalltalk":
+    see module docstring), straight to the engine otherwise (first turn).
+
+    "runtime_context" (deterministic current-date/time match) always goes
+    straight to the engine too, regardless of history — unlike an ordinary
+    question, it's never dependent on prior turns, so resolve_followup_node's
+    LLM call would be pure wasted latency."""
+    action = state.get("action")
+    if action == "smalltalk":
         return "smalltalk"
-    if state.get("history"):
+    if action != "runtime_context" and state.get("history"):
         return "resolve_followup"
     return "call_engine"
 

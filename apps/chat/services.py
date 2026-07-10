@@ -101,8 +101,8 @@ class ConversationQueryService:
     def run_turn(
         self, chat: ChatSession, message: str, request_id: str = "", stream: bool = False,
     ) -> Iterator[dict]:
-        """Yields: thinking (-> thinking*, when stream) -> content* -> visualization?
-        -> explainability -> error?.
+        """Yields: thinking* (stream only, zero for an instant fast-path answer)
+        -> content* -> visualization? -> explainability -> error?.
 
         `chat.pk` doubles as the chatbot/LangGraph session_id (thread_id) — the
         graph's own Redis checkpointer accumulates conversation history per
@@ -111,10 +111,11 @@ class ConversationQueryService:
         stream=True sources "thinking" from chatbot's own on_event callback,
         which itself forwards the inference tier's real SSE progress events
         (classify / decompose / route / answer) live as the pipeline advances,
-        via a background thread bridged through a queue (see _run_streamed)."""
-        yield {"event": "thinking",
-               "data": {"phase": "reasoning", "message": "Analyzing request..."}}
-
+        via a background thread bridged through a queue (see _run_streamed).
+        No placeholder "thinking" event fires up front — an instant fast-path
+        answer (smalltalk, runtime context) never emits one at all, and a real
+        question's first genuine thinking event (classify_node's "Understanding
+        your message...") arrives moments later on its own."""
         session_id = str(chat.pk)
         kwargs = dict(tenant=self.tenant, source_id=self.source_id, request_id=request_id)
 
