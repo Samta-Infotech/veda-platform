@@ -35,9 +35,13 @@ def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
 class ConversationQueryService:
     """One assistant turn: resolve chat -> run the existing pipeline -> persist."""
 
-    def __init__(self, user, source_id=None, tenant: str = "default"):
+    def __init__(self, user, source_id=None, tenant: str = "default", source_ids=None):
         self.user = user
         self.source_id = source_id
+        # Validated query SCOPE (P5) — ready source ids, primary first, resolved
+        # server-side by the view (QueryView._resolve_scope). Forwarded to inference
+        # so multi-source scopes retrieve/federate exactly like /api/v1/query.
+        self.source_ids = list(source_ids) if source_ids else ([source_id] if source_id else None)
         self.tenant = tenant
 
     def create_conversation(self, title: str = "") -> ChatSession:
@@ -101,6 +105,7 @@ class ConversationQueryService:
             if stream:
                 for kind, data in client.stream_hybrid_query(
                     message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
+                    source_ids=self.source_ids,
                 ):
                     if kind == "progress":
                         yield {"event": "thinking",
@@ -118,6 +123,7 @@ class ConversationQueryService:
             else:
                 payload = client.run_hybrid_query(
                     message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
+                    source_ids=self.source_ids,
                 )
         except InferenceUnavailable as exc:
             logger.warning("conversation query pipeline unavailable chat_id=%s: %s", chat.pk, exc)

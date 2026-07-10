@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import os
 
 from django.contrib.auth import authenticate, get_user_model
 from django.http import StreamingHttpResponse
@@ -122,8 +121,15 @@ class ConversationQueryView(APIView):
         if user is None:
             return _unauthenticated_response()
 
-        source_id = int(os.environ.get("VEDA_DEFAULT_SOURCE_ID", "1"))
-        service = ConversationQueryService(user=user, source_id=source_id)
+        # Resolve the query SCOPE server-side exactly like /api/v1/query (§6.2, P5):
+        # all READY sources by default, an optional request pin intersected with the
+        # ready registry, VEDA_DEFAULT_SOURCE_ID only as the last-resort fallback.
+        # This keeps chat multi-source (federation-capable) and immune to a stale
+        # default pointing at a source with no connection (e.g. an empty-host row).
+        from apps.query.views import QueryView
+        source_ids = QueryView._resolve_scope(request.data, tenant="default")
+        service = ConversationQueryService(
+            user=user, source_id=source_ids[0], source_ids=source_ids)
         try:
             chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
         except ChatNotFound:
