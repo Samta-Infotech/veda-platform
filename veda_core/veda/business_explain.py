@@ -43,6 +43,17 @@ _CHECK_LABELS = {
 _TABLE_PREFIXES = ("assets_", "accounts_", "worklists_", "organization_", "attachments_",
                    "evaluation_", "ingestion_", "query_", "chat_")
 
+# Deterministic visualization-reasoning phrasing, keyed by chart type — the
+# ONLY thing build_explain's visualization block adds beyond what already
+# existed. Standardized rather than the SLM's own free-text "reason", so
+# explainability stays LLM-free like the rest of this module.
+_CHART_REASON_TEMPLATES = {
+    "bar":  "Bar chart selected because the query compares a numeric measure across discrete categories.",
+    "line": "Line chart selected because the query tracks a numeric measure over time.",
+    "pie":  "Pie chart selected because the query breaks a numeric measure down by category.",
+    "line_histogram": "Combo chart selected because the query compares two numeric measures across the same dimension.",
+}
+
 
 def _humanize(name: str) -> str:
     return " ".join(w for w in name.replace("_", " ").split() if w).title()
@@ -185,6 +196,15 @@ def _extract(sql: str) -> Dict[str, Any]:
     return out
 
 
+def extract_sql_facts(sql: str) -> Dict[str, Any]:
+    """Public entry point onto `_extract()` — the same zero-LLM sqlglot pass
+    business_explain already runs, exposed for callers outside this module
+    (e.g. veda/result_analyzer.py's InsightContext) that need the same
+    entities/filters/aggregations/groupings/orderings/limit facts without a
+    second SQL parse."""
+    return _extract(sql)
+
+
 def _filter_phrase(field: str, op_class: str, val: Optional[str]) -> str:
     if op_class == "Is" and val is None:
         return f"{field} is empty"
@@ -224,9 +244,16 @@ def _build_understanding(*, dataset: str, aggregations: List[Tuple[str, Optional
 
 
 def build_explain(*, sql: str, table: str, sm: Optional[dict],
-                   checks: Optional[List[dict]] = None) -> Dict[str, Any]:
+                   checks: Optional[List[dict]] = None,
+                   visualization: Optional[dict] = None) -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
-    Returns a plain dict matching the documented explainability schema."""
+    Returns a plain dict matching the documented explainability schema.
+
+    `visualization`: the Insight Engine's already-validated chart spec
+    (query/result_explainer.py's validate_visualization — never the raw,
+    unvalidated SLM suggestion), when one was produced. Optional and additive:
+    omitted entirely from the returned dict when None, so every existing
+    caller/consumer of build_explain() is unaffected."""
     ir = _extract(sql or "")
     entities = ir["entities"] or ([table] if table else [])
     primary = entities[0] if entities else table
@@ -278,7 +305,7 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         for label in _CHECK_LABELS.get(c.get("name"), [c.get("name")]):
             check_items.append({"label": label, "passed": passed})
 
-    return {
+    out = {
         "version": "1.0",
         "understanding": {"summary": understanding},
         "data_used": {"datasets": datasets, "fields": fields},
@@ -293,3 +320,16 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         "validation": {"passed": all_passed, "checks": check_items},
         "sql": {"enabled": True, "query": sql or None},
     }
+    if visualization:
+        vtype = visualization.get("type")
+        out["visualization"] = {
+            "type": vtype,
+            # Deterministic, standardized phrasing — not the SLM's raw "reason"
+            # text (which can be vague/generic) — same principle as the rest of
+            # this module: explain = f(final SQL/shape), never f(an LLM's prose).
+            "reason": _CHART_REASON_TEMPLATES.get(vtype, visualization.get("reason")),
+            "fields": [f for f in (field_of(visualization.get("x_axis")) if visualization.get("x_axis") else None,
+                                   field_of(visualization.get("y_axis")) if visualization.get("y_axis") else None)
+                      if f],
+        }
+    return out

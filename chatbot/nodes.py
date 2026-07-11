@@ -2,7 +2,7 @@
 
 Each node takes a ChatState and returns a partial dict to merge into it
 (standard LangGraph node signature). Nodes that need to report mid-turn
-progress (classify_node, resolve_followup_node, call_engine_node) also
+progress (classify_node, context_resolve_node, call_engine_node) also
 declare a `config: RunnableConfig` parameter — LangGraph injects it
 automatically for any node function whose signature names a parameter
 `config` (see langgraph/_internal/_runnable.py's KWARGS_CONFIG_KEYS); nodes
@@ -18,7 +18,10 @@ from langchain_core.runnables import RunnableConfig
 
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
-from .llm import call_slm
+from .llm import CHATBOT_CLASSIFY_MODEL, call_slm
+from .memory import frame as memory_frame
+from .memory.classify import DELTA_TYPES, classify_delta, parse_delta_response
+from .memory.store import MemoryStore
 from .prompts import (
     FALLBACK_REPLY,
     FOLLOWUP_SYSTEM_PROMPT,
@@ -49,16 +52,36 @@ _DATA_QUESTION_HINTS = re.compile(
     re.IGNORECASE,
 )
 
+# Cheap, deterministic PRE-FILTER for _depends_on_history: only messages that
+# contain some referential/anaphoric language even PLAUSIBLY depend on earlier
+# conversation to mean something concrete. A bare greeting ("hi") or a self-
+# introduction ("my name is raj") contains none of these and can never depend
+# on history no matter what it contains — asking a model "could this secretly
+# depend on the conversation" for such messages produced real, observed false
+# positives in production (a bare "hi" and "my name is raj" were each rewritten
+# into bogus, unfiltered database queries — see the incident traces this fix
+# responds to). This is intentionally NOT trying to detect every kind of
+# follow-up (the docstring below explains why a fixed word list can't do that);
+# it only needs to catch messages that couldn't possibly qualify, so the model
+# call is skipped for those instead of trusted to always get them right.
+_REFERENTIAL_HINTS = re.compile(
+    r"\b(that|this|it|those|these|same|again|more|other|another|previous|"
+    r"above|below|instead|also|too|earlier|before|last one|the one)\b",
+    re.IGNORECASE,
+)
+
 def _depends_on_history(message: str, history: list) -> bool:
     """Generic (non-keyword) second opinion for a "smalltalk" verdict when prior
-    turns exist. Real users phrase referential follow-ups countless ways ("need
-    more details", "aur bata", "what about the other one", ...) — no fixed word
-    list generalizes to production traffic, so this asks the LLM the underlying
+    turns exist AND the message contains at least some referential language
+    (_REFERENTIAL_HINTS — see its docstring for why that pre-filter exists).
+    Real users phrase referential follow-ups countless ways ("need more
+    details", "aur bata", "what about the other one", ...) — no fixed word list
+    generalizes to production traffic, so THIS part asks the LLM the underlying
     semantic question directly instead of pattern-matching specific phrasings.
     Fails closed to False (trust the original "smalltalk" verdict) on any error,
     since this is only a second-opinion check, not the primary classifier."""
     user_prompt = build_standalone_check_user_prompt(message, history)
-    verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5)
+    verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5, model=CHATBOT_CLASSIFY_MODEL)
     return bool(verdict) and "dependent" in verdict.strip().lower()
 
 # Deterministic fast path for the overwhelming majority of smalltalk: pure
@@ -98,6 +121,17 @@ _RUNTIME_CONTEXT_RE = re.compile(
     r"|^\s*what(?:'s| is) (?:the )?current time\s*\??\s*$"
     r"|^\s*current time\s*\??\s*$"
     r"|^\s*what time is it(?: now)?\s*\??\s*$",
+    re.IGNORECASE,
+)
+
+# Deterministic fast path for an explicit hard reset of the structured
+# analytical memory (audit fix H2 — MemoryStore.reset() existed but was
+# never wired to anything). Whole-message match, same anchored style as the
+# smalltalk patterns above, so it never misfires on a real question that
+# merely contains one of these words mid-sentence.
+_RESET_RE = re.compile(
+    r"^\s*(start over|reset(?: everything)?|forget (everything|that|it)|"
+    r"clear (the )?context|new topic|let'?s start (over|fresh|again))\s*[.,!?]*\s*$",
     re.IGNORECASE,
 )
 
@@ -144,11 +178,27 @@ def _turn_delta(state: ChatState, assistant_reply: str) -> list:
 def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     """Decide what kind of message this is. Defaults to 'answer' (route to the
     engine) on any failure — refuse-over-guess: never silently short-circuit
-    a real data question as smalltalk just because the classifier is down."""
+    a real data question as smalltalk just because the classifier is down.
+
+    Latency fix: when a structured QueryFrame already exists (state["frame"],
+    loaded by memory_read_node before this node runs), the SAME LLM call ALSO
+    asks for the memory delta classification (chatbot/memory/classify.py's
+    job — new_topic|refine|drill_down|drill_up|compare|ambiguous) via
+    build_supervisor_system_prompt(frame)'s addendum — see that module's
+    docstring. This merges what used to be two sequential SLM round-trips
+    (classify_node's own call, then context_resolve_node's separate
+    classify_delta() call) into one for every follow-up turn, which was the
+    original design intent and had regressed to two calls in the first cut
+    of chatbot/memory/. context_resolve_node only falls back to a second,
+    standalone classify_delta() call if this one didn't produce a usable
+    delta_type (e.g. this call failed/timed out)."""
     message = state["message"]
     history = state.get("history", [])
+    frame = state.get("frame") or {}
+    deterministic_smalltalk = _canned_smalltalk_reply(message) is not None
+    delta_type = None          # None = "not computed this turn", see context_resolve_node
 
-    if _canned_smalltalk_reply(message) is not None:
+    if deterministic_smalltalk:
         # Deterministic fast path: a bare "hi"/"thanks"/"bye" needs no LLM call
         # at all — skips both this classify round-trip AND smalltalk_node's own
         # (each ~20s on this deployment's hardware). No "thinking" event either:
@@ -159,15 +209,18 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # Same idea, for pure system-value questions ("what's the current
         # date") — no LLM classify call, no thinking event. _route_after_classify
         # also sends this straight to call_engine_node, bypassing
-        # resolve_followup_node's LLM call too, since the question is always
+        # context_resolve_node's LLM call too, since the question is always
         # self-contained regardless of history.
         action = "runtime_context"
         logger.info("classify_node: deterministic runtime-context match, message=%r", message)
     else:
         _emit(config, "supervisor_classify", "Understanding your message...")
         raw = call_slm(
-            build_supervisor_system_prompt(),   # built fresh each call so "today" is always current
+            build_supervisor_system_prompt(frame),   # built fresh each call so "today" is always
+                                                      # current; includes the delta addendum only
+                                                      # when `frame` has an entity (see its docstring)
             build_supervisor_user_prompt(message, history),
+            model=CHATBOT_CLASSIFY_MODEL,
         )
         action = "answer"
         if raw:
@@ -180,8 +233,24 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                         action = candidate
                 except Exception:
                     logger.warning("classify_node: could not parse LLM output: %r", raw)
+            if frame.get("entity"):
+                # Parse delta_type/slot_candidates from the SAME raw response —
+                # shares classify_delta's exact vocabulary/confidence gates via
+                # parse_delta_response, so a merged response is held to the
+                # identical bar as the standalone fallback call.
+                dt, _slots = parse_delta_response(raw, message)
+                if dt in DELTA_TYPES:
+                    delta_type = dt
 
-    if action == "smalltalk" and history and _depends_on_history(message, history):
+    # Deliberately does NOT run _depends_on_history for every "smalltalk"
+    # verdict: a message with no referential language at all (_REFERENTIAL_HINTS)
+    # can never depend on history to mean something concrete, regardless of
+    # what that history contains — greetings and self-introductions both fall
+    # in this bucket (see chatbot/nodes.py's module docstring history / the
+    # incidents this responds to), and asking a model "could this secretly
+    # depend on context" for them was producing real false positives.
+    if (action == "smalltalk" and history and _REFERENTIAL_HINTS.search(message)
+            and _depends_on_history(message, history)):
         logger.warning(
             "classify_node: LLM said smalltalk but message depends on the prior "
             "conversation, overriding to 'followup': %r", message,
@@ -200,6 +269,11 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # status/engine_result/clarification are this-turn-only outputs. Without
     # this reset they'd leak forward from a previous turn's answer into a
     # later turn (e.g. smalltalk) that never touches these fields itself.
+    # `delta_type` is included in this reset for the same reason (also fixes
+    # a latent bug: a "runtime_context" turn used to leave whatever
+    # delta_type a PRIOR turn's context_resolve_node had set untouched in the
+    # checkpoint, since that route bypasses context_resolve_node entirely —
+    # explicitly setting it here every turn means it's never stale).
     return {
         "action": action,
         "sql": None,
@@ -209,6 +283,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         "needs_clarification": False,
         "clarification_question": None,
         "engine_unavailable": False,
+        "delta_type": delta_type,
     }
 
 
@@ -224,6 +299,7 @@ def smalltalk_node(state: ChatState) -> dict:
             build_smalltalk_system_prompt(),   # built fresh each call so "today" is always current
             message,
             max_tokens=60,
+            model=CHATBOT_CLASSIFY_MODEL,
         )
     if not reply:
         reply = FALLBACK_REPLY
@@ -236,22 +312,116 @@ def smalltalk_node(state: ChatState) -> dict:
     }
 
 
-def resolve_followup_node(state: ChatState, config: RunnableConfig) -> dict:
-    """Rewrite the message as a fully self-contained question using prior turns.
-    Used for both 'followup' and 'clarify_reply' actions — same mechanics:
-    merge new input with context, then treat like a normal question."""
+def memory_read_node(state: ChatState) -> dict:
+    """Loads the structured analytical memory (QueryFrame + DrillStack +
+    episodic buffer) from Redis for this session — see
+    chatbot/memory/store.py and docs/MEMORY_ARCHITECTURE.md §5/§7. Runs
+    before classify/context_resolve so both can see it; a Redis miss/error
+    degrades to empty (turn treated as if no prior analytical context
+    exists — never blocks the turn).
+
+    Also the deterministic "start over" fast path (audit fix H2 —
+    MemoryStore.reset() existed but nothing ever called it): a whole-message
+    match against _RESET_RE wipes the session's memory keys and returns a
+    guaranteed-empty frame/stack/episodic immediately, skipping the reads
+    entirely (there's nothing to read after a wipe)."""
+    tenant = state.get("tenant") or "default"
+    session_id = state.get("session_id") or ""
+    message = state.get("message", "")
+
+    if _RESET_RE.match(message):
+        MemoryStore.reset(tenant, session_id)
+        logger.info("memory_read_node: deterministic reset match, message=%r", message)
+        return {"frame": {}, "drill_stack": [], "episodic": []}
+
+    frame = MemoryStore.read_frame(tenant, session_id) or {}
+    stack = MemoryStore.read_stack(tenant, session_id) or []
+    episodic = MemoryStore.read_episodic(tenant, session_id) or []
+    return {"frame": frame, "drill_stack": stack, "episodic": episodic}
+
+
+def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
+    """Resolves a context-dependent message into a self-contained
+    `resolved_query`. Used for both 'followup' and 'clarify_reply' actions,
+    same as before — but now tries the DETERMINISTIC structured-memory merge
+    first (chatbot/memory/frame.py::render_frame_as_query, one SLM call for
+    classification only, never a free rewrite) whenever a usable frame
+    exists, falling back to the original free-text LLM rewrite
+    (FOLLOWUP_SYSTEM_PROMPT) ONLY when there is no frame yet at all — see
+    docs/MEMORY_ARCHITECTURE.md §8/§29 (staged rollout: this fallback is the
+    safety net for turns the new deterministic path can't cover yet, e.g. a
+    clarify_reply whose only context is raw history, before any query has
+    ever succeeded in this session).
+
+    LATENCY: classify_node (which runs right before this node — see
+    chatbot/graph.py) already tries to compute delta_type in its OWN single
+    LLM call whenever a frame exists (chatbot/prompts/supervisor.py's merged
+    prompt). If that succeeded, `state["delta_type"]` already holds a valid
+    value and this node makes ZERO additional SLM calls — it just reuses it.
+    A separate classify_delta() call only happens here as a FALLBACK, for
+    the (expected to be rare) case where classify_node's call failed/timed
+    out/returned something unparseable. Either way, once a delta_type is in
+    hand, this node NEVER makes a SECOND call on top of it — "ambiguous" (a
+    genuine judgment call OR a timeout — chatbot.llm.call_slm returns None
+    uniformly for both) degrades to passing the raw message through as-is,
+    and the engine's own existing refuse/clarify path (unchanged) handles
+    genuine ambiguity exactly as it always has, just without an extra
+    multi-second round-trip."""
     _emit(config, "supervisor_followup", "Resolving your follow-up context...")
     message = state["message"]
     history = state.get("history", [])
+    frame = state.get("frame") or {}
+    drill_stack = state.get("drill_stack") or []
 
-    rewritten = call_slm(
-        FOLLOWUP_SYSTEM_PROMPT,
-        build_followup_user_prompt(message, history),
-        max_tokens=80,
-    )
-    resolved = (rewritten or message).strip().strip('"')
-    logger.info("resolve_followup_node: %r -> %r", message, resolved)
-    return {"resolved_query": resolved}
+    if not frame.get("entity"):
+        # No prior frame at all — classify_node's merged prompt never asked
+        # for a delta_type in this case (no addendum without a frame), so
+        # this is genuinely the first SLM round-trip for this node, not a
+        # second one. Unchanged free-text rewrite, exactly as before.
+        rewritten = call_slm(
+            FOLLOWUP_SYSTEM_PROMPT,
+            build_followup_user_prompt(message, history),
+            max_tokens=80,
+            model=CHATBOT_CLASSIFY_MODEL,
+        )
+        resolved = (rewritten or message).strip().strip('"')
+        logger.info("context_resolve_node: no frame yet, fallback rewrite %r -> %r",
+                    message, resolved)
+        return {"resolved_query": resolved, "delta_type": "new_topic"}
+
+    delta_type = state.get("delta_type")
+    if delta_type in DELTA_TYPES:
+        # classify_node's merged call already produced this — ZERO extra SLM
+        # call here, which is the whole point of the merge.
+        logger.info("context_resolve_node: reusing delta_type=%s from classify_node's "
+                    "merged call (no extra SLM round-trip)", delta_type)
+    else:
+        # classify_node's call didn't yield a usable delta_type this turn
+        # (failed/timed out/unparseable, or this session never went through
+        # a frame-aware classify at all) — fall back to one standalone call.
+        episodic = state.get("episodic") or []
+        delta_type, _slot_candidates = classify_delta(frame, message, episodic)
+        # _slot_candidates itself is intentionally not threaded into the merge
+        # (render_frame_as_query only ever uses `frame` + the verbatim
+        # `message`, never a partially-extracted slot value — nothing gets
+        # added that isn't either an old proven fact or a substring the user
+        # actually typed). classify_delta()/parse_delta_response already
+        # applied the H3 confidence gate before delta_type reaches here.
+
+    if delta_type == "drill_up" and drill_stack:
+        drill_stack = memory_frame.pop_drill(drill_stack)
+        frame = memory_frame.rebuild_frame_from_stack(frame, drill_stack)
+
+    # "new_topic"/"refine"/"drill_down"/"drill_up"/"compare" all merge
+    # deterministically; "ambiguous" (judgment OR timeout) passes the message
+    # through untouched — no second SLM call, see docstring above.
+    resolved = (memory_frame.render_frame_as_query(frame, message, delta_type)
+                if delta_type != "ambiguous" else message)
+
+    logger.info("context_resolve_node: delta_type=%s frame-merge %r -> %r",
+                delta_type, message, resolved)
+    return {"resolved_query": resolved, "delta_type": delta_type,
+            "frame": frame, "drill_stack": drill_stack}
 
 
 def _extract_engine_result(payload: dict) -> tuple[dict, str]:
@@ -322,6 +492,66 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
     return {"engine_result": res0, "status": status, "engine_unavailable": False}
 
 
+def _templated_gist(engine_result: dict) -> str:
+    """One-line, deterministic (NOT LLM) summary of an answered turn, for the
+    episodic buffer only (chatbot/memory/store.py — capped, TTL'd, never the
+    full markdown/table reply). Mirrors the "memory is evidence, not prose"
+    principle: this line is stored purely to help classify_delta recognize
+    "it"/"that" references, never re-parsed back into the QueryFrame."""
+    answer = engine_result.get("answer")
+    if answer:
+        return f"answered: {answer}"[:200]
+    rows = engine_result.get("rows")
+    if isinstance(rows, list):
+        return f"answered: {len(rows)} row(s)"
+    return "answered"
+
+
+def memory_write_node(state: ChatState) -> dict:
+    """Writes the structured analytical memory AFTER a successful engine
+    execution — evidence only, never on refuse/error/clarify/unavailable
+    (hard-enforced below; see docs/MEMORY_ARCHITECTURE.md §6/§12 barrier 1).
+    Every field written traces back to engine_result's own already-validated
+    output (chatbot/memory/frame.py::harvest_frame) — nothing here is
+    invented by this node or by any LLM."""
+    if state.get("status") != "answered":
+        return {}
+
+    tenant = state.get("tenant") or "default"
+    session_id = state.get("session_id") or ""
+    engine_result = state.get("engine_result") or {}
+
+    harvested = memory_frame.harvest_frame(engine_result)
+    if not harvested:
+        # business_explain failed server-side (already logged there) or the
+        # result had no explain block — skip the write, the user's answer is
+        # unaffected, memory just doesn't advance this turn.
+        return {}
+
+    prev_frame = state.get("frame") or {}
+    prev_stack = state.get("drill_stack") or []
+    delta_type = state.get("delta_type") or "new_topic"
+
+    new_frame = memory_frame.merge_frame_post_execution(
+        prev_frame, harvested, delta_type, tenant, session_id)
+
+    reset = delta_type == "new_topic" or memory_frame.is_topic_switch(prev_frame, harvested)
+    if reset:
+        new_stack: list = []
+    elif delta_type == "drill_down":
+        new_stack = memory_frame.push_drill(prev_stack, harvested)
+    else:
+        new_stack = prev_stack
+
+    MemoryStore.write_frame(tenant, session_id, new_frame,
+                            expected_version=prev_frame.get("version") if prev_frame else None)
+    MemoryStore.write_stack(tenant, session_id, new_stack)
+    MemoryStore.push_episodic_turn(tenant, session_id, state.get("message", ""),
+                                   _templated_gist(engine_result))
+
+    return {"frame": new_frame, "drill_stack": new_stack}
+
+
 def ask_clarification_node(state: ChatState) -> dict:
     """Turn a refusal into a conversational clarifying question — reuses the
     engine's own deterministic explanation (already computed server-side by
@@ -342,17 +572,21 @@ def ask_clarification_node(state: ChatState) -> dict:
     if feedback:
         question = feedback.get("text") or "Could you clarify what you're asking about?"
     else:
-        # Rare fallback (e.g. FEEDBACK_ENABLED=False in the engine, so it
-        # never built one) — best-effort only, since we don't have the
-        # per-status context (missing/column/value/candidates) the engine
-        # itself has.
-        try:
-            from veda_core.veda.feedback import explain_failure
-            explanation = explain_failure(status, res0.get("sm"), msg=res0.get("refusal"))
-            question = explanation.get("text") or "Could you clarify what you're asking about?"
-        except Exception:
-            logger.exception("ask_clarification_node: explain_failure failed for status=%r", status)
-            question = "Could you clarify what you're asking about?"
+        # Rare fallback (e.g. FEEDBACK_ENABLED=False in the engine, so it never
+        # built one). Deliberately generic, NOT a veda_core import: chatbot/
+        # runs in the api container (working_dir=/app), while veda_core's own
+        # internals (e.g. veda/feedback.py -> veda/runtime.py's bare
+        # `from config import ...`) only resolve correctly when veda_core/
+        # itself is the process root (true for the inference container's
+        # working_dir=/app/veda_core, not this one) — importing
+        # veda_core.veda.feedback here always raised ImportError in this
+        # container, silently (caught below) but 100% of the time, not
+        # "rarely." Same api/veda_core boundary chatbot/llm.py and
+        # apps/query/inference_client.py already document; this path was
+        # violating it. If a genuinely richer fallback message is wanted
+        # later, it belongs behind an HTTP call to the inference tier (which
+        # already has veda_core in scope), not a direct import here.
+        question = "Could you clarify what you're asking about?"
 
     unavailable = status == "unavailable"
     update = {

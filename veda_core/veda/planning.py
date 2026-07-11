@@ -1,5 +1,6 @@
 """VEDA · L4b/L4c — deterministic existence, grain pre-aggregation, join orchestration."""
 import os, re, sys, time, json, logging, threading
+from query.ranking_parser import parse_ranking
 from veda.generation import _resolve_display_column, generate_join_sql
 from veda.routing import _name_toks
 from veda.runtime import IMPORTANCE_WEIGHTS, JOIN_CONFIDENCE_FLOOR, get_graph
@@ -64,8 +65,15 @@ def aggregate_mode(query):
     from config import QUERY_GRAMMAR, QUERY_LANGUAGE
     ql = f" {query.lower()} "
 
-    mtop = re.search(r"\btop\s+(\d+)\b", ql)
-    top_n = int(mtop.group(1)) if mtop else None
+    # Shared parser (query/ranking_parser.py): recognizes "top N" AND "latest N" /
+    # "bottom N" / "highest N" / ... (the old regex here only matched the literal
+    # word "top" before a digit, silently dropping every other phrasing's count).
+    # `ranked` below is still computed from the FULL QUERY_LANGUAGE["ranking"] list
+    # (unchanged) so existing counting/aggregate detection behavior doesn't shift —
+    # only the top_n EXTRACTION and the sort DIRECTION are upgraded.
+    _rank = parse_ranking(query)
+    top_n = _rank.top_n
+    direction = _rank.direction   # "desc" | "asc" — which end build_aggregate_sql ranks
 
     # A ranking word ("highest", "most"...) without an explicit number ("which
     # projects have the HIGHEST number of tenants") still means "sort by the metric
@@ -80,9 +88,9 @@ def aggregate_mode(query):
         n = _NUM_WORDS.get(m.group(2), None)
         n = int(m.group(2)) if n is None else n
         op = ">=" if m.group(1) in ("at least", "minimum of") else ">"
-        return {"threshold": n, "op": op, "top_n": top_n, "ranked": ranked}
+        return {"threshold": n, "op": op, "top_n": top_n, "ranked": ranked, "direction": direction}
     if re.search(r"\bmultiple\b", ql):
-        return {"threshold": 1, "op": ">", "top_n": top_n, "ranked": ranked}
+        return {"threshold": 1, "op": ">", "top_n": top_n, "ranked": ranked, "direction": direction}
 
     # "distribution"/"breakdown" of X across/per Y is grammatically a grouped COUNT
     # of X by Y, same as "how many X per Y" — just phrased as a noun instead of a
@@ -92,12 +100,12 @@ def aggregate_mode(query):
                     for w in QUERY_GRAMMAR.get("counting", []))
                or bool(re.search(r"\b(distribution|breakdown)\b", ql)))
     if counting or top_n is not None or ranked:  # "top 5"/"highest" implies ranking by count
-        return {"threshold": None, "op": None, "top_n": top_n, "ranked": ranked}
+        return {"threshold": None, "op": None, "top_n": top_n, "ranked": ranked, "direction": direction}
     return None
 
 
 def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
-                        top_n=None, group_col=None, ranked=False):
+                        top_n=None, group_col=None, ranked=False, direction="desc"):
     """Deterministic pre-aggregation: one CTE per child relation, each grouped by
     its FK to the anchor, then joined to the anchor grain. No LLM, and structurally
     fan-out-free — two child CTEs can never cross-multiply (the 'organizations with
@@ -171,13 +179,18 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
         else:
             selects.append(f"COALESCE({al}.{metric}, 0) AS {metric}")
 
+    # "bottom"/"lowest"/"fewest" rank ASCENDING (least first); "top"/"highest"/"most"
+    # (the default) rank DESCENDING — direction comes from aggregate_mode's shared
+    # query/ranking_parser.py classification, so "bottom 5" no longer sorts DESC and
+    # returns the biggest 5 instead of the smallest 5.
+    _order_dir = "ASC" if direction == "asc" else "DESC"
     tail = f' GROUP BY t0."{group_col}"' if group_col else ""
     if top_n is not None and metrics:
-        tail += f" ORDER BY {metrics[0]} DESC LIMIT {int(top_n)}"
+        tail += f" ORDER BY {metrics[0]} {_order_dir} LIMIT {int(top_n)}"
     elif ranked and metrics:
         # A ranking word ("highest"/"most") with NO explicit number still means sort
-        # by the metric descending — just without a hard cap beyond the default LIMIT.
-        tail += f" ORDER BY {metrics[0]} DESC LIMIT 100"
+        # by the metric — just without a hard cap beyond the default LIMIT.
+        tail += f" ORDER BY {metrics[0]} {_order_dir} LIMIT 100"
     else:
         tail += " LIMIT 100"
     sql = (f"WITH {', '.join(ctes)} "
@@ -948,7 +961,8 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
                         break
             agg_sql, agg_tables = build_aggregate_sql(
                 anchor, specs, sm, threshold=agg["threshold"], op=agg["op"] or ">",
-                top_n=agg.get("top_n"), group_col=group_col, ranked=agg.get("ranked", False))
+                top_n=agg.get("top_n"), group_col=group_col, ranked=agg.get("ranked", False),
+                direction=agg.get("direction", "desc"))
             agg_cols = [k.split(".", 1)[1] for k in all_cols
                         if k.split(".", 1)[0] in agg_tables]
             return {"action": "aggregate", "sql": agg_sql, "tables": agg_tables,

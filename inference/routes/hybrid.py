@@ -35,12 +35,25 @@ except ImportError:
     BaseModel = object
 
 
+# Internal-only keys that must never reach an HTTP caller. "context" is
+# veda.execution_state.ExecutionState (Tier1→Tier2 propagation — explicitly
+# internal-only, never an API field). "trace" is the full debug trace (already
+# deliberately excluded from the chat/SSE path — see apps/chat/services.py's own
+# "never sent over SSE" comment); stripped here too so EVERY caller of this route
+# (not just the chat path) gets the same guarantee, not just the ones that happen
+# to allowlist their own fields.
+_INTERNAL_ONLY_KEYS = frozenset({"context", "trace"})
+
+
 def _serialize(obj: Any) -> Any:
-    """Best-effort JSON-safe conversion that preserves the MultiResult shape."""
+    """Best-effort JSON-safe conversion that preserves the MultiResult shape.
+    Strips _INTERNAL_ONLY_KEYS from any dict encountered, at any nesting depth —
+    this is the ONE place every head result (SQL/Tier-2/RAG/hybrid/NoSQL) passes
+    through before crossing the wire, so it's the correct place to enforce this."""
     if dataclasses.is_dataclass(obj):
-        return {k: _serialize(v) for k, v in dataclasses.asdict(obj).items()}
+        return _serialize(dataclasses.asdict(obj))
     if isinstance(obj, dict):
-        return {k: _serialize(v) for k, v in obj.items()}
+        return {k: _serialize(v) for k, v in obj.items() if k not in _INTERNAL_ONLY_KEYS}
     if isinstance(obj, (list, tuple)):
         return [_serialize(v) for v in obj]
     if isinstance(obj, (str, int, float, bool)) or obj is None:
