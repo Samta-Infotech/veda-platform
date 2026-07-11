@@ -76,6 +76,7 @@ class InferenceClient:
 
     def stream_hybrid_query(
         self, query: str, source_id=None, tenant=None, flags=None, request_id=None,
+        source_ids=None,
     ) -> Iterator[tuple[str, dict]]:
         """Yields (event, data) as the inference tier's SSE stream delivers them
         (progress events as the pipeline advances, then one final "result" event).
@@ -83,8 +84,10 @@ class InferenceClient:
         surface to the caller as soon as the inference tier flushes them (§ SSE)."""
         req = self._request(
             "/v1/run_hybrid_query/stream",
-            {"query": query, "source_id": source_id, "tenant": tenant, "flags": flags},
+            {"query": query, "source_id": source_id, "tenant": tenant,
+             "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, accept="text/event-stream",
+            source_ids=source_ids,
         )
         try:
             resp = urllib.request.urlopen(req, timeout=self.config.timeout_s)

@@ -50,9 +50,13 @@ def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
 class ConversationQueryService:
     """One assistant turn: resolve chat -> run the chatbot supervisor -> persist."""
 
-    def __init__(self, user, source_id=None, tenant: str = "default"):
+    def __init__(self, user, source_id=None, tenant: str = "default", source_ids=None):
         self.user = user
         self.source_id = source_id
+        # Validated query SCOPE (P5) — ready source ids, primary first, resolved
+        # server-side by the view (QueryView._resolve_scope). Forwarded to inference
+        # so multi-source scopes retrieve/federate exactly like /api/v1/query.
+        self.source_ids = list(source_ids) if source_ids else ([source_id] if source_id else None)
         self.tenant = tenant
 
     def create_conversation(self, title: str = "") -> ChatSession:
@@ -104,32 +108,42 @@ class ConversationQueryService:
         """Yields: thinking* (stream only, zero for an instant fast-path answer)
         -> content* -> visualization? -> explainability -> error?.
 
-        `chat.pk` doubles as the chatbot/LangGraph session_id (thread_id) — the
-        graph's own Redis checkpointer accumulates conversation history per
-        session automatically, so no history is threaded through manually here.
+        stream=True sources "thinking" from the inference tier's real SSE progress
+        events (classify / decompose / route / answer) as the pipeline actually
+        advances, instead of one blocking call that only reports "done" at the end."""
+        yield {"event": "thinking",
+               "data": {"phase": "reasoning", "message": "Analyzing request..."}}
 
-        stream=True sources "thinking" from chatbot's own on_event callback,
-        which itself forwards the inference tier's real SSE progress events
-        (classify / decompose / route / answer) live as the pipeline advances,
-        via a background thread bridged through a queue (see _run_streamed).
-        No placeholder "thinking" event fires up front — an instant fast-path
-        answer (smalltalk, runtime context) never emits one at all, and a real
-        question's first genuine thinking event (classify_node's "Understanding
-        your message...") arrives moments later on its own."""
-        session_id = str(chat.pk)
-        kwargs = dict(tenant=self.tenant, source_id=self.source_id, request_id=request_id)
-
-        if stream:
-            response = yield from self._run_streamed(message, session_id, kwargs, chat)
-            if response is None:
-                return   # _run_streamed already yielded the error event
-        else:
-            try:
-                response = run_chat_turn(message, session_id, **kwargs)
-            except Exception as exc:
-                logger.exception("conversation query pipeline failed chat_id=%s", chat.pk)
-                yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
-                return
+        client = InferenceClient()
+        payload = None
+        try:
+            if stream:
+                for kind, data in client.stream_hybrid_query(
+                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
+                    source_ids=self.source_ids,
+                ):
+                    if kind == "progress":
+                        yield {"event": "thinking",
+                               "data": {"phase": data.get("phase", "progress"),
+                                        "message": data.get("message", "")}}
+                    elif kind == "error":
+                        logger.warning("conversation query pipeline error chat_id=%s: %s",
+                                       chat.pk, data)
+                        yield {"event": "error",
+                               "data": {"code": "MODEL_ERROR",
+                                        "message": data.get("message", "inference error")}}
+                        return
+                    elif kind == "result":
+                        payload = data
+            else:
+                payload = client.run_hybrid_query(
+                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
+                    source_ids=self.source_ids,
+                )
+        except InferenceUnavailable as exc:
+            logger.warning("conversation query pipeline unavailable chat_id=%s: %s", chat.pk, exc)
+            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
+            return
 
         if response.get("engine_unavailable"):
             logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)

@@ -114,12 +114,15 @@ scripts/demo/restore.sh                   # reads ./demo_bundle/ by default
 #   scripts/demo/restore.sh /path/to/demo_bundle
 ```
 
-It imports the volumes, untars `veda_core/data`, loads both DB dumps, starts the query-only stack,
-pulls the SLM if it wasn't bundled, and prints a `/readyz` check. Under the hood it runs:
+It imports the `model_cache` volume, untars `veda_core/data`, loads both DB dumps, pre-checks that the
+offloaded SLM (mini 1) and BGE (mini 2) hosts are reachable, starts the query-only stack, and prints a
+`/readyz` check. Under the hood it runs (note `--no-deps` — the SLM/BGE tiers are external, so no local
+`ollama` is started):
 
 ```bash
-docker compose -f docker-compose.yml -f docker-compose.demo.yml up -d \
-    postgres pgbouncer redis-broker redis-cache ollama inference api
+COMPOSE="docker compose -f docker-compose.yml -f docker-compose.demo.yml"
+$COMPOSE up -d postgres pgbouncer redis-broker redis-cache     # infra
+$COMPOSE up -d --no-deps inference api                         # app (SLM→mini 1, BGE→mini 2)
 ```
 
 ---
@@ -151,7 +154,9 @@ uses dev settings + `VEDA_ALLOW_ANONYMOUS=1`, so no auth token is required.
 - **Same password everywhere.** `.env` (`change-me` by default) must match `docker/userlist.txt`
   (PgBouncer md5). Copy both from the source machine, or regenerate `userlist.txt` (see
   `PRODUCTION_READINESS_PLAN.md` B1a).
-- **CPU-only latency.** With no GPU, the 7B SLM dominates per-query time. Uncomment the GPU block in
-  `docker-compose.demo.yml` if the demo box has an NVIDIA card.
+- **Models are offloaded, not local.** The demo box (mini 3) runs no models — the SLM lives on mini 1
+  (`OLLAMA_URL`) and BGE on mini 2 (`METAL_EMBED_URL`), both set to LAN IPs in `.env`. Importing
+  `model_cache` on mini 3 is optional (CPU fallback if mini 2 is unreachable). See
+  `docs/MAC3_APP_HOST_SETUP.md`.
 - **Want TLS/nginx?** Add `nginx` to the `up` list — but for a headless demo, hitting the api on
   `:8000` directly (as configured here) is simpler.
