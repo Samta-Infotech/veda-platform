@@ -618,7 +618,7 @@ Two application images. `Dockerfile.api` (Django/DRF/Celery, no ML deps) stays s
 > Do not put torch in the api image. The whole point of the split is thin API workers + heavy inference workers. A shared base for OS deps is fine; ML deps live only in the inference image.
 
 ### 1.4 compose + nginx + SLM backends
-Write `docker-compose.yml` with all services on `veda_net`. Only nginx publishes a host port. Add the SLM backends: `ollama/ollama` (dev/ingestion) and, for the prod profile, a `vllm` service; pre-pull `qwen2.5-coder:7b` into named volumes. Attach GPU to inference, vLLM, and ollama.
+Write `docker-compose.yml` with all services on `veda_net`. Only nginx publishes a host port. Add the SLM backends: `ollama/ollama` (dev/ingestion) and, for the prod profile, a `vllm` service; pre-pull `qwen2.5-coder:7b` (SQL/IR generation) **and** `qwen2.5:1.5b-instruct` (NL_SUMMARY_MODEL — the separate small model `query/result_explainer.py` uses to phrase result rows; missing it degrades to deterministic template answers rather than failing, but silently) into named volumes. Attach GPU to inference, vLLM, and ollama.
 
 > **Exit criteria (all must pass)**
 > 1. `docker compose up` brings all services healthy; `/healthz` on api and inference return 200.
@@ -757,7 +757,7 @@ Every `inference` replica subscribes to `veda:rehydrate:*` at startup. A rehydra
 Run encoder/reranker inference in a thread pool **via `run_in_threadpool_with_context`** so the event loop stays responsive under concurrency and the tenant context is carried in. Bounded fetch, `statement_timeout`, and read-only session preserved in execution. Note the in-worker GPU-serialization interaction with the SLM tier (§8.1 concurrency callout).
 
 ### 5.4 SLM backend = vLLM in prod; model cache offline
-Set `SLM_BACKEND=vllm` for the inference tier in the prod profile (dev stays `ollama`). Confirm the image/volume ships BGE-M3, bge-reranker-v2-m3, MiniLM, and that vLLM/Ollama weights are pre-pulled. Set HF offline env so startup never reaches the network (zero-egress).
+Set `SLM_BACKEND=vllm` for the inference tier in the prod profile (dev stays `ollama`). Confirm the image/volume ships BGE-M3, bge-reranker-v2-m3, MiniLM, and that vLLM/Ollama weights are pre-pulled — **both** `SLM_MODEL_NAME` (SQL/IR generation) **and** `NL_SUMMARY_MODEL` (`query/result_explainer.py`'s separate small summarization model, default `qwen2.5:1.5b-instruct`) — a missing `NL_SUMMARY_MODEL` doesn't fail startup, it silently degrades every answer to the deterministic template/row-count fallback. Set HF offline env so startup never reaches the network (zero-egress).
 
 > **Exit criteria (all must pass)**
 > 1. `/readyz` returns 200 only after all models + FK map + glossary + KG + `sm` + SLM backend are loaded/reachable.
