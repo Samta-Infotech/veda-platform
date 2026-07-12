@@ -417,8 +417,20 @@ class RetrievalEnginePhase3:
             self.cache.set(enriched_tokens, cutoff_results, raw_query=query)
             logger.info(f"✓ Cached {len(cutoff_results)} results")
 
-        # CONVERT TO RESULT OBJECTS
-        results = self._results_from_tuples(cutoff_results)
+        # CONVERT TO RESULT OBJECTS — carry the per-signal scores through instead of
+        # discarding them (they were computed above, then silently dropped: every
+        # RetrievalResult.*_score field defaulted to 0.0 regardless of what each signal
+        # actually contributed). Cheap: dict() over lists already in scope, no recompute.
+        results = self._results_from_tuples(
+            cutoff_results,
+            semantic_map=dict(signal1_semantic),
+            sparse_map=dict(signal2_sparse),
+            subgraph_map=signal3_subgraph_signals,
+            fk_map=signal4_fk_signals,
+            value_map=signal5_value_signals,
+            rrf_map=dict(fused),
+            boosted_map=dict(boosted),
+        )
 
         # TIMING
         elapsed = time.time() - start_time
@@ -432,9 +444,20 @@ class RetrievalEnginePhase3:
 
     def _results_from_tuples(
         self,
-        tuples: List[Tuple[str, float]]
+        tuples: List[Tuple[str, float]],
+        semantic_map: Optional[Dict[str, float]] = None,
+        sparse_map:   Optional[Dict[str, float]] = None,
+        subgraph_map: Optional[Dict[str, float]] = None,
+        fk_map:       Optional[Dict[str, float]] = None,
+        value_map:    Optional[Dict[str, float]] = None,
+        rrf_map:      Optional[Dict[str, float]] = None,
+        boosted_map:  Optional[Dict[str, float]] = None,
     ) -> List[RetrievalResult]:
-        """Convert (col_id, score) tuples to RetrievalResult objects."""
+        """Convert (col_id, score) tuples to RetrievalResult objects. The optional
+        *_map arguments carry each signal's OWN contribution through onto the result
+        (RetrievalResult already declares these fields "for debugging" — they were
+        just never populated). All optional and default to 0.0 (the dataclass's own
+        default), so any caller that doesn't pass them gets byte-identical behavior."""
         results = []
         for col_id, score in tuples:
             table_name, col_name = col_id.rsplit(".", 1) if "." in col_id else (col_id, col_id)
@@ -442,7 +465,14 @@ class RetrievalEnginePhase3:
                 col_id=col_id,
                 column_name=col_name,
                 table_name=table_name,
-                final_score=score
+                final_score=score,
+                semantic_score=(semantic_map or {}).get(col_id, 0.0),
+                sparse_score=(sparse_map or {}).get(col_id, 0.0),
+                subgraph_score=(subgraph_map or {}).get(col_id, 0.0),
+                fk_path_score=(fk_map or {}).get(col_id, 0.0),
+                value_index_score=(value_map or {}).get(col_id, 0.0),
+                rrf_score=(rrf_map or {}).get(col_id, 0.0),
+                boosted_score=(boosted_map or {}).get(col_id, 0.0),
             )
             results.append(result)
         return results

@@ -45,6 +45,18 @@ except ImportError:
 _INTERNAL_ONLY_KEYS = frozenset({"context", "trace"})
 
 
+def _verbose() -> bool:
+    """Container-log verbosity for the query pipeline, controlled by env.
+
+    VEDA_INFERENCE_VERBOSE=1 (default) → run_hybrid_query(verbose=True): the full
+    stage-by-stage detail (classify, routing, tier decisions, reuse logging) prints
+    to stdout where `docker logs inference` captures it. Set 0 to quiet it down.
+    Read per-request (not at import) so it can be flipped without a code change —
+    just restart the container with the new env value."""
+    import os
+    return os.environ.get("VEDA_INFERENCE_VERBOSE", "1") not in ("0", "false", "False")
+
+
 def _serialize(obj: Any) -> Any:
     """Best-effort JSON-safe conversion that preserves the MultiResult shape.
     Strips _INTERNAL_ONLY_KEYS from any dict encountered, at any nesting depth —
@@ -75,7 +87,8 @@ if APIRouter is not None:
         from inference.concurrency import run_in_threadpool_with_context
         from veda_core.veda_hybrid import run_hybrid_query
 
-        result = await run_in_threadpool_with_context(run_hybrid_query, req.query)
+        result = await run_in_threadpool_with_context(run_hybrid_query, req.query,
+                                                      verbose=_verbose())
         payload = _serialize(result)
         # Surface a top-level status for callers that don't walk items (§19 item 1).
         items = payload.get("items") if isinstance(payload, dict) else None
@@ -105,7 +118,7 @@ if APIRouter is not None:
 
         def _run():
             try:
-                result = run_hybrid_query(req.query, on_event=on_event)
+                result = run_hybrid_query(req.query, verbose=_verbose(), on_event=on_event)
                 payload = _serialize(result)
                 items = payload.get("items") if isinstance(payload, dict) else None
                 top_status = (

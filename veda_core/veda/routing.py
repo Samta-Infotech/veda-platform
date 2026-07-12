@@ -28,7 +28,7 @@ def route_tables_semantic(query, top_n=6):
         return {}
 
 
-def select_primary_table(results, query, semantic_model):
+def select_primary_table(results, query, semantic_model, trace=None):
     """Choose the target table by blending three signals:
 
       1. SEMANTIC ROUTING (primary) — cosine of the query vs the per-table
@@ -38,7 +38,13 @@ def select_primary_table(results, query, semantic_model):
          small correct MASTER table isn't drowned by a wide table on count).
       3. LEXICAL name match (singularized) — tiebreaker / fallback when the
          table_embeddings store isn't built yet.
-    """
+
+    `trace`: optional ExplainTrace (veda/explain.py) — when given, records the
+    candidate scoring under "table_routing" (a DIFFERENT section than
+    vet_primary's own "anchor_selection", since that runs after this and may
+    override the choice — both stay visible in the trace, not overwritten).
+    None (the default) is a no-op, same as every other trace-accepting call
+    in this module."""
     from retrieval.query_enrichment import _singularize
 
     routed = route_tables_semantic(query, top_n=8)   # {table: cosine} (may be empty)
@@ -68,9 +74,12 @@ def select_primary_table(results, query, semantic_model):
             candidates.add(t)
 
     if not candidates:
+        if trace is not None:
+            trace.set("anchor_selection", anchor=None, source="router",
+                      confidence=0.0, margin=0.0, alternatives=[])
         return None
 
-    best, best_score = None, -1e9
+    best, best_score, scored = None, -1e9, {}
     for t in candidates:
         # Strip structural connectives so a wide name can't match on glue words
         # (investigation_AND_research_counter_party must not match query token "and").
@@ -88,8 +97,22 @@ def select_primary_table(results, query, semantic_model):
         sem = routed.get(t, 0.0)                 # 0..1 cosine, the strongest signal
         col = (max_score.get(t, 0.0) / hi) if hi else 0.0   # 0..1 normalized
         combined = 1.0 * sem + 0.5 * col + lex
+        scored[t] = combined
         if combined > best_score:
             best_score, best = combined, t
+    if trace is not None:
+        ranked = sorted(scored.items(), key=lambda kv: kv[1], reverse=True)
+        second_score = ranked[1][1] if len(ranked) > 1 else 0.0
+        margin = best_score - second_score
+        # Non-tautological confidence (docs/RETRIEVAL_DECISION_LAYER_AUDIT.md): NOT
+        # best_score/best_score (always 1.0 regardless of how close the runner-up
+        # was) — margin relative to the runner-up, so a near-tie scores low and a
+        # clear win scores high, always in (0, 1].
+        confidence = margin / (margin + second_score) if (margin + second_score) > 0 else 1.0
+        trace.set("anchor_selection", anchor=best, source="router",
+                  confidence=round(min(max(confidence, 0.0), 1.0), 3),
+                  margin=round(margin, 3),
+                  alternatives=[{"table": t, "score": round(s, 3)} for t, s in ranked[:8]])
     return best
 
 

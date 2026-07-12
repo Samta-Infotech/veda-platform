@@ -94,13 +94,18 @@ def _temporal_predicate(table, sm, tf):
     return f"{q} <= '{tf.end}'"
 
 
-def run_query(query, sm, all_cols, return_result=False):
+def run_query(query, sm, all_cols, return_result=False, on_event=None):
     """Run one NL→SQL→result. Reuses the shared engine; never closes it.
 
     Returns an int status code (0 ok / 1 error) by default — backward-compatible.
     With return_result=True, returns a dict {status, ok, cols, rows, answer, sql, …}
     so callers (the hybrid fusion, the Tier-2 fallback) can use the executed rows and
-    distinguish 'answered' from 'refused'/'clarify'/error (the int code can't)."""
+    distinguish 'answered' from 'refused'/'clarify'/error (the int code can't).
+
+    on_event(phase, message, extra): optional live "thinking" callback for the chat
+    UI — fires a SMALL, curated set of plain-language checkpoints (schema_linking,
+    sql_planning, output), never every internal stage. Static strings only, no LLM
+    call involved. None (the default) is a true no-op everywhere it's read."""
     start = time.time()
     join_constraints = None
     fanout_guard = None
@@ -109,6 +114,17 @@ def run_query(query, sm, all_cols, return_result=False):
     from veda.execution_state import ExecutionState
     tr = new_trace(query)
     es = ExecutionState()
+
+    def _tick(phase, message):
+        """Fire a live, user-facing thinking event. Static string only — no LLM/SLM
+        call, no extra DB round-trip. A no-op when on_event is None or itself raises,
+        so progress reporting can never fail a query."""
+        if on_event is None:
+            return
+        try:
+            on_event(phase, message, {})
+        except Exception:
+            logger.exception("_tick: on_event callback raised for phase=%s", phase)
 
     def _feedback(status, **ctx):
         """Build + print actionable failure guidance (why / what's needed / suggestions).
@@ -132,6 +148,8 @@ def run_query(query, sm, all_cols, return_result=False):
             _refusal = kw.get("msg") or kw.get("error") or kw.get("missing")
             tr.set("output", refusal=_refusal)
             es.refusal_reason = _refusal
+        else:
+            _tick("output", "Done — here's your answer")
         tr.finish(status)
         # Tier2 continuation context (Tier1→Tier2 propagation) — deliberately NOT the
         # full trace (that stays below, for debugging); just what Tier2 needs to avoid
@@ -292,7 +310,7 @@ def run_query(query, sm, all_cols, return_result=False):
         # map (it uses the generated domain_synonyms). Graceful: any failure keeps RRF order.
         try:
             from config import (PRIMARY_RERANK_ENABLED, RERANKER_BATCH_SIZE,
-                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES)
+                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES, RERANKER_MAX_TEXT_LEN)
         except Exception:
             PRIMARY_RERANK_ENABLED = False
 
@@ -307,13 +325,27 @@ def run_query(query, sm, all_cols, return_result=False):
 
         if PRIMARY_RERANK_ENABLED and results and not _rrf_gap_unambiguous(results):
             try:
-                from query.reranker import _get_reranker
+                from query.reranker import _get_reranker, _precomputed_rerank_text
                 _rk = _get_reranker()
                 if _rk is not None:
                     # F4: cap candidate width — the tail never wins anchor selection.
                     _head = results[:RERANK_MAX_CANDIDATES]
                     _tail = results[RERANK_MAX_CANDIDATES:]
-                    _pairs = [[_search, f"{r.column_name} {r.table_name}"] for r in _head]
+                    # Same enriched cross-encoder text query/reranker.py's own _col_text()
+                    # uses (business definition/aliases/role/etc., precomputed at ingestion,
+                    # WP7) — not bare column_name+table_name. This is the SAME model as
+                    # rerank_columns()/rerank_tables(); it was just seeing less context here
+                    # than at that other call site. Falls back to the bare name pair when no
+                    # precomputed doc exists for a column (identical fallback _col_text uses).
+                    _pairs = [
+                        [_search, (_precomputed_rerank_text(r.col_id, is_table=False)
+                                   or f"{r.column_name} {r.table_name}")[:RERANKER_MAX_TEXT_LEN]]
+                        for r in _head
+                    ]
+                    _enriched_n = sum(1 for r in _head
+                                      if _precomputed_rerank_text(r.col_id, is_table=False) is not None)
+                    print(f"  [L2b] Enriched rerank input: {_enriched_n}/{len(_head)} candidates "
+                          f"used precomputed metadata, {len(_head) - _enriched_n} fell back to bare name")
                     _sc = _rk.predict(_pairs, batch_size=RERANKER_BATCH_SIZE)
                     _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
                     for _s, _r in _ranked:
@@ -342,7 +374,7 @@ def run_query(query, sm, all_cols, return_result=False):
             _t = r.col_id.split(".")[0]
             if _t not in _cand_tabs:
                 _cand_tabs.append(_t)
-        _router_primary = select_primary_table(results, query, sm)
+        _router_primary = select_primary_table(results, query, sm, trace=tr)
         primary = vet_primary(query, _router_primary, results, sm, trace=tr)
         if primary != _router_primary:
             print(f"  [L3] Grain vet     router primary {_router_primary!r} → {primary!r} "
@@ -366,17 +398,31 @@ def run_query(query, sm, all_cols, return_result=False):
         ]
         tr.set("retrieval", candidate_tables=_cand_tabs[:8], n_columns=len(results))
         for r in results[:15]:
+            # Per-signal scores (semantic_score/sparse_score/subgraph_score/fk_path_score/
+            # value_index_score) are now actually populated (retrieval_engine_phase3.py) —
+            # surface them here so the trace explains WHY a candidate ranked well, not just
+            # that it did. "type" used to read `semantic_type`, a field RetrievalResult
+            # never had (always None) — replaced with real signal-level evidence.
             tr.cand("retrieval", "top_columns",
                     {"col": r.col_id, "score": round(getattr(r, "final_score", 0.0), 3),
-                     "type": getattr(r, "semantic_type", None)})
+                     "signals": {
+                         "semantic": round(getattr(r, "semantic_score", 0.0), 3),
+                         "sparse":   round(getattr(r, "sparse_score", 0.0), 3),
+                         "subgraph": round(getattr(r, "subgraph_score", 0.0), 3),
+                         "fk_path":  round(getattr(r, "fk_path_score", 0.0), 3),
+                         "value":    round(getattr(r, "value_index_score", 0.0), 3),
+                     }})
         tr.set("schema_linking", selected_table=primary,
                router_primary=_router_primary, candidate_tables=_cand_tabs[:8])
+        if primary:
+            _tick("schema_linking", f"Using {primary} for this")
         print(f"  [L3] Routing       {len(results)} cols across {len(_cand_tabs)} tables "
               f"({', '.join(_cand_tabs[:4])}…) → primary: {primary}")
         if not primary:
             fb = _feedback("no_table", candidates=_cand_tabs)
             log_route("no_table", query, (time.time() - start) * 1000)
-            return _done(1, "no_table", feedback=fb)
+            return _done(1, "no_table", feedback=fb,
+                         msg="no single table confidently matched the question")
         from_cache = False
 
         # Multi-table: deterministic join plan (LLM never writes joins). Fires for
@@ -399,6 +445,7 @@ def run_query(query, sm, all_cols, return_result=False):
             _rec_plan(p)
             tr.set("sql_planning", action="existence", anchor=mt["anchor"],
                    mode=mt["mode"], tables=sorted(mt["tables"]))
+            _tick("sql_planning", "Checking which records match")
             print(f"  [L4b] Existence    {mt['mode']}  {mt['anchor']} ⟕ "
                   f"{' '.join(t for t in mt['tables'] if t != mt['anchor'])}")
             for w in p["why"]:
@@ -413,6 +460,7 @@ def run_query(query, sm, all_cols, return_result=False):
             tr.set("sql_planning", action="aggregate", anchor=mt["anchor"],
                    measures=mt.get("metrics"), dimension=mt.get("group_col"),
                    threshold=mt.get("threshold"), top_n=mt.get("top_n"))
+            _tick("sql_planning", "Calculating the numbers")
             thr = mt.get("threshold")
             print(f"  [L4c] Grain plan   {mt['anchor']} ⟕ {', '.join(mt['metrics'])}"
                   + (f"  (filter {thr}+)" if thr is not None else ""))
@@ -425,6 +473,7 @@ def run_query(query, sm, all_cols, return_result=False):
             p = mt["plan"]
             _rec_plan(p)
             tr.set("sql_planning", action="sql", tables=sorted(mt["tables"]))
+            _tick("sql_planning", "Building the query")
             _llm_sql = True
             print(f"  [L4b] Join plan    {' ⋈ '.join(sorted(mt['tables']))}  "
                   f"(conf {p['confidence']}, fan-out {p['max_fanout']})")
@@ -632,6 +681,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 tr.set("sql_planning", action="answer_entity", table=primary,
                        target=_tt, project=_proj_desc, via=_fkc,
                        filters=[(f["column"], f["op"], f["value"]) for f in _arb_filters])
+                _tick("sql_planning", "Looking up who's involved")
                 print(f"  [L4e] answer-entity  {_ans.get('mode','who')}: JOIN {_tt} → {_proj_desc}"
                       f"{(' + ' + str(len(_arb_filters)) + ' filter(s)') if _arb_filters else ''}"
                       "  — deterministic, no LLM")
@@ -655,6 +705,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 tr.set("sql_planning", action="fk_value_resolution", table=primary,
                        target=_fk["target"], via=_fk["anchor_col"],
                        filters=[c for c, _ in _fk["pairs"]], temporal=_tcol)
+                _tick("sql_planning", "Matching that to the right record")
                 print(f"  [L4d] FK value     {primary}.{_fk['anchor_col']} → "
                       f"{_fk['target']}.({', '.join(c for c, _ in _fk['pairs'])}) "
                       f"= '{_fk['pairs'][0][1]}'"
@@ -672,6 +723,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="multihop_fk_resolution", table=primary,
                        path=_mh["path"], anchor_col=_mh["anchor_col"], temporal=_tcol)
+                _tick("sql_planning", "Tracing the connection through related records")
             elif _arb_filters:
                 # Deterministic single-table SQL with arbiter-grounded categorical
                 # filters (= for VALUE, != for NEGATED_VALUE). All columns belong to the
@@ -690,6 +742,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 tr.set("sql_planning", action="value_arbiter_filter", table=primary,
                        filters=[(f["column"], f["op"], f["value"]) for f in _arb_filters],
                        temporal=_tcol)
+                _tick("sql_planning", "Applying your filters")
                 print(f"  [L4c] value filter {primary} WHERE {' AND '.join(_wparts)}"
                       "  — deterministic, no LLM")
             elif _tpred:
@@ -700,6 +753,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 allowed_columns = allowed_columns + [_tcol]
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="temporal_only", table=primary, temporal=_tcol)
+                _tick("sql_planning", "Narrowing to that time period")
                 print(f"  [L4e] Temporal     {primary} WHERE {_tcol} in window"
                       "  — deterministic, no LLM")
             elif _want_rank_order and _tcol:
@@ -713,6 +767,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="ranked_temporal_only", table=primary,
                        temporal=_tcol, top_n=_rank.top_n, direction=_rank.direction)
+                _tick("sql_planning", "Sorting and picking the top results")
                 print(f"  [L4e] Ranked       {primary} ORDER BY {_tcol} "
                       f"{_rank.direction.upper()} LIMIT {_rank.top_n or 100}"
                       "  — deterministic, no LLM")
@@ -731,6 +786,7 @@ def run_query(query, sm, all_cols, return_result=False):
                     log_route("refuse", query, (time.time() - start) * 1000)
                     return _done(0, "refuse", msg=_msg, feedback=fb)
                 tr.set("sql_planning", action="single_table", table=primary)
+                _tick("sql_planning", "Building the query")
                 _llm_sql = True
                 # in-scope column glossary (business_definition + aliases) → SQL prompt hint
                 _gloss = {}
