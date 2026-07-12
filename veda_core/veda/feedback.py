@@ -86,6 +86,15 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
                    f"I refused rather than invent a condition you didn't state.")
             what = ("If you DO want that condition, state it explicitly — otherwise the "
                     "answer is the unfiltered total.")
+        elif "joins to" in _m:
+            # Must outrank the ordering branch: a refusal that carries BOTH violations
+            # ("ORDER BY … not requested; joins to […] outside the planned tables") is
+            # fatally about the join — telling the user to add 'top N' fixes nothing.
+            why = (f"The generated SQL pulled in tables beyond what was planned for this "
+                   f"question ({msg}); I refused rather than answer from a broader join "
+                   f"than your question implies.")
+            what = ("Name the related entity explicitly (e.g. 'amounts per <entity>') so "
+                    "it can be planned in, or ask about one entity at a time.")
         elif "group by" in _m:
             why = (f"The generated SQL grouped the results when the question didn't ask "
                    f"for a breakdown ({msg}).")
@@ -117,7 +126,10 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
         from config import FEEDBACK_LLM_POLISH
     except Exception:
         FEEDBACK_LLM_POLISH = False
-    if FEEDBACK_LLM_POLISH:
+    # Clarifies are exempt from polish: their msg is already a grounded QUESTION
+    # built from real schema values — rephrasing costs an SLM round and has been
+    # observed to degrade it (rewording a table-name list into a wrong ask).
+    if FEEDBACK_LLM_POLISH and status != "clarify":
         polished = _polish(out)
         if polished:
             out["text"] = polished
@@ -136,7 +148,7 @@ def _polish(facts):
                   "Output one sentence, no markdown.")
         user = json.dumps({k: facts[k] for k in ("why", "what_needed", "suggestions")})
         txt = call_slm(user, system=system, purpose="refusal_polish",
-                       temperature=0.1, num_predict=96, timeout=30).strip()
+                       temperature=0.1, num_predict=96, timeout=6).strip()
         return txt or None
     except Exception:
         return None

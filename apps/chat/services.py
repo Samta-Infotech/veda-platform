@@ -50,9 +50,13 @@ def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
 class ConversationQueryService:
     """One assistant turn: resolve chat -> run the chatbot supervisor -> persist."""
 
-    def __init__(self, user, source_id=None, tenant: str = "default"):
+    def __init__(self, user, source_id=None, tenant: str = "default", source_ids=None):
         self.user = user
         self.source_id = source_id
+        # Validated query SCOPE (P5) — ready source ids, primary first, resolved
+        # server-side by the view (QueryView._resolve_scope). Forwarded to inference
+        # so multi-source scopes retrieve/federate exactly like /api/v1/query.
+        self.source_ids = list(source_ids) if source_ids else ([source_id] if source_id else None)
         self.tenant = tenant
 
     def create_conversation(self, title: str = "") -> ChatSession:
@@ -117,7 +121,8 @@ class ConversationQueryService:
         question's first genuine thinking event (classify_node's "Understanding
         your message...") arrives moments later on its own."""
         session_id = str(chat.pk)
-        kwargs = dict(tenant=self.tenant, source_id=self.source_id, request_id=request_id)
+        kwargs = dict(tenant=self.tenant, source_id=self.source_id,
+                      source_ids=self.source_ids, request_id=request_id)
 
         if stream:
             response = yield from self._run_streamed(message, session_id, kwargs, chat)

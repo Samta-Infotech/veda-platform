@@ -19,14 +19,13 @@ docker volume create "${PROJECT}_model_cache" >/dev/null
 docker run --rm -v "${PROJECT}_model_cache:/models" -v "$IN:/backup" alpine \
     tar xzf /backup/model_cache.tgz -C /models
 
-echo "==> [2/5] import ollama_models volume (if bundled)"
-docker volume create "${PROJECT}_ollama_models" >/dev/null
-if [ -f "$IN/ollama_models.tgz" ]; then
-    docker run --rm -v "${PROJECT}_ollama_models:/m" -v "$IN:/backup" alpine \
-        tar xzf /backup/ollama_models.tgz -C /m
-else
-    echo "    (no ollama bundle — will pull the SLM after startup)"
-fi
+echo "==> [2/5] pre-check the offloaded model hosts are reachable (mini 1 SLM, mini 2 BGE)"
+OLLAMA_URL="$(grep -E '^OLLAMA_URL=' "$HERE/.env" 2>/dev/null | cut -d= -f2-)"
+METAL_EMBED_URL="$(grep -E '^METAL_EMBED_URL=' "$HERE/.env" 2>/dev/null | cut -d= -f2-)"
+[ -n "$OLLAMA_URL" ] || { echo "!! OLLAMA_URL not set in .env (mini-1 LAN IP)"; exit 1; }
+[ -n "$METAL_EMBED_URL" ] || { echo "!! METAL_EMBED_URL not set in .env (mini-2 LAN IP)"; exit 1; }
+if curl -sf --max-time 5 "${OLLAMA_URL%/}/api/tags" >/dev/null; then echo "    SLM (mini 1) $OLLAMA_URL ✓"; else echo "    !! SLM host unreachable at $OLLAMA_URL — open the firewall / check the IP"; fi
+if curl -sf --max-time 5 "${METAL_EMBED_URL%/}/healthz" >/dev/null; then echo "    BGE (mini 2) $METAL_EMBED_URL ✓"; else echo "    !! BGE host unreachable at $METAL_EMBED_URL — queries will fall back to slow CPU (needs local model_cache)"; fi
 
 echo "==> [3/5] restore filesystem artifacts into veda_core/data"
 tar xzf "$IN/veda_data.tgz" -C "$HERE/veda_core"
@@ -54,15 +53,9 @@ done < <(docker compose exec -T postgres psql -U veda -d veda -tA -F'|' \
             -c "SELECT id, dialect FROM sources_source WHERE ready = true ORDER BY id;" 2>/dev/null)
 [ "$NEEDS_LIVE_DB" = "1" ] && echo "    !! at least one ready source is relational — ensure its DB is reachable, or re-materialize it as parquet before export."
 
-echo "==> [5/5] start the query-only stack"
-$COMPOSE up -d postgres pgbouncer redis-broker redis-cache ollama inference api
-
-# If the SLM wasn't bundled, pull it now (name from .env SLM_MODEL_NAME, default qwen2.5-coder:7b)
-if [ ! -f "$IN/ollama_models.tgz" ]; then
-    MODEL="$(grep -E '^SLM_MODEL_NAME=' "$HERE/.env" 2>/dev/null | cut -d= -f2)"; MODEL="${MODEL:-qwen2.5-coder:7b}"
-    echo "==> pulling SLM $MODEL into ollama"
-    docker compose exec ollama ollama pull "$MODEL"
-fi
+echo "==> [5/5] start the query-only stack (SLM+BGE are offloaded to mini 1/2)"
+$COMPOSE up -d postgres pgbouncer redis-broker redis-cache      # infra
+$COMPOSE up -d --no-deps inference api                          # app (--no-deps: no local ollama)
 
 echo ""
 echo "==> waiting for warm-load, then readiness check:"

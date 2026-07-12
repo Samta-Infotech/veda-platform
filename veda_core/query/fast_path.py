@@ -34,13 +34,23 @@ _AVG_VERBS      = ("average ", "avg ", "mean ")
 _LIST_VERBS     = ("list", "show", "what are", "which", "distinct", "unique",
                    "possible", "available")
 # Words that imply a relationship to ANOTHER entity → a real join → fall through.
-# "per" is NOT here — it's a grouping preposition ("sum of X per Y"), handled by the
-# group_dim/vals_hit/bucket checks below; treating it as a blanket join signal blocked
-# every grouped SUM/AVG/MAX/MIN query before group_dim was even resolved.
-_JOIN_HINTS     = {"with", "without", "their", "its", "whose", "each",
+# "per" and "each" are NOT here — they're grouping prepositions ("sum of X per/each Y"),
+# handled by the group_dim/vals_hit/bucket checks below; treating them as a blanket join
+# signal blocked every grouped SUM/AVG/MAX/MIN/COUNT query ("<metric> per/for each Y")
+# before the grouping dimension was even resolved — the query then fell to the full
+# pipeline, mis-anchored, and refused (qualifier_dropped).
+_JOIN_HINTS     = {"with", "without", "their", "its", "whose",
                    "having", "have", "has", "across", "joined"}
 _MAX_VERBS      = ("max ", "maximum ", "highest ", "largest ")
 _MIN_VERBS      = ("min ", "minimum ", "lowest ", "smallest ")
+# Superlative LIST intents ("cheapest properties", "most expensive listings") — a sorted
+# projection of an ENTITY by a price/measure, not an aggregate. Direction is intrinsic to
+# the adjective, so no measure noun need be named.
+_SUPERLATIVE_ASC  = ("cheapest", "least expensive", "most affordable", "lowest priced",
+                     "lowest-priced", "lowest price", "cheaper")
+_SUPERLATIVE_DESC = ("most expensive", "priciest", "dearest", "costliest", "highest priced",
+                     "highest-priced", "highest price")
+_PRICE_COL_HINTS  = ("price", "amount", "cost", "value", "rent", "fee", "charge", "rate")
 
 # The query LANGUAGE layer comes from config (closed linguistic classes, per-language,
 # NOT schema vocabulary). Any query token left over AFTER removing these and the tokens
@@ -72,6 +82,43 @@ def _unmodelled_residual(qtoks, consumed):
     used = {sing(w) for w in consumed}
     used |= {sing(w) for w in _LANG_VOCAB}
     return {sing(w) for w in qtoks} - used
+
+
+def _residual_is_filler(residual, table, query_l=""):
+    """Decide whether leftover tokens are conversational FILLER or a real qualifier,
+    using validation's own dropped-attribute / dropped-filter tests (schema + live
+    data decide — no word list). "how many properties are currently on the market
+    for sale" leaves {market, currently}: neither names a column of the anchor table
+    nor exists as a value in any DIMENSION/IDENTIFIER column, so a bare COUNT is the
+    faithful answer. Proceeding is safe because _finalize re-runs the full qualifier
+    gate on the built SQL. Any confirmable qualifier — or any doubt/error (the value
+    probe returns True on failure) — is NOT filler and the caller falls through to
+    the full pipeline exactly as before.
+
+    A residual token right after a GROUPING preposition ("per X" / "each X") is a
+    GROUPING TARGET the branch failed to model, never filler — "for each property"
+    on an anchor whose entity tokens don't cover 'property' must fall through, not
+    silently count without the grouping. ("by" is deliberately NOT here: "by <dim
+    phrase>" tokens — 'market' in "by their market status" — belong to a dimension
+    phrase the dim matcher owns; per/each are the entity-grouping prepositions.)
+
+    `table` may be one table or the full table set of the SQL about to be emitted —
+    the downstream qualifier gate checks column-refs against EVERY queried table, so
+    a join-adding path must re-check with both (the join to assets_asset makes
+    'active' name is_active there; emitting that SQL just gets it gate-refused)."""
+    try:
+        from veda.validation import _names_entity_column, _is_grounded_filter_value
+        tset = {table} if isinstance(table, str) else set(table)
+        sm = _sm()
+        for tok in residual:
+            if re.search(rf"\b(?:per|each)\s+(?:\w+\s+)?{re.escape(tok)}", query_l):
+                return False
+            if _names_entity_column(tok, tset, sm) or \
+               _is_grounded_filter_value(tok, tset, sm):
+                return False
+        return True
+    except Exception:
+        return False
 
 
 _GRAPH_CACHE = {"g": None}
@@ -132,6 +179,211 @@ def _rewrite_agg(expr: str, func: str) -> str:
     return f"{func}({m.group(1)})" if m else expr
 
 
+def _measure_col(expr: str):
+    """The bare measure column inside an aggregate expression: 'MAX(amount)' → 'amount'."""
+    m = re.match(r'[A-Z]+\(\s*(?:DISTINCT\s+)?([A-Za-z_][A-Za-z0-9_.]*)\s*\)', expr or "", re.I)
+    if not m:
+        return None
+    col = m.group(1)
+    return col.split(".")[-1]
+
+
+def _fk_to(a_table: str, b_table: str, graph: dict):
+    """(fk_col_on_A, pk_col_on_B) if table A has a DIRECT FK to B, else None."""
+    for e in graph.get("edges", []):
+        if e.get("source_table") == a_table and e.get("target_table") == b_table:
+            return e.get("source_column"), e.get("target_column")
+    return None
+
+
+def _metric_entity_group(query, query_l, qtoks, table_a, agg_func, measure_col,
+                         malias, why, filters=None):
+    """MULTI-TABLE metric aggregation (one FK hop): an <AGG> of a measure on table A,
+    grouped by an ENTITY on table B that the query NAMES and that A reaches via a single
+    FK (A.fk → B.pk), plus an optional dimension ON A. Deterministic — the join is a real
+    FK edge (the firewall's graph-guard re-verifies it). Returns a FastPathResult, or None
+    to fall back to the single-table path.
+
+      "maximum financial value per property by entry type"
+      → SELECT b."<name>", a."entry_type", MAX(a."amount")
+        FROM accounts_generalledger a JOIN assets_asset b ON a.asset_id = b.id
+        GROUP BY b."<name>", a."entry_type"
+
+    filters: structured Filters ON TABLE A (value / temporal), rendered alias-qualified
+    as WHERE a."col" … — same semantics as intent._render_filters. This is what lets
+    "active listings per property by market status" keep its value filter instead of
+    forfeiting the join-group. Raw/pre-formed fragments (soft-delete, subquery) reference
+    bare column names that can't be alias-qualified here → fall back (never drop them).
+    """
+    if not measure_col:
+        return None
+    if any(f.raw for f in (filters or [])):
+        return None
+    # ONLY an explicit per-ENTITY grouping request triggers a join-group. A plain total
+    # ("how many sale listings", "maximum amount") must NOT be silently grouped just because
+    # some entity is FK-reachable — that mis-grouped simple counts/metrics (regression).
+    if not _has(query_l, (" per ", " each ", "grouped", "breakdown", "broken down",
+                           "distribution")):
+        return None
+    graph = _graph()
+    if not graph.get("edges"):
+        return None
+    # grouping entity named in the query, reachable from A by ONE FK, and not A itself
+    edge = disp = b_table = None
+    for concept, _score in reg.match_concepts(qtoks):
+        bt = (concept.get("resolves_to") or {}).get("table")
+        if not bt or bt == table_a:
+            continue
+        e = _fk_to(table_a, bt, graph)
+        if e is None:
+            continue
+        dcols = [c.split(".", 1)[1] for c in (concept.get("default_display_columns") or [])
+                 if "." in c]
+        disp = dcols[0] if dcols else None
+        if not disp:
+            # prefer a human label column on B over the bare pk (id) for a readable group
+            _cols = _sm().get("columns", {})
+            disp = next((cn for cn in ("name", "project_name", "title", "display_name",
+                                        "full_name", "label")
+                         if f"{bt}.{cn}" in _cols), (e[1] or "id"))
+        edge, b_table = e, bt
+        break
+    if edge is None:
+        return None
+    fk_col, pk_col = edge
+
+    # optional dimension ON A ("... by entry type")
+    dim = None
+    if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
+                       "broken down", "distribution")):
+        gd = [d for d in reg.match_dimensions_in_table(table_a, qtoks, query_l, k=2)
+              if d["col_name"] not in (fk_col, measure_col, pk_col)]
+        if gd:
+            dim = gd[0]["col_name"]
+
+    a, b = "a", "b"
+    entity_alias = b_table.split("_")[-1]
+    ref_cols = [measure_col, fk_col, pk_col, disp]
+    sel = [f'{b}.{_q(disp)} AS {_q(entity_alias)}']
+    grp = [f'{b}.{_q(disp)}']
+    if dim:
+        sel.append(f'{a}.{_q(dim)}')
+        grp.append(f'{a}.{_q(dim)}')
+        ref_cols.append(dim)
+    sel.append(f'{agg_func}({a}.{_q(measure_col)}) AS {_q(malias)}')
+
+    # WHERE on table A — same rendering semantics as intent._render_filters, but
+    # alias-qualified. Filter columns must not exist only in my head: they join the
+    # allow-list (ref_cols) so the AST firewall can verify them.
+    conds = []
+    for f in (filters or []):
+        col = f'{a}.{_q(f.col)}'
+        if f.op in ("=", "<>"):
+            conds.append(f"{col} {f.op} '{f.values[0]}'")
+        elif f.op in ("IN", "NOT IN"):
+            vals = ", ".join(f"'{v}'" for v in f.values)
+            conds.append(f"{col} {f.op} ({vals})")
+        elif f.op == "BETWEEN":
+            conds.append(f"{col} BETWEEN '{f.values[0]}' AND '{f.values[1]}'")
+        else:
+            return None                      # unknown operator → never guess
+        ref_cols.append(f.col)
+    where = f' WHERE {" AND ".join(conds)}' if conds else ""
+
+    sql = (f'SELECT {", ".join(sel)} FROM {_q(table_a)} {a} '
+           f'JOIN {_q(b_table)} {b} ON {a}.{_q(fk_col)} = {b}.{_q(pk_col)}{where} '
+           f'GROUP BY {", ".join(grp)} ORDER BY {_q(malias)} DESC LIMIT 100')
+    return FastPathResult(
+        sql=sql, tables={table_a, b_table}, columns=list(dict.fromkeys(ref_cols)),
+        primary=table_a, route=f"metric.{agg_func.lower()}.entitygroup",
+        why=why + [f"{agg_func}({measure_col}) per {b_table}" + (f" by {dim}" if dim else "")])
+
+
+def _superlative_list(query, query_l, qtoks):
+    """SUPERLATIVE LIST: "cheapest / most expensive <entity> [by/with <dim>]" — a sorted
+    projection of an ENTITY by its price/measure, NOT an aggregate. The adjective fixes the
+    direction (cheapest→ASC, most expensive→DESC); no measure noun need be named. Anchors on
+    the first query-named ENTITY that actually HAS a price-like MEASURE column (so "cheapest
+    properties for sale" lands on the sale-listing, which carries expected_price, not the
+    bare asset). Returns a FastPathResult or None.
+    """
+    if _has(query_l, _SUPERLATIVE_ASC):
+        direction, why = "ASC", "cheapest"
+    elif _has(query_l, _SUPERLATIVE_DESC):
+        direction, why = "DESC", "most expensive"
+    else:
+        return None
+    cols = _sm().get("columns", {})
+
+    def _price_measure(tbl):
+        ms = [k.split(".", 1)[1] for k, c in cols.items()
+              if c.get("table_name") == tbl and c.get("analytics_role") == "MEASURE"]
+        if not ms:
+            return None
+        return next((m for m in ms if any(h in m.lower() for h in _PRICE_COL_HINTS)), None)
+
+    # pick the highest-scored NAMED entity that carries a price-like measure column
+    chosen = price_col = None
+    for concept, _score in reg.match_concepts(qtoks):
+        tbl = (concept.get("resolves_to") or {}).get("table")
+        pc = _price_measure(tbl) if tbl else None
+        if pc:
+            chosen, price_col = concept, pc
+            break
+    if chosen is None:
+        return None
+    table = chosen["resolves_to"]["table"]
+
+    disp = next((c.split(".", 1)[1] for c in (chosen.get("default_display_columns") or [])
+                 if "." in c), None)
+    if not disp:
+        disp = next((cn for cn in ("name", "project_name", "title", "display_name", "label")
+                     if f"{table}.{cn}" in cols), None)
+    # No local label column? Join ONE FK hop to a named entity so the list names the rows
+    # (e.g. assets_salelisting → assets_asset.project_name) instead of showing bare prices.
+    disp_join = None
+    if not disp:
+        for e in _graph().get("edges", []):
+            if e.get("source_table") != table:
+                continue
+            tt = e.get("target_table")
+            td = next((cn for cn in ("name", "project_name", "title", "display_name")
+                       if f"{tt}.{cn}" in cols), None)
+            if td and tt != table:
+                disp_join = (e.get("source_column"), tt, e.get("target_column"), td)
+                break
+
+    dim = None
+    gd = [d for d in reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+          if d["col_name"] not in (price_col, disp)]
+    if gd:
+        dim = gd[0]["col_name"]
+
+    n = 100
+    m = re.search(r"\b(?:top|first)\s+(\d+)\b", query_l)
+    if m:
+        n = int(m.group(1))
+
+    a = "s"
+    sel, ref, tables = [], [price_col], {table}
+    join = ""
+    if disp:
+        sel.append(f'{a}.{_q(disp)}'); ref.append(disp)
+    elif disp_join:
+        fk, tt, pk, td = disp_join
+        join = f' JOIN {_q(tt)} d ON {a}.{_q(fk)} = d.{_q(pk)}'
+        sel.append(f'd.{_q(td)} AS {_q(tt.split("_")[-1])}'); ref += [fk, pk, td]; tables.add(tt)
+    if dim:
+        sel.append(f'{a}.{_q(dim)}'); ref.append(dim)
+    sel.append(f'{a}.{_q(price_col)}')
+    sql = (f'SELECT {", ".join(sel)} FROM {_q(table)} {a}{join} '
+           f'WHERE {a}.{_q(price_col)} IS NOT NULL '
+           f'ORDER BY {a}.{_q(price_col)} {direction} LIMIT {n}')
+    return FastPathResult(sql=sql, tables=tables, columns=list(dict.fromkeys(ref)),
+                          primary=table, route=f"superlative.{direction.lower()}",
+                          why=[f"{why} {table} by {price_col}"])
+
+
 def _has(query_l: str, needles) -> bool:
     return any(n in query_l for n in needles)
 
@@ -163,13 +415,38 @@ def _single_entity(qtoks: set):
     if _vh:
         for _v in _vh[1]:
             val_toks |= set(re.findall(r"[a-z0-9]+", str(_v).lower()))
+    top_strength = hits[0][1][0]        # number of query tokens the top concept matched
     for c, score in hits[1:]:
         if score[0] < 1:
             continue
         if c["resolves_to"]["table"] == top_table:
             continue
-        if (set(c["match_tokens"]) & qtoks) - top_matched - val_toks:
-            return None                # genuine multi-entity -> let the planner join
+        _c_matched = set(c["match_tokens"]) & qtoks
+        # SIBLING TIE: a DIFFERENT table matched by exactly the same query tokens at
+        # equal strength ("listings" hits sale listing AND lease listing; both also
+        # claim 'property') — nothing in the query discriminates them, so which one
+        # tops the list is set-iteration order (PYTHONHASHSEED): the anchor flipped
+        # between processes. That is genuine ambiguity, not a runner-up → fall through
+        # (refuse-over-guess) instead of letting hash order silently pick a subject.
+        # EXCEPTION: when the query names the top concept's CORE entity noun itself
+        # ('users' → users_user), same-token partial-name siblings (users_userrole,
+        # users_userpreference — matched only via the shared 'user') are noise, not a
+        # competing subject; only a tie between two PARTIAL matches is unresolvable.
+        if score[0] >= top_strength and _c_matched == top_matched:
+            _core = top_table.split("_", 1)[-1]
+            if _core not in qtoks and reg._singularize(_core) not in qtoks:
+                return None
+        if _c_matched - top_matched - val_toks:
+            # A genuinely-requested SECOND entity (→ a join) is COMPARABLY strong — named
+            # about as specifically as the top. A weaker runner-up (a stray dimension/
+            # grammar word like "status"→newsletters_subscription or "grouped"→
+            # chats_messagegroup hitting an unrelated table) is NOISE, not a second
+            # subject. Only fall through when the competitor matches as many tokens as the
+            # top; otherwise keep the dominant entity. (A true join that this misreads as
+            # single-entity still degrades safely: the single-table SQL drops the other
+            # entity's token → qualifier gate refuses → the full pipeline's join planner runs.)
+            if score[0] >= top_strength:
+                return None             # genuine multi-entity -> let the planner join
     return top
 
 
@@ -251,6 +528,13 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
     # A relationship word strongly implies a join to another entity. Existence/“with”
     # is handled by the existing deterministic existence path, not here.
     join_hint = bool(_JOIN_HINTS & qtoks)
+
+    # ── 0. SUPERLATIVE LIST ("cheapest / most expensive <entity>") — a sorted projection
+    # of the entity by its price/measure, ranked BEFORE the count/measure paths (a
+    # superlative is not a count).
+    _sup = _superlative_list(query, query_l, qtoks)
+    if _sup is not None:
+        return _sup
 
     # ── 0a. RATIO: "percentage of incidents that are escalated" ──────────────
     if re.search(r"\b(percentage|percent|proportion|share)\b|%", query_l):
@@ -337,10 +621,13 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     bucket = None
 
                 group_dim = None
+                group_dim2 = None
                 if bucket is None and _has(query_l, (" by ", " per ", " each ",
                                                      "grouped", "breakdown",
                                                      "broken down", "distribution")):
-                    group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
+                    _gds = reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+                    group_dim = _gds[0] if _gds else None
+                    group_dim2 = _gds[1] if len(_gds) > 1 else None
 
                 vals_hit = reg.match_values_in_table(table, qtoks)
                 # Registry sample missed → optionally resolve the value against the
@@ -354,14 +641,23 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                         from config import VALUE_RESOLVER_LIVE_DB
                     except Exception:
                         VALUE_RESOLVER_LIVE_DB = False
+                    # Only tokens the ENTITY match didn't already consume (and that
+                    # aren't query language) are filter-value candidates — the entity
+                    # noun itself must never be looked up as a data value ("how many
+                    # users" grounded 'User' in users_user.last_name and silently added
+                    # a filter the user never asked for). Nothing left over → no lookup.
+                    _rtoks = []
                     if VALUE_RESOLVER_LIVE_DB:
+                        _res = _unmodelled_residual(qtoks, set(entity.get("match_tokens", [])))
+                        _rtoks = [t for t in qtoks if reg._singularize(t) in _res]
+                    if _rtoks:
                         try:
                             from query.value_resolver import (resolve_value_filter,
                                                               column_values_lookup)
                             from veda.runtime import _pg
                             _acols = {c.split(".", 1)[1] for c in _sm().get("columns", {})
                                       if c.split(".", 1)[0] == table}
-                            _desc = resolve_value_filter(table, qtoks, _graph(),
+                            _desc = resolve_value_filter(table, _rtoks, _graph(),
                                                          column_values_lookup(_pg),
                                                          anchor_cols=_acols)
                         except Exception:
@@ -407,11 +703,18 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     consumed |= set(group_dim["col_name"].split("_"))
                     for _lab in group_dim.get("labels", []):
                         consumed |= set(re.findall(r"[a-z0-9]+", _lab.lower()))
+                if group_dim2 is not None:
+                    consumed |= set(group_dim2["col_name"].split("_"))
+                    for _lab in group_dim2.get("labels", []):
+                        consumed |= set(re.findall(r"[a-z0-9]+", _lab.lower()))
                 if bucket is not None:
                     consumed |= {bucket, "daily", "weekly", "monthly", "quarterly",
                                  "yearly", "trend", "over"}
-                if _unmodelled_residual(qtoks, consumed):
+                _residual = _unmodelled_residual(qtoks, consumed)
+                if _residual and not _residual_is_filler(_residual, table, query_l):
                     return None             # unhandled qualifier → full pipeline
+                if _residual:
+                    why.append(f"filler ignored: {sorted(_residual)}")
 
                 if vals_hit is not None:
                     d, vs = vals_hit
@@ -441,6 +744,22 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                 select_expr = metric["expression"].replace(f"{table}.", "")
                 alias = metric["metric_id"]
                 base_why = [f"metric {alias}"]
+                # multi-table: "how many <A> per <entity on B via FK> [by <dim on A>]".
+                # Structured value/temporal filters ride along (rendered on alias a);
+                # only the live-resolver SUBQUERY filter (raw, bare column names) still
+                # forces the single-table path — _metric_entity_group also self-rejects
+                # any raw fragment, so a WHERE clause is never silently dropped.
+                if not _extra_tables:
+                    _mtc = _metric_entity_group(query, query_l, qtoks, table, "COUNT",
+                                                _measure_col(select_expr) or "id", alias,
+                                                base_why + why, filters=filters)
+                    if _mtc is not None:
+                        # the join added table B — re-check leftovers against the FULL
+                        # table set, exactly as the downstream qualifier gate will
+                        if _residual and not _residual_is_filler(_residual, _mtc.tables,
+                                                                 query_l):
+                            return None
+                        return _mtc
                 if bucket is not None:
                     tcol = metric["allowed_time_dimension"].split(".", 1)[1]
                     return _finalize(query, QueryIntent(
@@ -452,13 +771,14 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                         why=base_why + why + [f"bucket by {bucket} on {tcol}"]))
                 if group_dim is not None:
                     g = group_dim["col_name"]
+                    g2 = group_dim2["col_name"] if group_dim2 is not None else None
                     return _finalize(query, QueryIntent(
                         query_type="count", subject_table=table, metric_id=alias,
                         select_expr=select_expr, metric_alias=alias,
-                        group_col=g, filters=filters,
+                        group_col=g, group_col2=g2, filters=filters,
                         extra_tables=_extra_tables, extra_columns=_extra_columns,
                         route="metric.count.group",
-                        why=base_why + why + [f"group by {g}"]))
+                        why=base_why + why + [f"group by {g}" + (f", {g2}" if g2 else "")]))
                 route = ("metric.count" + (".filter" if (vals_hit or _extra_tables) else "")
                          + (".temporal" if has_temporal else ""))
                 return _finalize(query, QueryIntent(
@@ -482,17 +802,25 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                                               tf.end or "2999-12-31"]))
                 why.append("temporal window")
             expr = metric["expression"].replace(f"{table}.", "")
-            group_dim = None
+            # multi-table: "<total/average X> per <entity on another table> [by <dim>]"
+            _mt = _metric_entity_group(query, query_l, qtoks, table, metric.get("kind", "SUM"),
+                                       _measure_col(expr), metric["metric_id"], why,
+                                       filters=filters)
+            if _mt is not None:
+                return _mt
+            group_dims = []
             if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
                                "broken down", "distribution")):
-                group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
-            if group_dim is not None:
-                g = group_dim["col_name"]
+                group_dims = reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+            if group_dims:
+                g = group_dims[0]["col_name"]
+                g2 = group_dims[1]["col_name"] if len(group_dims) > 1 else None
                 return _finalize(query, QueryIntent(
                     query_type="count", subject_table=table,
                     select_expr=expr, metric_alias=metric["metric_id"],
-                    group_col=g, filters=filters,
-                    route="metric.measure.group", why=why + [f"group by {g}"]))
+                    group_col=g, group_col2=g2, filters=filters,
+                    route="metric.measure.group",
+                    why=why + [f"group by {g}" + (f", {g2}" if g2 else "")]))
             return _finalize(query, QueryIntent(
                 query_type="measure", subject_table=table, metric_id=metric["metric_id"],
                 select_expr=expr, metric_alias=metric["metric_id"], filters=filters,
@@ -509,17 +837,25 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
             expr  = _rewrite_agg(base_expr, func)
             alias = f"{func.lower()}_{metric['metric_id']}"
             filters, why = [], [f"{func}({metric['metric_id']})"]
-            group_dim = None
+            # multi-table: "<AGG> per <entity on another table> [by <dim>]" (one FK hop)
+            _mt = _metric_entity_group(query, query_l, qtoks, table, func,
+                                       _measure_col(base_expr), alias, why,
+                                       filters=filters)
+            if _mt is not None:
+                return _mt
+            group_dims = []
             if _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
                                "broken down", "distribution")):
-                group_dim = reg.match_dimension_in_table(table, qtoks, query_l)
-            if group_dim is not None:
-                g = group_dim["col_name"]
+                group_dims = reg.match_dimensions_in_table(table, qtoks, query_l, k=2)
+            if group_dims:
+                g = group_dims[0]["col_name"]
+                g2 = group_dims[1]["col_name"] if len(group_dims) > 1 else None
                 return _finalize(query, QueryIntent(
                     query_type="count", subject_table=table,
                     select_expr=expr, metric_alias=alias,
-                    group_col=g, filters=filters,
-                    route=f"metric.{func.lower()}.group", why=why + [f"group by {g}"]))
+                    group_col=g, group_col2=g2, filters=filters,
+                    route=f"metric.{func.lower()}.group",
+                    why=why + [f"group by {g}" + (f", {g2}" if g2 else "")]))
             return _finalize(query, QueryIntent(
                 query_type="measure", subject_table=table,
                 select_expr=expr, metric_alias=alias, filters=filters,

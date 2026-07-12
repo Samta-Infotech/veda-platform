@@ -45,19 +45,52 @@ except ImportError:
     pass
 
 
-def _get_reranker():
-    global _RERANKER_INSTANCE
-    if _RERANKER_INSTANCE is not None:
-        return _RERANKER_INSTANCE
+_METAL_URL = os.environ.get("METAL_EMBED_URL", "").strip()
+
+
+class _RemoteReranker:
+    """CrossEncoder-compatible facade that offloads .predict to the host Metal server
+    (scripts/metal_embed_server.py, device=mps). Any transport error falls back to the
+    in-process CPU CrossEncoder, so it never fails a query."""
+    def predict(self, pairs, batch_size: int = 64, **_kw):
+        import json as _json
+        import urllib.request as _u
+        try:
+            body = _json.dumps({"pairs": [list(p) for p in pairs],
+                                "batch_size": int(batch_size)}).encode()
+            req = _u.Request(_METAL_URL.rstrip("/") + "/rerank", data=body,
+                             headers={"Content-Type": "application/json"}, method="POST")
+            with _u.urlopen(req, timeout=float(os.environ.get("METAL_EMBED_TIMEOUT", "60"))) as r:
+                return _json.loads(r.read())["scores"]
+        except Exception as e:
+            warnings.warn(f"[Reranker] metal rerank failed ({e}) — CPU fallback")
+            local = _load_local_crossencoder()
+            if local is None:
+                raise
+            return local.predict(pairs, batch_size=batch_size)
+
+
+def _load_local_crossencoder():
     if not RERANKER_AVAILABLE:
         return None
     try:
         from sentence_transformers import CrossEncoder
-        _RERANKER_INSTANCE = CrossEncoder(RERANKER_MODEL, device=RERANKER_DEVICE)
-        return _RERANKER_INSTANCE
+        return CrossEncoder(RERANKER_MODEL, device=RERANKER_DEVICE)
     except Exception as e:
         warnings.warn(f"[Reranker] Could not load model '{RERANKER_MODEL}': {e}")
         return None
+
+
+def _get_reranker():
+    global _RERANKER_INSTANCE
+    if _RERANKER_INSTANCE is not None:
+        return _RERANKER_INSTANCE
+    if _METAL_URL:
+        # offload to host Metal; the local CrossEncoder is never loaded (saves CPU + RAM)
+        _RERANKER_INSTANCE = _RemoteReranker()
+        return _RERANKER_INSTANCE
+    _RERANKER_INSTANCE = _load_local_crossencoder()
+    return _RERANKER_INSTANCE
 
 
 def _columns_of_table(table_id: str) -> List[str]:

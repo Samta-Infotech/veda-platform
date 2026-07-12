@@ -70,9 +70,18 @@ def resolve_value_filter(anchor, qtoks, graph, lookup, anchor_cols=None):
     #     is a polymorphic TYPE DISCRIMINATOR (e.g. change_request.object_type='Role' when
     #     the anchor IS 'role'), not a filter value — the entity noun leaked into value
     #     grounding. Drop such hits. Targeted (anchor-scoped); mirrors the entity-name skip
-    #     already in query/value_filter.py.
+    #     already in query/value_filter.py. Compared against the anchor's NAME PARTS
+    #     (singular/plural absorbed), not just the verbatim table name — anchor
+    #     'users_user' must also skip the value 'User' (last_name='User' grounding the
+    #     entity noun of "how many users" was a silently-added filter).
     _anchor_l = (anchor or "").lower()
-    hits = [h for h in hits if str(h[2]).lower() != _anchor_l]
+    _anchor_names = {_anchor_l} | {p for p in _anchor_l.split("_") if len(p) > 2}
+
+    def _is_anchor_name(v):
+        vl = str(v).lower()
+        vs = vl[:-1] if vl.endswith("s") and len(vl) > 3 else vl
+        return vl in _anchor_names or vs in _anchor_names
+    hits = [h for h in hits if not _is_anchor_name(h[2])]
 
     # 1b. REACHABILITY scope. A value sitting in a table with NO FK path to the anchor
     #     cannot be filtered for THIS query (e.g. a denormalised name copy in an

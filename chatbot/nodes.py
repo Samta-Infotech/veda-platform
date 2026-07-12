@@ -301,6 +301,7 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
         for kind, data in client.stream_hybrid_query(
             query,
             source_id=state.get("source_id"),
+            source_ids=state.get("source_ids"),
             tenant=state.get("tenant"),
             request_id=state.get("request_id"),
         ):

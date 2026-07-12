@@ -185,6 +185,13 @@ def _gate_strip():
             s.update(w.split())
     for cls in QUERY_LANGUAGE.values():
         s.update(cls)
+    # Conversational function words (pronouns / interrogatives / polite requests) — query
+    # LANGUAGE, never schema vocabulary. Without these, filler in "can YOU find X" false-
+    # refuses when the word coincidentally exists as a data VALUE ("you" as a payer name).
+    s.update({"you", "your", "yours", "we", "us", "our", "ours", "i", "me", "my", "mine",
+              "he", "she", "him", "her", "his", "hers", "they", "them", "their", "theirs",
+              "who", "whom", "whose", "can", "could", "would", "should", "please", "find",
+              "show", "give", "tell", "get", "see", "want", "need", "pull", "provide"})
     return s
 
 
@@ -278,7 +285,25 @@ def _names_entity_column(token, tables_in_sql, sm):
     return False
 
 
-def qualifier_completeness(query, sql, sm=None):
+_DS_SYN_CACHE = {"v": None}
+
+
+def _domain_synonyms() -> dict:
+    """Authoritative domain_synonyms (business phrase → [col_id]) from DOMAIN_SYNONYMS_FILE
+    — the file retrieval + scripts/enrich_synonyms.py maintain — independent of sm's
+    possibly-stale embedded copy. Cached per process; empty dict when absent."""
+    if _DS_SYN_CACHE["v"] is None:
+        try:
+            import json as _json
+            import os as _os
+            from config import DOMAIN_SYNONYMS_FILE as _p
+            _DS_SYN_CACHE["v"] = _json.load(open(_p)) if _os.path.exists(_p) else {}
+        except Exception:
+            _DS_SYN_CACHE["v"] = {}
+    return _DS_SYN_CACHE["v"]
+
+
+def qualifier_completeness(query, sql, sm=None, strict=False):
     """Unified correctness gate (all paths): every CONTENT token the user named must
     appear somewhere in the generated SQL — as a table, column, string literal, or
     SELECT alias (or as a descriptor in a referenced table's business purpose). A named
@@ -329,6 +354,15 @@ def qualifier_completeness(query, sql, sm=None):
         for tname in tables_in_sql:
             tmeta = sm.get("tables", {}).get(tname, {})
             sqltoks |= _idtoks(tmeta.get("business_purpose", ""))
+        # Domain-synonym vocabulary for the QUERIED tables: a business term the ingestion
+        # mapped to a column/entity of a table in this SQL ("property"→assets_asset) is
+        # ACCOUNTED — otherwise the gate false-refuses the synonym as a "dropped" column
+        # (e.g. "property" substring-matches assets_asset.corner_property, so a join to the
+        # asset entity is wrongly seen as dropping "property").
+        for _phrase, _cids in _domain_synonyms().items():
+            _cl = _cids if isinstance(_cids, list) else [_cids]
+            if any(str(_c).split(".")[0] in tables_in_sql for _c in _cl):
+                sqltoks |= _idtoks(_phrase)
         referenced_cols = {c.name for c in tree.find_all(exp.Column) if c.name}
         for tname in tables_in_sql:
             for cname in referenced_cols:
@@ -351,9 +385,25 @@ def qualifier_completeness(query, sql, sm=None):
     # column (a DROPPED FILTER). Tokens that name NEITHER ("in the database/system/
     # platform", or any noun a user invents) are filler — ignoring them avoids a false
     # refuse. Schema + data decide, no word lists.
+    # STRICT (LLM lanes): the filler policy above has a wrong-table blind spot — a
+    # token is only "real" if it names a column of the QUERIED tables or a grounded
+    # value, so a maximally-wrong table makes every qualifier look like filler
+    # ('financial records' vs SELECT * FROM assets_asset passed). In strict mode a
+    # token with a QSR referent ANYWHERE in the schema (entity/column/value) is a
+    # dropped qualifier. Failure-safe: resolver errors keep the lenient behavior.
+    def _qsr_ref(ct):
+        if not strict:
+            return False
+        try:
+            from query.resolution import has_schema_referent
+            return has_schema_referent(ct, sm)
+        except Exception:
+            return False
+
     missing = [ct for ct in unaccounted
                if _names_entity_column(ct, tables_in_sql, sm)
-               or _is_grounded_filter_value(ct, tables_in_sql, sm)]
+               or _is_grounded_filter_value(ct, tables_in_sql, sm)
+               or _qsr_ref(ct)]
     return (not missing), (missing[0] if missing else None)
 
 

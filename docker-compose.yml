@@ -195,6 +195,12 @@ services:
       # (veda:sm:{source}:{tenant}) so a scoped/cross-source query uses each source's OWN
       # model (and _merge_scoped_sms for multi-source), instead of the global homzhub file.
       VEDA_SM_REDIS: "1"
+      # Offload BGE-M3 encode + cross-encoder rerank to the HOST Metal GPU (mps) instead of
+      # the CPU-bound in-container models (~28s/retrieval — the dominant query-latency cost).
+      # Empty by default (in-process CPU). To enable: run scripts/metal_embed_server.py on the
+      # host, then set METAL_EMBED_URL=http://host.docker.internal:11435 in .env. Mirrors the
+      # host-Ollama SLM offload above.
+      METAL_EMBED_URL: ${METAL_EMBED_URL:-}
     volumes:
       - ".:/app"           # DEV: live code
       - model_cache:/models:ro

@@ -96,6 +96,75 @@ def aggregate_mode(query):
     return None
 
 
+def superlative_mode(query):
+    """Grammar-level superlative-by-dimension detection, or None.
+
+    "which category contributes the highest value ..." / "what user has the most ..."
+    declares a RANKED AGGREGATION (group by the asked dimension, order by an
+    aggregate, LIMIT 1) — never a plain row lookup. Deliberately SEPARATE from
+    aggregate_mode: that dict drives the COUNT-based grain planner
+    (build_aggregate_sql), and a superlative usually ranks by a MEASURE, so feeding
+    it the same shape would silently plan the wrong aggregate. Consumers today use
+    this as a routing/trace signal (send the query through join/grain planning
+    rather than single-table lookup); the deterministic SUM/MAX grain builder is the
+    follow-up. Grammar words only (config.QUERY_GRAMMAR — the language layer), no
+    schema vocabulary."""
+    from config import QUERY_GRAMMAR
+    ql = f" {query.lower()} "
+    if not re.search(r"\b(which|what|who|whose)\b", ql):
+        return None
+    for direction, key in (("max", "superlative_max"), ("min", "superlative_min")):
+        for w in QUERY_GRAMMAR.get(key, []):
+            if re.search(rf"\b{re.escape(w)}\b", ql):
+                return {"superlative": direction, "term": w}
+    return None
+
+
+def grouped_mode(query):
+    """Grammar-level grouped-measure breakdown detection, or None.
+
+    "how much does each category contribute" / "total amount per type" declares a
+    GROUPED SUM over a measure (GROUP BY dim) — the non-ranked sibling of the
+    superlative shape. Deliberately SEPARATE from aggregate_mode (whose dict drives
+    the COUNT-based grain planner) and mutually exclusive with superlative_mode
+    (ranking owns the query when both could match). Grammar words only
+    (config.QUERY_GRAMMAR — the language layer), no schema vocabulary."""
+    from config import QUERY_GRAMMAR
+    ql = f" {query.lower()} "
+
+    def has(group):
+        for w in QUERY_GRAMMAR.get(group, []):
+            if (" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql):
+                return True
+        return False
+
+    if superlative_mode(query):
+        return None                     # ranked aggregation — the superlative planner owns it
+    if not (has("grouping") and has("measure_agg")):
+        return None
+    return {"grouped": True}
+
+
+def ratio_mode(query):
+    """Grammar-level ratio detection, or None.
+
+    "what is the ratio of completed payment value to pending value" declares a
+    DIVIDED PAIR of aggregates — SUM(side A) / SUM(side B) on one anchor — never
+    a row lookup. Returns the two side phrases verbatim; the ratio planner
+    resolves each side to a grounded filter or a measure column (refuse/clarify
+    otherwise). Grammar words only (config.QUERY_GRAMMAR — the language layer)."""
+    from config import QUERY_GRAMMAR
+    words = QUERY_GRAMMAR.get("ratio") or []
+    if not words:
+        return None
+    ql = query.lower().rstrip(" ?.!")
+    m = re.search(rf"\b(?:{'|'.join(re.escape(w) for w in words)})\b"
+                  rf"\s+(?:of|between)\s+(.+?)\s+(?:to|and|vs)\s+(.+)$", ql)
+    if not m:
+        return None
+    return {"side_a": m.group(1).strip(), "side_b": m.group(2).strip()}
+
+
 def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
                         top_n=None, group_col=None, ranked=False):
     """Deterministic pre-aggregation: one CTE per child relation, each grouped by
@@ -563,7 +632,7 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
         from query.join_planner import score_anchors
         from config import (ANCHOR_CONFIDENCE_MARGIN, ANCHOR_CONFIDENCE_GATE,
                             ANCHOR_CONFLICT_MULT)
-        ranked_anchors = score_anchors(query, anchor_cands, score, graph=graph)
+        ranked_anchors = score_anchors(query, anchor_cands, score, graph=graph, sm=sm)
         if not ranked_anchors:
             return {"action": "fallback"}
         anchor = ranked_anchors[0].table
@@ -851,7 +920,10 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
         from retrieval.query_enrichment import _singularize
         qwords = [_singularize(w) for w in re.findall(r"[a-z]+", query.lower())]
         def _first_pos(t):
-            ttoks = {_singularize(tok) for tok in t.split("_")}
+            # superset of the legacy underscore tokens: segmentation-aware entity
+            # words (paymenttransaction → payment, transaction) plus the raw parts,
+            # so short (≤2 char) name parts keep matching exactly as before.
+            ttoks = _name_toks(t, sm) | {_singularize(tok) for tok in t.split("_")}
             for i, w in enumerate(qwords):
                 if w in ttoks:
                     return i

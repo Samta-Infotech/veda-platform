@@ -37,6 +37,46 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
         except Exception as e:
             out.append(StageOutcome("semantic_registry", False, fatal=False, error=str(e)))
 
+        # value referents (QSR grounding artifact: value→referent FK closure + per-
+        # edge label domains) — consumed by the deterministic planners, typed anchor
+        # evidence, the strict Tier-2 qualifier gate and grounded clarifies. Derived
+        # from THIS run's column_values (the sampler truncates + rewrites the store,
+        # so it holds exactly this source's values here) + the relationship graph
+        # built above. Written per (tenant, source); the runtime loader resolves the
+        # same scope from the request context. Source conn (when reachable) enables
+        # the precise per-edge label closure; otherwise broad closure. Non-fatal.
+        try:
+            import json as _vjson
+            from config import SEMANTIC_MODEL_FILE
+            from ingestion.value_referents import write_value_referents
+            from ingestion.db_abstraction import (get_client_connection,
+                                                  get_internal_connection,
+                                                  release_internal_connection)
+            try:
+                with open(SEMANTIC_MODEL_FILE) as _vf:
+                    _vsm = _vjson.load(_vf)
+            except Exception:
+                _vsm = {}          # no table_type filter → broad (still correct) closure
+            try:
+                _vsrc = get_client_connection(ctx.source_id)
+            except Exception:
+                _vsrc = None
+            _vconn = get_internal_connection()
+            try:
+                _vpath = write_value_referents(
+                    _vconn, _vsm, source_conn=_vsrc, verbose=verbose,
+                    tenant=ctx.tenant, source_id=ctx.source_id)
+            finally:
+                release_internal_connection(_vconn)
+                if _vsrc is not None:
+                    try:
+                        _vsrc.close()
+                    except Exception:
+                        pass
+            out.append(StageOutcome("value_referents", True, detail=_vpath))
+        except Exception as e:
+            out.append(StageOutcome("value_referents", False, fatal=False, error=str(e)))
+
     # Per-source HNSW ef_search (NEW, P7/Q-10) — tune by source size, persist for the
     # activate step to store on SubstrateVersion.hnsw_ef_search — non-fatal.
     try:
