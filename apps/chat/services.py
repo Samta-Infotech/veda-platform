@@ -10,6 +10,7 @@ from chatbot.run import run_chat_turn
 
 from .models import ChatMessage, ChatSession, MessageType
 from .visualization import VisualizationRecommender
+from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 logger = logging.getLogger(__name__)
 
