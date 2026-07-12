@@ -47,8 +47,16 @@ MAX_CLOSURE_EDGES_PER_TABLE = 32  # cap FK fan-in per lookup table
 MAX_LABELS_PER_EDGE = 5000        # bound the per-edge reachable-label query
 
 
-def _artifact() -> str:
-    from config import artifact_path
+def _artifact(tenant=None, source_id=None) -> str:
+    """Per-(tenant, source) artifact path when both are known —
+    <ARTIFACT_ROOT>/<tenant>/<source_id>/veda_value_referents.json — matching the
+    runtime scope contract (Redis sm keys are `veda:sm:{source}:{tenant}`; parquet
+    lives under data/<source_id>/). Legacy flat data/ path otherwise (single-source
+    dev, pre-scoping bundles)."""
+    from config import artifact_path, ARTIFACT_ROOT
+    if tenant is not None and source_id is not None:
+        return os.path.join(ARTIFACT_ROOT, str(tenant), str(source_id),
+                            "veda_value_referents.json")
     return artifact_path("veda_value_referents.json")
 
 
@@ -186,9 +194,10 @@ def build_value_referents(conn, sm: dict, source_conn=None, verbose: bool = Fals
     return art
 
 
-def write_value_referents(conn, sm: dict, source_conn=None, verbose: bool = True) -> str:
+def write_value_referents(conn, sm: dict, source_conn=None, verbose: bool = True,
+                          tenant=None, source_id=None) -> str:
     art = build_value_referents(conn, sm, source_conn=source_conn, verbose=verbose)
-    path = _artifact()
+    path = _artifact(tenant, source_id)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(art, f)
@@ -201,18 +210,47 @@ _CACHE = {"path": None, "art": None}
 
 
 def load_value_referents() -> dict:
-    """Runtime loader (cached per process per artifact path). Missing artifact →
-    empty referent map; consumers fall back to the live value store."""
-    path = _artifact()
-    if _CACHE["path"] == path and _CACHE["art"] is not None:
-        return _CACHE["art"]
-    art = {"version": 0, "referents": {}}
+    """Runtime loader (cached per resolved scope). Scope resolution mirrors
+    runtime._load_scoped_sm: request context → the per-(tenant, source)
+    artifact(s), merged for a multi-source scope; no context or no scoped file →
+    the legacy flat artifact (single-source dev / pre-scoping bundles). Missing
+    everything → empty referent map; consumers fall back to the live value store."""
+    paths = []
     try:
-        if os.path.exists(path):
-            art = json.load(open(path))
+        from veda_core import context
+        ctx = context.try_current()
+        if ctx is not None:
+            paths = [_artifact(ctx.tenant, sid) for sid in ctx.source_ids]
     except Exception:
         pass
-    _CACHE["path"], _CACHE["art"] = path, art
+    paths = [p for p in paths if os.path.exists(p)] or [_artifact()]
+    key = tuple(paths)
+    if _CACHE["path"] == key and _CACHE["art"] is not None:
+        return _CACHE["art"]
+    arts = []
+    for p in paths:
+        try:
+            if os.path.exists(p):
+                arts.append(json.load(open(p)))
+        except Exception:
+            pass
+    if not arts:
+        art = {"version": 0, "referents": {}}
+    elif len(arts) == 1:
+        art = arts[0]
+    else:
+        # multi-source scope: union — referent lists concatenate per value;
+        # edge_domains keys are table-qualified so cross-source collisions can't
+        # occur unless the same table name exists in both (last write wins there,
+        # same policy as the merged semantic-model namespace).
+        art = {"version": max(a.get("version", 0) for a in arts),
+               "precise": all(a.get("precise") for a in arts),
+               "referents": {}, "edge_domains": {}}
+        for a in arts:
+            for v, refs in (a.get("referents") or {}).items():
+                art["referents"].setdefault(v, []).extend(refs)
+            art["edge_domains"].update(a.get("edge_domains") or {})
+    _CACHE["path"], _CACHE["art"] = key, art
     return art
 
 
@@ -242,7 +280,12 @@ def main() -> None:
     conn = psycopg2.connect(host=db["host"], port=db["port"], dbname=db["database"],
                             user=db["user"], password=db["password"])
     try:
-        write_value_referents(conn, _load_scoped_sm(), source_conn=source_conn, verbose=True)
+        # scoped write when a source is named (matches the L5 ingestion stage);
+        # bare invocation keeps the legacy flat path (single-source dev)
+        write_value_referents(conn, _load_scoped_sm(), source_conn=source_conn,
+                              verbose=True,
+                              tenant=args.tenant if args.source_id is not None else None,
+                              source_id=args.source_id)
     finally:
         conn.close()
         if source_conn is not None:
