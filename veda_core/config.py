@@ -720,6 +720,12 @@ RERANK_SKIP_GAP        = 0.02   # F4: skip L2b when top-2 RRF gap >= this and sa
                                 # almost never fired; 0.02 matches the RRF scale so the skip
                                 # (latency) path actually triggers on unambiguous top-1s.
 RERANK_MAX_CANDIDATES  = 20     # F4: cap candidates fed to the cross-encoder
+RERANK_NOISE_FLOOR     = 0.01   # cross-encoder outputs are calibrated (sigmoid 0..1):
+                                # when the BEST pair scores under this, the ranker found
+                                # NOTHING relevant — keep the RRF consensus order instead
+                                # of overwriting it with noise that anchor normalization
+                                # would stretch to 1.0. (Measured: irrelevant ≈ 1e-4,
+                                # weak-but-real ≈ 0.05, strong ≈ 0.9.) 0 disables.
 
 # Value-anchor re-rank (routing.vet_primary): boost a candidate table whose sampled
 # CATEGORY values exact-match a query token ("debit" → accounts_generalledger.entry_type)
@@ -727,6 +733,36 @@ RERANK_MAX_CANDIDATES  = 20     # F4: cap candidates fed to the cross-encoder
 # (These flags were referenced by routing.py but never defined, so the feature was inert.)
 VALUE_ANCHOR_RERANK_ENABLED = True
 VALUE_ANCHOR_RERANK_WEIGHT  = 0.25
+# FK-closure evidence (QSR, query/resolution.py): a query value that lives one join
+# away — a status label in a lookup/LOV row — credits the REFERENCING table
+# (…payment_status_id) at this reduced weight. Routing evidence only; SQL predicates
+# still come from direct referents (the label is not a legal literal for the FK column).
+VALUE_ANCHOR_CLOSED_WEIGHT  = 0.15
+# QSR typed-evidence anchor re-rank (routing.vet_primary ← resolution.
+# typed_anchor_evidence): role-disciplined evidence — entity words vote, grammar
+# words don't, values vote for owning tables (label stores demoted). Shares the
+# scorer with the superlative builder so anchor behavior can't drift between lanes.
+TYPED_ANCHOR_RERANK_ENABLED = True
+TYPED_ANCHOR_RERANK_WEIGHT  = 0.2
+# Fast-path evidence guard: a fast-path answer built ONLY on tables with zero typed
+# anchor evidence (no entity word / value / closure for any of them) is DEMOTED to
+# the full pipeline (which has anchor vetting) instead of being served. Demotion,
+# not refusal — measured: strict-refusing here flipped good answers on descriptor
+# words ('market', 'absolute'); demotion only costs latency on rare wrong picks.
+FASTPATH_EVIDENCE_GUARD = True
+QSR_FP_EVIDENCE_FLOOR = 0.3
+# Heavy-lane time budgets (Phase C): skip Tier-2 when the deterministic head already
+# overspent (retrieval/grounding struggled — Tier-2 rarely rescues those), and give
+# Tier-2 a hard deadline enforced between SLM rounds. Measured 2026-07-12: without
+# these, ungroundable maintenance-vocabulary queries burned 240s+ per refusal.
+TIER2_SKIP_IF_HEAD_OVER_S = 60.0
+TIER2_TIME_BUDGET_S       = 120.0
+# Referent-strength thresholds for the strict gate (schema statistics, no word lists):
+# entity claims need this idf; column claims must map to at most this many columns —
+# request verbs ('flag' → every boolean column) and broad descriptive vocabulary are
+# too generic to count as dropped qualifiers.
+QSR_REFERENT_MIN_IDF  = 0.35
+QSR_REFERENT_MAX_COLS = 20
 
 # --- Reranker: enriched text + dynamic cutoff (Gaps 1, 2, 3) ---
 # A/B data: bare names score sharper (0.89) than enriched text (0.15) for the cross-encoder;
@@ -973,9 +1009,61 @@ QUERY_GRAMMAR = {
                   "associated", "linked"],
     "counting":  ["how many", "count", "number of"],
     "quantity":  ["more than", "at least", "fewer than", "less than", "greater than",
-                  "exactly", "over"],
-    "grouping":  ["per", "each", "grouped by"],
+                  "exactly", "over", "between"],
+    "grouping":  ["per", "each", "grouped by", "breakdown"],
+    # superlatives are grammar too: "which X ... highest Y" declares a ranked
+    # aggregation (GROUP BY dim ORDER BY agg LIMIT 1), not a row lookup.
+    "superlative_max": ["highest", "most", "largest", "greatest", "maximum", "biggest"],
+    "superlative_min": ["lowest", "least", "smallest", "minimum", "fewest", "cheapest"],
+    # measure-sum question words: "how much does each X contribute" declares a grouped
+    # SUM over a measure (GROUP BY dim), not a count and not a row lookup.
+    "measure_agg": ["how much", "total", "sum", "contribute", "contributes",
+                    "contribution", "contributed"],
+    # exclusion/negation of a FILTER VALUE ("excluding paid entries", "except
+    # cancelled"). Consumed ONLY by the deterministic grouped/superlative planners as
+    # a bail-out signal (their builders emit positive predicates only — applying an
+    # excluded value as a positive filter would silently invert the answer). NOT
+    # wired into existence_mode's negation (that would reroute existing queries).
+    "exclusion": ["excluding", "excluded", "exclude", "excludes", "except"],
+    # ratio operators: "ratio of X to Y" declares a DIVIDED pair of aggregates
+    # (SUM side-A / SUM side-B on one anchor) — never a row lookup.
+    "ratio": ["ratio", "proportion"],
+    # frequency words: a superlative + one of these ("appears most frequently",
+    # "most common") ranks by COUNT(*), not by a measure column.
+    "frequency": ["frequently", "frequent", "often", "common", "commonly"],
+    # portion words: "what percentage of the dataset" asks for the winning
+    # group's share of the (filtered) total — a projection, not a filter. These
+    # spans serve the plan shape and must not vote for an anchor ('percentage'
+    # coincides with sampled lookup values).
+    "portion": ["percentage", "percent", "share", "proportion", "fraction"],
 }
+# Route detected superlatives into multi-table/grain planning (intent=AGGREGATE).
+# OFF until the grain planner can consume a superlative (dim + measure): the extra
+# planning is pure latency today (measured 2026-07-11: q19/q22/q34/q37 pushed past
+# the 120s suite budget). superlative detection itself stays on (trace + intent print).
+SUPERLATIVE_JOIN_ROUTING = False
+# Deterministic superlative-by-dimension planner (query/superlative_plan.py, QSR-
+# backed): grouped ranked aggregation straight from resolution artifacts, fast-path
+# style (no retrieval/LLM). Ambiguous dimension/measure → grounded clarify listing
+# the anchor's real options; unconsumed qualifier spans → falls through (refuse-
+# over-guess). This is the consumer SUPERLATIVE_JOIN_ROUTING was waiting for.
+SUPERLATIVE_PLAN_ENABLED = True
+# Deterministic grouped-breakdown planner (same module/machinery): "how much does
+# each <dim> contribute" → GROUP BY dim, SUM(measure) — the non-ranked sibling of
+# the superlative shape. Same refuse-over-guess guards; bails on negation/exclusion
+# (its builder emits positive predicates only).
+GROUPED_PLAN_ENABLED = True
+# Deterministic ratio planner (query/ratio_plan.py, QSR-backed): "ratio of X to Y"
+# → single-scan CASE-WHEN sums divided, on the typed-evidence anchor that OWNS a
+# declared measure. Ungroundable sides ('completed payments' where no such status
+# exists) → grounded clarify listing the anchor's real FK value domain — in ~2s,
+# instead of a 60s Tier-2 burn ending in a firewall message.
+RATIO_PLAN_ENABLED = True
+# IR-equivalence Rule 4 carve-out: when grouping IS licensed by the query, allow an
+# ORDER BY whose every key is a projected aggregate (or its SELECT alias) — sorting
+# a licensed breakdown by its own measure changes presentation, never the answer
+# set. Admits no new rows/filters/joins. Off → today's strict behavior.
+IR_ORDERBY_GROUPED_MEASURE_OK = True
 
 # Query LANGUAGE layer — the ONLY word-lists in the system. These are CLOSED
 # LINGUISTIC CLASSES (command verbs, ranking operators, function words, temporal
@@ -1002,7 +1090,7 @@ QUERY_LANGUAGE = {
                   "which", "who", "whom", "whose", "where", "there", "here", "please",
                   "their", "its", "about", "also", "only", "just", "much", "more",
                   "less", "than", "exactly", "them", "they", "not", "but", "have",
-                  "has", "had", "been", "being", "does", "per", "give"],
+                  "has", "had", "been", "being", "does", "per", "give", "among"],
     # temporal words (the temporal window itself is resolved by L1, so these tokens
     # are already consumed before SQL generation)
     "temporal": ["last", "past", "previous", "recent", "recently", "ago", "since",
@@ -1018,12 +1106,14 @@ QUERY_LANGUAGE = {
     # ("mappings", "entries", "records") regardless of the table's real name
     "collection_nouns": ["mapping", "record", "entry", "item", "row", "listing",
                          "collection", "association", "detail", "info", "field",
-                         "attribute", "value", "set", "thing"],
+                         "attribute", "value", "set", "thing", "dataset"],
     # relationship verbs — describe HOW entities relate (the join), never a value
     "relation_verbs": ["assigned", "owned", "belong", "belonging", "related", "linked",
                       "associated", "mapped", "connected", "tied", "attached", "held",
                       "containing", "contains", "including", "registered", "stored",
-                      "tracked", "named", "called", "based", "using"],
+                      "tracked", "named", "called", "based", "using",
+                      "appears", "appear", "represents", "represent",
+                      "occurs", "occur", "occurring"],
 }
 # --- Target selection (evidence-based, Stage 1 of the join pipeline) -------------
 # Feature-flagged so it can be benchmarked OLD-vs-NEW before adoption. When False the
@@ -1055,8 +1145,24 @@ ANCHOR_SCORING = {
     "retrieval": 0.25,
     "graph":     0.15,
 }
+# Schema-vocabulary subword segmentation of table-name tokens (semantic/name_tokens.py).
+# Concatenated table names (Django's app_modelname: accounts_paymenttransaction) are
+# opaque to underscore splitting, killing the lexical anchor signal for the whole
+# schema. Segmentation uses ONLY the scope's own schema vocabulary (column/table name
+# words, generated aliases, domain-synonym phrases) — no built-in word lists, so it is
+# schema-agnostic. Off → the legacy underscore-split tokens everywhere.
+NAME_SUBWORD_SPLIT_ENABLED = True
+NAME_SUBWORD_MIN_PIECE = 3         # min chars per segmented piece (blocks 's'/'id' shrapnel)
 ANCHOR_CONFIDENCE_MARGIN = 0.06    # min top-second gap to commit; below → ambiguous
 ANCHOR_CONFIDENCE_GATE = True      # when False, commit to top candidate without abstaining
+# Single-table path counterpart of the gate above (routing.vet_primary): the multi-table
+# gate never runs for queries planned single_table, so a sub-margin coin-flip between
+# two DIFFERENTLY-NAMED subjects used to commit silently and refuse 20s later at the
+# qualifier gate. Clarify at anchor time instead. Narrow by construction: both top
+# candidates must be named by disjoint query tokens, and the winner must not be the
+# query's plain sentence-initial subject.
+ANCHOR_SINGLE_GATE_ENABLED = True
+ANCHOR_SUBJECT_POS_MIN = 0.7       # "genuinely early": subject token in the first ~30% of words
 # When the composite winner is NOT the earliest-mentioned candidate, the subject
 # prior (position) disagrees with the lexical pick — a SIGNAL CONFLICT. Require this
 # multiple of the normal margin to commit; otherwise abstain ("comment with their

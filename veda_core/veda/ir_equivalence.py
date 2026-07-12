@@ -27,6 +27,8 @@ class SqlIR:
     aggregations: List[str]              = field(default_factory=list)
     groupings:    List[str]              = field(default_factory=list)
     orderings:    List[str]              = field(default_factory=list)
+    ordering_agg: List[bool]             = field(default_factory=list)  # per ordering: key is an aggregate expr
+    agg_aliases:  set                    = field(default_factory=set)   # SELECT aliases of aggregate exprs
     distinct:     bool                   = False
 
 
@@ -48,6 +50,13 @@ def extract_sql_ir(sql: str) -> SqlIR:
     ir.distinct = tree.find(exp.Distinct) is not None
     ir.aggregations = sorted({a.key.upper() for a in tree.find_all(exp.AggFunc)})
 
+    # SELECT aliases whose expression is an aggregate (SUM(x) AS total_amount) — an
+    # ORDER BY on one of these re-sorts a grouped result by its own measure; it can
+    # never widen/narrow the answer set. Collected so Rule 4 can license that case.
+    for a in tree.find_all(exp.Alias):
+        if a.alias and a.find(exp.AggFunc) is not None:
+            ir.agg_aliases.add(a.alias)
+
     grp = tree.find(exp.Group)
     if grp is not None:
         for e in grp.expressions:
@@ -60,6 +69,7 @@ def extract_sql_ir(sql: str) -> SqlIR:
             c = e.find(exp.Column)
             if c is not None:
                 ir.orderings.append(c.name)
+                ir.ordering_agg.append(e.find(exp.AggFunc) is not None)
 
     def _in_subquery(node) -> bool:
         p = node.parent
@@ -193,10 +203,25 @@ def validate_ir_equivalence(query, sql, sm, *, allowed_tables=None,
     if ir.groupings and not _has(query, r"\b(per|by|each|every|group|breakdown|split)\b"):
         v.append(f"GROUP BY {ir.groupings} not requested")
 
-    # Rule 4 — no extra ordering
+    # Rule 4 — no extra ordering. Carve-out (flag-guarded): when grouping IS licensed
+    # (Rule 3's own words) and every ordering key is a projected aggregate or its
+    # SELECT alias, the sort only re-orders the licensed breakdown by its own measure
+    # — presentation, not semantics; it admits no rows/filters/joins. Anything else
+    # (ordering by a raw column, unlicensed grouping) stays refused.
     if ir.orderings and not _has(query, r"\b(top|highest|lowest|most|least|largest|"
                                         r"smallest|sorted?|rank|order|first|last|recent)\b"):
-        v.append(f"ORDER BY {ir.orderings} not requested")
+        try:
+            from config import IR_ORDERBY_GROUPED_MEASURE_OK
+        except Exception:
+            IR_ORDERBY_GROUPED_MEASURE_OK = False
+        _grouped_measure_sort = (
+            IR_ORDERBY_GROUPED_MEASURE_OK and ir.groupings
+            and _has(query, r"\b(per|by|each|every|group|breakdown|split)\b")
+            and len(ir.ordering_agg) == len(ir.orderings)
+            and all(is_agg or name in ir.agg_aliases
+                    for name, is_agg in zip(ir.orderings, ir.ordering_agg)))
+        if not _grouped_measure_sort:
+            v.append(f"ORDER BY {ir.orderings} not requested")
 
     # Rule 2 — no unrequested DISTINCT (COUNT(DISTINCT) grain is allowed)
     if ir.distinct and "COUNT" not in ir.aggregations \

@@ -67,7 +67,27 @@ def _execute_duckdb(sql, params, surfaces):
             pass
 
 
+# Clean, classified error for a placeholder/param-count mismatch in GENERATED SQL.
+# Without this, psycopg2 surfaces the raw formatting crash ("IndexError: list index
+# out of range" / "unsupported format character") as the exec error — cryptic, and it
+# reads like an engine bug instead of "the generated SQL was malformed, refused".
+PARAM_MISMATCH_ERROR = ("generated SQL parameter mismatch "
+                        "(placeholder count != bound values) — refused")
+
+
+def _param_mismatch(sql, params):
+    """True when the %s placeholder count disagrees with the bound-value count —
+    the exact condition that makes psycopg2 raise IndexError at execute time.
+    %% (escaped literal percent) is not a placeholder."""
+    return len(re.findall(r"%s", (sql or "").replace("%%", ""))) != len(params or [])
+
+
 def execute_sql(sql, params=None):
+    # Placeholder/param consistency FIRST — never hand psycopg2 (or DuckDB, after the
+    # %s→? rewrite) SQL whose placeholders can't all bind. Degrade to a clean error.
+    if _param_mismatch(sql, params):
+        return None, None, PARAM_MISMATCH_ERROR
+
     # Tabular sources (CSV/parquet) have no relational DB — route their SQL to DuckDB
     # over the materialized parquet. Purely relational scopes keep the psycopg2 fast path.
     source_ids, tenant = _scope_source_ids()
@@ -103,6 +123,10 @@ def execute_sql(sql, params=None):
             cols = [d[0] for d in cur.description]
             rows = cur.fetchmany(EXECUTION_RESULT_LIMIT)
         return cols, rows, None
+    except (IndexError, ValueError, TypeError):
+        # psycopg2's client-side %-formatting crash (stray %, tuple/list mismatch)
+        # that slipped past the pre-check — same class, same clean refusal.
+        return None, None, PARAM_MISMATCH_ERROR
     except Exception as e:
         return None, None, str(e)
     finally:

@@ -102,13 +102,12 @@ def run_query(query, sm, all_cols, return_result=False):
     else:
         print("  [L1] Temporal     (no date range)")
 
-    try:
-        from query_engine.intent_detector import IntentDetector
-        ir = IntentDetector().detect(query)
-        intent = ir.intent.value if hasattr(ir.intent, "value") else str(ir.intent)
-    except Exception:
-        intent = "SIMPLE"
-    print(f"  [L4] Intent       {intent}")
+    # Intent comes from the grammar signals that actually exist (existence_mode /
+    # aggregate_mode / superlative_mode below) — the old query_engine.IntentDetector
+    # import never resolved (module absent), silently pinning intent to SIMPLE while
+    # the trace implied a classifier ran.
+    intent = "SIMPLE"
+    print(f"  [L4] Intent       {intent} (grammar-derived below)")
 
     # Existence queries (with/without/how-many-have) are deterministic + fast, and the
     # embedding cache CAN'T tell "with" from "without" (near-identical vectors, opposite
@@ -117,11 +116,28 @@ def run_query(query, sm, all_cols, return_result=False):
     if is_existence:
         print(f"  [L4a] Existence    semi/anti-join operator detected → {existence_mode(query)}")
 
-    from veda.planning import aggregate_mode as _agg_mode
+    from veda.planning import (aggregate_mode as _agg_mode, grouped_mode as _grp_mode,
+                               ratio_mode as _rat_mode, superlative_mode as _sup_mode)
+    _agg, _sup, _grp, _rat = (_agg_mode(query), _sup_mode(query), _grp_mode(query),
+                              _rat_mode(query))
+    if _sup:
+        # Routing a superlative into join planning is gated: until the grain planner
+        # can actually CONSUME a superlative (group-by dim + measure), the extra
+        # multi-table planning is pure latency on wide schemas (measured: 4 suite
+        # queries pushed past the 120s budget). The trace still records the
+        # superlative either way.
+        try:
+            from config import SUPERLATIVE_JOIN_ROUTING
+        except Exception:
+            SUPERLATIVE_JOIN_ROUTING = False
+        if SUPERLATIVE_JOIN_ROUTING:
+            intent = "AGGREGATE"
+        print(f"  [L4] Intent       {intent} (superlative: {_sup['term']} → {_sup['superlative']})")
     tr.set("query_understanding", query=query, intent=intent,
            temporal=({"start": tf.start, "end": tf.end}
                      if tf and (tf.start or tf.end) else None),
-           existence=existence_mode(query), aggregation=_agg_mode(query))
+           existence=existence_mode(query), aggregation=_agg, superlative=_sup,
+           grouped=_grp, ratio=_rat)
 
     # Deterministic fast path: count / aggregate / dimension-list questions resolve
     # straight from the compiled registries — no retrieval, no planner, no LLM (and
@@ -137,7 +153,114 @@ def run_query(query, sm, all_cols, return_result=False):
             print(f"  [FastPath] warning: {_fpe} — falling through")
             fp = None
 
+    # Deterministic superlative-by-dimension planner (QSR-backed, Phase B): grouped
+    # ranked aggregation straight from resolution artifacts — no retrieval, no LLM.
+    # May also return a grounded clarify (ambiguous dimension/measure listed).
+    if fp is None and not is_existence and _sup:
+        try:
+            from config import SUPERLATIVE_PLAN_ENABLED
+        except Exception:
+            SUPERLATIVE_PLAN_ENABLED = False
+        if SUPERLATIVE_PLAN_ENABLED:
+            try:
+                from query.superlative_plan import try_superlative_plan
+                _sp = try_superlative_plan(query, sm)
+            except Exception as _spe:
+                print(f"  [SupPlan] warning: {_spe} — falling through")
+                _sp = None
+            if isinstance(_sp, tuple) and _sp and _sp[0] == "clarify":
+                fb = _feedback("clarify", msg=_sp[1])
+                log_route("clarify", query, (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_sp[1], feedback=fb)
+            if _sp is not None:
+                fp = _sp
+
+    # Deterministic grouped-breakdown planner (same QSR machinery, non-ranked
+    # sibling): "how much does each <dim> contribute" → GROUP BY dim, SUM(measure).
+    # Same clarify/fall-through contract as the superlative planner above.
+    if fp is None and not is_existence and _grp:
+        try:
+            from config import GROUPED_PLAN_ENABLED
+        except Exception:
+            GROUPED_PLAN_ENABLED = False
+        if GROUPED_PLAN_ENABLED:
+            try:
+                from query.superlative_plan import try_grouped_plan
+                _gp = try_grouped_plan(query, sm)
+            except Exception as _gpe:
+                print(f"  [GrpPlan] warning: {_gpe} — falling through")
+                _gp = None
+            if isinstance(_gp, tuple) and _gp and _gp[0] == "clarify":
+                fb = _feedback("clarify", msg=_gp[1])
+                log_route("clarify", query, (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_gp[1], feedback=fb)
+            if _gp is not None:
+                fp = _gp
+
+    # Deterministic ratio planner: "ratio of X to Y" → single-scan divided sums
+    # on the measure-owning anchor; ungroundable side → grounded clarify with the
+    # anchor's real value domain (terminal — never retried by Tier-2).
+    if fp is None and not is_existence and _rat:
+        try:
+            from config import RATIO_PLAN_ENABLED
+        except Exception:
+            RATIO_PLAN_ENABLED = False
+        if RATIO_PLAN_ENABLED:
+            try:
+                from query.ratio_plan import try_ratio_plan
+                _rp = try_ratio_plan(query, sm)
+            except Exception as _rpe:
+                print(f"  [RatioPlan] warning: {_rpe} — falling through")
+                _rp = None
+            if isinstance(_rp, tuple) and _rp and _rp[0] == "clarify":
+                fb = _feedback("clarify", msg=_rp[1])
+                log_route("clarify", query, (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_rp[1], feedback=fb)
+            if _rp is not None:
+                fp = _rp
+
+    # FAST-PATH EVIDENCE GUARD: the fast path bypasses anchor vetting, so an answer
+    # built entirely on tables the query gives NO typed evidence for (no entity
+    # word, no value, no closure) is the wrong-pick signature — "annual sum of
+    # financial records…" answered from users_userpreference via the
+    # financial_year_id accident. DEMOTE, don't refuse: fall through to the full
+    # pipeline, which has anchor vetting and its own gates. (Measured on the golden
+    # baseline: refusing here flipped good answers on descriptor words; demotion
+    # only costs latency on the rare zero-evidence picks.)
+    if fp is not None and not isinstance(fp, dict):
+        try:
+            from config import FASTPATH_EVIDENCE_GUARD, QSR_FP_EVIDENCE_FLOOR
+            if FASTPATH_EVIDENCE_GUARD and fp.tables:
+                from query.resolution import typed_anchor_evidence
+                _ev, _ = typed_anchor_evidence(query, sm)
+                if not any(_ev.get(t, 0.0) >= QSR_FP_EVIDENCE_FLOOR for t in fp.tables):
+                    print(f"  [FastPath] demoted: no typed evidence for "
+                          f"{sorted(fp.tables)[:3]} — full pipeline")
+                    tr.note("schema_linking",
+                            f"fast-path pick {sorted(fp.tables)[:3]} demoted (zero typed evidence)")
+                    fp = None
+        except Exception:
+            pass
+
     cached_sql, sim = (None, 0.0) if (is_existence or fp) else verified_cache_lookup(query)
+    # Same evidence guard for the CACHED lane — the fourth answer-producing lane,
+    # which replays SQL verified under OLDER code: a cached answer whose tables get
+    # zero typed evidence from the query is a stale wrong pick → recompute.
+    if cached_sql:
+        try:
+            from config import FASTPATH_EVIDENCE_GUARD, QSR_FP_EVIDENCE_FLOOR
+            if FASTPATH_EVIDENCE_GUARD:
+                from query.resolution import typed_anchor_evidence
+                _ct = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)',
+                                     cached_sql))
+                _ev, _ = typed_anchor_evidence(query, sm)
+                if _ct and not any(_ev.get(t, 0.0) >= QSR_FP_EVIDENCE_FLOOR for t in _ct):
+                    print(f"  [cache] demoted: no typed evidence for cached tables "
+                          f"{sorted(_ct)[:3]} — recompute")
+                    tr.note("schema_linking", "verified-cache hit demoted (zero typed evidence)")
+                    cached_sql = None
+        except Exception:
+            pass
     if fp:
         print(f"  [FastPath] {fp.route}  ({'; '.join(fp.why)})  — no retrieval / no LLM")
         sql, primary, from_cache = fp.sql, fp.primary, False
@@ -235,23 +358,35 @@ def run_query(query, sm, all_cols, return_result=False):
                     _tail = results[RERANK_MAX_CANDIDATES:]
                     _pairs = [[_search, f"{r.column_name} {r.table_name}"] for r in _head]
                     _sc = _rk.predict(_pairs, batch_size=RERANKER_BATCH_SIZE)
-                    _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
-                    for _s, _r in _ranked:
-                        _r.final_score = float(_s)   # anchor reads final_score → now reranked
-                    # SCALE GUARD: the reranked head now carries CROSS-ENCODER scores (raw
-                    # logits, often negative), while the tail still carries RRF scores (small
-                    # positive). select_primary_table/score_anchors pick the anchor by
-                    # max(final_score) across BOTH — so without this a weak tail column (RRF
-                    # 0.05) would outrank a reranked head column scored -3 and hijack the
-                    # anchor. Floor every tail score strictly below the lowest reranked head
-                    # score (preserving the tail's own relative order) so the tail can never
-                    # win anchoring — matching this block's stated intent.
-                    if _ranked and _tail:
-                        _floor = min(float(_s) for _s, _ in _ranked)
-                        for _i, _r in enumerate(_tail):
-                            _r.final_score = _floor - 1.0 - _i * 1e-6
-                    results = [_r for _, _r in _ranked] + _tail
-                    print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
+                    # NOISE FLOOR: the cross-encoder's output is calibrated (sigmoid) — when
+                    # its BEST pair is near zero it is affirmatively saying NO candidate is
+                    # relevant to this query. Overwriting final_score then replaces the RRF
+                    # consensus (BM25+embedding+graph) with pure noise that downstream anchor
+                    # normalization stretches to 1.0 — mis-anchoring on garbage. Keep the RRF
+                    # order instead; the floor is in the model's own output space, no schema
+                    # or vocabulary assumption.
+                    try:
+                        from config import RERANK_NOISE_FLOOR
+                    except Exception:
+                        RERANK_NOISE_FLOOR = 0.0
+                    _smax = max((float(s) for s in _sc), default=0.0)
+                    if _smax < RERANK_NOISE_FLOOR:
+                        print(f"  [L2b] Primary rerank UNINFORMATIVE (max {_smax:.5f} < "
+                              f"{RERANK_NOISE_FLOOR}) — keeping RRF order")
+                    else:
+                        _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
+                        for _s, _r in _ranked:
+                            _r.final_score = float(_s)   # anchor reads final_score → now reranked
+                        # SCALE GUARD (H-0): reranked head carries cross-encoder scores, the tail
+                        # keeps RRF scores — incomparable, so floor the tail below the head to keep
+                        # it from hijacking anchor selection. (Verified NOT the count-for-sale
+                        # regression culprit; the anchor ambiguity there is pre-existing.)
+                        if _ranked and _tail:
+                            _floor = min(float(_s) for _s, _ in _ranked)
+                            for _i, _r in enumerate(_tail):
+                                _r.final_score = _floor - 1.0 - _i * 1e-6
+                        results = [_r for _, _r in _ranked] + _tail
+                        print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
             except Exception as _rr_e:
                 print(f"  [L2b] primary rerank skipped: {type(_rr_e).__name__}: {str(_rr_e)[:100]}")
         elif PRIMARY_RERANK_ENABLED and results:
@@ -264,6 +399,13 @@ def run_query(query, sm, all_cols, return_result=False):
                 _cand_tabs.append(_t)
         _router_primary = select_primary_table(results, query, sm)
         primary = vet_primary(query, _router_primary, results, sm, trace=tr)
+        if isinstance(primary, dict):
+            # single-table ambiguity gate: two sub-margin, differently-named subjects —
+            # ask which grain the user means instead of silently picking one.
+            _cmsg = primary.get("clarify")
+            fb = _feedback("clarify", msg=_cmsg)
+            log_route("clarify", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_cmsg, feedback=fb)
         if primary != _router_primary:
             print(f"  [L3] Grain vet     router primary {_router_primary!r} → {primary!r} "
                   f"(word-order / grain-hint)")
@@ -419,10 +561,12 @@ def run_query(query, sm, all_cols, return_result=False):
             if VALUE_ARBITER_ENABLED:
                 try:
                     from query.value_arbiter import (arbitrate, anchor_filters,
-                                                     column_values_typed_lookup,
                                                      build_schema_terms)
-                    from veda.runtime import _pg as _pgc_arb
-                    _arb = arbitrate(query, column_values_typed_lookup(_pgc_arb),
+                    # QSR typed lookup — the old column_values_typed_lookup(runtime._pg)
+                    # pointed at the SOURCE DB (no column_values there) and silently
+                    # returned [] for every token; the arbiter never saw a value.
+                    from query.resolution import typed_value_lookup
+                    _arb = arbitrate(query, typed_value_lookup(),
                                      build_schema_terms(sm))
                     _arb_filters = anchor_filters(_arb, primary)
                     if _arb.value_filters:
@@ -681,6 +825,38 @@ def run_query(query, sm, all_cols, return_result=False):
     ok_q, missing = qualifier_completeness(query, sql, sm)
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
+        # Grounded clarify upgrade: when the dropped token is NOT a real data value
+        # anywhere (no direct/closed referent) and the queried table exposes FK label
+        # domains, the honest answer is the domain, not a generic refusal —
+        # "'completed' doesn't match any payment status; statuses here are captured /
+        # authorized / cancelled." Clarify is terminal (never retried by Tier-2).
+        try:
+            from query.resolution import value_referents, domain_via
+            from query.join_planner import load_graph
+            _vr = value_referents(missing)
+            if not _vr["direct"] and not _vr["closed"]:
+                _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
+                _qw = set(re.findall(r"[a-z]+", query.lower()))
+                _doms = []
+                for _e in load_graph().get("edges", []):
+                    if _e.get("source_table") in _sql_tabs and _e.get("cardinality") == "N:1":
+                        _d = domain_via(_e["source_table"], _e["source_column"], limit=6)
+                        if len(_d) > 1:
+                            # rank by how much the FK column's own words overlap the
+                            # query ("payment_status_id" for "…completed payments")
+                            _ov = len(_qw & {w for w in _e["source_column"].split("_")
+                                             if len(w) > 2})
+                            _doms.append((-_ov, _e["source_column"], _d))
+                if _doms:
+                    _doms.sort()
+                    _, _col, _d = _doms[0]
+                    _msg = (f"'{missing}' doesn't match any value in this data — "
+                            f"did you mean one of {', '.join(_d[:5])} ({_col})?")
+                    fb = _feedback("clarify", msg=_msg)
+                    log_route(_route + ".grounded_clarify", query, (time.time() - start) * 1000)
+                    return _done(0, "clarify", msg=_msg, feedback=fb)
+        except Exception:
+            pass
         fb = _feedback("qualifier_dropped", missing=missing)
         log_route(_route + ".qualifier_dropped", query, (time.time() - start) * 1000)
         return _done(0, "qualifier_dropped", missing=missing, feedback=fb)

@@ -76,7 +76,7 @@ class AnchorCandidate:
     signals: dict                # per-signal breakdown (lexical/position/retrieval/graph)
 
 
-def score_anchors(query, candidate_tables, scores=None, graph=None, adj=None):
+def score_anchors(query, candidate_tables, scores=None, graph=None, adj=None, sm=None):
     """Rank candidate subject/grain tables by a MULTI-SIGNAL composite — the
     replacement for a single winner-take-all heuristic.
 
@@ -99,6 +99,33 @@ def score_anchors(query, candidate_tables, scores=None, graph=None, adj=None):
     import re
     from retrieval.query_enrichment import _singularize
     from config import ANCHOR_SCORING as W
+
+    # Schema-vocabulary segmentation so concatenated names ("paymenttransaction")
+    # expose their entity words to the lexical/position signals; plain split on
+    # any failure — identical to the legacy tokens.
+    def _tab_toks(t):
+        try:
+            from semantic.name_tokens import table_tokens
+            return {w for w in table_tokens(t, sm) if w not in _ANCHOR_CONNECTIVES}
+        except Exception:
+            return {_singularize(w) for w in t.split("_")
+                    if len(w) > 2 and w not in _ANCHOR_CONNECTIVES}
+
+    # Table-token IDF: a matched name token shared by many tables ("value", "type",
+    # an app prefix) is weak evidence; one carried by few ("payment") is strong.
+    # Schema-derived — the generic-word discount without any stopword list. Without
+    # this, subword segmentation would let generic tokens mis-anchor wide families
+    # (query "…value…" → every valuebundle table). Empty dict → weights of 1.0
+    # everywhere, i.e. exactly the unweighted legacy arithmetic.
+    try:
+        from semantic.name_tokens import token_table_idf
+        _idf = token_table_idf(sm) or {}
+    except Exception:
+        _idf = {}
+
+    def _w(tok):
+        return _idf.get(tok, 1.0)
+
     scores = scores or {}
     words = [_singularize(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2]
     qtoks = set(words)
@@ -120,27 +147,29 @@ def score_anchors(query, candidate_tables, scores=None, graph=None, adj=None):
     # first token (incident vs incident_signal_score, rfi_objects vs
     # rfi_instance_questions), the one the query names with MORE tokens is the more
     # specific subject — the old picker's primary key, kept here as a weighted signal.
-    _matched_counts = []
+    _matched_weights = []
     for t in candidate_tables:
-        _tk = {_singularize(w) for w in t.split("_")
-               if len(w) > 2 and w not in _ANCHOR_CONNECTIVES}
-        _matched_counts.append(len(qtoks & _tk))
-    max_matched = max(_matched_counts) if _matched_counts else 0
+        _matched_weights.append(sum(_w(x) for x in (qtoks & _tab_toks(t))))
+    max_matched = max(_matched_weights) if _matched_weights else 0.0
 
     rows = []
     for t in candidate_tables:
-        toks = {_singularize(w) for w in t.split("_")
-                if len(w) > 2 and w not in _ANCHOR_CONNECTIVES}
+        toks = _tab_toks(t)
         matched = qtoks & toks
-        coverage = len(matched) / len(toks) if toks else 0.0
-        specificity = (len(matched) / max_matched) if max_matched else 0.0
+        mw = sum(_w(x) for x in matched)
+        tw = sum(_w(x) for x in toks)
+        coverage = mw / tw if tw else 0.0
+        specificity = (mw / max_matched) if max_matched else 0.0
         # A SINGLE name-token match is often coincidental ("investigation" hits both
         # incident-related intent and the table investigation_..._party) and must NOT let
         # lexical override the learned reranker/retrieval signal. Mirrors select_primary_table:
         # one token contributes only coverage; 2+ matched tokens keep full lexical weight.
         lexical = (0.5 * coverage + 0.5 * specificity) if len(matched) >= 2 else 0.5 * coverage
         fp = _first_pos(toks)
-        position = (1.0 - fp / nwords) if fp is not None else 0.0
+        # Subject prior, discounted by the DISTINCTIVENESS of the word that claimed it:
+        # an early generic token ("value") is a weak subject claim, an early rare one
+        # ("payment") a strong one. IDF absent → weight 1.0 = legacy behavior.
+        position = (1.0 - fp / nwords) * _w(words[fp]) if fp is not None else 0.0
         retrieval = (scores.get(t, 0.0) / maxret) if maxret else 0.0
         graph_sig = 0.0
         if adj is not None and len(candidate_tables) > 1:

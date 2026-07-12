@@ -32,13 +32,21 @@ class NLAnswerResult:
 
 def _fmt_value(v):
     """Human-friendly scalar formatting (thousands separators for ints)."""
+    from decimal import Decimal
     if isinstance(v, bool):
         return "yes" if v else "no"
+    if isinstance(v, Decimal):      # psycopg2 returns NUMERIC as Decimal
+        v = float(v)
     if isinstance(v, int):
         return f"{v:,}"
     if isinstance(v, float):
         return f"{v:,.2f}".rstrip("0").rstrip(".")
     return str(v)
+
+
+def _is_numericish(v) -> bool:
+    from decimal import Decimal
+    return v is None or isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
 
 
 def _label_from_column(col: str) -> str:
@@ -71,6 +79,24 @@ def template_answer(query: str, columns: List[str], rows: List[dict]) -> Optiona
                  for c in columns[:6] if row.get(c) is not None]
         if parts:
             return "Result: " + ", ".join(parts) + "."
+
+    # Small GROUPED result (label column + numeric aggregates, ≤6 groups): prose
+    # per group, deterministically — "2 transaction type groups: DEBIT (total
+    # expected amount 20,416,761, …); CREDIT (…)". This is the canonical shape the
+    # grouped/superlative planners emit; without it every breakdown rode the SLM's
+    # 800ms budget and usually shipped the bare row-count fallback instead of NL.
+    if 2 <= row_count <= 6 and columns and len(columns) >= 2:
+        label_col, val_cols = columns[0], columns[1:6]
+        if all(_is_numericish(row.get(c)) for row in rows for c in val_cols) \
+                and not _is_numericish(rows[0].get(label_col)):
+            groups = []
+            for row in rows:
+                vals = ", ".join(f"{_label_from_column(c)} {_fmt_value(row.get(c))}"
+                                 for c in val_cols if row.get(c) is not None)
+                groups.append(f"{row.get(label_col)} ({vals})" if vals
+                              else str(row.get(label_col)))
+            return (f"{row_count} {_label_from_column(label_col)} groups: "
+                    + "; ".join(groups) + ".")
     return None
 
 

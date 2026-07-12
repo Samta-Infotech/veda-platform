@@ -64,7 +64,7 @@ def select_primary_table(results, query, semantic_model):
     # silently routes to the wrong table. Name-matched tables enter scoring; only a
     # strong lexical match (below) actually wins, so this adds candidates, not noise.
     for t in semantic_model.get("tables", {}):
-        if q_tokens & {_singularize(w) for w in t.split("_") if len(w) > 2}:
+        if q_tokens & _name_toks(t, semantic_model):
             candidates.add(t)
 
     if not candidates:
@@ -74,8 +74,7 @@ def select_primary_table(results, query, semantic_model):
     for t in candidates:
         # Strip structural connectives so a wide name can't match on glue words
         # (investigation_AND_research_counter_party must not match query token "and").
-        name_tokens = {_singularize(w) for w in t.split("_")
-                       if len(w) > 2 and w not in _NAME_CONNECTIVES}
+        name_tokens = _name_toks(t, semantic_model)
         matched = q_tokens & name_tokens
         coverage = (len(matched) / len(name_tokens)) if name_tokens else 0.0
         # Lexical evidence outranks a higher semantic cosine ONLY when the query genuinely
@@ -135,8 +134,7 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
             _grain_is_dim = False
     if gm and not _grain_is_dim:
         grain = _singularize(gm.group(1).split()[0])
-        exact = [t for t in gtabs
-                 if {_singularize(w) for w in t.split("_") if len(w) > 2} == {grain}]
+        exact = [t for t in gtabs if _name_toks(t, semantic_model) == {grain}]
         if len(exact) == 1:
             if trace is not None:
                 trace.set("anchor_selection", anchor=exact[0], confidence=1.0,
@@ -155,8 +153,7 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
     # else a grain-hint table ("for each incident" → incident) can't be scored/pinned.
     from retrieval.query_enrichment import _singularize
     qtok = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
-    named = [t for t in gtabs
-             if {_singularize(w) for w in t.split("_") if len(w) > 2} & qtok]
+    named = [t for t in gtabs if _name_toks(t, semantic_model) & qtok]
     cand = list(dict.fromkeys(cand + named + [primary]))
 
     # Graph-driven dimension demotion: a multi-word phrase the UNIFIED GRAPH maps to a COLUMN
@@ -177,7 +174,7 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
                     _dim_toks |= {_singularize(_words[_i]), _singularize(_words[_i + 1])}
             if _dim_toks:
                 _filtered = [t for t in cand if t == primary or not (
-                    (m := {_singularize(w) for w in t.split("_") if len(w) > 2} & qtok)
+                    (m := _name_toks(t, semantic_model) & qtok)
                     and m <= _dim_toks)]
                 if len(_filtered) >= 2:
                     cand = _filtered
@@ -187,7 +184,7 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
     if len(cand) < 2:
         return primary
 
-    ranked = score_anchors(query, cand, score, graph=graph)
+    ranked = score_anchors(query, cand, score, graph=graph, sm=semantic_model)
     if not ranked:
         return primary
 
@@ -229,14 +226,54 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
         VALUE_ANCHOR_RERANK_ENABLED, VALUE_ANCHOR_RERANK_WEIGHT = False, 0.25
     if VALUE_ANCHOR_RERANK_ENABLED and len(ranked) > 1:
         try:
-            from query.value_arbiter import arbitrate, column_values_typed_lookup
-            from veda.runtime import _pg as _pgc_anchor
-            _arb = arbitrate(query, column_values_typed_lookup(_pgc_anchor))
+            # QSR (query/resolution.py): artifact-first typed lookup — the old
+            # column_values_typed_lookup(runtime._pg) queried the SOURCE DB, which
+            # has no column_values table, so this whole channel silently returned
+            # [] in production. Also new: FK-CLOSURE evidence — a value living one
+            # join away ('captured' in a status lookup) credits the REFERENCING
+            # table (accounts_paymenttransaction.payment_status_id) at reduced
+            # weight. Anchor evidence only; predicates still use direct referents.
+            from query.value_arbiter import arbitrate
+            from query.resolution import typed_value_lookup, closed_value_tables
+            try:
+                from config import VALUE_ANCHOR_CLOSED_WEIGHT
+            except Exception:
+                VALUE_ANCHOR_CLOSED_WEIGHT = 0.15
+            _arb = arbitrate(query, typed_value_lookup())
             _value_tables = {t.table for t in _arb.value_filters if t.table}
-            if _value_tables:
+            _closed_tables = set()
+            for _t in _arb.value_filters:
+                _closed_tables.update(closed_value_tables(_t.span))
+            _closed_tables -= _value_tables
+            if _value_tables or _closed_tables:
                 for a in ranked:
                     if a.table in _value_tables:
                         a.score = round(a.score + VALUE_ANCHOR_RERANK_WEIGHT, 4)
+                    elif a.table in _closed_tables:
+                        a.score = round(a.score + VALUE_ANCHOR_CLOSED_WEIGHT, 4)
+                ranked.sort(key=lambda a: a.score, reverse=True)
+        except Exception:
+            pass
+
+    # QSR typed-evidence re-rank (downstream of score_anchors, same pattern as the
+    # IDF/value re-ranks): role-disciplined evidence — entity words vote (grammar
+    # words don't), values vote for their owning tables (FK-closed at reduced
+    # weight, label stores demoted). This is the signal that anchors "annual sum of
+    # financial records by transaction years" on a *transaction table instead of
+    # whatever retrieval noise ranked first. Bounded, flag-guarded, failure-safe.
+    try:
+        from config import TYPED_ANCHOR_RERANK_ENABLED, TYPED_ANCHOR_RERANK_WEIGHT
+    except Exception:
+        TYPED_ANCHOR_RERANK_ENABLED, TYPED_ANCHOR_RERANK_WEIGHT = False, 0.2
+    if TYPED_ANCHOR_RERANK_ENABLED and len(ranked) > 1:
+        try:
+            from query.resolution import typed_anchor_evidence
+            _ev, _ = typed_anchor_evidence(query, semantic_model)
+            _mx = max(_ev.values()) if _ev else 0.0
+            if _mx > 0:
+                for a in ranked:
+                    a.score = round(a.score + TYPED_ANCHOR_RERANK_WEIGHT
+                                    * (_ev.get(a.table, 0.0) / _mx), 4)
                 ranked.sort(key=lambda a: a.score, reverse=True)
         except Exception:
             pass
@@ -254,6 +291,52 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
                 and len(qtok & _name_toks(primary)) > len(qtok & _name_toks(top.table)))
     if top.table != primary and not _protect and (top.score - pscore) >= ANCHOR_CONFIDENCE_MARGIN:
         chosen, overrode = top.table, True
+
+    # ── Single-table ambiguity gate (counterpart of planning.py's multi-table gate,
+    # which this path never reaches). Fires ONLY when (a) the top two anchors are
+    # within the commit margin, (b) each is named by DISJOINT query tokens — two
+    # different subjects, not one entity vs its wider sibling (those share tokens
+    # and stay with the existing rules), and (c) the winner is not the query's
+    # plain grammatical subject (its name token both earliest among the pair and
+    # genuinely early in the sentence). Refuse-over-guess: a coin-flip between two
+    # differently-named subjects should ask, not silently pick a grain.
+    try:
+        from config import ANCHOR_SINGLE_GATE_ENABLED, ANCHOR_SUBJECT_POS_MIN
+    except Exception:
+        ANCHOR_SINGLE_GATE_ENABLED, ANCHOR_SUBJECT_POS_MIN = False, 0.7
+    if ANCHOR_SINGLE_GATE_ENABLED and len(ranked) > 1:
+        a, b = ranked[0], ranked[1]
+        if (a.score - b.score) < ANCHOR_CONFIDENCE_MARGIN:
+            am = qtok & _name_toks(a.table, semantic_model)
+            bm = qtok & _name_toks(b.table, semantic_model)
+            if am and bm and not (am & bm):
+                _qw = [_singularize(w) for w in re.findall(r"[a-z]+", query.lower())
+                       if len(w) > 2]
+
+                def _fpos(mset):
+                    for _i, _w in enumerate(_qw):
+                        if _w in mset:
+                            return _i
+                    return None
+
+                fa, fb = _fpos(am), _fpos(bm)
+                subject_clear = (fa is not None
+                                 and (fb is None or fa < fb)
+                                 and (1.0 - fa / (len(_qw) or 1)) >= ANCHOR_SUBJECT_POS_MIN)
+                if not subject_clear:
+                    msg = (f"ambiguous subject — should this be about {a.table} or "
+                           f"{b.table}? (confidence {a.score} vs {b.score})")
+                    if trace is not None:
+                        trace.set("anchor_selection", anchor=None,
+                                  confidence=round(a.score, 3),
+                                  margin=round(a.score - b.score, 3),
+                                  router_primary=primary, overrode_router=False,
+                                  source="single-table-gate")
+                        trace.note("anchor_selection",
+                                   f"sub-margin disjoint subjects {a.table!r} vs "
+                                   f"{b.table!r} → clarify")
+                    return {"clarify": msg, "candidates": [a.table, b.table]}
+
     if trace is not None:
         second = ranked[1].score if len(ranked) > 1 else 0.0
         trace.set("anchor_selection", anchor=chosen, confidence=round(top.score, 3),
@@ -271,8 +354,15 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
 _NAME_CONNECTIVES = {"and", "or", "of", "to", "by"}
 
 
-def _name_toks(table_name):
-    """Singularized entity tokens of a TABLE NAME, minus structural connectives."""
+def _name_toks(table_name, sm=None):
+    """Singularized entity tokens of a TABLE NAME, minus structural connectives.
+    Schema-vocabulary segmentation (semantic/name_tokens) opens up concatenated
+    names ("paymenttransaction" → payment, transaction); falls back to the plain
+    underscore split on any failure or when the flag is off."""
     from retrieval.query_enrichment import _singularize
-    return {_singularize(tok) for tok in table_name.split("_")
-            if len(tok) > 2 and tok not in _NAME_CONNECTIVES}
+    try:
+        from semantic.name_tokens import table_tokens
+        return {t for t in table_tokens(table_name, sm) if t not in _NAME_CONNECTIVES}
+    except Exception:
+        return {_singularize(tok) for tok in table_name.split("_")
+                if len(tok) > 2 and tok not in _NAME_CONNECTIVES}

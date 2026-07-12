@@ -303,7 +303,7 @@ def _domain_synonyms() -> dict:
     return _DS_SYN_CACHE["v"]
 
 
-def qualifier_completeness(query, sql, sm=None):
+def qualifier_completeness(query, sql, sm=None, strict=False):
     """Unified correctness gate (all paths): every CONTENT token the user named must
     appear somewhere in the generated SQL — as a table, column, string literal, or
     SELECT alias (or as a descriptor in a referenced table's business purpose). A named
@@ -385,9 +385,25 @@ def qualifier_completeness(query, sql, sm=None):
     # column (a DROPPED FILTER). Tokens that name NEITHER ("in the database/system/
     # platform", or any noun a user invents) are filler — ignoring them avoids a false
     # refuse. Schema + data decide, no word lists.
+    # STRICT (LLM lanes): the filler policy above has a wrong-table blind spot — a
+    # token is only "real" if it names a column of the QUERIED tables or a grounded
+    # value, so a maximally-wrong table makes every qualifier look like filler
+    # ('financial records' vs SELECT * FROM assets_asset passed). In strict mode a
+    # token with a QSR referent ANYWHERE in the schema (entity/column/value) is a
+    # dropped qualifier. Failure-safe: resolver errors keep the lenient behavior.
+    def _qsr_ref(ct):
+        if not strict:
+            return False
+        try:
+            from query.resolution import has_schema_referent
+            return has_schema_referent(ct, sm)
+        except Exception:
+            return False
+
     missing = [ct for ct in unaccounted
                if _names_entity_column(ct, tables_in_sql, sm)
-               or _is_grounded_filter_value(ct, tables_in_sql, sm)]
+               or _is_grounded_filter_value(ct, tables_in_sql, sm)
+               or _qsr_ref(ct)]
     return (not missing), (missing[0] if missing else None)
 
 

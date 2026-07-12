@@ -180,7 +180,16 @@ class UnifiedGraph:
         added: List[str] = []
         resolved_cids: List[str] = []
         # 1) synonym/alias/name resolution of query tokens → columns (the high-signal part)
-        for tok in [t for t in _re.findall(r"[a-zA-Z_]+", query.lower()) if len(t) > 2]:
+        # Seeds are CONTENT words only — same language-layer contract as the qualifier
+        # gate. Without this, operator/function words seed synonym walks ("all" →
+        # "24/7 access", "value" → every valuebundle column) and pollute retrieval.
+        try:
+            from veda.validation import _gate_strip
+            _lang = _gate_strip()
+        except Exception:
+            _lang = set()
+        for tok in [t for t in _re.findall(r"[a-zA-Z_]+", query.lower())
+                    if len(t) > 2 and t not in _lang]:
             cids = self.resolve_term(tok)
             if cids:
                 seeds.append(tok)

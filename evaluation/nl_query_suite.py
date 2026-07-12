@@ -46,67 +46,82 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 # --------------------------------------------------------------------------- queries
 # id, text.  Grouped loosely by complexity so the report reads sensibly.
 QUERIES: list[tuple[str, str]] = [
-    ("q01", "Can you list the latest payments made for our properties, including whether they were debited or credited and the exact amounts?"),
-    ("q02", "Show me the cheapest properties currently on the market for sale, along with their current market status."),
-    ("q03", "Which properties have the most expensive financial records logged to date?"),
-    ("q04", "What were the smallest payments processed across our real estate portfolio recently?"),
-    ("q05", "What are the oldest properties we put up for sale, and what is their current status?"),
-    ("q06", "Give me a quick breakdown of the most recent accounting entries for our assets."),
-    ("q07", "Can I get a quick alphabetical list of our properties and the recent payments associated with them?"),
-    ("q08", "Please show the financial logs ordered by property name in reverse alphabetical order."),
-    ("q09", "Which of our properties on the market are priced above 10,000?"),
-    ("q10", "Are there any recent payments processed that fall between 100 and 50,000?"),
-    ("q11", "Show me the top 5 most recently dated accounting entries for our assets."),
-    ("q12", "Could you pull the last 5 payment records based on their internal system processing ID?"),
-    ("q13", "Which properties available for sale currently have an active status defined in the system?"),
-    ("q14", "List our top most expensive properties that are currently on the market for sale."),
-    ("q15", "What were the absolute smallest financial records we've ever logged?"),
-    ("q16", "Can you sort our recent payments by their respective currency configurations?"),
-    ("q17", "Group our properties for sale based on their currency configuration in descending order."),
-    ("q18", "What are the oldest financial records we have on file by date?"),
-    ("q19", "Which property payments were most recently modified or updated in our database?"),
-    ("q20", "Show me the properties on the market that had their statuses updated most recently."),
-    ("q21", "What is the average transaction amount for each property, categorized by whether it's an inflow or outflow?"),
-    ("q22", "Which properties would generate the highest total revenue based on their market prices?"),
-    ("q23", "Can you find the maximum financial value recorded for each property, broken down by entry type?"),
-    ("q24", "What is the smallest single payment made towards each property by transaction type?"),
-    ("q25", "How many active listings do we have for each property, grouped by their market status?"),
-    ("q26", "What is the total aggregated sum of our accounting books, calculated for each property and entry type?"),
-    ("q27", "On average, what is the expected sale price of our properties per current status category?"),
-    ("q28", "If we sum up all payments received or paid out, which properties have the highest transaction volume?"),
-    ("q29", "What is the average accounting entry amount we record across different properties?"),
-    ("q30", "Can you flag any properties that have accumulated more than 1,000 in total payments?"),
-    ("q31", "Which properties have a total combined valuation that is less than 10,000,000?"),
-    ("q32", "How many individual accounting records does each property have registered in our system?"),
-    ("q33", "What is the average payment amount when broken down by specific currency configurations?"),
-    ("q34", "What is the highest sale price currently requested for a property, segmented by its assigned currency?"),
-    ("q35", "Can we see the annual sum of financial records grouped by their transaction years?"),
-    ("q36", "Identify the properties that have the most diverse set of transaction types (debits/credits/etc)."),
-    ("q37", "Which properties on the market have the highest price variance, indicating shifting market expectations?"),
-    ("q38", "What is the standard deviation in the amounts logged in our financial records per property?"),
-    ("q39", "Are there any properties where every single payment is exactly equal to its maximum recorded payout?"),
-    ("q40", "Find properties whose total market valuations are high, but their average expected price stays below 5,000,000."),
-    ("q41", "If we rank our properties by their individual payment amounts, which ones take the top spots?"),
-    ("q42", "Can we see a month-over-month running total of the expected revenue from our properties currently on the market?"),
-    ("q43", "What percentage does each entry contribute to the total financial balance of its respective transaction type?"),
-    ("q44", "How does the total payment amount for each property compare directly to its previously recorded date's total?"),
-    ("q45", "Assign a dense ranking to our properties based strictly on their expected market sale prices."),
-    ("q46", "Provide a chronological row-number mapping of the most recent financial accounting entries for each property."),
-    ("q47", "What is the long-term yearly moving average of payments being processed for our assets?"),
-    ("q48", "Divide our properties on the market into performance quartiles based on their expected pricing."),
-    ("q49", "What is the statistical cumulative distribution of financial record amounts across our property portfolio?"),
-    ("q50", "How far does each individual payment deviate from the overall average payment amount?"),
-    ("q51", "Identify the very first expected sale price recorded historically for each of our properties."),
-    ("q52", "What was the final recorded amount logged for each specific entry type in our accounting system?"),
-    ("q53", "Can we forecast the immediate next payment amount sequentially based on our transaction history?"),
-    ("q54", "What percentage does each listing's price represent compared to the maximum priced property in its category?"),
-    ("q55", "What is the total rolling count of payments processed for each transaction type?"),
-    ("q56", "Determine the exact percentile rank of each financial amount within our accounting records."),
-    ("q57", "Calculate the short-term moving sum of the last 2 payments recorded for every property."),
-    ("q58", "What is the historical running average of expected sale prices for properties added to our system?"),
-    ("q59", "How much does each accounting record differ from the absolute minimum amount logged in its category?"),
-    ("q60", "Rank all property payments within their specific assigned currency configuration."),
+    ("q01", 'What is the total outstanding amount for all maintenance items that are not yet completed or settled?'),
+    ("q02", 'Which category contributes the highest value among all completed payments?'),
+    ("q03", 'If all open repair requests are closed today, what would be the total repair expenditure recorded?'),
+    ("q04", 'Which asset currently has multiple maintenance activities associated with it, and what are they?'),
+    ("q05", 'What percentage of all maintenance records are related to repair work?'),
+    ("q06", 'What is the average amount of all repair-related requests?'),
+    ("q07", 'How much money has already been collected through completed payments?'),
+    ("q08", 'If unpaid and open records are combined into a single pending bucket, how many pending items exist and what is their total value?'),
+    ("q09", 'Among all assets with pending work or dues, which asset has the highest financial impact?'),
+    ("q10", 'If all paid entries are excluded, what categories remain and how much does each contribute?'),
+    ("q11", 'What is the ratio of completed payment value to pending value?'),
+    ("q12", 'Which category appears most frequently in the records and what percentage of the dataset does it represent?'),
+    ("q13", 'If a 10% surcharge is applied to all unresolved items, what would be the revised outstanding amount?'),
+    ("q14", 'What is the difference between the highest and lowest transaction amounts recorded?'),
+    ("q15", 'If all rent-related transactions are grouped together, what is the total rent value and how many entries contribute to it?'),
+    ("q16", 'Which assets are currently covered under the maintenance arrangement?'),
+    ("q17", 'What types of facilities are included in the maintenance coverage?'),
+    ("q18", 'In which location are these facilities situated?'),
+    ("q19", 'What is the monthly rent amount associated with these assets?'),
+    ("q20", 'How much is charged for repair services when they are requested?'),
+    ("q21", 'What is the annual insurance cost for the covered assets?'),
+    ("q22", 'How frequently are society charges collected, and what is the amount?'),
+    ("q23", 'What is the annual tax amount payable for these assets?'),
+    ("q24", 'What is the recurring monthly loan payment amount?'),
+    ("q25", 'Which charges need to be paid every month?'),
+    ("q26", 'How much notice is required if either party wants to end the agreement?'),
+    ("q27", 'Is there any penalty for paying invoices late?'),
+    ("q28", 'Which types of invoices are subject to late payment charges?'),
+    ("q29", 'What is the monthly rate charged on overdue invoices?'),
+    ("q30", 'Which assets are included under this service arrangement?'),
+    ("q31", 'Which locations are associated with the covered assets?'),
+    ("q32", 'What amenities are included within the scope of services?'),
+    ("q33", 'Is intercom maintenance included in the covered services?'),
+    ("q34", 'Which financial categories are managed under this agreement?'),
+    ("q35", 'Does the agreement include repair-related expenses?'),
+    ("q36", "Which city has the highest-rated vendor, and what is the vendor's rating?"),
+    ("q37", 'What is the average vendor rating across all service locations?'),
+    ("q38", 'Which locations have vendors performing above the overall average rating?'),
+    ("q39", 'If vendors with ratings below 4.0 must undergo a quality review, which vendors would be flagged?'),
+    ("q40", 'What percentage of vendors have ratings of at least 4.0?'),
+    ("q41", 'Which location has the greatest positive deviation from the average vendor rating?'),
+    ("q42", 'If only vendors rated 4.2 or higher qualify for premium contracts, which locations remain eligible?'),
+    ("q43", 'What is the rating spread between the best-performing and lowest-performing vendors?'),
+    ("q44", 'Which city appears multiple times in the vendor network, and how do its vendors compare internally?'),
+    ("q45", 'If vendors scoring below 4.0 are removed from the network, what would be the new average vendor rating?'),
+    ("q46", 'How many vendors fall within one standard service band of 4.0 to 4.5 inclusive?'),
+    ("q47", 'If the organization wants to expand operations in cities already served by high-performing vendors (rating above 4.3), which cities should be prioritized?'),
+    ("q48", 'What proportion of the vendor network is concentrated in locations with ratings above the network average?'),
+    ("q49", 'If a service quality score is calculated as (rating × 20), which location achieves the highest score?'),
+    ("q50", 'Assuming each vendor can support one active maintenance ticket at a time, what is the maximum number of simultaneous tickets the current vendor network can handle?'),
 ]
+
+# --------------------------------------------------------------------------- goldens
+# GOLDEN_ANCHORS: qid → set of acceptable tables. Contract: when a query is ANSWERED
+# (PASS or EMPTY), its SQL must reference AT LEAST ONE of these tables. A wrong-table
+# answer is the dangerous failure mode — plausible-looking data from the wrong entity —
+# and the plain answerability verdict cannot see it. Refusals/clarifies pass vacuously
+# (refuse-over-guess is judged separately). Only assert where the correct table set is
+# unambiguous from the question + schema; grow over time. Sets are deliberately
+# generous (e.g. payments may legitimately resolve to the payment-transaction table or
+# the general ledger) so a golden failure is a REAL failure.
+GOLDEN_ANCHORS: dict[str, set[str]] = {
+    # 2026-07-12 question set v2 — assert only where the correct table set is
+    # unambiguous from the question; grows as answers are reviewed.
+    "q02": {"accounts_paymenttransaction"},
+    "q07": {"accounts_paymenttransaction", "accounts_generalledger"},
+    "q11": {"accounts_paymenttransaction", "accounts_generalledger"},
+    "q14": {"accounts_paymenttransaction", "accounts_generalledger"},
+}
+
+_TABLE_REF_RE = re.compile(r'\b(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)"?', re.I)
+
+
+def sql_tables(sql: str) -> set[str]:
+    """Table names referenced by FROM/JOIN in generated SQL (quoted or bare)."""
+    return {m.group(1).lower() for m in _TABLE_REF_RE.finditer(sql or "")}
 
 # --------------------------------------------------------------------------- helpers
 _LIMIT_RE = re.compile(r"\b(?:top|first|last)\s+(\d+)\b", re.I)
@@ -159,11 +174,12 @@ def _first_item(payload: dict):
 
 
 _REFUSE = ("refuse", "refused", "clarify", "no_table", "ungrounded",
-           "qualifier_dropped", "federated_refused", "not_federated")
-_ERROR = ("error", "exec_error", "tier2_exec_error", "tier2_rejected")
+           "qualifier_dropped", "federated_refused", "not_federated",
+           "tier2_rejected")   # the correctness gate declining an unsafe LLM answer
+_ERROR = ("error", "exec_error", "tier2_exec_error")
 
 
-def classify(resp: dict, cap: int | None) -> dict:
+def classify(resp: dict, cap: int | None, golden: set[str] | None = None) -> dict:
     """Return {verdict, status, route, rows, answer, sql, note}."""
     note = []
     if not resp.get("ok_http"):
@@ -211,6 +227,14 @@ def classify(resp: dict, cap: int | None) -> dict:
     # advisory structural check
     if cap is not None and n > cap:
         note.append(f"⚠ expected ≤{cap} rows, got {n}")
+
+    # golden-anchor check: an ANSWER (even an empty one) built on none of the
+    # acceptable tables is a wrong-table answer — the failure answerability can't see.
+    if golden and verdict in ("PASS", "EMPTY") and sql:
+        touched = sql_tables(sql)
+        if touched and not (touched & golden):
+            verdict = "GOLDEN-FAIL"
+            note.append(f"✗ answered from {sorted(touched)[:3]}, expected one of {sorted(golden)}")
 
     return {"verdict": verdict, "status": status or str(top_status), "route": route,
             "rows": n, "answer": answer[:200], "sql": sql[:400], "note": "; ".join(note)}
@@ -285,7 +309,27 @@ def main():
                     help="keep existing results; only run queries not already recorded (chunk-friendly)")
     ap.add_argument("--only", default="", help="comma-separated query ids to run (e.g. q17,q21) — A/B mode")
     ap.add_argument("--tag", default="", help="output file suffix, e.g. --tag ab_norepair → nl_query_suite_ab_norepair_*")
+    ap.add_argument("--recheck", default="",
+                    help="offline: re-apply GOLDEN_ANCHORS to an existing results jsonl (no API calls)")
     args = ap.parse_args()
+
+    if args.recheck:
+        recs = [json.loads(l) for l in open(args.recheck) if l.strip()]
+        checked = fails = 0
+        for r in recs:
+            g = GOLDEN_ANCHORS.get(r.get("id"))
+            # GOLDEN-FAIL included: a stored failure must re-fail (CI honesty)
+            if not g or r.get("verdict") not in ("PASS", "EMPTY", "GOLDEN-FAIL"):
+                continue
+            checked += 1
+            touched = sql_tables(r.get("sql") or "")
+            if touched and not (touched & g):
+                fails += 1
+                print(f"GOLDEN-FAIL {r['id']}: answered from {sorted(touched)[:3]}, "
+                      f"expected one of {sorted(g)} | {r.get('query', '')[:70]}")
+        print(f"recheck {os.path.basename(args.recheck)}: {len(recs)} records, "
+              f"{checked} golden-checked, {fails} GOLDEN-FAIL")
+        return
 
     sfx = f"_{args.tag}" if args.tag else ""
     jsonl_path = os.path.join(HERE, f"nl_query_suite{sfx}_results.jsonl")
@@ -326,7 +370,7 @@ def main():
     for i, (qid, text) in enumerate(pending, 1):
         cap = expected_row_cap(text)
         resp = post_query(args.url, text, args.source_id, args.tenant, args.timeout)
-        cls = classify(resp, cap)
+        cls = classify(resp, cap, GOLDEN_ANCHORS.get(qid))
         rec = {"id": qid, "query": text, "latency_ms": resp.get("latency_ms"), **cls,
                "raw": resp.get("json") if resp.get("ok_http") else resp.get("error")}
         records.append(rec)
