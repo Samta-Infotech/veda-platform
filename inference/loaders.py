@@ -21,7 +21,8 @@ import os
 
 logger = logging.getLogger("inference.loaders")
 
-_STATE: dict = {"ready": False, "semantic_model": False, "engine_warm": False}
+_STATE: dict = {"ready": False, "semantic_model": False, "engine_warm": False,
+                "nl_summary_model_warm": False}
 
 
 async def hydrate() -> dict:
@@ -75,6 +76,23 @@ async def hydrate() -> dict:
         _p("✓ SLM")
     except Exception as exc:
         _p(f"SLM warm deferred: {exc}")
+
+    try:
+        from veda_core.slm._call_slm import prewarm
+        from veda_core.config import NL_SUMMARY_MODEL
+        # Distinct small model for result summarization (query/result_explainer.py) —
+        # its own cold Ollama load easily exceeds the NL_ANSWER_FAST_TIMEOUT_MS budget
+        # (~800ms), which silently degrades every early answer to the generic
+        # deterministic fallback until something else happens to warm it. Prewarming
+        # here means the first real query already finds it resident (keep_alive 24h).
+        prewarm(model=NL_SUMMARY_MODEL)
+        _STATE["nl_summary_model_warm"] = True
+        _p("✓ NL summary SLM")
+    except Exception as exc:
+        # Non-fatal by design (query/result_explainer.py falls back to deterministic
+        # template answers) — but surfaced in /readyz so a missing/unpulled
+        # NL_SUMMARY_MODEL is an observable operational fact, not a silent one.
+        _p(f"NL summary SLM warm deferred: {exc}")
 
     _STATE["ready"] = _STATE["semantic_model"]
     _p(f"hydrate complete: {_STATE}")

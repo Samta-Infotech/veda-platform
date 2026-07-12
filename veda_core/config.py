@@ -699,6 +699,14 @@ BIENCODER_CANDIDATE_TABLES = 10   # rerank on CPU; 24 still comfortably covers t
 TABLE_PRIOR_TOP_M = 10
 TABLE_PRIOR_BETA  = 0.3
 
+# Tier1→Tier2 ExecutionState propagation (veda/execution_state.py): a small additive
+# score boost applied to Tier1's vetted primary_table when building candidate_fields
+# seeds for Tier2's retrieval — Tier1 already ran a full retrieval + grain-vet pass to
+# pick this table, so Tier2's reranker starts from that prior instead of from zero.
+# Small and additive, same convention as TABLE_PRIOR_BETA above — never overrides the
+# cross-encoder's own judgment, only nudges a near-tie in the vetted table's favor.
+PRIMARY_TABLE_SEED_BOOST = 0.05
+
 # =============================================================================
 # WEIGHTED FUSION (WP6) — per-signal weights for the RRF merger.
 # score(d) = Σ_s w_s / (k + rank_s(d)). Identity (all 1.0) == the pre-WP6 unweighted
@@ -871,7 +879,51 @@ IR_JOIN_FREE_ENABLED = True   # SLM omits joins[]; sql_builder derives from fk_a
 
 NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
-NL_ANSWER_FAST_TIMEOUT_MS = 800   # F6: bound worst-case NL-answer latency
+# F6: bound worst-case NL-answer latency. Measured against the actual small summary
+# model (warm, over the configured Ollama host): a genuine multi-row facts payload
+# consistently takes ~1000-1100ms end to end — 800ms guaranteed a timeout on EVERY
+# such call, silently downgrading every multi-row answer to the generic deterministic
+# fallback ("Returned N row(s)...") even though the SLM was healthy and answering.
+# 2500ms leaves real headroom above the observed ~1000-1100ms without materially
+# affecting overall query latency (dominated by retrieval/SQL-gen, several seconds).
+NL_ANSWER_FAST_TIMEOUT_MS = int(__import__("os").environ.get("NL_ANSWER_FAST_TIMEOUT_MS", "2500"))
+
+# Result Explanation Layer (query/result_explainer.py) — row-summarization SLM call.
+# Deliberately a SMALL instruct model, distinct from SLM_MODEL_NAME (the 7B coder
+# model used for SQL/IR generation): summarizing a handful of result rows into one
+# sentence doesn't need a code model, and a small model keeps this off the hot path.
+NL_SUMMARY_MODEL       = __import__("os").environ.get("NL_SUMMARY_MODEL", "qwen2.5:1.5b-instruct")
+NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "2500"))
+# 80 was cutting the model off mid-sentence for multi-row answers (a "~1-2 sentence"
+# answer with several named values comfortably needs more than 80 tokens). 120 gives
+# headroom to finish; the prompt itself also now asks for one ~30-word sentence.
+NL_SUMMARY_MAX_TOKENS  = int(__import__("os").environ.get("NL_SUMMARY_MAX_TOKENS", "120"))
+NL_SUMMARY_MAX_ROWS    = int(__import__("os").environ.get("NL_SUMMARY_MAX_ROWS", "20"))
+
+# Insight Engine (veda/result_analyzer.py + query/result_explainer.py's
+# run_insight_engine) — deterministic ResultAnalyzer feeding one optional SLM
+# call that extends the existing summary with insights/visualization-
+# suggestion/follow-up-questions/confidence. Off by default: a new,
+# best-effort layer that must be explicitly opted into per deployment before
+# it can affect the response shape (additively — see result_explainer.py).
+INSIGHT_ENGINE_ENABLED     = __import__("os").environ.get(
+    "INSIGHT_ENGINE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+# Cap on rows scanned for in-memory column stats (nulls/distinct/top-values) —
+# large result sets still get a summary, just profiled from a bounded sample.
+RESULT_ANALYZER_MAX_ROWS   = int(__import__("os").environ.get("RESULT_ANALYZER_MAX_ROWS", "200"))
+# Measured live (2026-07-10): a bare JSON round trip against qwen2.5:1.5b-instruct
+# already takes ~3.2s over the configured Ollama host, and the real Insight Engine
+# prompt asks for MORE structured output (summary+insights+visualization+follow-ups,
+# ~240 predicted tokens vs run_nl_answer's 120) — so it needs materially more
+# headroom than NL_SUMMARY_TIMEOUT_MS's 2500ms, not less. 1200ms silently fell back
+# to the deterministic answer on every call in that environment.
+INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "5000"))
+# Deterministic chart-recommendation gate (veda/result_analyzer.chart_confidence,
+# query/result_explainer.validate_visualization): below this, no visualization is
+# returned at all — a table-only response is always safer than a low-confidence
+# or semantically-wrong chart (e.g. an identifier plotted as a measure).
+VISUALIZATION_CONFIDENCE_THRESHOLD = float(
+    __import__("os").environ.get("VISUALIZATION_CONFIDENCE_THRESHOLD", "0.6"))
 
 # =============================================================================
 # WP7: the Track-4 precompute consumption flags (_env_flag + the seven toggles and

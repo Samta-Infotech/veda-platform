@@ -93,6 +93,12 @@ docker run --rm -v veda-platform_model_cache:/models \
 docker compose up -d ollama
 docker compose exec ollama ollama pull "$SLM_MODEL_NAME"     # e.g. qwen2.5-coder:7b
 
+# Ollama NL-summary SLM — a SEPARATE, small instruct model (NOT the coder model
+# above) used by query/result_explainer.py to phrase result rows into prose.
+# Missing this doesn't crash anything (it falls back to deterministic template
+# answers) but silently loses the natural-language summary feature — pull it too:
+docker compose exec ollama ollama pull "${NL_SUMMARY_MODEL:-qwen2.5:1.5b-instruct}"
+
 # vLLM query SLM (quantized) — pre-download so boot is offline (B9)
 #   pull an AWQ/GPTQ 7B into /models/hf_cache and set SLM_MODEL_DIR accordingly
 ```

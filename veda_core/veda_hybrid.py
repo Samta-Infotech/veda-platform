@@ -555,7 +555,8 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
                 t2 = _tier2_sql(query, sm, cols, verbose=verbose,
-                                deadline=time.time() + TIER2_TIME_BUDGET_S)
+                                deadline=time.time() + TIER2_TIME_BUDGET_S,
+                                execution_state=res.get("context") if isinstance(res, dict) else None)
                 if t2 is not None:
                     if isinstance(t2, dict) and t2.get("status") == "tier2_rejected":
                         # Tier-2 exists to RESCUE a refusal; a candidate its own
@@ -757,13 +758,100 @@ def _is_param_mismatch(err) -> bool:
         return "parameter mismatch" in str(err or "")
 
 
-def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
+def _tier2_finish(query, sm, cols, rows, sql, source):
+    """Bring a Tier-2 result to STRUCTURAL PARITY with the deterministic
+    (Tier-1, veda/pipeline.py's _done()) response shape — same bug/fix as the
+    NoSQL path (_run_nosql), extended: rows were always correct, but
+    previously none of Tier-2's three success returns ever computed a
+    natural-language answer, a "table" key, or a real "explain" — the latter
+    two were EITHER MISSING ENTIRELY (table) OR only present when
+    INSIGHT_ENGINE_ENABLED (explain), so with that flag at its default (off)
+    every Tier-2 answer had a visibly different shape than Tier-1: no table,
+    and explainability always fell back to the empty placeholder. Tier-1
+    never gates table/explain on that flag, so Tier-2 shouldn't either — only
+    insights/follow_up_questions/visualization/confidence are flag-gated.
+    Never raises — a summarization/analysis failure still returns the
+    (correct) rows, just without prose/insights."""
+    result = {"status": "answered", "ok": True, "cols": cols, "rows": rows,
+              "sql": sql, "source": source}
+
+    # table: derived from the SQL's own primary entity (AST, zero LLM) — Tier-2
+    # SQL may join multiple tables, so this is the FIRST referenced table,
+    # matching Tier-1's single-table `table` field as closely as this
+    # multi-table-capable path allows.
+    table = None
+    try:
+        from veda.business_explain import extract_sql_facts
+        facts = extract_sql_facts(sql or "")
+        table = facts["entities"][0] if facts["entities"] else None
+    except Exception:
+        pass
+    result["table"] = table
+
+    try:
+        from config import (NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS,
+                            INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS)
+    except Exception:
+        NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS = True, 2500
+        INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS = False, 200
+
+    visualization = None
+    if NL_ANSWER_ENABLED and cols:
+        row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
+
+        if INSIGHT_ENGINE_ENABLED:
+            try:
+                from veda.result_analyzer import analyze_result
+                from query.result_explainer import run_insight_engine
+                ctx = analyze_result(query, sql, list(cols), row_dicts, sm=sm, table=table,
+                                     max_rows=RESULT_ANALYZER_MAX_ROWS)
+                insight = run_insight_engine(ctx)
+                if getattr(insight, "answer", None):
+                    result["answer"] = insight.answer
+                result["insights"] = insight.insights
+                result["follow_up_questions"] = insight.follow_up_questions
+                result["visualization"] = insight.visualization
+                result["confidence"] = insight.confidence
+                visualization = insight.visualization
+            except Exception as _ie:
+                print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
+                      f"— falling back to plain NL answer")
+
+        if "answer" not in result:
+            try:
+                from query.nl_answer import run_nl_answer
+                nl = run_nl_answer(query, list(cols), row_dicts,
+                                   timeout=NL_ANSWER_FAST_TIMEOUT_MS / 1000.0, semantic_model=sm)
+                if getattr(nl, "answer", None):
+                    result["answer"] = nl.answer
+            except Exception as _nle:
+                print(f"  [Tier2] Answer (summarisation skipped: {type(_nle).__name__})")
+
+    try:
+        from veda.business_explain import build_explain
+        result["explain"] = build_explain(sql=sql or "", table=table or "", sm=sm,
+                                          visualization=visualization)
+    except Exception:
+        print("  [Tier2] explainability skipped")
+    return result
+
+
+def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_state=None):
     """Tier-2 SQL fallback (only when the deterministic head can't answer).
 
     LLM emits IR → deterministic sql_builder makes the SQL (LLM never writes SQL) →
     the GRAPH-GUARDED firewall validates (every join must be a real FK edge, no
     cartesian, value-grounded) → execute. Returns a result dict or None. Needs Ollama
-    + the integrated retrieval stores; any failure → None (caller keeps the refusal)."""
+    + the integrated retrieval stores; any failure → None (caller keeps the refusal).
+
+    deadline: optional absolute time.time() cutoff — checked between SLM rounds so
+    an expired Tier-2 budget returns the head's refusal instead of burning minutes
+    (TIER2_TIME_BUDGET_S at the call site).
+
+    execution_state: optional veda.execution_state.ExecutionState from Tier1's own
+    run_query() call (see _dispatch_single) — when given, reuses Tier1's temporal
+    parse and seeds retrieval with Tier1's candidate fields instead of starting cold.
+    None (default) preserves this function's exact prior behavior."""
     try:
         from query.retrieval_select import select_retrieval
         from query.slm_layer import run_slm_layer
@@ -772,8 +860,30 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
         from veda.execution import execute_sql
         from query.temporal_parser import run_temporal_parser
 
-        tf = run_temporal_parser(query).temporal_filter
-        sel = select_retrieval(query=query, intent="sql", verbose=verbose)
+        if execution_state is not None and execution_state.temporal_result is not None:
+            tf = execution_state.temporal_result.temporal_filter
+        else:
+            tf = run_temporal_parser(query).temporal_filter
+
+        _seeds = execution_state.candidate_fields if execution_state is not None else None
+        if verbose and execution_state is not None:
+            # Only claim what's ACTUALLY functionally reused below — Temporal (the tf
+            # computed above) and Candidate Fields (seed_candidates, passed to
+            # select_retrieval right below; primary_table is folded into these fields'
+            # scores in pipeline.py, not used standalone here). query_understanding and
+            # sql_planning are carried on ExecutionState for future use but are NOT yet
+            # consumed by any Tier2 decision — deliberately left out of this log so it
+            # doesn't overstate what this function does.
+            _reused = []
+            if execution_state.temporal_result is not None: _reused.append("Temporal")
+            if _seeds:                                       _reused.append("Candidate Fields")
+            if execution_state.primary_table and _seeds:
+                _reused.append(f"Primary Table ({execution_state.primary_table!r}, "
+                                f"biased in Candidate Fields)")
+            if _reused:
+                print(f"  [Tier2] Tier1 completed. Reusing: {', '.join('✓ ' + r for r in _reused)}")
+            print("  [Tier2] continuing execution...")
+        sel = select_retrieval(query=query, intent="sql", verbose=verbose, seed_candidates=_seeds)
 
         # ── ENVELOPE PATH (D): one-call SLM → intent envelope → deterministic build_sql.
         # Single-table analytical shapes (count/measure/ratio/trend/compare/group/list) go
@@ -806,8 +916,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
                         else:
                             print(f"  [Tier2] answered via ENVELOPE ({_qi.query_type}) — {len(erows)} rows")
                             _print_rows(ecols, erows, sql=psql)
-                            return {"status": "answered", "ok": True, "cols": ecols,
-                                    "rows": erows, "sql": psql, "source": "envelope"}
+                            return _tier2_finish(query, sm, ecols, erows, psql, "envelope")
         except Exception as _ee:
             print(f"  [Tier2] envelope path skipped: {type(_ee).__name__}: {str(_ee)[:120]}")
 
@@ -825,7 +934,11 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
         except Exception:
             VALIDATION_REPAIR_LOOP_ENABLED, VALIDATION_MAX_REPAIR_ATTEMPTS = False, 0
         _max_repairs = int(VALIDATION_MAX_REPAIR_ATTEMPTS) if VALIDATION_REPAIR_LOOP_ENABLED else 0
-        _repair_hint = None
+        # Seed attempt 0 with WHY Tier1 refused (when known) instead of starting cold —
+        # reuses the existing repair-hint mechanism, not a second retry framework.
+        _repair_hint = (_repair_hint_for(execution_state.refusal_reason)
+                         if (execution_state is not None and execution_state.refusal_reason
+                             and _max_repairs > 0) else None)
         from config import LANGGRAPH_SHARED_PLANNER
 
         for _attempt in range(_max_repairs + 1):
@@ -836,7 +949,9 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
                       f"keeping deterministic refusal")
                 return None
             _q_ir = query if not _repair_hint else f"{query}\n\n{_repair_hint}"
-            if _repair_hint:
+            if _repair_hint and _attempt == 0:
+                print("  [Tier2] seeded with Tier1's refusal reason")
+            elif _repair_hint:
                 print(f"  [Tier2] repair attempt {_attempt}/{_max_repairs}")
             l3 = run_slm_layer(query=_q_ir, temporal_filter=tf, top_k_columns=sel.columns,
                                join_path=sel.join_path, verbose=verbose)
@@ -879,8 +994,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
                     print(f"  [Tier2] answered via SHARED planner (graph-verified joins)"
                           f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
                     _print_rows(cols, rows, sql=psql)
-                    return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
-                            "sql": psql, "source": "tier2_shared_planner"}
+                    return _tier2_finish(query, sm, cols, rows, psql, "tier2_shared_planner")
                 # planner refused/clarified the multi-table join → respect it (refuse-over-guess)
                 if isinstance(act, dict) and act.get("action") in ("refuse", "clarify"):
                     if verbose:
@@ -924,8 +1038,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None):
             print(f"  [Tier2] answered via LLM-IR (graph-verified)"
                   f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
             _print_rows(cols, rows, sql=psql)
-            return {"status": "answered", "ok": True, "cols": cols, "rows": rows,
-                    "sql": psql, "source": "tier2"}
+            return _tier2_finish(query, sm, cols, rows, psql, "tier2")
         return None   # repair attempts exhausted → keep the refusal
     except Exception as e:
         # Always surface WHY Tier-2 bailed (Ollama down, retrieval store missing, etc.) —
@@ -960,18 +1073,23 @@ def _run_nosql(query, source_ids, verbose=False):
             conn2.disconnect()
             print(f"  [NoSQL] {getattr(res,'row_count','?')} docs")
             # NL-back summary, parity with the SQL path (gated; graceful fallback).
+            # F6-equivalent: bound worst-case latency with NL_SUMMARY_TIMEOUT_MS instead
+            # of falling through to the SLM's full default timeout.
             try:
-                from config import NL_ANSWER_ENABLED
+                from config import NL_ANSWER_ENABLED, NL_SUMMARY_TIMEOUT_MS
             except Exception:
                 NL_ANSWER_ENABLED = False
+                NL_SUMMARY_TIMEOUT_MS = 1000
             cols = getattr(res, "columns", None)
             rows = getattr(res, "rows", None)
             if NL_ANSWER_ENABLED and cols and rows is not None:
                 try:
                     from query.nl_answer import run_nl_answer
                     row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
-                    nl = run_nl_answer(query, list(cols), row_dicts)
+                    nl = run_nl_answer(query, list(cols), row_dicts,
+                                       timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0)
                     if getattr(nl, "answer", None):
+                        res.answer = nl.answer
                         print(f"  [NoSQL] Answer  {nl.answer}")
                 except Exception:
                     pass

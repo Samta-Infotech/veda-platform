@@ -3,13 +3,74 @@
 Decides one action per turn: smalltalk | followup | clarify_reply | answer.
 See nodes.py::classify_node for the deterministic safety net layered on top
 of this LLM classification.
+
+Latency fix: when a structured QueryFrame already exists (`frame` passed in
+below), this SAME call ALSO asks for the memory delta classification
+(chatbot/memory/classify.py's job) — new_topic|refine|drill_down|drill_up|
+compare|ambiguous, plus grounded slot_candidates — instead of
+context_resolve_node making a SECOND, separate SLM round-trip afterward.
+This was the original design intent (merge into one call, net latency win)
+that the first cut of chatbot/memory/ shipped as a second call instead
+(flagged in the memory-system audit's Performance Assessment) — fixed here.
+When `frame` is None/empty (no prior successful query this session), the
+prompt is IDENTICAL to before this change — zero behavior change for the
+common "first turn" / "no memory yet" case.
 """
 from __future__ import annotations
 
+import json
+
 from .common import today_str
 
+_DELTA_BLOCK = """
 
-def build_supervisor_system_prompt() -> str:
+The user also has a CURRENT ANALYTICAL FRAME — what they were just looking \
+at, already computed and executed, not a guess:
+{frame_json}
+
+If action is "followup" or "clarify_reply" (or the message continues the \
+SAME topic as the frame above), ALSO classify which ONE of these the new \
+message is, and include it as "delta_type":
+
+- "new_topic"   — asks about a different entity/subject than the frame.
+- "refine"      — adds or changes a filter/grouping on the SAME entity.
+- "drill_down"  — narrows into a MORE SPECIFIC value of a dimension already \
+                   in play (e.g. after "by region", user says "North America").
+- "drill_up"    — asks to go back / zoom out / remove the most specific filter.
+- "compare"     — asks to compare the frame against another time period or \
+                   another value of the same dimension.
+- "ambiguous"   — references something ("it", "that", "inactive ones") that \
+                   is NOT clearly resolvable from the frame with high \
+                   confidence. When unsure, choose this — never guess.
+
+CRITICAL: never invent a column, table, or filter value that isn't the \
+frame's own remembered fact or a word the user just typed in the NEW \
+message. Also include "slot_candidates": a list of words copied VERBATIM \
+from the NEW message that name a filter value, dimension, or time period \
+(empty list if none — do not invent one).
+
+If action is "smalltalk" or "answer" (a genuinely new, self-contained \
+question unrelated to continuing the frame), set "delta_type" to \
+"new_topic" and "slot_candidates" to []."""
+
+
+def build_supervisor_system_prompt(frame: dict | None = None) -> str:
+    delta_addendum = ""
+    action_schema = '"action": "smalltalk"|"followup"|"clarify_reply"|"answer", "reason": "<one short phrase>"'
+    if frame and frame.get("entity"):
+        frame_view = {
+            "entity": frame.get("entity_display") or frame.get("entity"),
+            "understanding": frame.get("understanding"),
+            "filters": [f"{f.get('field')} {f.get('operator')} {f.get('value')}"
+                        for f in (frame.get("filters") or [])],
+            "group_by": frame.get("group_by") or [],
+            "drill_path": frame.get("drill_path") or [],
+        }
+        delta_addendum = _DELTA_BLOCK.format(frame_json=json.dumps(frame_view, default=str))
+        action_schema += (', "delta_type": "new_topic"|"refine"|"drill_down"|"drill_up"|'
+                          '"compare"|"ambiguous", "slot_candidates": [<verbatim words from '
+                          'the NEW message, or empty list>]')
+
     return f"""\
 You are the front-door supervisor for a data-analyst chatbot. Today's date is \
 {today_str()} — use it if the message or history refers to a relative date \
@@ -41,9 +102,10 @@ NEVER "smalltalk", even if it's phrased casually or as a recall ("what was...", 
 "remind me..."). When unsure between "smalltalk" and any other action, choose the \
 other action — a real question wrongly treated as smalltalk means the user gets a \
 made-up, ungrounded answer, which is the one thing this system must never do.
+{delta_addendum}
 
 Output ONLY a JSON object, no markdown, no explanation:
-{{"action": "smalltalk"|"followup"|"clarify_reply"|"answer", "reason": "<one short phrase>"}}
+{{{action_schema}}}
 """
 
 

@@ -35,6 +35,26 @@ class ChatNotFound(Exception):
     """Raised when chat_id is provided but no matching, owned ChatSession exists."""
 
 
+def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
+    """Turn the query tier's validated {type,x_axis,y_axis,...} column-name
+    suggestion into a real VisualizationSpec, reusing the existing
+    recommender's own chart-data builders (never re-implemented here) — the
+    suggestion only names WHICH columns to chart, the recommender still owns
+    HOW the chart_data is built."""
+    if not suggestion or not isinstance(suggestion, dict):
+        return None
+    vtype = suggestion.get("type")
+    x_name, y_name = suggestion.get("x_axis"), suggestion.get("y_axis")
+    if x_name not in cols or y_name not in cols:
+        return None
+    x_idx, y_idx = cols.index(x_name), cols.index(y_name)
+    if vtype == "line":
+        return _visualization_recommender._line(cols, rows, x_idx, y_idx)
+    if vtype in ("bar", "pie"):
+        return _visualization_recommender._category_numeric(cols, rows, x_idx, y_idx)
+    return None
+
+
 def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
     # rows are positional (each row is a list/tuple aligned with cols by index) —
     # this is what the engine actually returns (JSON-serialized SQL tuples), NOT
@@ -212,6 +232,16 @@ class ConversationQueryService:
         # final validated SQL + semantic model — never from retrieval/routing internals
         # (those live only in res0["trace"], for our own debugging, never sent over SSE).
         yield {"event": "explainability", "data": res0.get("explain") or _NO_EXPLAIN}
+        # Insight Engine (additive, new event type): only present when
+        # INSIGHT_ENGINE_ENABLED produced these keys server-side (veda/pipeline.py's
+        # _done()) — absent entirely when the flag is off, so old clients that only
+        # listen for content/visualization/explainability/error see nothing new.
+        if "insights" in res0 or "follow_up_questions" in res0 or "confidence" in res0:
+            yield {"event": "insights", "data": {
+                "insights": res0.get("insights") or [],
+                "follow_up_questions": res0.get("follow_up_questions") or [],
+                "confidence": res0.get("confidence"),
+            }}
 
     @staticmethod
     def _build_content_blocks(response: dict, res0: dict) -> list:
@@ -234,5 +264,15 @@ class ConversationQueryService:
         cols, rows = res0.get("cols"), res0.get("rows")
         if not cols or not rows:
             return []
-        return [spec.to_dict() for spec in _visualization_recommender.recommend(cols, rows)]
+        specs = _visualization_recommender.recommend(cols, rows)
+        if specs:
+            return [spec.to_dict() for spec in specs]
+        # Deterministic rules found nothing confident — fall back to the query
+        # tier's Insight Engine suggestion (already validated server-side:
+        # column existence + type compatibility — see
+        # query/result_explainer.py's validate_visualization). Still built into
+        # the SAME chart_data shape via the existing recommender's own builders,
+        # never served as a bare column-name suggestion.
+        spec = _spec_from_suggestion(cols, rows, res0.get("visualization"))
+        return [spec.to_dict()] if spec else []
 

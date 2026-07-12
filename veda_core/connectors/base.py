@@ -185,6 +185,7 @@ class QueryResult:
     truncated:    bool              # True if result was capped at row limit
     error:        Optional[str]     # None on success
     metadata:     dict = field(default_factory=dict)
+    answer:       Optional[str] = None  # NL summarization (query/result_explainer.py), when computed
 
 
 # =============================================================================
