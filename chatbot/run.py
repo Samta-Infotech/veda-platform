@@ -18,6 +18,7 @@ def run_chat_turn(
     history: Optional[list] = None,
     tenant: str = "default",
     source_id: Optional[int] = None,
+    source_ids: Optional[list] = None,
     request_id: str = "",
     on_event: Optional[Callable[[str, str], None]] = None,
 ) -> dict:
@@ -41,6 +42,7 @@ def run_chat_turn(
             "session_id": session_id,
             "tenant": tenant,
             "source_id": source_id,
+            "source_ids": list(source_ids) if source_ids else None,
             "request_id": request_id,
         },
         config={"configurable": {"thread_id": session_id, "on_event": on_event}},

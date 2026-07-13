@@ -55,28 +55,37 @@ class ExplainTrace:
     total_ms: float = 0.0
 
     # ── recording API (all cheap dict ops) ──────────────────────────────────
+    def _sec(self, section: str) -> Dict[str, Any]:
+        """Section accessor. Stamps `_ms` (elapsed since trace start) the FIRST
+        time a section is touched — per-stage timing for free, since stages touch
+        their section when they run. Consumers: latency budgeting/calibration."""
+        d = self.sections.get(section)
+        if d is None:
+            d = self.sections[section] = {"_ms": round((time.time() - self._t0) * 1000, 1)}
+        return d
+
     def set(self, section: str, **data) -> None:
         """Set/merge scalar decision fields for a section."""
-        self.sections.setdefault(section, {}).update(data)
+        self._sec(section).update(data)
 
     def note(self, section: str, msg: str) -> None:
         """Append a human 'why' line."""
-        self.sections.setdefault(section, {}).setdefault("why", []).append(msg)
+        self._sec(section).setdefault("why", []).append(msg)
 
     def cand(self, section: str, key: str, item: Any) -> None:
         """Append to a candidate/rejected list — VERBOSE-only (the heavy data)."""
         if not self.verbose:
             return
-        self.sections.setdefault(section, {}).setdefault(key, []).append(item)
+        self._sec(section).setdefault(key, []).append(item)
 
     def check(self, name: str, passed: bool, detail: str = "") -> None:
         """Record a validation check pass/fail."""
-        self.sections.setdefault("validation", {}).setdefault("checks", []).append(
+        self._sec("validation").setdefault("checks", []).append(
             {"name": name, "status": "pass" if passed else "fail",
              **({"detail": detail} if detail else {})})
 
     def repair(self, what: str, frm: Any, to: Any) -> None:
-        self.sections.setdefault("validation", {}).setdefault("repairs", []).append(
+        self._sec("validation").setdefault("repairs", []).append(
             {"what": what, "from": frm, "to": to})
 
     # ── serialization ────────────────────────────────────────────────────────

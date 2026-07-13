@@ -36,6 +36,17 @@ class ChatNotFound(Exception):
     """Raised when chat_id is provided but no matching, owned ChatSession exists."""
 
 
+def _positional_rows(cols: list, rows: list) -> list:
+    # The plain SQL path returns positional rows (list/tuple aligned with cols by
+    # index) but the federated executor returns column-keyed dicts
+    # (dict(zip(cols, r))) — normalize to positional so the table/chart builders
+    # can index by column position.
+    return [
+        [row.get(c) for c in cols] if isinstance(row, dict) else row
+        for row in rows
+    ]
+
+
 def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
     """Turn the query tier's validated {type,x_axis,y_axis,...} column-name
     suggestion into a real VisualizationSpec, reusing the existing
@@ -57,9 +68,6 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
 
 
 def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
-    # rows are positional (each row is a list/tuple aligned with cols by index) —
-    # this is what the engine actually returns (JSON-serialized SQL tuples), NOT
-    # column-keyed dicts.
     header = "| " + " | ".join(str(c) for c in cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body_lines = [
@@ -129,42 +137,33 @@ class ConversationQueryService:
         """Yields: thinking* (stream only, zero for an instant fast-path answer)
         -> content* -> visualization? -> explainability -> error?.
 
-        stream=True sources "thinking" from the inference tier's real SSE progress
-        events (classify / decompose / route / answer) as the pipeline actually
-        advances, instead of one blocking call that only reports "done" at the end."""
-        yield {"event": "thinking",
-               "data": {"phase": "reasoning", "message": "Analyzing request..."}}
+        `chat.pk` doubles as the chatbot/LangGraph session_id (thread_id) — the
+        graph's own Redis checkpointer accumulates conversation history per
+        session automatically, so no history is threaded through manually here.
 
-        client = InferenceClient()
-        payload = None
-        try:
-            if stream:
-                for kind, data in client.stream_hybrid_query(
-                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
-                    source_ids=self.source_ids,
-                ):
-                    if kind == "progress":
-                        yield {"event": "thinking",
-                               "data": {"phase": data.get("phase", "progress"),
-                                        "message": data.get("message", "")}}
-                    elif kind == "error":
-                        logger.warning("conversation query pipeline error chat_id=%s: %s",
-                                       chat.pk, data)
-                        yield {"event": "error",
-                               "data": {"code": "MODEL_ERROR",
-                                        "message": data.get("message", "inference error")}}
-                        return
-                    elif kind == "result":
-                        payload = data
-            else:
-                payload = client.run_hybrid_query(
-                    message, source_id=self.source_id, tenant=self.tenant, request_id=request_id,
-                    source_ids=self.source_ids,
-                )
-        except InferenceUnavailable as exc:
-            logger.warning("conversation query pipeline unavailable chat_id=%s: %s", chat.pk, exc)
-            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
-            return
+        stream=True sources "thinking" from chatbot's own on_event callback,
+        which itself forwards the inference tier's real SSE progress events
+        (classify / decompose / route / answer) live as the pipeline advances,
+        via a background thread bridged through a queue (see _run_streamed).
+        No placeholder "thinking" event fires up front — an instant fast-path
+        answer (smalltalk, runtime context) never emits one at all, and a real
+        question's first genuine thinking event (classify_node's "Understanding
+        your message...") arrives moments later on its own."""
+        session_id = str(chat.pk)
+        kwargs = dict(tenant=self.tenant, source_id=self.source_id,
+                      source_ids=self.source_ids, request_id=request_id)
+
+        if stream:
+            response = yield from self._run_streamed(message, session_id, kwargs, chat)
+            if response is None:
+                return   # _run_streamed already yielded the error event
+        else:
+            try:
+                response = run_chat_turn(message, session_id, **kwargs)
+            except Exception as exc:
+                logger.exception("conversation query pipeline failed chat_id=%s", chat.pk)
+                yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
+                return
 
         if payload.get("engine_unavailable"):
             logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)
@@ -264,6 +263,7 @@ class ConversationQueryService:
             blocks.append({"type": "markdown", "content": str(reply_text), "is_summary": True})
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
+            rows = _positional_rows(cols, rows)
             blocks.append({"type": "markdown", "content": _rows_to_markdown_table(cols, rows)})
         if not blocks:
             blocks.append({"type": "markdown", "content": "No response could be generated."})
@@ -274,6 +274,7 @@ class ConversationQueryService:
         cols, rows = res0.get("cols"), res0.get("rows")
         if not cols or not rows:
             return []
+        rows = _positional_rows(cols, rows)
         specs = _visualization_recommender.recommend(cols, rows)
         if specs:
             return [spec.to_dict() for spec in specs]

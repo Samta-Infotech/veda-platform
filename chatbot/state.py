@@ -43,6 +43,9 @@ class ChatState(TypedDict, total=False):
     session_id: str
     tenant: str
     source_id: Optional[int]           # forwarded to InferenceClient.stream_hybrid_query
+    source_ids: Optional[List[int]]    # validated multi-source scope (P5), primary first —
+                                       # forwarded alongside source_id so scoped chat turns
+                                       # retrieve/federate exactly like /api/v1/query
     request_id: str                    # forwarded as X-Request-Id (tracing across api->inference)
 
     # ── supervisor decision ─────────────────────────────────────────────────

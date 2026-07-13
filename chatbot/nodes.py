@@ -263,7 +263,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         )
         action = "answer"
 
-        logger.info("classify_node: action=%s message=%r", action, message)
+    logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state
     # across turns (that's the point, for history/context), but sql/rows/
     # status/engine_result/clarification are this-turn-only outputs. Without
@@ -274,8 +274,14 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # delta_type a PRIOR turn's context_resolve_node had set untouched in the
     # checkpoint, since that route bypasses context_resolve_node entirely —
     # explicitly setting it here every turn means it's never stale).
+    # `resolved_query` too, for the exact same route: context_resolve_node
+    # normally overwrites it every turn, but a "runtime_context" turn skips
+    # that node, and call_engine_node's `resolved_query or message` fallback
+    # then re-sent the PREVIOUS turn's resolved text to the engine (verified:
+    # "what is the current date" mid-drill re-ran the prior drill query).
     return {
         "action": action,
+        "resolved_query": None,
         "sql": None,
         "rows": None,
         "status": None,
@@ -471,6 +477,7 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
         for kind, data in client.stream_hybrid_query(
             query,
             source_id=state.get("source_id"),
+            source_ids=state.get("source_ids"),
             tenant=state.get("tenant"),
             request_id=state.get("request_id"),
         ):

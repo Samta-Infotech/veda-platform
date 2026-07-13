@@ -24,6 +24,7 @@ Usage:
 import os
 import sys
 import json
+import time
 
 # Zero-egress on-prem: force HuggingFace/transformers OFFLINE before ANY model-loading
 # import. This entry point loads the BGE retrieval model (query.retrieval_engine) before
@@ -351,9 +352,16 @@ def run_hybrid_query(query, verbose=False, on_event=None):
         probe = io.StringIO()
         with contextlib.redirect_stdout(probe):
             det = run_query(query, sm, cols, return_result=True)
-        if isinstance(det, dict) and det.get("ok"):
+        if isinstance(det, dict) and (det.get("ok") or det.get("status") == "clarify"):
+            # A CLARIFY is terminal, same as an answer: the head UNDERSTOOD the
+            # utterance and asked a grounded question back. Running the decomposer
+            # after it burns an SLM round (~30s on a busy SLM, measured: 2.8s head
+            # → 39s total) and could only override the safe question with a
+            # mis-split. Same contract as the Tier-2 clarify exemption.
             sys.stdout.write(probe.getvalue())
-            _emit(on_event, "answer", "Deterministic SQL answered the query")
+            _emit(on_event, "answer",
+                  "Deterministic SQL answered the query" if det.get("ok")
+                  else "Asked a clarifying question")
             return MultiResult(items=[_to_subresult(query, "deterministic", det)])
         # Deterministic couldn't fully answer → maybe it was several questions.
         return _maybe_split(query, verbose=verbose, precomputed_sql=det,
@@ -513,27 +521,56 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     if intent == "sql":
         sm, cols = _load_semantic_model()
         from veda.pipeline import run_query
+        _head_t0 = time.time()
         res = precomputed_sql if isinstance(precomputed_sql, dict) \
             else run_query(query, sm, cols, return_result=True)
+        _head_s = time.time() - _head_t0
         # Tier-2 fallback: if the deterministic head couldn't answer (refuse / dropped
         # qualifier / ungrounded / no table), let the LLM emit IR → deterministic
         # builder → GRAPH-GUARDED firewall → execute. Flag-gated (needs Ollama); the
         # graph guard (now live in the firewall) keeps LLM-proposed joins honest.
+        # A CLARIFY is deliberately NOT retried: it is a grounded QUESTION the
+        # deterministic head chose to ask (refuse-over-guess) — an LLM retry both
+        # burns 40–80s and can override the safe question with guessed SQL.
         if isinstance(res, dict) and not res.get("ok") and res.get("status") in (
-                "refuse", "qualifier_dropped", "ungrounded", "no_table", "clarify",
+                "refuse", "qualifier_dropped", "ungrounded", "no_table",
                 "exec_error"):
             try:
                 from config import TIER2_LLM_FALLBACK
             except Exception:
                 TIER2_LLM_FALLBACK = False
-            if TIER2_LLM_FALLBACK:
+            # TIME BUDGET (heavy-lane governance): a slow deterministic head means
+            # retrieval/grounding already struggled — Tier-2 rarely rescues those and
+            # each SLM round is 30–120s. Skip Tier-2 when the head overspent, and give
+            # Tier-2 itself a hard deadline (enforced between SLM rounds). Measured:
+            # ungroundable maintenance-vocab queries burned 240s+ without this.
+            try:
+                from config import TIER2_SKIP_IF_HEAD_OVER_S, TIER2_TIME_BUDGET_S
+            except Exception:
+                TIER2_SKIP_IF_HEAD_OVER_S, TIER2_TIME_BUDGET_S = 60.0, 120.0
+            if TIER2_LLM_FALLBACK and _head_s > TIER2_SKIP_IF_HEAD_OVER_S:
+                print(f"  [Tier2] SKIPPED (head took {_head_s:.0f}s > "
+                      f"{TIER2_SKIP_IF_HEAD_OVER_S:.0f}s budget) — refusal stands")
+            elif TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
                 t2 = _tier2_sql(query, sm, cols, verbose=verbose,
+                                deadline=time.time() + TIER2_TIME_BUDGET_S,
                                 execution_state=res.get("context") if isinstance(res, dict) else None)
                 if t2 is not None:
-                    _emit(on_event, "answer", "Tier-2 SQL answered the query")
-                    return "deterministic", t2
+                    if isinstance(t2, dict) and t2.get("status") == "tier2_rejected":
+                        # Tier-2 exists to RESCUE a refusal; a candidate its own
+                        # correctness gates killed is not an answer. The head's
+                        # refusal (with its user-facing feedback) stands — the
+                        # gate error ("fan-out risk: SUM(t2.list_value)…") is an
+                        # internal note about SQL the user never saw.
+                        print(f"  [Tier2] candidate rejected by gates — head refusal "
+                              f"stands ({str(t2.get('error'))[:80]})")
+                        if isinstance(res, dict):
+                            res["tier2_note"] = t2.get("error")
+                    else:
+                        _emit(on_event, "answer", "Tier-2 SQL answered the query")
+                        return "deterministic", t2
         else:
             _emit(on_event, "answer", "SQL query executed")
         return "deterministic", res
@@ -601,8 +638,10 @@ def _to_subresult(sub_query, route, result):
             return SubResult(sub_query, STATUS_OK, route, result)
         st = result.get("status")
         reason = result.get("error") or st or "could not answer"
-        # Tier-2 firewall/exec failures are infra errors; deterministic declines are refusals.
-        status = STATUS_ERROR if st in ("tier2_rejected", "tier2_exec_error") else STATUS_REFUSED
+        # Tier-2 exec failures are infra errors; tier2_rejected is the CORRECTNESS GATE
+        # declining an unsafe LLM answer (dropped qualifier / ungrounded value / wrong
+        # semantics) — a refusal, same contract as deterministic declines.
+        status = STATUS_ERROR if st == "tier2_exec_error" else STATUS_REFUSED
         return SubResult(sub_query, status, route, result, str(reason))
     # object-shaped head result (RAG / hybrid / NoSQL)
     err = getattr(result, "error", None)
@@ -661,7 +700,10 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     ok_val, bad = value_grounding(raw_sql, _resolve, cols_meta)
     if not ok_val:
         return False, f"ungrounded value {bad}"
-    ok_q, missing = qualifier_completeness(query, raw_sql, sm)
+    # STRICT: LLM-lane answers face the QSR-aware gate — an unaccounted token with a
+    # referent anywhere in the schema is a dropped qualifier, closing the wrong-table
+    # blind spot (SELECT * FROM assets_asset for "most expensive financial records").
+    ok_q, missing = qualifier_completeness(query, raw_sql, sm, strict=True)
     if not ok_q:
         return False, f"dropped qualifier {missing!r}"
     _tcols = ({k.split(".", 1)[1] for k, m in cols_meta.items()
@@ -703,6 +745,17 @@ def _repair_hint_for(error: str) -> str:
     else:
         cls = "The previous attempt failed validation/execution. Produce a simpler, correct IR."
     return f"[REPAIR] {cls} (error: {str(error)[:180]})"
+
+
+def _is_param_mismatch(err) -> bool:
+    """True when an exec error is the classified placeholder/param-count mismatch
+    (veda.execution.PARAM_MISMATCH_ERROR) — OUR param assembly failed, so the SLM
+    repair loop can't fix it and the caller should keep the deterministic refusal."""
+    try:
+        from veda.execution import PARAM_MISMATCH_ERROR
+        return PARAM_MISMATCH_ERROR in str(err or "")
+    except Exception:
+        return "parameter mismatch" in str(err or "")
 
 
 def _tier2_finish(query, sm, cols, rows, sql, source):
@@ -783,13 +836,17 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
     return result
 
 
-def _tier2_sql(query, sm, all_cols, verbose=False, execution_state=None):
+def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_state=None):
     """Tier-2 SQL fallback (only when the deterministic head can't answer).
 
     LLM emits IR → deterministic sql_builder makes the SQL (LLM never writes SQL) →
     the GRAPH-GUARDED firewall validates (every join must be a real FK edge, no
     cartesian, value-grounded) → execute. Returns a result dict or None. Needs Ollama
     + the integrated retrieval stores; any failure → None (caller keeps the refusal).
+
+    deadline: optional absolute time.time() cutoff — checked between SLM rounds so
+    an expired Tier-2 budget returns the head's refusal instead of burning minutes
+    (TIER2_TIME_BUDGET_S at the call site).
 
     execution_state: optional veda.execution_state.ExecutionState from Tier1's own
     run_query() call (see _dispatch_single) — when given, reuses Tier1's temporal
@@ -849,6 +906,9 @@ def _tier2_sql(query, sm, all_cols, verbose=False, execution_state=None):
                     psql, params, err = validate_and_parameterize(_sql, _tbls, _cols)
                     if err:
                         print(f"  [Tier2] envelope firewall rejected ({err}) — fallback to IR")
+                    elif not (_ev := _tier2_validate(query, psql, sm, set(_tbls), _cols,
+                                                     llm_written=True, tf=tf))[0]:
+                        print(f"  [Tier2] envelope gated ({_ev[1]}) — fallback to IR")
                     else:
                         ecols, erows, eerr = execute_sql(psql, list(params))
                         if eerr:
@@ -882,6 +942,12 @@ def _tier2_sql(query, sm, all_cols, verbose=False, execution_state=None):
         from config import LANGGRAPH_SHARED_PLANNER
 
         for _attempt in range(_max_repairs + 1):
+            # hard deadline between SLM rounds — an expired budget returns the
+            # deterministic refusal instead of starting another 30–120s generation
+            if deadline is not None and time.time() > deadline:
+                print(f"  [Tier2] time budget exhausted before attempt {_attempt} — "
+                      f"keeping deterministic refusal")
+                return None
             _q_ir = query if not _repair_hint else f"{query}\n\n{_repair_hint}"
             if _repair_hint and _attempt == 0:
                 print("  [Tier2] seeded with Tier1's refusal reason")
@@ -917,6 +983,11 @@ def _tier2_sql(query, sm, all_cols, verbose=False, execution_state=None):
                         return {"status": "tier2_rejected", "ok": False, "error": err}
                     cols, rows, eerr = execute_sql(psql, list(params))
                     if eerr:
+                        if _is_param_mismatch(eerr):
+                            # our own param assembly failed — not SLM-repairable; keep
+                            # the deterministic head's clean refusal, never a raw crash
+                            print(f"  [Tier2] shared-planner exec degraded: {eerr}")
+                            return None
                         if _attempt < _max_repairs:
                             _repair_hint = _repair_hint_for(eerr); continue
                         return {"status": "tier2_exec_error", "ok": False, "error": eerr}
@@ -945,8 +1016,22 @@ def _tier2_sql(query, sm, all_cols, verbose=False, execution_state=None):
                     _repair_hint = _repair_hint_for(err); continue
                 print(f"  [Tier2] firewall rejected (kept safe): {err}")
                 return {"status": "tier2_rejected", "ok": False, "error": err}
+            # Correctness gates (value grounding + STRICT qualifier + IR equivalence) —
+            # previously defined but never called on this path, which is how a bare
+            # SELECT * from the wrong table shipped as an "answer". NO repair retry on
+            # a gate failure: a dropped qualifier isn't fixable by IR nudging (the
+            # schema doesn't change between attempts), and each retry is a full SLM
+            # round — measured blowing the q61-class past 200s on CPU fallback.
+            _ok2, _why2 = _tier2_validate(query, psql, sm, allowed_tables, allowed_cols,
+                                          llm_written=True, tf=tf)
+            if not _ok2:
+                print(f"  [Tier2] gated (kept safe): {_why2}")
+                return {"status": "tier2_rejected", "ok": False, "error": _why2}
             cols, rows, eerr = execute_sql(psql, list(params))
             if eerr:
+                if _is_param_mismatch(eerr):
+                    print(f"  [Tier2] IR exec degraded: {eerr}")
+                    return None
                 if _attempt < _max_repairs:
                     _repair_hint = _repair_hint_for(eerr); continue
                 return {"status": "tier2_exec_error", "ok": False, "error": eerr}

@@ -39,8 +39,11 @@ class NLAnswerResult:
 
 def _fmt_value(v):
     """Human-friendly scalar formatting (thousands separators for ints)."""
+    from decimal import Decimal
     if isinstance(v, bool):
         return "yes" if v else "no"
+    if isinstance(v, Decimal):      # psycopg2 returns NUMERIC as Decimal
+        v = float(v)
     if isinstance(v, int):
         return f"{v:,}"
     if isinstance(v, float):
