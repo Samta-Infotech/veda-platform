@@ -113,11 +113,18 @@ def _business_field_name(table: str, col: str, sm: Optional[dict]) -> str:
     return _humanize(col)
 
 
-def _extract(sql: str) -> Dict[str, Any]:
+def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """One self-contained sqlglot pass over the final SQL. Deliberately NOT a
     reuse of veda/ir_equivalence.py's extract_sql_ir — that module's shape is
     owned by SQL-safety validation and free to change for validation reasons;
-    this module's contract must stay independently stable for explainability."""
+    this module's contract must stay independently stable for explainability.
+
+    `sql` is the EXECUTED sql — veda/validation.py's validate_and_parameterize()
+    rewrites every filter literal into a %s placeholder (bound separately in
+    `params`, in the same left-to-right order they appear in the rendered SQL)
+    for safe execution. Without `params`, every filter's value would come back
+    None (a placeholder has no exp.Literal to find) — `params` lets filter
+    values be resolved back by position for explainability/memory purposes."""
     import sqlglot
     from sqlglot import exp
 
@@ -129,6 +136,15 @@ def _extract(sql: str) -> Dict[str, Any]:
         return out
     if tree is None:
         return out
+
+    # Map each Placeholder node (by identity) to its bound value, in the SAME
+    # left-to-right document order validate_and_parameterize() used to build
+    # `params` — find_all() walks the tree in source order, matching that.
+    placeholder_values = {}
+    if params:
+        for i, ph in enumerate(tree.find_all(exp.Placeholder)):
+            if i < len(params):
+                placeholder_values[id(ph)] = params[i]
 
     out["entities"] = sorted({t.name for t in tree.find_all(exp.Table) if t.name})
     out["distinct"] = tree.find(exp.Distinct) is not None
@@ -191,18 +207,22 @@ def _extract(sql: str) -> Dict[str, Any]:
                 val = lit.name
             else:
                 b = pred.find(exp.Boolean)
-                val = str(b.this) if b is not None else None
+                if b is not None:
+                    val = str(b.this)
+                else:
+                    ph = pred.find(exp.Placeholder)
+                    val = placeholder_values.get(id(ph)) if ph is not None else None
             out["filters"].append((col.name, type(pred).__name__, val))
     return out
 
 
-def extract_sql_facts(sql: str) -> Dict[str, Any]:
+def extract_sql_facts(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Public entry point onto `_extract()` — the same zero-LLM sqlglot pass
     business_explain already runs, exposed for callers outside this module
     (e.g. veda/result_analyzer.py's InsightContext) that need the same
     entities/filters/aggregations/groupings/orderings/limit facts without a
     second SQL parse."""
-    return _extract(sql)
+    return _extract(sql, params=params)
 
 
 def _filter_phrase(field: str, op_class: str, val: Optional[str]) -> str:
@@ -245,7 +265,8 @@ def _build_understanding(*, dataset: str, aggregations: List[Tuple[str, Optional
 
 def build_explain(*, sql: str, table: str, sm: Optional[dict],
                    checks: Optional[List[dict]] = None,
-                   visualization: Optional[dict] = None) -> Dict[str, Any]:
+                   visualization: Optional[dict] = None,
+                   params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
     Returns a plain dict matching the documented explainability schema.
 
@@ -253,8 +274,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     (query/result_explainer.py's validate_visualization — never the raw,
     unvalidated SLM suggestion), when one was produced. Optional and additive:
     omitted entirely from the returned dict when None, so every existing
-    caller/consumer of build_explain() is unaffected."""
-    ir = _extract(sql or "")
+    caller/consumer of build_explain() is unaffected.
+
+    `params`: the bound values validate_and_parameterize() rewrote `sql`'s
+    filter literals into %s placeholders for (veda/pipeline.py's `params`,
+    same order) — without these every filter's value comes back None (see
+    _extract()'s docstring)."""
+    ir = _extract(sql or "", params=params)
     entities = ir["entities"] or ([table] if table else [])
     primary = entities[0] if entities else table
 

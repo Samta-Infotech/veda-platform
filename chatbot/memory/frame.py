@@ -226,12 +226,24 @@ def render_frame_as_query(frame: Optional[QueryFrame], message: str, delta_type:
     chatbot/nodes.py::context_resolve_node — pop_drill() +
     rebuild_frame_from_stack() BEFORE calling this) — this function no
     longer drops a filter of its own (audit C2 fix: that was a double-pop).
+
+    "drill_up" is the one delta_type whose `message` ("go back", "go back
+    again", ...) carries NO data content of its own — it's a pure navigation
+    trigger, not a fragment to combine with the frame. Gluing it onto `ctx`
+    (e.g. "go back (for accounts_paymenttransaction, ...)")  sent the literal
+    words "back"/"again" to the engine as if they were part of the question,
+    which then tried (and failed) to match them against columns/values. The
+    resolved query for drill_up is just the popped frame's own restatement —
+    the user's exact words never carried the intent, the stack pop already
+    did.
     """
     if not frame or not frame.get("entity") or delta_type in ("new_topic", "ambiguous"):
         return message
     ctx = _describe_frame(frame)
     if not ctx:
         return message
+    if delta_type == "drill_up":
+        return ctx
     return f"{message} (for {ctx})".strip()
 
 

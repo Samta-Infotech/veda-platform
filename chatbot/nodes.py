@@ -262,6 +262,24 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             "overriding to 'answer': %r", message,
         )
         action = "answer"
+    elif (action == "smalltalk" and frame.get("entity")
+            and not (_GREETING_RE.match(message) or _THANKS_RE.match(message)
+                      or _BYE_RE.match(message))):
+        # _DATA_QUESTION_HINTS is schema-agnostic action-words only (count/how
+        # many/show me/...) — it never catches a bare entity mention like
+        # "tell me something about transaction" (no table/column names
+        # hardcoded there by design). But a QueryFrame from a prior successful
+        # query IS a grounded, deterministic signal that the session already
+        # has an active analytical topic: a message that isn't a genuine
+        # greeting/thanks/bye can't really be smalltalk right after that,
+        # regardless of whether the LLM recognized the entity noun. Same
+        # refuse-over-guess principle as the two overrides above.
+        logger.warning(
+            "classify_node: LLM said smalltalk but an active QueryFrame exists "
+            "(entity=%r) and message isn't a genuine greeting/thanks/bye, "
+            "overriding to 'followup': %r", frame.get("entity"), message,
+        )
+        action = "followup"
 
     logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state

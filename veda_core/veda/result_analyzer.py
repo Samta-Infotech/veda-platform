@@ -262,6 +262,7 @@ def analyze_result(
     connector_type:     str = "relational",
     query_intent:       Optional[str] = None,
     confidence_inputs:  Optional[Dict[str, float]] = None,
+    params:             Optional[List[Any]] = None,
 ) -> InsightContext:
     """Build the canonical InsightContext from an already-executed result.
     No LLM call, no new SQL query — reuses veda.business_explain.extract_sql_facts
@@ -270,10 +271,14 @@ def analyze_result(
     `query_intent` / `confidence_inputs`: metadata the CALLER already computed
     upstream (e.g. veda/pipeline.py's IntentDetector classification, anchor/join
     selection confidence) — reused here, never recomputed. Both optional and
-    default to None/{} so existing callers are unaffected."""
+    default to None/{} so existing callers are unaffected.
+
+    `params`: the bound values `sql`'s %s placeholders were parameterized to
+    (veda/validation.py's validate_and_parameterize) — without these, filter
+    values in the derived facts come back None (see business_explain._extract)."""
     from veda.business_explain import extract_sql_facts
 
-    facts = extract_sql_facts(sql or "")
+    facts = extract_sql_facts(sql or "", params=params)
     row_count = len(rows)
     result_type = classify_result_type(row_count, columns)
     stats = _column_stats(columns, rows, max_rows, table=table, semantic_model=sm)

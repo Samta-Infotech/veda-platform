@@ -164,6 +164,7 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                         sql=kw.get("sql") or "", table=kw.get("table") or "", sm=sm,
                         checks=tr.sections.get("validation", {}).get("checks", []),
                         visualization=kw.get("visualization"),
+                        params=params,
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
@@ -365,7 +366,7 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
         allowed_tables, allowed_columns = set(fp.tables), list(fp.columns)
     elif cached_sql:
         print(f"  [cache] verified-query hit (sim={sim:.2f}) — skipping retrieval + SLM")
-        sql, primary, from_cache = cached_sql, "(cached)", True
+        sql, from_cache = cached_sql, True
         import sqlglot
         from sqlglot import exp
         try:
@@ -373,6 +374,15 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
             allowed_tables = {t.name for t in ct.find_all(exp.Table) if t.name}
         except Exception:
             allowed_tables = set()
+        # The real table name, derived from the cached SQL text itself — NOT the
+        # literal string "(cached)" this used to be (a display-only leftover that
+        # ended up as engine_result["table"], then as the QueryFrame's "entity"
+        # via harvest_frame(), poisoning memory/topic-switch detection on every
+        # cache-hit turn). Multi-table cached query: pick deterministically
+        # (first alphabetically) rather than guess — never crashes downstream,
+        # which only special-cases an empty/unknown primary already.
+        primary = (next(iter(allowed_tables)) if len(allowed_tables) == 1
+                   else (sorted(allowed_tables)[0] if allowed_tables else ""))
         allowed_columns = [k.split(".", 1)[1] for k in all_cols
                            if k.split(".", 1)[0] in allowed_tables]
     else:
@@ -1166,7 +1176,8 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                                (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
                 ctx = analyze_result(query, param_sql, list(cols), row_dicts, sm=sm,
                                      table=str(primary), max_rows=RESULT_ANALYZER_MAX_ROWS,
-                                     query_intent=intent, confidence_inputs=_conf_inputs)
+                                     query_intent=intent, confidence_inputs=_conf_inputs,
+                                     params=params)
                 insight = run_insight_engine(ctx, rank_column=_rank_column_for_nl)
                 if getattr(insight, "answer", None):
                     nl_answer_text = insight.answer
