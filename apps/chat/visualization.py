@@ -46,9 +46,11 @@ class VisualizationSpec:
     histogram_title: str | None = None  # line_histogram only
     line_title: str | None = None       # line_histogram only
     chart_data: dict = field(default_factory=dict)
+    confidence: float = 1.0             # deterministic 0-1 — see _CONFIDENCE_THRESHOLD
 
     def to_dict(self) -> dict:
-        d = {"type": self.type.value, "title": self.title, "chart_data": self.chart_data}
+        d = {"type": self.type.value, "title": self.title, "chart_data": self.chart_data,
+             "confidence": self.confidence}
         for key in ("sub_title", "x_axis_title", "y_axis_title", "histogram_title", "line_title"):
             value = getattr(self, key)
             if value:
@@ -69,8 +71,28 @@ def _is_numeric(v: Any) -> bool:
 _DATE_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?")
 _TEMPORAL_NAME_HINTS = ("date", "month", "year", "week", "day", "time", "period", "quarter")
 
+# Identifier detection — a self-contained copy of the same heuristic
+# veda_core/veda/result_analyzer.py's classify_column_role() uses (which
+# itself mirrors config.IDENTIFIER_SUFFIXES). Not a shared import: this
+# Django api-tier module never imports veda_core (apps/query/inference_client.py's
+# own docstring) — kept in sync manually if either changes.
+#
+# WHY this exists: an id/uuid/code column is structurally "numeric" (or a
+# short low-cardinality "categorical") by _infer_kind's rules alone, which
+# previously let it get picked as a chart measure or dimension (e.g. a
+# line_histogram plotting a primary-key `id` column as one of the two
+# "measures" against payment_attempt_count) — a real, observed production bug.
+# Identifiers are excluded from every candidate pool below; they may still
+# appear in the accompanying markdown table, just never charted.
+_IDENTIFIER_SUFFIXES = ("_id", "_uuid", "_key", "_no", "_number", "_num", "_code", "_ref")
+_IDENTIFIER_NAMES = ("id", "uuid", "guid")
+
 _MAX_PIE_SLICES = 6
 _TOP_N_CATEGORIES = 9  # + 1 "Other" bucket for the long tail = 10 slices/bars, still readable
+
+# Below this, no chart is returned at all — a table-only response is always
+# safer than a low-confidence or borderline-meaningless chart.
+_CONFIDENCE_THRESHOLD = 0.6
 
 
 class VisualizationRecommender:
@@ -101,9 +123,13 @@ class VisualizationRecommender:
             return []
 
         kinds = [self._infer_kind(cols[i], [row[i] for row in rows]) for i in range(len(cols))]
-        numeric_idx = [i for i, k in enumerate(kinds) if k == "numeric"]
-        temporal_idx = [i for i, k in enumerate(kinds) if k == "temporal"]
-        categorical_idx = [i for i, k in enumerate(kinds) if k == "categorical"]
+        is_id = [self._is_identifier(c) for c in cols]
+        # Identifiers are excluded from every candidate pool up front — an id/
+        # uuid/code column never becomes a measure OR a dimension, regardless
+        # of how numeric/categorical it structurally looks.
+        numeric_idx = [i for i, k in enumerate(kinds) if k == "numeric" and not is_id[i]]
+        temporal_idx = [i for i, k in enumerate(kinds) if k == "temporal" and not is_id[i]]
+        categorical_idx = [i for i, k in enumerate(kinds) if k == "categorical" and not is_id[i]]
         dimension_idx = temporal_idx[:1] or categorical_idx[:1]
 
         # A dimension with TWO measures is the frontend's line_histogram: a
@@ -112,15 +138,17 @@ class VisualizationRecommender:
         # specific, more informative match than either measure charted alone.
         if dimension_idx and len(numeric_idx) >= 2:
             combo = self._combo(cols, rows, dimension_idx[0], numeric_idx[0], numeric_idx[1])
-            if combo is not None:
+            if combo is not None and combo.confidence >= _CONFIDENCE_THRESHOLD:
                 return [combo]
 
         if temporal_idx and numeric_idx and len(rows) > 1:
-            return [self._line(cols, rows, temporal_idx[0], numeric_idx[0])]
+            spec = self._line(cols, rows, temporal_idx[0], numeric_idx[0])
+            if spec.confidence >= _CONFIDENCE_THRESHOLD:
+                return [spec]
 
         if categorical_idx and numeric_idx:
             spec = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0])
-            if spec is not None:
+            if spec is not None and spec.confidence >= _CONFIDENCE_THRESHOLD:
                 return [spec]
 
         return []
@@ -141,6 +169,11 @@ class VisualizationRecommender:
         return "categorical"
 
     @staticmethod
+    def _is_identifier(col_name: str) -> bool:
+        name = col_name.lower()
+        return name in _IDENTIFIER_NAMES or name.endswith(_IDENTIFIER_SUFFIXES)
+
+    @staticmethod
     def _looks_like_date(v: Any) -> bool:
         if hasattr(v, "isoformat"):  # datetime/date objects
             return True
@@ -149,14 +182,24 @@ class VisualizationRecommender:
     # --- chart builders ------------------------------------------------------
 
     def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> VisualizationSpec | None:
-        pairs = [(str(row[cat_idx]), _to_number(row[val_idx])) for row in rows if _is_numeric(row[val_idx])]
-        if not pairs:
-            return None  # the "numeric" column turned out to be unusable for this row set
+        # SQL upstream doesn't guarantee GROUP BY on the category column, so the
+        # same category name can appear across multiple rows — sum them here
+        # rather than plotting one slice/bar per raw row.
+        totals: dict[str, float] = {}
+        for row in rows:
+            if not _is_numeric(row[val_idx]):
+                continue
+            name = str(row[cat_idx])
+            totals[name] = totals.get(name, 0) + _to_number(row[val_idx])
+        pairs = list(totals.items())
+        if len(pairs) < 2:
+            return None  # a single category isn't a chart — never force one
 
         title = f"{cols[val_idx]} by {cols[cat_idx]}"
         if len(pairs) <= _MAX_PIE_SLICES:
             slices = [{"name": name, "value": value} for name, value in pairs]
-            return VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices})
+            return VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
+                                     confidence=0.9)
 
         # Long tail: keep the top N by value, collapse the rest into "Other"
         # rather than dropping the chart entirely — this is what makes bar/pie
@@ -168,22 +211,29 @@ class VisualizationRecommender:
             slices.append({"name": "Other", "value": sum(value for _, value in rest)})
 
         if len(slices) <= _MAX_PIE_SLICES:
-            return VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices})
+            return VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
+                                     confidence=0.75)
 
         labels = [s["name"] for s in slices]
         values = [s["value"] for s in slices]
         return VisualizationSpec(
             type=ChartType.BAR, title=title, x_axis_title=cols[cat_idx], y_axis_title=cols[val_idx],
-            chart_data={"labels": labels, "values": values},
+            chart_data={"labels": labels, "values": values}, confidence=0.7,
         )
 
     @staticmethod
     def _line(cols: list, rows: list, x_idx: int, y_idx: int) -> VisualizationSpec:
+        # SQL upstream doesn't guarantee ORDER BY on the temporal column, so
+        # rows can arrive in arbitrary DB order — sort here or the line zig-zags.
+        ordered = sorted(rows, key=lambda row: (row[x_idx] is None, row[x_idx]))
+        non_null_x = sum(1 for row in ordered if row[x_idx] is not None)
+        confidence = 0.9 if non_null_x == len(ordered) and len(ordered) >= 3 else 0.7
         return VisualizationSpec(
             type=ChartType.LINE, title=f"{cols[y_idx]} over {cols[x_idx]}",
             x_axis_title=cols[x_idx], y_axis_title=cols[y_idx],
-            chart_data={"labels": [str(row[x_idx]) for row in rows],
-                       "values": [_to_number(row[y_idx]) for row in rows]},
+            chart_data={"labels": [str(row[x_idx]) for row in ordered],
+                       "values": [_to_number(row[y_idx]) for row in ordered]},
+            confidence=confidence,
         )
 
     @staticmethod
@@ -194,6 +244,11 @@ class VisualizationRecommender:
         ]
         if len(triples) < 2:
             return None
+        # A combo chart is inherently a more specific/riskier read than a plain
+        # bar/line — scale confidence by how much of the result set actually
+        # produced a usable (dim, measure1, measure2) triple.
+        coverage = len(triples) / len(rows) if rows else 0.0
+        confidence = 0.8 if coverage >= 0.8 else 0.6
         return VisualizationSpec(
             type=ChartType.LINE_HISTOGRAM,
             title=f"{cols[hist_idx]} and {cols[line_idx]} by {cols[dim_idx]}",
@@ -201,4 +256,5 @@ class VisualizationRecommender:
             chart_data={"labels": [t[0] for t in triples],
                        "histogram_values": [t[1] for t in triples],
                        "line_values": [t[2] for t in triples]},
+            confidence=confidence,
         )

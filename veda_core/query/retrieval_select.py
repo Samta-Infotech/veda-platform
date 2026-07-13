@@ -29,6 +29,8 @@ def select_retrieval(
     source_ids: Optional[List[str]] = None,
     intent:     str = "sql",
     graph_result = None,    # pass pre-computed GraphRetrievalResult to avoid a double run
+    seed_candidates = None, # Tier1-computed {table_name, col_name, score} dicts — merged
+                            # into the bi-encoder pool before reranking (see retrieve_v2)
     verbose:    bool = False,
 ) -> SelectedRetrieval:
     """
@@ -39,6 +41,9 @@ def select_retrieval(
          - high-confidence exact match → short-circuit, skip bi-encoder
       2. Bi-encoder + reranker  (RETRIEVAL_V2_ENABLED + BIENCODER_ENABLED)
          - skipped when schema-link short-circuited
+         - when seed_candidates given, merged into the pool before reranking
+           (retrieve_v2._merge_seed_candidates) — Tier2's own retrieval still runs,
+           so it can recover if Tier1's candidates weren't sufficient
       3. Graph retrieval  (UNIFIED_GRAPH_ENABLED + GRAPH_RETRIEVAL_ENABLED + GRAPH_EMBED_ENABLED)
          - skipped when graph_result already provided by caller
       4. Semantic layer  (always — needed for join_path, encoding_strategy, synonym stats)
@@ -80,6 +85,7 @@ def select_retrieval(
             from query.retrieval_v2 import retrieve_v2
             _v2_cols, _v2_tables = retrieve_v2(
                 query=query, source_ids=source_ids, verbose=verbose,
+                seed_candidates=seed_candidates,
             )
             if _v2_cols:
                 _source = "v2_rerank"

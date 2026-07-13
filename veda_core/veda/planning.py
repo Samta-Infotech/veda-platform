@@ -1,5 +1,6 @@
 """VEDA · L4b/L4c — deterministic existence, grain pre-aggregation, join orchestration."""
 import os, re, sys, time, json, logging, threading
+from query.ranking_parser import parse_ranking
 from veda.generation import _resolve_display_column, generate_join_sql
 from veda.routing import _name_toks
 from veda.runtime import IMPORTANCE_WEIGHTS, JOIN_CONFIDENCE_FLOOR, get_graph
@@ -15,7 +16,7 @@ def existence_mode(query):
       exists_count     : "how many counterparties have annotations"
       not_exists_count : "how many counterparties have no annotations"
     """
-    from config import QUERY_GRAMMAR
+    from config import QUERY_GRAMMAR, QUERY_LANGUAGE
     ql = f" {query.lower()} "
 
     def has(group):
@@ -25,8 +26,12 @@ def existence_mode(query):
         return False
 
     # quantity ("more than one") and grouping ("per") are HAVING-counts / grouped
-    # aggregates, not existence — leave them to the aggregate path.
-    if has("quantity") or re.search(r"[<>]=?", ql) or has("grouping"):
+    # aggregates, not existence — leave them to the aggregate path. Ratio/percentage
+    # ("what PERCENTAGE of X have Y") wants a CASE-WHEN ratio, not a bare EXISTS check,
+    # and a ranking word ("which X HAVE the HIGHEST Y") wants GROUP BY + ORDER BY, not
+    # a semi-join — both are misclassified by the bare "have"/"with" existence trigger.
+    if (has("quantity") or re.search(r"[<>]=?", ql) or has("grouping") or has("ratio")
+            or any(re.search(rf"\b{re.escape(w)}\b", ql) for w in QUERY_LANGUAGE["ranking"])):
         return None
     # Possessive / projection phrasing ("X with THEIR Y", "X and their Y names") asks
     # to SHOW the related entity's columns — that's a projection JOIN, not an existence
@@ -57,11 +62,25 @@ def aggregate_mode(query):
 
     Existence (how-many-have / with / without) is classified FIRST by the caller —
     this only sees what existence_mode declined (e.g. possessive counting)."""
-    from config import QUERY_GRAMMAR
+    from config import QUERY_GRAMMAR, QUERY_LANGUAGE
     ql = f" {query.lower()} "
 
-    mtop = re.search(r"\btop\s+(\d+)\b", ql)
-    top_n = int(mtop.group(1)) if mtop else None
+    # Shared parser (query/ranking_parser.py): recognizes "top N" AND "latest N" /
+    # "bottom N" / "highest N" / ... (the old regex here only matched the literal
+    # word "top" before a digit, silently dropping every other phrasing's count).
+    # `ranked` below is still computed from the FULL QUERY_LANGUAGE["ranking"] list
+    # (unchanged) so existing counting/aggregate detection behavior doesn't shift —
+    # only the top_n EXTRACTION and the sort DIRECTION are upgraded.
+    _rank = parse_ranking(query)
+    top_n = _rank.top_n
+    direction = _rank.direction   # "desc" | "asc" — which end build_aggregate_sql ranks
+
+    # A ranking word ("highest", "most"...) without an explicit number ("which
+    # projects have the HIGHEST number of tenants") still means "sort by the metric
+    # descending" — just without a hard LIMIT. Distinct from top_n (which also caps
+    # the row count); ranked=True only adds ORDER BY.
+    ranked = bool(re.search(r"\b(?:" + "|".join(re.escape(w) for w in QUERY_LANGUAGE["ranking"])
+                            + r")\b", ql))
 
     m = re.search(r"\b(more than|over|at least|minimum of)\s+(\d+|one|two|three|four|"
                   r"five|six|seven|eight|nine|ten)\b", ql)
@@ -69,14 +88,19 @@ def aggregate_mode(query):
         n = _NUM_WORDS.get(m.group(2), None)
         n = int(m.group(2)) if n is None else n
         op = ">=" if m.group(1) in ("at least", "minimum of") else ">"
-        return {"threshold": n, "op": op, "top_n": top_n}
+        return {"threshold": n, "op": op, "top_n": top_n, "ranked": ranked, "direction": direction}
     if re.search(r"\bmultiple\b", ql):
-        return {"threshold": 1, "op": ">", "top_n": top_n}
+        return {"threshold": 1, "op": ">", "top_n": top_n, "ranked": ranked, "direction": direction}
 
-    counting = any((" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql)
-                   for w in QUERY_GRAMMAR.get("counting", []))
-    if counting or top_n is not None:     # "top 5 X by Y" implies ranking by count
-        return {"threshold": None, "op": None, "top_n": top_n}
+    # "distribution"/"breakdown" of X across/per Y is grammatically a grouped COUNT
+    # of X by Y, same as "how many X per Y" — just phrased as a noun instead of a
+    # question. Grouped into "counting" rather than a new top-level QUERY_GRAMMAR
+    # class since it resolves to the exact same aggregate shape.
+    counting = (any((" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql)
+                    for w in QUERY_GRAMMAR.get("counting", []))
+               or bool(re.search(r"\b(distribution|breakdown)\b", ql)))
+    if counting or top_n is not None or ranked:  # "top 5"/"highest" implies ranking by count
+        return {"threshold": None, "op": None, "top_n": top_n, "ranked": ranked, "direction": direction}
     return None
 
 
@@ -150,16 +174,18 @@ def ratio_mode(query):
 
 
 def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
-                        top_n=None, group_col=None):
+                        top_n=None, group_col=None, ranked=False, direction="desc"):
     """Deterministic pre-aggregation: one CTE per child relation, each grouped by
     its FK to the anchor, then joined to the anchor grain. No LLM, and structurally
     fan-out-free — two child CTEs can never cross-multiply (the 'organizations with
     user count AND incident count' double-count bug is impossible by construction).
 
-    child_specs: [(display_name, edge)] — edge is the anchor-touching graph edge;
-    the child side is whichever side isn't the anchor. A polymorphic predicate is
-    applied INSIDE the child's CTE. threshold turns LEFT JOIN + COALESCE into
-    INNER JOIN + HAVING (the 'more than N' filter)."""
+    child_specs: [(display_name, edge_or_chain)] — edge_or_chain is either the single
+    anchor-touching graph edge (the child side is whichever side isn't the anchor), or
+    — for a child several hops from the anchor (_resolve_agg_chain) — an ordered hop
+    list from the anchor down to the actual child table. A polymorphic
+    predicate is applied INSIDE the child's CTE. threshold turns LEFT JOIN + COALESCE
+    into INNER JOIN + HAVING (the 'more than N' filter)."""
     ctes, joins, selects, tables = [], [], [], {anchor}
     metrics = []
     if group_col:
@@ -171,20 +197,47 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
         display = _resolve_display_column(anchor, sm)
         anchor_sel = [f't0."{display}"'] if display else ['t0.*']
 
-    for i, (name, edge) in enumerate(child_specs):
-        if edge["target_table"] == anchor:
-            child, child_col, anchor_col = (edge["source_table"],
-                                            edge["source_column"], edge["target_column"])
-        else:
-            child, child_col, anchor_col = (edge["target_table"],
-                                            edge["target_column"], edge["source_column"])
-        tables.add(child)
+    for i, (name, spec) in enumerate(child_specs):
         cte, al, metric = f"agg_{i}", f"a{i}", f"{name}_count"
-        pred = f" WHERE {edge['requires_predicate']}" if edge.get("requires_predicate") else ""
         having = (f" HAVING COUNT(*) {op} {int(threshold)}"
                   if threshold is not None else "")
-        ctes.append(f'{cte} AS (SELECT "{child_col}" AS agg_key, COUNT(*) AS {metric} '
-                    f'FROM "{child}"{pred} GROUP BY "{child_col}"{having})')
+        if isinstance(spec, list):
+            # Multi-hop chain (_resolve_agg_chain): anchor -[hop0]->
+            # bridge -[hop1..]-> ... -> the actual child/target table. Every hop was
+            # already verified to fan TOWARD the child (each far-side row maps to
+            # exactly one near-side row), so COUNT(DISTINCT child.id) — not COUNT(*)
+            # — makes this safe regardless of how many 1:N hops sit in between.
+            hops = spec
+            anchor_col = hops[0]["near_col"]
+            bridge_table, bridge_col = hops[0]["far_table"], hops[0]["far_col"]
+            tables.add(bridge_table)
+            from_sql, prev_alias, preds = f'"{bridge_table}" c0', "c0", []
+            if hops[0].get("requires_predicate"):
+                preds.append(hops[0]["requires_predicate"])
+            for j, h in enumerate(hops[1:], start=1):
+                alias = f"c{j}"
+                tables.add(h["far_table"])
+                from_sql += (f' JOIN "{h["far_table"]}" {alias} '
+                            f'ON {alias}."{h["far_col"]}" = {prev_alias}."{h["near_col"]}"')
+                if h.get("requires_predicate"):
+                    preds.append(h["requires_predicate"])
+                prev_alias = alias
+            pred = f" WHERE {' AND '.join(preds)}" if preds else ""
+            ctes.append(f'{cte} AS (SELECT c0."{bridge_col}" AS agg_key, '
+                        f'COUNT(DISTINCT {prev_alias}."id") AS {metric} '
+                        f'FROM {from_sql}{pred} GROUP BY c0."{bridge_col}"{having})')
+        else:
+            edge = spec
+            if edge["target_table"] == anchor:
+                child, child_col, anchor_col = (edge["source_table"],
+                                                edge["source_column"], edge["target_column"])
+            else:
+                child, child_col, anchor_col = (edge["target_table"],
+                                                edge["target_column"], edge["source_column"])
+            tables.add(child)
+            pred = f" WHERE {edge['requires_predicate']}" if edge.get("requires_predicate") else ""
+            ctes.append(f'{cte} AS (SELECT "{child_col}" AS agg_key, COUNT(*) AS {metric} '
+                        f'FROM "{child}"{pred} GROUP BY "{child_col}"{having})')
         jtype = "JOIN" if threshold is not None else "LEFT JOIN"
         joins.append(f'{jtype} {cte} {al} ON {al}.agg_key = t0."{anchor_col}"')
         metrics.append(metric)
@@ -195,15 +248,83 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
         else:
             selects.append(f"COALESCE({al}.{metric}, 0) AS {metric}")
 
+    # "bottom"/"lowest"/"fewest" rank ASCENDING (least first); "top"/"highest"/"most"
+    # (the default) rank DESCENDING — direction comes from aggregate_mode's shared
+    # query/ranking_parser.py classification, so "bottom 5" no longer sorts DESC and
+    # returns the biggest 5 instead of the smallest 5.
+    _order_dir = "ASC" if direction == "asc" else "DESC"
     tail = f' GROUP BY t0."{group_col}"' if group_col else ""
     if top_n is not None and metrics:
-        tail += f" ORDER BY {metrics[0]} DESC LIMIT {int(top_n)}"
+        tail += f" ORDER BY {metrics[0]} {_order_dir} LIMIT {int(top_n)}"
+    elif ranked and metrics:
+        # A ranking word ("highest"/"most") with NO explicit number still means sort
+        # by the metric — just without a hard cap beyond the default LIMIT.
+        tail += f" ORDER BY {metrics[0]} {_order_dir} LIMIT 100"
     else:
         tail += " LIMIT 100"
     sql = (f"WITH {', '.join(ctes)} "
            f"SELECT {', '.join(anchor_sel + selects)} "
            f'FROM "{anchor}" t0 ' + " ".join(joins) + tail)
     return sql, tables
+
+
+def _resolve_agg_chain(anchor, tgt, graph, max_hops=6):
+    """BFS over the FULL relationship graph from `anchor` to `tgt`, traversing an edge
+    ONLY in the 'child fans toward anchor' direction — cardinality '1:N' with
+    anchor-side=source, 'N:1' with anchor-side=target, or '1:1' either way (an even
+    SAFER special case: at most one far-side row per near-side row instead of many).
+    Baking this into the search itself — not filtering a path AFTER the fact — means a
+    coincidental cross-reference through an unrelated table (e.g. a ledger row that
+    happens to carry both an asset_id and a lease_transaction_id independently) is
+    never even a candidate hop: it's a dead end the moment its onward edge fails the
+    direction check, so a shortest-path cost tie can never prefer a semantically wrong
+    route over a genuine containment chain. Lets the grain planner pre-aggregate a
+    child several hops from the anchor ('lease transactions per PROJECT' is
+    project→asset→leaseunit→leasetransaction), not just a direct anchor-touching
+    child, WITHOUT the restrictive named-tables-only intermediate set the main
+    join-tree search uses (an unnamed bridge entity like 'asset' is the normal case
+    here, not a query-named table). Returns an ordered hop list — each hop a dict of
+    near/far table+column — or None if no such safe path exists within `max_hops`."""
+    from collections import deque
+    if anchor == tgt:
+        return []
+    by_table = {}
+    for e in graph.get("edges", []):
+        by_table.setdefault(e["source_table"], []).append(e)
+        by_table.setdefault(e["target_table"], []).append(e)
+    visited, parent, q = {anchor}, {}, deque([(anchor, 0)])
+    while q:
+        cur, depth = q.popleft()
+        if depth >= max_hops:
+            continue
+        for e in by_table.get(cur, []):
+            if e["source_table"] == cur:
+                far_table, near_col, far_col = e["target_table"], e["source_column"], e["target_column"]
+                safe = e.get("cardinality") in ("1:N", "1:1")
+            elif e["target_table"] == cur:
+                far_table, near_col, far_col = e["source_table"], e["target_column"], e["source_column"]
+                safe = e.get("cardinality") in ("N:1", "1:1")
+            else:
+                continue
+            if not safe or far_table in visited:
+                continue
+            visited.add(far_table)
+            parent[far_table] = {"near_table": cur, "near_col": near_col,
+                                 "far_table": far_table, "far_col": far_col,
+                                 "requires_predicate": e.get("requires_predicate")}
+            if far_table == tgt:
+                q.clear()
+                break
+            q.append((far_table, depth + 1))
+    if tgt not in parent:
+        return None
+    hops, node = [], tgt
+    while node != anchor:
+        h = parent[node]
+        hops.append(h)
+        node = h["near_table"]
+    hops.reverse()
+    return hops
 
 
 def build_existence_sql(anchor, edges, mode):
@@ -280,6 +401,124 @@ def _junction_tables(graph, sm):
     return junctions
 
 
+def _match_measure_metric(query):
+    """Non-COUNT (SUM/AVG) metric named by the query, or None — a thin wrapper over
+    the semantic metric registry's label matcher ('average carpet area' ->
+    avg_assets_asset_carpet_area), so 'AVERAGE X PER Y' reuses the SAME compiled
+    metric→table→column→function knowledge the single-table measure path already
+    trusts, instead of inventing new column-resolution vocabulary."""
+    from semantic import registry as reg
+    hits = reg.match_metric_labels(query.lower())
+    return hits[0][0] if hits else None
+
+
+def build_measure_by_entity_sql(anchor, metric, chain, sm, ranked=False):
+    """'AVERAGE/TOTAL <column> PER <entity>' where the metric's own table is several
+    hops from the grouping anchor ('average carpet area per project': metric =
+    AVG(assets_asset.carpet_area), chain = project→asset). Structurally the same
+    pre-aggregation shape as build_aggregate_sql's multi-hop branch — one CTE walking
+    the safe chain (_resolve_agg_chain already verified every hop fans toward the
+    child) — just applying the metric's OWN aggregation function to its OWN column
+    instead of COUNT(DISTINCT pk). `chain=[]` means the metric already lives on the
+    anchor table (plain single-table GROUP BY); returns (None, set()) if the metric's
+    expression can't be parsed into a function+column (never emits a guess)."""
+    import re as _re
+    m = _re.match(r'^(\w+)\(\s*(?:DISTINCT\s+)?[\w]+\.(\w+)\s*\)$', metric["expression"], _re.I)
+    if not m:
+        return None, set()
+    func, col = m.group(1).upper(), m.group(2)
+    display = _resolve_display_column(anchor, sm)
+    anchor_sel = f't0."{display}"' if display else "t0.*"
+    metric_alias = f"{func.lower()}_{col}"
+    order = f" ORDER BY {metric_alias} DESC" if ranked else ""
+    if not chain:
+        sql = (f'SELECT {anchor_sel}, {func}("{col}") AS {metric_alias} FROM "{anchor}" t0 '
+               f'GROUP BY {anchor_sel}{order} LIMIT 100')
+        return sql, {anchor}
+    bridge_table, bridge_col, anchor_col = chain[0]["far_table"], chain[0]["far_col"], chain[0]["near_col"]
+    tables = {anchor, bridge_table}
+    from_sql, prev_alias = f'"{bridge_table}" c0', "c0"
+    for j, h in enumerate(chain[1:], start=1):
+        alias = f"c{j}"
+        tables.add(h["far_table"])
+        from_sql += f' JOIN "{h["far_table"]}" {alias} ON {alias}."{h["far_col"]}" = {prev_alias}."{h["near_col"]}"'
+        prev_alias = alias
+    sql = (f'WITH agg_0 AS (SELECT c0."{bridge_col}" AS agg_key, '
+           f'{func}({prev_alias}."{col}") AS {metric_alias} '
+           f'FROM {from_sql} GROUP BY c0."{bridge_col}") '
+           f'SELECT {anchor_sel}, agg_0.{metric_alias} '
+           f'FROM "{anchor}" t0 LEFT JOIN agg_0 ON agg_0.agg_key = t0."{anchor_col}"{order} LIMIT 100')
+    return sql, tables
+
+
+def _resolve_entity_phrase(phrase, graph_tables, junctions):
+    """The single graph table a noun PHRASE names (whole-entity match, same rule as
+    the grouped-aggregate `_group_anchor` fallback in try_multitable): every token of
+    `phrase` must be a subset of the table's segmented name tokens, preferring the
+    SMALLEST such table (most specific match, so a generic word doesn't get pulled
+    toward an unrelated, more-specific-sounding table). None if nothing matches."""
+    from retrieval.query_enrichment import _singularize as _sg_ep
+    toks = {_sg_ep(w) for w in phrase.split() if len(w) > 2}
+    if not toks:
+        return None
+    cands = [(t, len(_name_toks(t))) for t in graph_tables
+            if t not in junctions and toks <= _name_toks(t)]
+    if not cands:
+        return None
+    cands.sort(key=lambda x: (x[1], len(x[0])))
+    return cands[0][0]
+
+
+def _try_measure_by_entity(query, sm, all_cols, graph, junctions):
+    """Early, narrow check for a single named metric grouped by a single named
+    entity, independent of the count-oriented target-selection try_multitable
+    otherwise does — two phrasings:
+      'AVERAGE/TOTAL <column> PER <entity>'            (entity trails "per"/"by")
+      'WHICH <entity> HAVE/GENERATE the HIGHEST <col>'  (entity is the subject)
+    Returns an action dict, or None to decline (falls through to the normal
+    try_multitable flow) when the phrasing doesn't match, the metric/anchor can't be
+    resolved, or the metric is already on the anchor's own table (the single-table
+    path's job) — never a wrong guess."""
+    import re as _re
+    metric = _match_measure_metric(query)
+    if metric is None:
+        return None
+    ql = query.lower()
+    graph_tables = set(graph.get("tables", []))
+    from config import QUERY_LANGUAGE as _QL_measure
+    has_ranking = bool(re.search(r"\b(?:" + "|".join(re.escape(w) for w in _QL_measure["ranking"])
+                                 + r")\b", ql))
+    anchor = None
+    mg = _re.search(r"\b(?:per|by)\s+([a-z_][a-z_ ]{2,40})", ql)
+    if mg:
+        anchor = _resolve_entity_phrase(mg.group(1).strip(), graph_tables, junctions)
+    if anchor is None and has_ranking:
+        # No "per/by X" trailer — try "WHICH X have/generate/produce the highest Y",
+        # where X (the grouping entity) is the query's SUBJECT. Gated on a ranking
+        # word so a plain single-table measure question is never hijacked.
+        mwhich = _re.match(r"^\s*which\s+([a-z_][a-z_ ]{2,40}?)\s+(?:have|has|generate[s]?|"
+                           r"produce[s]?|show[s]?|contribute[s]?|receive[s]?|earn[s]?)\b", ql)
+        if mwhich:
+            anchor = _resolve_entity_phrase(mwhich.group(1).strip(), graph_tables, junctions)
+    if anchor is None or anchor not in graph_tables:
+        return None
+    metric_table = metric["source_table"]
+    if anchor == metric_table:
+        return None
+    chain = _resolve_agg_chain(anchor, metric_table, graph)
+    if not chain:
+        return None
+    sql, tables = build_measure_by_entity_sql(anchor, metric, chain, sm, ranked=has_ranking)
+    if sql is None:
+        return None
+    cols = [k.split(".", 1)[1] for k in all_cols if k.split(".", 1)[0] in tables]
+    plan = {"join_path": [], "confidence": 1.0, "max_fanout": None, "why": [],
+           "unreachable": [], "ambiguous": []}
+    return {"action": "aggregate", "sql": sql, "tables": tables, "columns": cols,
+            "plan": plan, "anchor": anchor, "metrics": [metric["metric_id"]],
+            "threshold": None, "top_n": None, "group_col": None}
+
+
 def try_multitable(query, results, sm, all_cols, tf, primary=None):
     """Attempt a deterministic multi-table plan. Returns an action dict:
       {action: sql|clarify|refuse|fallback, ...}"""
@@ -289,6 +528,12 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
     if not graph_tables:
         return {"action": "fallback"}
     junctions = _junction_tables(graph, sm)
+
+    from config import GRAIN_PLANNER_ENABLED as _GPE_measure
+    if _GPE_measure:
+        _measure = _try_measure_by_entity(query, sm, all_cols, graph, junctions)
+        if _measure is not None:
+            return _measure
 
     cols_meta = sm.get("columns", {})
     score = {}
@@ -373,6 +618,20 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
                 if any(a == _phrase and len(a) > 3 for a in _cands):
                     _group_anchor = _tn
                     break
+        # No dimension-COLUMN match ("per counterparty type") — try a whole-ENTITY
+        # match: "per project" means group by the project TABLE itself, however many
+        # join hops it takes to reach it from the metric table (_resolve_agg_chain
+        # handles the multi-hop CTE). Prefer the SMALLEST name-token superset among
+        # matches so a generic phrase word doesn't get pulled toward an unrelated,
+        # more-specific-sounding table.
+        if _group_anchor is None:
+            _phrase_toks = {_singularize(w) for w in _phrase.split() if len(w) > 2} if _mg else set()
+            if _phrase_toks:
+                _entity_cands = [(_tn, len(_name_toks(_tn))) for _tn in graph_tables
+                                 if _tn not in junctions and _phrase_toks <= _name_toks(_tn)]
+                if _entity_cands:
+                    _entity_cands.sort(key=lambda x: (x[1], len(x[0])))
+                    _group_anchor = _entity_cands[0][0]
     if _group_anchor:
         anchor = _group_anchor
     elif primary and primary in graph_tables and primary not in junctions:
@@ -638,14 +897,24 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
         return {"action": "clarify",
                 "msg": f"ambiguous join to {a['target']} — which key: {', '.join(a['options'])}?"}
     # A requested target that can only be reached by tunnelling through an unrelated
-    # table is refused, NOT silently narrowed to single-table (correctness over coverage).
-    if plan["unreachable"]:
+    # table is refused, NOT silently narrowed to single-table (correctness over
+    # coverage) — UNLESS this is a grain/aggregate query ("X count per Y"), where the
+    # target sitting several hops away through an UNNAMED bridge entity is the NORMAL
+    # case ("lease transactions per project" needs project→asset→leaseunit, and
+    # neither bridge table is named in the query). `plan` here was built with the
+    # RESTRICTIVE intermediate set (named tables/junctions only), so defer the refuse
+    # and let the grain branch below retry with its own safety-integrated BFS
+    # (_resolve_agg_chain) over the full graph — only refuse for real if THAT also
+    # fails (right before the skeleton build).
+    from config import GRAIN_PLANNER_ENABLED as _GPE_early
+    _defer_unreachable = bool(plan["unreachable"]) and _GPE_early and bool(aggregate_mode(query))
+    if plan["unreachable"] and not _defer_unreachable:
         return {"action": "refuse",
                 "msg": f"{anchor} and {', '.join(plan['unreachable'])} are not directly "
                        f"related — a join would have to pass through unrelated tables"}
-    if not plan["join_path"]:
+    if not plan["join_path"] and not _defer_unreachable:
         return {"action": "fallback"}
-    if plan["confidence"] < JOIN_CONFIDENCE_FLOOR:
+    if plan["confidence"] < JOIN_CONFIDENCE_FLOOR and not _defer_unreachable:
         return {"action": "refuse",
                 "msg": f"join confidence {plan['confidence']} < {JOIN_CONFIDENCE_FLOOR}"}
 
@@ -724,10 +993,21 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
                 # junction hop: counting role_permissions rows per role IS the
                 # permission count — the relationship grain lives on the bridge.
                 direct = anchor_edges[0]
-            if direct is None or not _fans(direct):
+            if direct is not None and _fans(direct):
+                specs.append((tgt, direct))
+                continue
+            # No direct anchor-touching fan-out edge — try a multi-hop chain ("lease
+            # transactions per PROJECT" is project→asset→leaseunit→leasetransaction,
+            # 3 hops). plan["join_path"] was built with the RESTRICTIVE intermediate
+            # set (junctions/named-tables only), which excludes unnamed bridge
+            # entities like assets_asset here — so search the FULL graph instead, via
+            # _resolve_agg_chain's safety-integrated BFS (never affects the
+            # skeleton/LLM path's own `plan`/join_path).
+            hops = _resolve_agg_chain(anchor, tgt, graph)
+            if not hops:
                 agg_ok = False
                 break
-            specs.append((tgt, direct))
+            specs.append((tgt, hops))
         if agg_ok and specs:
             # Optional grouping dimension on the ANCHOR ("annotation count per
             # counterparty type"). Alias/phrase match only — no token guessing;
@@ -753,7 +1033,8 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
                         break
             agg_sql, agg_tables = build_aggregate_sql(
                 anchor, specs, sm, threshold=agg["threshold"], op=agg["op"] or ">",
-                top_n=agg.get("top_n"), group_col=group_col)
+                top_n=agg.get("top_n"), group_col=group_col, ranked=agg.get("ranked", False),
+                direction=agg.get("direction", "desc"))
             agg_cols = [k.split(".", 1)[1] for k in all_cols
                         if k.split(".", 1)[0] in agg_tables]
             return {"action": "aggregate", "sql": agg_sql, "tables": agg_tables,
@@ -761,6 +1042,14 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
                     "metrics": [f"{t}_count" for t, _ in specs],
                     "threshold": agg["threshold"], "top_n": agg.get("top_n"),
                     "group_col": group_col}
+
+    if _defer_unreachable:
+        # The grain branch's wide-search chain resolution also failed (or GRAIN_PLANNER
+        # declined for another reason) — the original restrictive plan really can't
+        # reach the target, and building a skeleton from it would be wrong/incomplete.
+        return {"action": "refuse",
+                "msg": f"{anchor} and {', '.join(plan['unreachable'])} are not directly "
+                       f"related — a join would have to pass through unrelated tables"}
 
     skeleton, alias_map = build_skeleton(plan)     # alias_map: alias -> table (occurrence-keyed)
     # Alias-qualified join keys from OUR OWN skeleton (deterministic format), for

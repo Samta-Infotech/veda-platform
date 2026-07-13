@@ -7,6 +7,16 @@
 # relgt/light_text/hybrid/ensemble vocabulary were removed — see EMBEDDING_MODEL_ID.
 # =============================================================================
 
+# Auto-load the repo-root .env so this module gives correct values regardless
+# of cwd or whether the shell manually exported them. Real env vars (already
+# set) always win — this only fills in what's missing.
+# from pathlib import Path as _Path_dotenv
+# try:
+#     from dotenv import load_dotenv as _load_dotenv
+#     _load_dotenv(_Path_dotenv(__file__).resolve().parent.parent / ".env")
+# except ImportError:
+#     pass
+
 # =============================================================================
 # SOURCE REGISTRY  (§3.1 — config-file registry eliminated)
 #
@@ -334,6 +344,16 @@ COL_ID_IDX_PATH = "schema/col_id_to_idx.pkl"
 # NL Simplifier — Layer 0
 # -----------------------------------------------------------------------------
 NL_SIMPLIFIER_ENABLED = False
+
+# -----------------------------------------------------------------------------
+# Runtime Context Provider — Layer 0 (query/runtime_context.py)
+# -----------------------------------------------------------------------------
+# Pure system-value questions ("what's the current date", "what time is it") need
+# no table, no SQL, no LLM — they were previously falling through to retrieval,
+# which could match unrelated columns (e.g. "current" -> an is_current flag) and
+# select a real table, producing "SELECT CURRENT_DATE FROM <table> LIMIT 100"
+# (today's date duplicated once per row instead of answered once).
+RUNTIME_CONTEXT_ENABLED = True
 
 # -----------------------------------------------------------------------------
 # SLM — Layer 3
@@ -679,6 +699,14 @@ BIENCODER_CANDIDATE_TABLES = 10   # rerank on CPU; 24 still comfortably covers t
 TABLE_PRIOR_TOP_M = 10
 TABLE_PRIOR_BETA  = 0.3
 
+# Tier1→Tier2 ExecutionState propagation (veda/execution_state.py): a small additive
+# score boost applied to Tier1's vetted primary_table when building candidate_fields
+# seeds for Tier2's retrieval — Tier1 already ran a full retrieval + grain-vet pass to
+# pick this table, so Tier2's reranker starts from that prior instead of from zero.
+# Small and additive, same convention as TABLE_PRIOR_BETA above — never overrides the
+# cross-encoder's own judgment, only nudges a near-tie in the vetted table's favor.
+PRIMARY_TABLE_SEED_BOOST = 0.05
+
 # =============================================================================
 # WEIGHTED FUSION (WP6) — per-signal weights for the RRF merger.
 # score(d) = Σ_s w_s / (k + rank_s(d)). Identity (all 1.0) == the pre-WP6 unweighted
@@ -851,7 +879,51 @@ IR_JOIN_FREE_ENABLED = True   # SLM omits joins[]; sql_builder derives from fk_a
 
 NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
-NL_ANSWER_FAST_TIMEOUT_MS = 800   # F6: bound worst-case NL-answer latency
+# F6: bound worst-case NL-answer latency. Measured against the actual small summary
+# model (warm, over the configured Ollama host): a genuine multi-row facts payload
+# consistently takes ~1000-1100ms end to end — 800ms guaranteed a timeout on EVERY
+# such call, silently downgrading every multi-row answer to the generic deterministic
+# fallback ("Returned N row(s)...") even though the SLM was healthy and answering.
+# 2500ms leaves real headroom above the observed ~1000-1100ms without materially
+# affecting overall query latency (dominated by retrieval/SQL-gen, several seconds).
+NL_ANSWER_FAST_TIMEOUT_MS = int(__import__("os").environ.get("NL_ANSWER_FAST_TIMEOUT_MS", "2500"))
+
+# Result Explanation Layer (query/result_explainer.py) — row-summarization SLM call.
+# Deliberately a SMALL instruct model, distinct from SLM_MODEL_NAME (the 7B coder
+# model used for SQL/IR generation): summarizing a handful of result rows into one
+# sentence doesn't need a code model, and a small model keeps this off the hot path.
+NL_SUMMARY_MODEL       = __import__("os").environ.get("NL_SUMMARY_MODEL", "qwen2.5:1.5b-instruct")
+NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "2500"))
+# 80 was cutting the model off mid-sentence for multi-row answers (a "~1-2 sentence"
+# answer with several named values comfortably needs more than 80 tokens). 120 gives
+# headroom to finish; the prompt itself also now asks for one ~30-word sentence.
+NL_SUMMARY_MAX_TOKENS  = int(__import__("os").environ.get("NL_SUMMARY_MAX_TOKENS", "120"))
+NL_SUMMARY_MAX_ROWS    = int(__import__("os").environ.get("NL_SUMMARY_MAX_ROWS", "20"))
+
+# Insight Engine (veda/result_analyzer.py + query/result_explainer.py's
+# run_insight_engine) — deterministic ResultAnalyzer feeding one optional SLM
+# call that extends the existing summary with insights/visualization-
+# suggestion/follow-up-questions/confidence. Off by default: a new,
+# best-effort layer that must be explicitly opted into per deployment before
+# it can affect the response shape (additively — see result_explainer.py).
+INSIGHT_ENGINE_ENABLED     = __import__("os").environ.get(
+    "INSIGHT_ENGINE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+# Cap on rows scanned for in-memory column stats (nulls/distinct/top-values) —
+# large result sets still get a summary, just profiled from a bounded sample.
+RESULT_ANALYZER_MAX_ROWS   = int(__import__("os").environ.get("RESULT_ANALYZER_MAX_ROWS", "200"))
+# Measured live (2026-07-10): a bare JSON round trip against qwen2.5:1.5b-instruct
+# already takes ~3.2s over the configured Ollama host, and the real Insight Engine
+# prompt asks for MORE structured output (summary+insights+visualization+follow-ups,
+# ~240 predicted tokens vs run_nl_answer's 120) — so it needs materially more
+# headroom than NL_SUMMARY_TIMEOUT_MS's 2500ms, not less. 1200ms silently fell back
+# to the deterministic answer on every call in that environment.
+INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "5000"))
+# Deterministic chart-recommendation gate (veda/result_analyzer.chart_confidence,
+# query/result_explainer.validate_visualization): below this, no visualization is
+# returned at all — a table-only response is always safer than a low-confidence
+# or semantically-wrong chart (e.g. an identifier plotted as a measure).
+VISUALIZATION_CONFIDENCE_THRESHOLD = float(
+    __import__("os").environ.get("VISUALIZATION_CONFIDENCE_THRESHOLD", "0.6"))
 
 # =============================================================================
 # WP7: the Track-4 precompute consumption flags (_env_flag + the seven toggles and
@@ -1090,7 +1162,7 @@ QUERY_LANGUAGE = {
                   "which", "who", "whom", "whose", "where", "there", "here", "please",
                   "their", "its", "about", "also", "only", "just", "much", "more",
                   "less", "than", "exactly", "them", "they", "not", "but", "have",
-                  "has", "had", "been", "being", "does", "per", "give", "among"],
+                  "has", "had", "been", "being", "does", "per", "give", "along", "among"],
     # temporal words (the temporal window itself is resolved by L1, so these tokens
     # are already consumed before SQL generation)
     "temporal": ["last", "past", "previous", "recent", "recently", "ago", "since",
@@ -1114,6 +1186,11 @@ QUERY_LANGUAGE = {
                       "tracked", "named", "called", "based", "using",
                       "appears", "appear", "represents", "represent",
                       "occurs", "occur", "occurring"],
+    # generic "this row exists / this event happened" verbs — carry no filter/value
+    # semantics of their own ("transactions that OCCURRED" == just "transactions").
+    # Kept narrow (vs. e.g. "recorded"/"logged") to avoid ever stripping a word that's
+    # a genuine status value in some schema.
+    "event_verbs": ["occurred", "happened"],
 }
 # --- Target selection (evidence-based, Stage 1 of the join pipeline) -------------
 # Feature-flagged so it can be benchmarked OLD-vs-NEW before adoption. When False the
@@ -1294,6 +1371,15 @@ VALUE_ARBITER_RETRIEVAL_FILTER = True
 # deterministic JOIN. Ships OFF — it builds a JOIN in the hot path, so validate on the real
 # env (SLM+DB) before enabling.
 ANSWER_ENTITY_DISCOVERY_ENABLED = True
+# Answer-Entity LLM fallback: when the deterministic pronoun cues (who/whom/their/its/
+# theirs/them) find nothing — e.g. "the assigned user's name", "each incident's owner",
+# "the person handling it" — ask the SLM for ONLY the relation word (e.g. "assigned").
+# The SLM never picks the table/column itself: the returned word still has to pass the
+# same deterministic _relation_named() match against the real FK graph as any other
+# cue, so grounding is unchanged — this only widens which PHRASINGS can trigger the
+# finder. Fails safe (timeout/error/unparseable → None → falls through to the next
+# resolver), same as every other LLM call in this codebase.
+ANSWER_ENTITY_LLM_FALLBACK_ENABLED = True
 # Multi-hop FK resolution: when 1-hop value resolution finds nothing, resolve an entity
 # filter through ONE unambiguous junction-membership path (tags on a document via
 # document_tags). Multiple paths (RBAC direct+role), shared dimensions, or provenance FKs →

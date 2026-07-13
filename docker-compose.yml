@@ -1,16 +1,23 @@
 # VEDA platform — DEV compose (migration_plan.md §3 topology, Phase 1).
 #
-# Nine application services on one internal network (veda_net); ONLY nginx
-# publishes a host port. Two callouts encoded here:
+# Application services on one internal network (veda_net); nginx is the only
+# one meant to be reached from outside docker. Three callouts encoded here:
 #   • Split Redis (§3): redis-broker (unbounded, no evict) and redis-cache
 #     (maxmemory + allkeys-lru) are SEPARATE instances even in dev, so the shape
 #     matches prod. Dev may point both Django aliases at one — but the two
 #     instances stay distinct so a cache-eviction storm never touches the broker.
+#     redis-stack is a THIRD, dedicated instance for chatbot/'s LangGraph
+#     checkpointer (needs RediSearch, which plain redis:7-alpine lacks) — kept
+#     isolated rather than repurposing broker/cache so its memory/latency
+#     profile can't couple to Celery or the app cache's LRU eviction.
 #   • PgBouncer (§1.1): every app DB pool connects THROUGH pgbouncer:6432, never
 #     postgres:5432 directly, so the fleet cannot exceed Postgres max_connections.
+#   • redis-stack also publishes :6380 to the host — DEV convenience only, so
+#     chat_cli.py/test_manual.py work from bare metal (see chatbot/checkpointer.py).
 #
-# SLM: ollama is the dev/ingestion backend (§8b). vLLM is prod-only (see
-# docker-compose.prod.yml).
+# SLM: ollama is the dev/ingestion backend (§8b); also used here by the api
+# tier's chatbot/ supervisor (classify/smalltalk/followup). vLLM is prod-only
+# for these query-time calls (see docker-compose.prod.yml).
 
 x-app-env: &app-env
   env_file: [.env]
@@ -23,6 +30,7 @@ volumes:
   pg_data:
   model_cache:      # BGE-M3 / reranker / MiniLM weights (§9), mounted into inference
   ollama_models:
+  redis_stack_data:
 
 services:
   postgres:
@@ -60,6 +68,17 @@ services:
     command: ["redis-server", "--maxmemory", "512mb", "--maxmemory-policy", "allkeys-lru"]
     networks: [veda_net]
 
+  redis-stack:                  # chatbot/'s LangGraph checkpoint store — dedicated
+                                 # and isolated from redis-broker/redis-cache. Needs
+                                 # RediSearch (FT.* commands), which plain redis:7-alpine
+                                 # does not have; redis-stack-server is a superset image
+                                 # (same protocol/commands + modules).
+    image: redis/redis-stack-server:latest
+    ports: ["6380:6379"]        # DEV: bare-metal chat_cli.py/test_manual.py reach it at
+                                 # localhost:6380 (matches chatbot/checkpointer.py's default)
+    volumes: [redis_stack_data:/data]
+    networks: [veda_net]
+
   ollama:                       # dev/ingestion SLM backend (§8b)
     image: ollama/ollama
     volumes: [ollama_models:/root/.ollama]
@@ -87,12 +106,16 @@ services:
   api:
     build: {context: ., dockerfile: docker/Dockerfile.api}
     <<: *app-env
-    environment: {ROLE: api}
+    environment:
+      ROLE: api
+      CHATBOT_CHECKPOINTER_REDIS_URL: redis://redis-stack:6379/0
     volumes: [".:/app"]   # DEV: live code, no rebuild on edit
     depends_on:
       pgbouncer: {condition: service_started}
       redis-broker: {condition: service_started}
       redis-cache: {condition: service_started}
+      redis-stack: {condition: service_started}
+      ollama: {condition: service_started}   # chatbot's classify/smalltalk/followup SLM calls (dev)
     networks: [veda_net]
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:8000/healthz')"]

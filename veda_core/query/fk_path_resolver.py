@@ -115,7 +115,7 @@ def resolve_fk_path(
     graph: dict,
     lookup: Lookup,
     max_hops: int = 4,
-    anchor_cols: Optional[set] = None,
+    anchor_col_toks: Optional[set] = None,
 ) -> Optional[Dict]:
     """Single UNAMBIGUOUS multi-hop entity filter, or None (refuse → LLM).
 
@@ -123,23 +123,20 @@ def resolve_fk_path(
              "path", "pairs"} only when exactly one grounded table is reachable by exactly
     one membership path. Otherwise None (ungrounded, ambiguous target, or >1 path).
 
-    anchor_cols (optional, injected): the anchor table's COLUMN NAMES — same guard as
-    resolve_value_filter's anchor-column skip. A token naming an anchor column ("state" →
-    workflow_state) is a COLUMN REFERENCE to project, not a cross-table value filter — even
-    when it coincidentally exists as a value in some FK-reachable table (signal_levels.name=
-    'state'). Without this, a common word coincidentally stored as a value in a distant table
-    hijacks a single-table query into a fabricated multi-hop join."""
-    _ac = {str(c).lower() for c in (anchor_cols or set())}
-
-    def _names_anchor_col(t):
-        tl = t.lower()
-        sing = tl[:-1] if tl.endswith("s") and len(tl) > 3 else tl
-        return tl in _ac or sing in _ac
+    anchor_col_toks (optional, injected): singularized WORD-PIECES of the anchor table's
+    column names (e.g. "workflow_state" → {"workflow", "state"}). A token that NAMES an
+    attribute of the anchor ("state" → workflow_state, "updated" → updated_date) is a
+    column to PROJECT, not a cross-table value filter — "incidents with their workflow
+    state changes" stays single-table. Without this guard a common word coincidentally
+    stored as a value in a distant table (signal_levels) hijacks the query into a
+    fabricated multi-hop join. Mirrors the 1-hop resolve_value_filter guard."""
+    from retrieval.query_enrichment import _singularize
+    _skip = anchor_col_toks or set()
 
     # 1. EXACT-ground every token (same as value_resolver — never fuzzy/LIKE)
     hits, seen = [], set()
     for tok in qtoks:
-        if _names_anchor_col(tok):
+        if tok in _skip or _singularize(tok) in _skip:
             continue
         try:
             found = lookup(tok) or []
