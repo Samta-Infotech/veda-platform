@@ -34,3 +34,15 @@ Output ONLY JSON, no markdown.
 {"filter_tree":{"type":"AND","children":[{"col_id":"<uuid>","operator":"EQ","value":"active"}]}}
 OPERATORS: EQ|NEQ|GT|GTE|LT|LTE|BETWEEN|LIKE|IN|IS_NULL
 """
+
+# query/answer_entity.py::_llm_relation_word — narrow fallback used only when no
+# closed-class pronoun cue (who/their/its/theirs/them) matches; asks the SLM for
+# ONLY the relation word, never the table/column (see that function's docstring
+# for why grounding is unaffected).
+ANSWER_ENTITY_RELATION_PROMPT = """\
+Does this question ask to SHOW a related person's name/identity via some \
+relationship (e.g. who created/owns/handles/is assigned to something) — as \
+opposed to filtering BY a specific named person? If yes, output the single \
+English word that names the relationship (e.g. assigned, created, owner, \
+handler). If no, output exactly: none. Output ONLY that one word, nothing else.\
+"""

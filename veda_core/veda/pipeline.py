@@ -1,5 +1,6 @@
 """VEDA · The L1→L7 orchestrator (run_query)."""
 import os, re, sys, time, json, logging, threading
+from query.ranking_parser import parse_ranking
 from veda.cache import save_verified_query, verified_cache_lookup
 from veda.execution import execute_sql
 from veda.generation import generate_sql
@@ -7,6 +8,9 @@ from veda.planning import existence_mode, try_multitable
 from veda.routing import select_primary_table, vet_primary
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 def _resolve_temporal_column(table, sm):
@@ -25,6 +29,52 @@ def _resolve_temporal_column(table, sm):
         return _pick_best_temporal(temporal, {c: {"col_name": c} for c in temporal})
     except Exception:
         return sorted(temporal)[0]
+
+
+_VAGUE_RECENCY_RE = re.compile(
+    r'\b(?:recently|lately|latest|newest|most\s+recent)\b', re.IGNORECASE)
+
+
+def _is_vague_recency_only(raw_expressions):
+    """True when every temporal span the L1 parser matched is a bare vague-recency
+    word (latest/newest/most recent/recently/lately) — i.e. the derived 30-day
+    BETWEEN window is a heuristic guess, not something the user explicitly asked
+    for. Used to prefer ORDER BY + LIMIT (an explicit top-N ranking request like
+    'latest 10 ledger entries') over a hard date-range filter that would silently
+    exclude rows outside an arbitrary 30-day window and ignore the requested N."""
+    return bool(raw_expressions) and all(_VAGUE_RECENCY_RE.search(e) for e in raw_expressions)
+
+
+def _resolve_rank_metric_column(table, sm):
+    """The anchor's single unambiguous measure column, if the schema names exactly
+    one (veda_semantic_model.json tables[...].candidate_measure_columns) — lets a
+    'top N'/'highest N' style ranking pick an ORDER BY column without guessing
+    among several measures."""
+    candidates = (sm.get("tables", {}).get(table, {}) or {}).get("candidate_measure_columns") or []
+    return candidates[0] if len(candidates) == 1 else None
+
+
+def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
+    """Shared ' ORDER BY ... LIMIT ...' tail for every hand-built single-table SQL
+    branch (FK / multi-hop / value-filter / temporal-only / plain listing) — so
+    'latest 10 X' / 'top 5 Y' / 'bottom 3 Z' are honored everywhere a single-table
+    SELECT is constructed deterministically, not only on the LLM-generated path.
+    Falls back to the historical ' LIMIT 100' when the query named no ranking, so
+    an unrelated query's SQL is byte-for-byte unaffected.
+
+    `alias`: some branches FROM the anchor under an alias (answer-entity's `a`/`t`
+    join) — the ORDER BY column must be qualified there to stay unambiguous."""
+    limit = rank.top_n if rank.top_n is not None else 100
+    prefix = f"{alias}." if alias else ""
+    if rank.basis == "temporal" and tcol:
+        direction = "ASC" if rank.direction == "asc" else "DESC"
+        return f' ORDER BY {prefix}"{tcol}" {direction} LIMIT {limit}'
+    if rank.basis == "metric":
+        metric_col = _resolve_rank_metric_column(table, sm)
+        if metric_col:
+            direction = "ASC" if rank.direction == "asc" else "DESC"
+            return f' ORDER BY {prefix}"{metric_col}" {direction} LIMIT {limit}'
+    return f' LIMIT {limit}'
 
 
 def _temporal_predicate(table, sm, tf):
@@ -56,7 +106,9 @@ def run_query(query, sm, all_cols, return_result=False):
     fanout_guard = None
     _llm_sql = False          # True only when the SQL's SELECT/WHERE was LLM-written
     from veda.explain import new_trace
+    from veda.execution_state import ExecutionState
     tr = new_trace(query)
+    es = ExecutionState()
 
     def _feedback(status, **ctx):
         """Build + print actionable failure guidance (why / what's needed / suggestions).
@@ -77,11 +129,28 @@ def run_query(query, sm, all_cols, return_result=False):
 
     def _done(rc, status, **kw):
         if status != "answered":
-            tr.set("output", refusal=kw.get("msg") or kw.get("error") or kw.get("missing"))
+            _refusal = kw.get("msg") or kw.get("error") or kw.get("missing")
+            tr.set("output", refusal=_refusal)
+            es.refusal_reason = _refusal
         tr.finish(status)
+        # Tier2 continuation context (Tier1→Tier2 propagation) — deliberately NOT the
+        # full trace (that stays below, for debugging); just what Tier2 needs to avoid
+        # recomputing temporal parsing / query understanding / retrieval / primary table.
+        es.sql_planning = dict(tr.sections.get("sql_planning", {}))
         if return_result:
+            explain = None
+            if status == "answered":
+                try:
+                    from veda.business_explain import build_explain
+                    explain = build_explain(
+                        sql=kw.get("sql") or "", table=kw.get("table") or "", sm=sm,
+                        checks=tr.sections.get("validation", {}).get("checks", []),
+                        visualization=kw.get("visualization"),
+                    )
+                except Exception:
+                    logger.exception("business_explain failed — end-user explainability omitted")
             return {"status": status, "ok": (status == "answered"),
-                    "trace": tr.to_dict(), **kw}
+                    "trace": tr.to_dict(), "explain": explain, "context": es, **kw}
         return rc
 
     def _rec_plan(p):
@@ -95,17 +164,26 @@ def run_query(query, sm, all_cols, return_result=False):
         for w in p.get("why", []):
             tr.note("join_planning", w)
 
+    # Which column a "top N"/"latest N" ranking request was actually ordered by —
+    # set only on the single-table path below; stays None (and the NL-answer SLM
+    # gets no ranking hint) for every other route, unchanged from before.
+    _rank_column_for_nl = None
+
     from query.temporal_parser import run_temporal_parser
-    tf = run_temporal_parser(query).temporal_filter
+    _tp_result = run_temporal_parser(query)
+    es.temporal_result = _tp_result
+    tf = _tp_result.temporal_filter
     if tf and (tf.start or tf.end):
         print(f"  [L1] Temporal     {tf.start}  →  {tf.end}")
     else:
         print("  [L1] Temporal     (no date range)")
 
     # Intent comes from the grammar signals that actually exist (existence_mode /
-    # aggregate_mode / superlative_mode below) — the old query_engine.IntentDetector
-    # import never resolved (module absent), silently pinning intent to SIMPLE while
-    # the trace implied a classifier ran.
+    # aggregate_mode / superlative_mode below). The rule-based
+    # query_engine.IntentDetector present in this tree is deliberately NOT wired in:
+    # its keyword classes overlap the grammar planners, and flipping intent to
+    # MULTI_TABLE/AGGREGATE here re-opens the multi-table planning latency that
+    # SUPERLATIVE_JOIN_ROUTING deliberately gates off (see config.py).
     intent = "SIMPLE"
     print(f"  [L4] Intent       {intent} (grammar-derived below)")
 
@@ -133,11 +211,13 @@ def run_query(query, sm, all_cols, return_result=False):
         if SUPERLATIVE_JOIN_ROUTING:
             intent = "AGGREGATE"
         print(f"  [L4] Intent       {intent} (superlative: {_sup['term']} → {_sup['superlative']})")
-    tr.set("query_understanding", query=query, intent=intent,
-           temporal=({"start": tf.start, "end": tf.end}
-                     if tf and (tf.start or tf.end) else None),
-           existence=existence_mode(query), aggregation=_agg, superlative=_sup,
-           grouped=_grp, ratio=_rat)
+    _qu = dict(query=query, intent=intent,
+               temporal=({"start": tf.start, "end": tf.end}
+                         if tf and (tf.start or tf.end) else None),
+               existence=existence_mode(query), aggregation=_agg, superlative=_sup,
+               grouped=_grp, ratio=_rat)
+    tr.set("query_understanding", **_qu)
+    es.query_understanding = _qu
 
     # Deterministic fast path: count / aggregate / dimension-list questions resolve
     # straight from the compiled registries — no retrieval, no planner, no LLM (and
@@ -409,6 +489,23 @@ def run_query(query, sm, all_cols, return_result=False):
         if primary != _router_primary:
             print(f"  [L3] Grain vet     router primary {_router_primary!r} → {primary!r} "
                   f"(word-order / grain-hint)")
+        from config import PRIMARY_TABLE_SEED_BOOST
+        es.primary_table = primary
+        es.candidate_tables = list(_cand_tabs)
+        # Plain {table_name, col_name, score} dicts — connector-agnostic, and reused
+        # as-is by select_retrieval()'s seed-candidate merge (no second DB lookup).
+        # Fields from the VETTED primary table get a small score boost — this is how
+        # `primary_table` actually influences Tier2 (not just an inert log flag): Tier1
+        # already spent a whole retrieval+grain-vet pass deciding this table is the
+        # anchor, so Tier2's reranker should start from that prior, not from zero.
+        # Small and additive — never overrides the cross-encoder's own judgment.
+        es.candidate_fields = [
+            {"table_name": (_t := r.col_id.split(".", 1)[0]),
+             "col_name":   r.col_id.split(".", 1)[1] if "." in r.col_id else r.column_name,
+             "score":      float(getattr(r, "final_score", 0.0)) + (PRIMARY_TABLE_SEED_BOOST
+                                                                     if _t == primary else 0.0)}
+            for r in results[:15]
+        ]
         tr.set("retrieval", candidate_tables=_cand_tabs[:8], n_columns=len(results))
         for r in results[:15]:
             tr.cand("retrieval", "top_columns",
@@ -497,6 +594,11 @@ def run_query(query, sm, all_cols, return_result=False):
             allowed_tables = {primary}
             allowed_columns = [c.split(".", 1)[1] for c in all_cols if c.startswith(primary + ".")]
 
+            # "latest 10 X" / "top 5 Y" / "bottom 3 Z" — an explicit ranking request
+            # the deterministic branches below must honor (ORDER BY + LIMIT N),
+            # instead of every branch hardcoding "LIMIT 100" with no ordering.
+            _rank = parse_ranking(query)
+
             # FK→label resolution (task #6): if a query VALUE grounds (EXACT) to a related
             # table reachable by an FK, build the filter THROUGH that FK deterministically
             # (subquery) — never let the LLM match a name against a foreign-key id. The
@@ -537,11 +639,15 @@ def run_query(query, sm, all_cols, return_result=False):
                     from veda.runtime import get_graph as _gg_mh
                     from veda.runtime import _pg as _pgc_mh
                     from query.value_resolver import column_values_lookup as _cvl
+                    from retrieval.query_enrichment import _singularize as _sg_mh
                     _qtoks_mh = [w for w in re.findall(r"[a-z0-9]+", query.lower()) if len(w) > 2]
-                    _anchor_cols_mh = {c.split(".", 1)[1] for c in sm.get("columns", {})
-                                       if c.split(".", 1)[0] == primary}
+                    # Anchor attribute tokens: a query word naming one ("state"→workflow_state)
+                    # is projection, not a cross-table value filter — never fabricate a join for it.
+                    _anchor_col_toks_mh = {_sg_mh(tok) for c in all_cols
+                                           if c.split(".", 1)[0] == primary
+                                           for tok in c.split(".", 1)[1].split("_") if len(tok) > 2}
                     _mh = resolve_fk_path(primary, _qtoks_mh, _gg_mh(), _cvl(_pgc_mh),
-                                          anchor_cols=_anchor_cols_mh)
+                                          anchor_col_toks=_anchor_col_toks_mh)
                     if _mh:
                         print(f"  [L4d] multi-hop FK  {' → '.join(_mh['path'])}  — deterministic, no LLM")
                 except Exception:
@@ -581,8 +687,40 @@ def run_query(query, sm, all_cols, return_result=False):
             # column, applied DIRECTLY in the deterministic SQL (FK / arbiter / temporal-
             # only). A date filter is never silently dropped, and we never fall back to the
             # LLM just to add a BETWEEN. Schema-metadata driven (_resolve_temporal_column).
-            _tcol = _resolve_temporal_column(primary, sm) if (tf and (tf.start or tf.end)) else None
-            _tpred = _temporal_predicate(primary, sm, tf) if _tcol else ""
+            #
+            # An explicit ranking request needing a temporal sort ("latest 10 X") also
+            # needs the canonical column resolved even when L1 found no date RANGE at
+            # all (e.g. "last 10 ledger entries" — "last" without a time unit sets no
+            # temporal_filter), so ORDER BY has something to sort by.
+            _want_rank_order = _rank.top_n is not None and _rank.basis == "temporal"
+            _tcol = (_resolve_temporal_column(primary, sm)
+                    if (tf and (tf.start or tf.end)) or _want_rank_order else None)
+            # "latest 10 X" ALSO makes L1 match the vague-recency word and derive a
+            # synthetic last-30-days BETWEEN window (query/temporal_parser.py) — but
+            # "the latest 10" means ORDER BY ... DESC LIMIT 10, not "some rows from an
+            # arbitrary 30-day window, silently dropping the requested count". When the
+            # ranking's own count is present and the ONLY temporal signal was that bare
+            # vague-recency wording (never an explicit range like "last month"/"since
+            # January"), skip the synthetic window and let ORDER BY + LIMIT do the job.
+            _skip_vague_window = (_want_rank_order
+                                  and _is_vague_recency_only(_tp_result.raw_expressions))
+            _tpred = (_temporal_predicate(primary, sm, tf)
+                     if _tcol and not _skip_vague_window else "")
+            _rank_tail = _rank_order_limit_sql(_rank, primary, sm, _tcol)
+            _rank_tail_a = _rank_order_limit_sql(_rank, primary, sm, _tcol, alias="a")
+            # Postgres requires SELECT DISTINCT's ORDER BY expressions to appear in the
+            # select list — the WHO/distinct-name branch below projects only the display
+            # column, so it can honor an explicit count but not an ORDER BY on a column
+            # (the temporal/metric column) that isn't part of that projection.
+            _limit_only_tail = f' LIMIT {_rank.top_n if _rank.top_n is not None else 100}'
+            # Which column the ranking actually sorted by — passed to the L7b NL
+            # summarizer (query/result_explainer.py) so it narrates the right field
+            # (e.g. "amount") instead of guessing (e.g. an id column) for "top N"/
+            # "latest N" style questions.
+            if _rank.basis == "temporal" and _tcol:
+                _rank_column_for_nl = _tcol
+            elif _rank.basis == "metric":
+                _rank_column_for_nl = _resolve_rank_metric_column(primary, sm)
 
             # Answer-Entity Discovery (OFF by default): a WHO question projects the
             # person's display column reached over a FK, not the raw id. Reuses
@@ -619,7 +757,7 @@ def run_query(query, sm, all_cols, return_result=False):
                     _rl = _ans.get("rel_label", _disp)
                     sql = (f'SELECT a.*, t."{_disp}" AS "{_rl}" '
                            f'FROM "{primary}" a LEFT JOIN "{_tt}" t ON a."{_fkc}" = t."{_tpk}"'
-                           + (f' WHERE {_w}' if _w else '') + ' LIMIT 100')
+                           + (f' WHERE {_w}' if _w else '') + _rank_tail_a)
                     _anchor_cols = [c.split(".", 1)[1] for c in all_cols
                                     if c.split(".", 1)[0] == primary]
                     allowed_columns = (_anchor_cols + [_disp, _fkc, _tpk]
@@ -629,7 +767,7 @@ def run_query(query, sm, all_cols, return_result=False):
                     # WHO → just the person's distinct name.
                     sql = (f'SELECT DISTINCT t."{_disp}" '
                            f'FROM "{primary}" a JOIN "{_tt}" t ON a."{_fkc}" = t."{_tpk}"'
-                           + (f' WHERE {_w}' if _w else '') + ' LIMIT 100')
+                           + (f' WHERE {_w}' if _w else '') + _limit_only_tail)
                     allowed_columns = ([_disp, _fkc, _tpk]
                                        + [f["column"] for f in _arb_filters])
                     _proj_desc = _disp
@@ -652,7 +790,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 if _tpred:
                     _wparts.append(_tpred)        # FK + temporal stays deterministic
                 sql = (f'SELECT {_proj} FROM "{primary}" WHERE '
-                       + " AND ".join(_wparts) + ' LIMIT 100')
+                       + " AND ".join(_wparts) + _rank_tail)
                 allowed_tables = {primary, _fk["target"]}
                 allowed_columns = (allowed_columns + [c for c, _ in _fk["pairs"]]
                                    + [_fk["target_col"], _fk["anchor_col"]]
@@ -672,7 +810,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 if _tpred:
                     _wparts.append(_tpred)
                 sql = (f'SELECT {_proj} FROM "{primary}" WHERE '
-                       + " AND ".join(_wparts) + ' LIMIT 100')
+                       + " AND ".join(_wparts) + _rank_tail)
                 allowed_tables = {primary, *_mh["path"]}
                 allowed_columns = allowed_columns + [_mh["anchor_col"]] + ([_tcol] if _tcol else [])
                 _llm_sql = False                 # deterministic — skip IR-equivalence
@@ -689,7 +827,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 if _tpred:
                     _wparts.append(_tpred)        # value filter + temporal stays deterministic
                 sql = (f'SELECT {_proj} FROM "{primary}" WHERE '
-                       + " AND ".join(_wparts) + ' LIMIT 100')
+                       + " AND ".join(_wparts) + _rank_tail)
                 allowed_columns = (allowed_columns + [f["column"] for f in _arb_filters]
                                    + ([_tcol] if _tcol else []))
                 _llm_sql = False                 # deterministic — skip IR-equivalence
@@ -702,11 +840,25 @@ def run_query(query, sm, all_cols, return_result=False):
                 # Temporal-only deterministic projection ("users created last month") — no
                 # value/FK filter, just the date window on the canonical temporal column.
                 _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
-                sql = f'SELECT {_proj} FROM "{primary}" WHERE {_tpred} LIMIT 100'
+                sql = f'SELECT {_proj} FROM "{primary}" WHERE {_tpred}' + _rank_tail
                 allowed_columns = allowed_columns + [_tcol]
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="temporal_only", table=primary, temporal=_tcol)
                 print(f"  [L4e] Temporal     {primary} WHERE {_tcol} in window"
+                      "  — deterministic, no LLM")
+            elif _want_rank_order and _tcol:
+                # "latest 10 X" / "last 10 X" — the only temporal signal was a bare
+                # recency word (or none at all), so there's no real date-RANGE filter
+                # to apply (see _skip_vague_window above) — just ORDER BY the anchor's
+                # canonical temporal column + LIMIT N. Deterministic, no LLM.
+                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                sql = f'SELECT {_proj} FROM "{primary}"' + _rank_tail
+                allowed_columns = allowed_columns + [_tcol]
+                _llm_sql = False                 # deterministic — skip IR-equivalence
+                tr.set("sql_planning", action="ranked_temporal_only", table=primary,
+                       temporal=_tcol, top_n=_rank.top_n, direction=_rank.direction)
+                print(f"  [L4e] Ranked       {primary} ORDER BY {_tcol} "
+                      f"{_rank.direction.upper()} LIMIT {_rank.top_n or 100}"
                       "  — deterministic, no LLM")
             else:
                 # ENFORCEMENT: a temporal question on an anchor with NO date column cannot
@@ -925,25 +1077,67 @@ def run_query(query, sm, all_cols, return_result=False):
     # the local SLM with a deterministic row-count fallback if Ollama is unavailable.
     # execute_sql returns tuples → zip to the dicts run_nl_answer expects.
     try:
-        from config import NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS
+        from config import (NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS,
+                            INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS)
     except Exception:
         NL_ANSWER_ENABLED = False
         NL_ANSWER_FAST_TIMEOUT_MS = 800
+        INSIGHT_ENGINE_ENABLED = False
+        RESULT_ANALYZER_MAX_ROWS = 200
     nl_answer_text = None
+    _insight_extra = {}
     if NL_ANSWER_ENABLED and cols is not None:
         row_dicts = [dict(zip(cols, r)) for r in rows]
         # F6: don't block on the SLM prose call. Compute the safe fallback now;
         # the caller (run_query) still returns promptly even if the SLM is slow.
-        from query.nl_answer import run_nl_answer, deterministic_fallback_answer
+        from query.nl_answer import deterministic_fallback_answer
         nl_answer_text = deterministic_fallback_answer(query, list(cols), row_dicts)
-        try:
-            nl = run_nl_answer(query, list(cols), row_dicts,
-                               timeout=NL_ANSWER_FAST_TIMEOUT_MS / 1000.0)
-            if getattr(nl, "answer", None):
-                nl_answer_text = nl.answer
-                print(f"\n  [L7b] Answer       {nl.answer}")
-        except Exception as _nle:
-            print(f"  [L7b] Answer       (summarisation skipped: {type(_nle).__name__})")
+
+        # Insight Engine (additive, flag-gated): ONE combined SLM call producing
+        # summary + insights + visualization suggestion + follow-ups, REPLACING
+        # (not layering on top of) the plain NL-answer SLM call below — never both,
+        # so there is still only one post-query SLM call either way.
+        if INSIGHT_ENGINE_ENABLED:
+            try:
+                from veda.result_analyzer import analyze_result
+                from query.result_explainer import run_insight_engine
+                # Reuse metadata already computed upstream this same run — never a
+                # second reasoning pass: intent (L4 IntentDetector) and the anchor/
+                # join gating confidence already surfaced into the trace.
+                _anchor_conf = tr.sections.get("anchor_selection", {}).get("confidence")
+                _join_conf = tr.sections.get("join_planning", {}).get("confidence")
+                _conf_inputs = {k: v for k, v in
+                               (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
+                ctx = analyze_result(query, param_sql, list(cols), row_dicts, sm=sm,
+                                     table=str(primary), max_rows=RESULT_ANALYZER_MAX_ROWS,
+                                     query_intent=intent, confidence_inputs=_conf_inputs)
+                insight = run_insight_engine(ctx, rank_column=_rank_column_for_nl)
+                if getattr(insight, "answer", None):
+                    nl_answer_text = insight.answer
+                    print(f"\n  [L7b] Insight      {insight.answer}")
+                _insight_extra = {
+                    "insights": insight.insights,
+                    "follow_up_questions": insight.follow_up_questions,
+                    "visualization": insight.visualization,
+                    "confidence": insight.confidence,
+                }
+            except Exception as _ie:
+                print(f"  [L7b] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
+                      f"— falling back to plain NL answer")
+                INSIGHT_ENGINE_ENABLED = False   # this turn only — fall through below
+
+        if not INSIGHT_ENGINE_ENABLED:
+            try:
+                from query.nl_answer import run_nl_answer
+                nl = run_nl_answer(query, list(cols), row_dicts,
+                                   timeout=NL_ANSWER_FAST_TIMEOUT_MS / 1000.0,
+                                   table=str(primary), semantic_model=sm,
+                                   rank_column=_rank_column_for_nl)
+                if getattr(nl, "answer", None):
+                    nl_answer_text = nl.answer
+                    print(f"\n  [L7b] Answer       {nl.answer}")
+            except Exception as _nle:
+                print(f"  [L7b] Answer       (summarisation skipped: {type(_nle).__name__})")
 
     is_temporal = bool(tf and (tf.start or tf.end))
     # Don't cache fast-path results — they're already instant and the fast path always
@@ -957,4 +1151,4 @@ def run_query(query, sm, all_cols, return_result=False):
     print(f"✅ Done in {time.time()-start:.1f}s   |   intent={intent}   |   {tag}")
     print("=" * 78 + "\n")
     return _done(0, "answered", cols=list(cols) if cols else [], rows=rows,
-                 answer=nl_answer_text, sql=param_sql, table=str(primary))
+                 answer=nl_answer_text, sql=param_sql, table=str(primary), **_insight_extra)

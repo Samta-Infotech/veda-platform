@@ -5,9 +5,13 @@ Usage:
     python chat_cli.py "how many incidents are escalated"
     python chat_cli.py "and waived ones?" --session mysession   # follow-up, same session
 
-Run from the repo root, with the venv active:
-    source .venv/bin/activate
-    python chat_cli.py "hi"
+call_engine_node now reaches the engine via apps.query.inference_client
+(INFERENCE_URL, default http://inference:8001), which only resolves on the
+docker `veda_net` — inference publishes no host port. Run this INSIDE the api
+container instead of bare metal:
+    docker compose exec api python chat_cli.py "hi"
+(Bare-metal still works if you set INFERENCE_URL to a locally-reachable
+inference endpoint yourself.)
 """
 from __future__ import annotations
 

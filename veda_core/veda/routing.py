@@ -1,5 +1,5 @@
 """VEDA · L2/L3 — semantic table routing + primary-table selection."""
-import os, re, sys, time, json, logging, threading
+import os, re, sys, time, logging, threading
 from veda.runtime import IMPORTANCE_WEIGHTS, TABLE_EMB_TABLE, _encode_query, _pg
 
 

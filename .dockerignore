@@ -1,0 +1,31 @@
+# Keeps build contexts small — without this, `COPY . /app` in every Dockerfile
+# was pulling in the host's local .venv/ (5.6GB, incl. CUDA libs) on every build,
+# which is what filled up /var and broke image exports (no space left on device).
+
+.git
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+.env
+.env.*
+!.env.example
+docker/userlist.txt
+
+db.sqlite3
+db.sqlite3-journal
+staticfiles/
+media/
+
+model_cache/
+.hf_cache_host/
+*.safetensors
+*.gguf
+veda_core/data/
+veda_core/schema/*.pkl
+
+evaluation/results/
+.claude/

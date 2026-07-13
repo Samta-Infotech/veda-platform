@@ -1,9 +1,11 @@
 """chatbot.test_manual — quick manual smoke test, no pytest/framework needed.
 
-Run:
-    cd /Users/arun/veda_latest/veda-platform
-    source .venv/bin/activate
-    python -m chatbot.test_manual
+call_engine_node reaches the engine via apps.query.inference_client
+(INFERENCE_URL, default http://inference:8001), which only resolves on the
+docker `veda_net` — run this INSIDE the api container:
+    docker compose exec api python -m chatbot.test_manual
+(Bare-metal still works if you set INFERENCE_URL to a locally-reachable
+inference endpoint yourself.)
 
 Tests, in one conversation (same session_id, so checkpointing/history applies):
   1. Smalltalk        -> should NOT touch the engine

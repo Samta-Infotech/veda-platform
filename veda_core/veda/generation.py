@@ -1,24 +1,20 @@
 """VEDA · L5 — LLM SQL generation (single-table + join-skeleton fill)."""
 import os, re, sys, time, json, logging, threading
 from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
-
-_NUM_WORDS = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
-              "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10}
+from query.ranking_parser import parse_ranking
 
 _DEFAULT_ROW_LIMIT = 100
 
 
 def _extract_requested_limit(query: str) -> int:
-    """'top N' / 'first N' rows the user explicitly asked for, digit or spelled-out
-    ('top five', 'first 10'). Falls back to _DEFAULT_ROW_LIMIT when the query names
-    no count — the prompt previously hardcoded 'LIMIT 100' regardless of what was
-    asked, so "top five" silently returned 100 rows."""
-    m = re.search(r"\b(?:top|first)\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten)\b",
-                  query.lower())
-    if not m:
-        return _DEFAULT_ROW_LIMIT
-    tok = m.group(1)
-    return int(tok) if tok.isdigit() else _NUM_WORDS[tok]
+    """Row count the user explicitly asked for — 'top N' / 'first N' / 'latest N' /
+    'bottom N' / ... (see query/ranking_parser.py for the full vocabulary), digit or
+    spelled-out ('top five', 'latest 10'). Falls back to _DEFAULT_ROW_LIMIT when the
+    query names no count — the prompt previously hardcoded 'LIMIT 100' regardless of
+    what was asked, so "top five" (and "latest 10", before this fix) silently
+    returned 100 rows."""
+    top_n = parse_ranking(query).top_n
+    return top_n if top_n is not None else _DEFAULT_ROW_LIMIT
 
 
 def _domain_line() -> str:
@@ -102,12 +98,22 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
                          f"(do not use any other column for the date), "
                          f"between '{temporal.start}' and '{temporal.end}'.")
 
+    # "latest N" / "oldest N" / "last N" etc. ask for a specific SORT ORDER, not just
+    # a row cap — without this the model has no reason to add an ORDER BY, so "latest
+    # 10 X" could return an arbitrary 10 rows instead of the 10 most recent ones.
+    _rank = parse_ranking(query)
+    order_line = ""
+    if _rank.basis == "temporal" and time_col:
+        _dir = "DESC" if _rank.direction == "desc" else "ASC"
+        order_line = f'\nOrder results by "{time_col}" {_dir} (the question asks for the ' \
+                     f'{"most" if _dir == "DESC" else "least"} recent rows).'
+
     system = ("You are a PostgreSQL expert. Output ONE read-only SELECT statement "
               "and nothing else — no markdown, no commentary, no semicolon." + _domain_line())
     _limit = _extract_requested_limit(query)
     user = (f"Question: {query}\n"
             f"Table: {table}\n"
-            f"Columns: {', '.join(columns)}{date_line}"
+            f"Columns: {', '.join(columns)}{date_line}{order_line}"
             f"{_column_glossary_block(col_glossary)}"
             f"{_term_directive_block(term_map)}\n"
             f"Rules: SELECT only, FROM {table}. Use only listed columns. "

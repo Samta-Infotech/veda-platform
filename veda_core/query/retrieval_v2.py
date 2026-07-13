@@ -340,16 +340,62 @@ def _fetch_columns_by_name(
         return []
 
 
+def _merge_seed_candidates(
+    candidate_columns: List[RetrievalResult],
+    candidate_tables:  List[RetrievalResult],
+    seed_candidates:   List[dict],
+    verbose:           bool = False,
+) -> "tuple[List[RetrievalResult], List[RetrievalResult]]":
+    """Merge Tier1-computed seed candidates (plain {table_name, col_name, score}
+    dicts — see veda/execution_state.py) into this stage's own candidate pool,
+    UNION-style, same convention as graph_expand(): additive only, reranker still
+    makes the final cut. Unlike graph_expand's _fetch_columns_by_name, this does
+    NOT hit the DB — Tier1 already paid for retrieval, so its col_id/table_id are
+    unknown here (synthetic table_id=""); downstream code that needs a real
+    table_id (FK adjacency etc.) already guards on a falsy table_id and simply
+    skips these entries, same as any other partial-metadata candidate."""
+    if not seed_candidates:
+        return candidate_columns, candidate_tables
+    have_cols = {(c.table_name, c.col_name) for c in candidate_columns}
+    added_cols = []
+    for s in seed_candidates:
+        t, c = s.get("table_name"), s.get("col_name")
+        if not t or not c or (t, c) in have_cols:
+            continue
+        added_cols.append(RetrievalResult(
+            col_id=f"{t}.{c}", col_name=c, table_id="", table_name=t,
+            semantic_type="UNKNOWN", similarity=float(s.get("score", 0.0)),
+        ))
+        have_cols.add((t, c))
+    have_tabs = {t.table_name for t in candidate_tables}
+    added_tabs = []
+    for t in dict.fromkeys(s.get("table_name") for s in seed_candidates):
+        if t and t not in have_tabs:
+            added_tabs.append(RetrievalResult(
+                col_id="", col_name="", table_id="", table_name=t,
+                semantic_type="UNKNOWN", similarity=0.0))
+            have_tabs.add(t)
+    if verbose and (added_cols or added_tabs):
+        print(f"  [RetrievalV2] Tier1 seed merge  +{len(added_cols)} cols, +{len(added_tabs)} tables")
+    return candidate_columns + added_cols, candidate_tables + added_tabs
+
+
 def retrieve_v2(
-    query:      str,
-    source_ids: Optional[List[str]] = None,
-    verbose:    bool = False,
+    query:           str,
+    source_ids:      Optional[List[str]] = None,
+    verbose:         bool = False,
     trace=None,
+    seed_candidates: Optional[List[dict]] = None,
 ):
     """
-    Full two-stage retrieve: first-stage bi-encoder -> graph expand -> cross-encoder rerank.
-    When BIDIRECTIONAL_ENABLED, also does table-first retrieval and merges.
-    Returns (cols, tables) as List[RetrievalResult].
+    Full two-stage retrieve: first-stage bi-encoder -> graph expand -> seed merge ->
+    cross-encoder rerank. When BIDIRECTIONAL_ENABLED, also does table-first retrieval
+    and merges. Returns (cols, tables) as List[RetrievalResult].
+
+    seed_candidates: optional Tier1-computed candidates (see _merge_seed_candidates)
+    merged into the pool BEFORE reranking, so they're scored on equal footing with
+    this stage's own retrieval — not appended post-hoc, and Tier2's own retrieval
+    still runs regardless, so it can recover if Tier1's candidates weren't enough.
     """
     from query.reranker import rerank_columns, rerank_tables, RERANKER_AVAILABLE
 
@@ -368,6 +414,11 @@ def retrieve_v2(
     fs.candidate_columns = graph_expand(
         query, fs.candidate_columns, fs.candidate_tables,
         source_ids=source_ids, trace=trace, verbose=verbose,
+    )
+
+    # Tier1→Tier2 seed merge (additive; reranker still cuts) — see _merge_seed_candidates.
+    fs.candidate_columns, fs.candidate_tables = _merge_seed_candidates(
+        fs.candidate_columns, fs.candidate_tables, seed_candidates, verbose=verbose,
     )
 
     if RERANKER_ENABLED and RERANKER_AVAILABLE:

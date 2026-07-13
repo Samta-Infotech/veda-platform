@@ -148,7 +148,7 @@ class ConversationQueryView(APIView):
 
     def _json_response(self, service, chat, message, rid):
         logger.info("conversation query AI processing started chat_id=%s", chat.pk)
-        content_blocks, explainability, thinking_text, summary_text, error = [], [], "", "", None
+        content_blocks, explainability, thinking_text, summary_text, error = [], None, "", "", None
         for evt in service.run_turn(chat, message, request_id=rid):
             kind, payload = evt["event"], evt["data"]
             if kind == "thinking":
@@ -158,7 +158,7 @@ class ConversationQueryView(APIView):
                 if payload.get("is_summary"):
                     summary_text = payload.get("content", "")
             elif kind == "explainability":
-                explainability = payload.get("steps", [])
+                explainability = payload
             elif kind == "error":
                 error = payload
         logger.info("conversation query AI processing completed chat_id=%s", chat.pk)
@@ -200,7 +200,7 @@ class ConversationQueryView(APIView):
 
     def _sse_generator(self, service, chat, message, rid):
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
-        content_blocks, explainability, thinking_text, summary_text = [], [], "", ""
+        content_blocks, explainability, thinking_text, summary_text = [], None, "", ""
         try:
             for evt in service.run_turn(chat, message, request_id=rid, stream=True):
                 kind, payload = evt["event"], evt["data"]
@@ -211,7 +211,7 @@ class ConversationQueryView(APIView):
                     if payload.get("is_summary"):
                         summary_text = payload.get("content", "")
                 elif kind == "explainability":
-                    explainability = payload.get("steps", [])
+                    explainability = payload
                 elif kind == "error":
                     yield _sse_format("error", payload)
                     logger.warning("conversation query streaming error chat_id=%s: %s",
@@ -357,7 +357,7 @@ def _serialize_history_message(msg) -> dict:
             "response": response,
             "metadata": {
                 "thinking": meta.get("thinking", ""),
-                "explainability": meta.get("explainability", []),
+                "explainability": meta.get("explainability"),
             },
         }
     else:

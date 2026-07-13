@@ -27,6 +27,16 @@ services:
     # unbounded / never evicts — a full broker must fail loud, not silently drop jobs.
     command: ["redis-server", "--save", "", "--appendonly", "yes"]
 
+  redis-stack:
+    restart: always
+    # RDB snapshots only (image default), no AOF: this Redis holds LangGraph
+    # conversation checkpoints, NOT the source of truth — Django's ChatMessage/
+    # ChatSession tables are. Losing recent checkpoints on a hard crash degrades
+    # a few in-flight conversations to "no prior context" on their next turn
+    # (self-healing, refuse-over-guess-consistent), not a correctness bug. AOF
+    # would add write-path latency and RediSearch-index-replay risk for a
+    # durability guarantee this data doesn't need.
+
   vllm:                          # PROD query-time SLM backend (§3, §8b)
     image: vllm/vllm-openai:latest
     command: ["--model", "${SLM_MODEL_NAME}"]
@@ -50,6 +60,9 @@ services:
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.prod
       DEBUG: "0"
+      SLM_BACKEND: vllm             # chatbot/'s classify/smalltalk/followup calls (§8b) —
+      VLLM_URL: http://vllm:8000/v1 # matches inference's own prod backend, NOT ollama
+                                     # (ollama stays worker/ingestion-only, see worker below)
     secrets: [postgres_password, django_secret_key]
     deploy: {replicas: 3, resources: {limits: {memory: 1g}}}
 
