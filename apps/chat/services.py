@@ -165,14 +165,14 @@ class ConversationQueryService:
                 yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
                 return
 
-        if payload.get("engine_unavailable"):
+        if response.get("engine_unavailable"):
             logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)
             yield {"event": "error",
                    "data": {"code": "MODEL_ERROR",
-                            "message": payload.get("reply_text") or "Inference tier unavailable."}}
+                            "message": response.get("reply_text") or "Inference tier unavailable."}}
             return
 
-        yield from self._build_reply_events(payload)
+        yield from self._build_reply_events(response)
 
     def _run_streamed(self, message: str, session_id: str, kwargs: dict, chat: ChatSession):
         """Bridges run_chat_turn's synchronous on_event callback (fired from

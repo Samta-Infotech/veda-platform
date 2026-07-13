@@ -571,8 +571,15 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                     else:
                         _emit(on_event, "answer", "Tier-2 SQL answered the query")
                         return "deterministic", t2
-        else:
+        elif isinstance(res, dict) and res.get("ok"):
             _emit(on_event, "answer", "SQL query executed")
+        else:
+            # Not tier-2-retried (status outside the retry list above, e.g.
+            # clarify/invalid/ir_mismatch) AND not ok — the pipeline did NOT
+            # actually answer. Emitting "SQL query executed" here would lie
+            # to the caller about what happened (audit fix: this progress
+            # event used to fire unconditionally in this branch).
+            _emit(on_event, "answer", "SQL query could not be answered")
         return "deterministic", res
 
     # ── RAG → integrated document retrieval + synthesis ───────────────────────
