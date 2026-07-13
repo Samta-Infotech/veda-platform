@@ -20,10 +20,18 @@ class ChatNotFound(Exception):
     """Raised when chat_id is provided but no matching, owned ChatSession exists."""
 
 
+def _positional_rows(cols: list, rows: list) -> list:
+    # The plain SQL path returns positional rows (list/tuple aligned with cols by
+    # index) but the federated executor returns column-keyed dicts
+    # (dict(zip(cols, r))) — normalize to positional so the table/chart builders
+    # can index by column position.
+    return [
+        [row.get(c) for c in cols] if isinstance(row, dict) else row
+        for row in rows
+    ]
+
+
 def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
-    # rows are positional (each row is a list/tuple aligned with cols by index) —
-    # this is what the engine actually returns (JSON-serialized SQL tuples), NOT
-    # column-keyed dicts.
     header = "| " + " | ".join(str(c) for c in cols) + " |"
     sep = "| " + " | ".join("---" for _ in cols) + " |"
     body_lines = [
@@ -167,6 +175,7 @@ class ConversationQueryService:
             blocks.append({"type": "markdown", "content": str(answer), "is_summary": True})
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
+            rows = _positional_rows(cols, rows)
             blocks.append({"type": "markdown", "content": _rows_to_markdown_table(cols, rows)})
         if not blocks:
             blocks.append({"type": "markdown", "content": "No response could be generated."})
@@ -177,6 +186,7 @@ class ConversationQueryService:
         cols, rows = res0.get("cols"), res0.get("rows")
         if not cols or not rows:
             return []
+        rows = _positional_rows(cols, rows)
         return [spec.to_dict() for spec in _visualization_recommender.recommend(cols, rows)]
 
     @staticmethod
