@@ -1,0 +1,66 @@
+# VEDA Platform — MLflow OBSERVABILITY override (mlflow_impl.md).
+#
+# Purely ADDITIVE: two new services, zero changes to existing ones. The engine
+# already writes one trace record per query to veda_core/logs/explain_trace.jsonl
+# (veda/explain.py, EXPLAIN_TRACE_* flags default-on); the exporter sidecar tails
+# that file — it never imports or touches the pipeline, so a dead/misconfigured
+# MLflow can never affect inference.
+#
+#   mlflow           tracking server + UI (sqlite store + artifacts on a volume)
+#   mlflow-exporter  mlflow_observability/ watcher: trace JSONL → MLflow runs
+#
+# Usage (on top of the dev or demo compose — same override pattern as demo):
+#
+#   COMPOSE="docker compose -f docker-compose.yml -f docker-compose.mlflow.yml"
+#   $COMPOSE up -d mlflow mlflow-exporter
+#
+# UI: http://<host>:${MLFLOW_UI_PORT:-5000}   (experiment VEDA-Query-Observability)
+#
+# Prod hardening options (all env-driven, no file edits):
+#   • put the UI behind nginx / firewall instead of publishing the port;
+#   • MLFLOW_BACKEND_URI=postgresql+psycopg2://…  → Postgres-backed store;
+#   • VEDA_ENVIRONMENT=production  → tagged onto every run.
+
+networks:
+  veda_net:
+    driver: bridge
+
+volumes:
+  mlflow_data:        # backing store (mlflow.db) + logged artifacts
+  mlflow_state:       # exporter checkpoint — survives restarts, repo stays :ro
+
+services:
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v2.22.0
+    command: >
+      mlflow server --host 0.0.0.0 --port 5000
+      --backend-store-uri ${MLFLOW_BACKEND_URI:-sqlite:////mlflow/mlflow.db}
+      --artifacts-destination /mlflow/artifacts
+    ports: ["${MLFLOW_UI_PORT:-5000}:5000"]   # operator-facing UI (or front with nginx)
+    volumes: [mlflow_data:/mlflow]
+    networks: [veda_net]
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request;urllib.request.urlopen('http://localhost:5000/health')"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+
+  mlflow-exporter:
+    image: ghcr.io/mlflow/mlflow:v2.22.0    # has python + mlflow preinstalled
+    working_dir: /app
+    command: ["python", "-m", "mlflow_observability", "watch"]
+    environment:
+      VEDA_MLFLOW_TRACKING_URI: http://mlflow:5000
+      VEDA_TRACE_LOG: /app/veda_core/logs/explain_trace.jsonl
+      VEDA_MLFLOW_CHECKPOINT: /state/exporter_checkpoint.json
+      VEDA_MLFLOW_EXPERIMENT: ${VEDA_MLFLOW_EXPERIMENT:-VEDA-Query-Observability}
+      VEDA_MLFLOW_POLL_SECS: ${VEDA_MLFLOW_POLL_SECS:-5}
+      VEDA_ENVIRONMENT: ${VEDA_ENVIRONMENT:-production}
+    volumes:
+      - ".:/app:ro"                 # read-only: sees the engine's trace log, can't touch code
+      - mlflow_state:/state
+    depends_on:
+      mlflow: {condition: service_healthy}
+    networks: [veda_net]
+    restart: unless-stopped

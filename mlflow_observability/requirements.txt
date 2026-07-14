@@ -1,0 +1,3 @@
+# MLflow observability exporter — deliberately the ONLY dependency.
+# The exporter is a separate process; none of the platform tiers install this.
+mlflow>=2.14
