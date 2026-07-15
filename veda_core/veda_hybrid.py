@@ -523,7 +523,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         from veda.pipeline import run_query
         _head_t0 = time.time()
         res = precomputed_sql if isinstance(precomputed_sql, dict) \
-            else run_query(query, sm, cols, return_result=True)
+            else run_query(query, sm, cols, return_result=True, on_event=on_event)
         _head_s = time.time() - _head_t0
         # Tier-2 fallback: if the deterministic head couldn't answer (refuse / dropped
         # qualifier / ungrounded / no table), let the LLM emit IR → deterministic
@@ -605,7 +605,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         # Run the DETERMINISTIC SQL head first and feed its EXECUTED rows into the
         # fusion (the correct-by-construction numbers), instead of letting the fusion
         # rely on LLM-written SQL. (Also supplies the previously-missing sql_columns.)
-        sqlres = run_query(query, sm, cols, return_result=True)
+        sqlres = run_query(query, sm, cols, return_result=True, on_event=on_event)
         sql_result = None
         if isinstance(sqlres, dict) and sqlres.get("ok"):
             _c, _r = sqlres.get("cols", []), sqlres.get("rows", [])
@@ -632,7 +632,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     # ── default safety net ────────────────────────────────────────────────────
     sm, cols = _load_semantic_model()
     from veda.pipeline import run_query
-    return "deterministic", run_query(query, sm, cols, return_result=True)
+    return "deterministic", run_query(query, sm, cols, return_result=True, on_event=on_event)
 
 
 def _to_subresult(sub_query, route, result):

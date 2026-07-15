@@ -2,7 +2,7 @@
 import os, re, sys, time, json, logging, threading
 from query.ranking_parser import parse_ranking
 from veda.generation import _resolve_display_column, generate_join_sql
-from veda.routing import _name_toks
+from veda.routing import _name_toks, recommended_projection
 from veda.runtime import IMPORTANCE_WEIGHTS, JOIN_CONFIDENCE_FLOOR, get_graph
 from veda.validation import qualifier_completeness
 
@@ -327,7 +327,7 @@ def _resolve_agg_chain(anchor, tgt, graph, max_hops=6):
     return hops
 
 
-def build_existence_sql(anchor, edges, mode):
+def build_existence_sql(anchor, edges, mode, sm=None, results=None, query=None, all_cols=None):
     """Deterministic EXISTS / NOT EXISTS over the anchor (no LLM, no fan-out — a
     semi-join returns each anchor row once). One subquery per anchor-touching edge,
     AND-combined, so a multi-relation query ("permission not assigned to role or user")
@@ -335,7 +335,14 @@ def build_existence_sql(anchor, edges, mode):
     silently dropping all but the first relation. The child is the edge side that isn't
     the anchor; a polymorphic predicate (if any) is carried INTO its subquery. Each
     subquery is its own scope, so they all reuse alias 'b' without colliding. Accepts a
-    single edge dict (back-compat) or a list of edges."""
+    single edge dict (back-compat) or a list of edges.
+
+    `sm`/`results`/`query`/`all_cols`: optional — when all four are given, the
+    row-returning ("...list") mode projects veda/routing.py::recommended_projection()
+    instead of `a.*` (every anchor column), same business-facing narrowing every
+    other deterministic branch already applies. Omitting any of them (the default)
+    keeps the historical `a.*` behavior byte-for-byte — this stays a pure addition
+    for any other/older caller."""
     if isinstance(edges, dict):
         edges = [edges]
     op = "NOT EXISTS" if mode.startswith("not_exists") else "EXISTS"
@@ -362,7 +369,12 @@ def build_existence_sql(anchor, edges, mode):
     if mode.endswith("count"):
         sql = f'SELECT COUNT(*) AS n FROM "{anchor}" a WHERE {where} LIMIT 100'
     else:
-        sql = f'SELECT a.* FROM "{anchor}" a WHERE {where} LIMIT 100'
+        proj = "a.*"
+        if sm is not None and results is not None and query is not None and all_cols is not None:
+            anchor_cols = [k.split(".", 1)[1] for k in all_cols if k.split(".", 1)[0] == anchor]
+            proj_cols = recommended_projection(anchor, anchor_cols, results, sm, query)
+            proj = ", ".join(f'a."{c}"' for c in proj_cols) or "a.*"
+        sql = f'SELECT {proj} FROM "{anchor}" a WHERE {where} LIMIT 100'
     return sql, tables
 
 
@@ -958,7 +970,9 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
             _seen_children.add(child)
             ex_edges.append(e)
         if ex_edges:
-            ex_sql, ex_tables = build_existence_sql(ex_anchor, ex_edges, mode)
+            ex_sql, ex_tables = build_existence_sql(ex_anchor, ex_edges, mode, sm=sm,
+                                                    results=results, query=query,
+                                                    all_cols=all_cols)
             ex_cols = [k.split(".", 1)[1] for k in all_cols if k.split(".", 1)[0] in ex_tables]
             return {"action": "existence", "sql": ex_sql, "tables": ex_tables, "columns": ex_cols,
                     "plan": plan, "mode": mode, "anchor": ex_anchor}
@@ -1060,7 +1074,7 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
         for ln in skeleton.splitlines()
         for m in [re.search(r'ON (\w+)\."([^"]+)" = (\w+)\."([^"]+)"', ln)] if m
     ]
-    sql = generate_join_sql(query, skeleton, alias_map, sm, tf)
+    sql = generate_join_sql(query, skeleton, alias_map, sm, tf, results=results)
     allowed_tables = set(alias_map.values())
     allowed_columns = [k.split(".", 1)[1] for k in all_cols
                        if k.split(".", 1)[0] in allowed_tables]

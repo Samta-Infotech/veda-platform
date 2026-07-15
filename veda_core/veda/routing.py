@@ -389,3 +389,120 @@ def _name_toks(table_name, sm=None):
     except Exception:
         return {_singularize(tok) for tok in table_name.split("_")
                 if len(tok) > 2 and tok not in _NAME_CONNECTIVES}
+
+
+def recommended_projection(primary, allowed_columns, results, sm, query, must_include=None):
+    """Deterministic, LLM-free business-facing SELECT list for `primary` —
+    composes THREE signals VEDA already computes elsewhere, never re-ranking
+    columns from scratch:
+
+      1. Entity identity  — veda/generation.py::_resolve_display_column(), the
+         SAME governed label-column resolver (human-override file, then a
+         name/title/label/business_role/*_no heuristic) already used by every
+         OTHER caller that needs "the column that represents this entity"
+         (generate_join_sql's per-alias hints, the grouped-breakdown planner,
+         build_aggregate_sql's dimension display — planning.py:197,430,
+         generation.py:273). Reusing it here (instead of independently
+         reading the compiled concept registry's OWN default_display_columns)
+         means there is exactly ONE mechanism answering "what's this table's
+         display column" across the whole codebase, not two that could
+         silently disagree. Falls back to the concept registry only if this
+         returns nothing (e.g. no metadata at all for `primary`) — a
+         secondary source, never a competing decision for the same table.
+      2. User intent       — THIS query's own per-column retrieval relevance
+         (`results[].final_score`, already computed by the 5-signal retrieval
+         engine before this function ever runs).
+      3. Business importance — columns whose ingestion-computed
+         `importance_class` is "HIGH" (veda/ingestion/deterministic_metadata.py).
+
+    Plus two safety overrides, both added before RECOMMENDED_PROJECTION_MAX_COLS
+    trims the list so they always survive the cap:
+      a. `must_include` — columns the CALLER already knows are structurally
+         required for this SQL to read sensibly (e.g. the column a ranked
+         result is actually ORDER BY'd on) — never invented here, only
+         accepted from the caller, which already computed it for the WHERE/
+         ORDER BY clause.
+      b. a column the user's query literally names (by column name or a
+         known business alias).
+
+    `allowed_columns` (the validation allow-list) is read-only input here and
+    is NEVER itself modified — this function only decides what to SELECT,
+    never what SQL is allowed to reference. Every candidate is intersected
+    with `allowed_columns` so a stale/mismatched registry entry can never
+    introduce a column that hasn't been validated.
+
+    Falls back to `allowed_columns` verbatim (today's behavior, unchanged) if
+    every signal above comes up empty — a missing registry, empty retrieval
+    results, or a semantic model with no importance metadata must never
+    produce a degraded (or empty) SELECT list."""
+    from config import RECOMMENDED_PROJECTION_MAX_COLS
+
+    allowed = list(allowed_columns or [])
+    allowed_set = set(allowed)
+    cols_meta = (sm or {}).get("columns", {})
+    picked: list = []
+
+    def _add(col):
+        if col in allowed_set and col not in picked:
+            picked.append(col)
+
+    # a. MUST-INCLUDE — structurally required by the caller (e.g. the active
+    # ORDER BY column), first so it always survives the cap.
+    for c in (must_include or []):
+        _add(c)
+
+    # b. SAFETY OVERRIDE — an explicitly user-named column (by column name or a
+    # known business alias) must appear regardless of importance/relevance
+    # rank. Same "does the user's own wording name this column" idea
+    # qualifier_completeness (veda/validation.py) already applies to
+    # generated SQL — applied here to candidate columns instead, not a new
+    # matching scheme.
+    query_l = (query or "").lower()
+    if query_l:
+        for c in allowed:
+            meta = cols_meta.get(f"{primary}.{c}", {}) or {}
+            names = [c.replace("_", " ")] + [str(a).lower() for a in (meta.get("aliases") or [])]
+            if any(len(n) > 3 and n in query_l for n in names):
+                _add(c)
+
+    # 1. Entity identity — ONE canonical resolver (see docstring); the concept
+    # registry's own default_display_columns is only a fallback for when
+    # _resolve_display_column has nothing at all for this table.
+    try:
+        from veda.generation import _resolve_display_column
+        dc = _resolve_display_column(primary, sm)
+        if dc:
+            _add(dc)
+        else:
+            from semantic import registry as reg
+            concept = reg.active().get("concepts", {}).get(primary) or {}
+            for cid in concept.get("default_display_columns") or []:
+                _, _, col = str(cid).partition(".")
+                if col:
+                    _add(col)
+    except Exception:
+        pass
+
+    # 2. User intent — this query's own retrieval relevance for primary's
+    # columns (RetrievalResult.final_score, retrieval/retrieval_engine_phase3.py)
+    # — read, not recomputed.
+    try:
+        candidates = sorted(
+            (r for r in (results or []) if getattr(r, "col_id", "").split(".")[0] == primary),
+            key=lambda r: r.final_score, reverse=True,
+        )
+        for r in candidates[:RECOMMENDED_PROJECTION_MAX_COLS]:
+            _add(r.column_name)
+    except Exception:
+        pass
+
+    # 3. Business importance — HIGH-importance columns (ingestion-computed,
+    # veda/ingestion/deterministic_metadata.py::compute_importance_class).
+    for c in allowed:
+        meta = cols_meta.get(f"{primary}.{c}", {}) or {}
+        if meta.get("importance_class") == "HIGH":
+            _add(c)
+
+    if not picked:
+        return allowed   # every signal was empty — unchanged behavior, never degrade
+    return picked[:RECOMMENDED_PROJECTION_MAX_COLS]

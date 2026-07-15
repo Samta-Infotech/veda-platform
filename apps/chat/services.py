@@ -192,8 +192,13 @@ class ConversationQueryService:
         """
         q: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
-        def on_event(phase: str, evt_message: str) -> None:
-            q.put(("thinking", {"phase": phase, "message": evt_message}))
+        def on_event(phase: str, evt_message: str, extra: dict | None = None) -> None:
+            # `extra` carries the inference tier's per-phase structured fields
+            # (route's intent=, sub_query's index=/total=/sub_query=, ...) —
+            # merged in so the SSE "thinking" payload isn't just flattened
+            # phase/message text. phase/message win on key collision (unlikely,
+            # but they're the guaranteed-present fields).
+            q.put(("thinking", {**(extra or {}), "phase": phase, "message": evt_message}))
 
         def target() -> None:
             try:

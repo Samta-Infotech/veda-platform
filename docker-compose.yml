@@ -109,6 +109,11 @@ services:
     environment:
       ROLE: api
       CHATBOT_CHECKPOINTER_REDIS_URL: redis://redis-stack:6379/0
+      # Makes the ".:/app" bind mount below actually mean "live code" — without
+      # this, gunicorn's workers cached the old module in memory until the
+      # container was manually restarted (see entrypoint.api.sh). Dev only —
+      # docker-compose.prod.yml doesn't set this, so prod is unaffected.
+      DEV_AUTORELOAD: "1"
     volumes: [".:/app"]   # DEV: live code, no rebuild on edit
     depends_on:
       pgbouncer: {condition: service_started}
@@ -178,6 +183,12 @@ services:
     working_dir: /app/veda_core     # engine cwd-relative paths (data/, schema/, client_bge) resolve here
     environment:
       WORKERS: ${INFERENCE_WORKERS:-1}   # dev default; prod sizes from measured RSS (§8.1)
+      # Makes the ".:/app" bind mount below actually mean "live code" — without
+      # this, uvicorn's worker cached the old veda_core module in memory until
+      # the container was manually restarted (see entrypoint.inference.sh —
+      # only takes effect when WORKERS=1, true by the default above). Dev
+      # only — docker-compose.prod.yml doesn't set this, so prod is unaffected.
+      DEV_AUTORELOAD: "1"
       PYTHONPATH: /app                    # so `inference.main` imports from the repo root
       HF_HOME: /models/hf_cache            # offline model cache (BGE / reranker) — matches ingest-worker + Dockerfile default
       # Pin HF_HUB_CACHE to the flat weights dir (same as ingest-worker): huggingface_hub

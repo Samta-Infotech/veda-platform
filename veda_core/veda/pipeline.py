@@ -5,7 +5,7 @@ from veda.cache import save_verified_query, verified_cache_lookup
 from veda.execution import execute_sql
 from veda.generation import generate_sql
 from veda.planning import existence_mode, try_multitable
-from veda.routing import select_primary_table, vet_primary
+from veda.routing import recommended_projection, select_primary_table, vet_primary
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
 from utils.logger import get_logger
@@ -54,6 +54,20 @@ def _resolve_rank_metric_column(table, sm):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _rank_sort_column(rank, table, sm, tcol):
+    """The single column (if any) `_rank_order_limit_sql` below will actually
+    ORDER BY for this ranking request — extracted as its own function so
+    callers that need to know (recommended_projection's must_include, so a
+    "latest 10 X" result is never sorted by a column it doesn't also show)
+    don't duplicate this basis/temporal/metric branching. None means no
+    ranking was requested (plain LIMIT, no ORDER BY)."""
+    if rank.basis == "temporal" and tcol:
+        return tcol
+    if rank.basis == "metric":
+        return _resolve_rank_metric_column(table, sm)
+    return None
+
+
 def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
     """Shared ' ORDER BY ... LIMIT ...' tail for every hand-built single-table SQL
     branch (FK / multi-hop / value-filter / temporal-only / plain listing) — so
@@ -66,14 +80,10 @@ def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
     join) — the ORDER BY column must be qualified there to stay unambiguous."""
     limit = rank.top_n if rank.top_n is not None else 100
     prefix = f"{alias}." if alias else ""
-    if rank.basis == "temporal" and tcol:
+    sort_col = _rank_sort_column(rank, table, sm, tcol)
+    if sort_col:
         direction = "ASC" if rank.direction == "asc" else "DESC"
-        return f' ORDER BY {prefix}"{tcol}" {direction} LIMIT {limit}'
-    if rank.basis == "metric":
-        metric_col = _resolve_rank_metric_column(table, sm)
-        if metric_col:
-            direction = "ASC" if rank.direction == "asc" else "DESC"
-            return f' ORDER BY {prefix}"{metric_col}" {direction} LIMIT {limit}'
+        return f' ORDER BY {prefix}"{sort_col}" {direction} LIMIT {limit}'
     return f' LIMIT {limit}'
 
 
@@ -115,10 +125,14 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
     tr = new_trace(query)
     es = ExecutionState()
 
+    _ticks: list = []   # passive (phase, message) record of every _tick() below,
+                        # for build_explain()'s "timeline" — see _done()'s return.
+
     def _tick(phase, message):
         """Fire a live, user-facing thinking event. Static string only — no LLM/SLM
         call, no extra DB round-trip. A no-op when on_event is None or itself raises,
         so progress reporting can never fail a query."""
+        _ticks.append((phase, message))
         if on_event is None:
             return
         try:
@@ -165,9 +179,22 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                         checks=tr.sections.get("validation", {}).get("checks", []),
                         visualization=kw.get("visualization"),
                         params=params,
+                        timeline=_ticks,
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
+            elif kw.get("feedback"):
+                # Refusal path: same structured-explainability CONTRACT as a
+                # success, built from the feedback _feedback() already computed
+                # above (why/what_needed/suggestions) — not from SQL, which
+                # doesn't exist for a refusal. None when no feedback dict is
+                # available (invalid/exec_error's _done() calls don't build
+                # one — see those call sites), same as before this change.
+                try:
+                    from veda.business_explain import build_refusal_explain
+                    explain = build_refusal_explain(status, kw.get("feedback"))
+                except Exception:
+                    logger.exception("build_refusal_explain failed — refusal explainability omitted")
             return {"status": status, "ok": (status == "answered"),
                     "trace": tr.to_dict(), "explain": explain, "context": es, **kw}
         return rc
@@ -358,6 +385,27 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                           f"{sorted(_ct)[:3]} — recompute")
                     tr.note("schema_linking", "verified-cache hit demoted (zero typed evidence)")
                     cached_sql = None
+        except Exception:
+            pass
+    if cached_sql:
+        # QUALIFIER re-check (distinct from the table-level evidence guard above):
+        # the evidence guard only asks "is THIS query plausibly about the cached
+        # SQL's table(s)" — it can't catch a same-table cache entry whose WHERE
+        # clause answers a DIFFERENT question (found in production: a cached
+        # "properties in the UAE" answer replayed verbatim for "properties priced
+        # above 10,000" — same table, unrelated filter, similarity ≥0.85 anyway).
+        # Reuses the SAME gate the main pipeline already applies to freshly-built
+        # SQL (below, ~line 1090) — a cache hit must clear the identical bar a
+        # fresh answer would, not a lesser one just because it was pre-verified
+        # once under possibly-older code.
+        try:
+            ok_cache_q, missing_cache_q = qualifier_completeness(query, cached_sql, sm)
+            if not ok_cache_q:
+                print(f"  [cache] demoted: cached SQL drops qualifier {missing_cache_q!r} "
+                      f"for THIS query — recompute")
+                tr.note("schema_linking",
+                        f"verified-cache hit demoted (dropped qualifier {missing_cache_q!r})")
+                cached_sql = None
         except Exception:
             pass
     if fp:
@@ -767,6 +815,11 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                      if _tcol and not _skip_vague_window else "")
             _rank_tail = _rank_order_limit_sql(_rank, primary, sm, _tcol)
             _rank_tail_a = _rank_order_limit_sql(_rank, primary, sm, _tcol, alias="a")
+            # Whatever column the tail above actually ORDER BY's on (if any) must
+            # always be part of what's shown — a "latest 10 X" result sorted by a
+            # date the recommendation happened not to pick would be confusing.
+            # Computed once, reused as recommended_projection's must_include below.
+            _rank_sort_col = _rank_sort_column(_rank, primary, sm, _tcol)
             # Postgres requires SELECT DISTINCT's ORDER BY expressions to appear in the
             # select list — the WHO/distinct-name branch below projects only the display
             # column, so it can honor an explicit count but not an ORDER BY on a column
@@ -814,14 +867,21 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                     # "incidents and their handler" → show the anchor rows + the handler NAME.
                     # LEFT JOIN so anchor rows with no related person still appear.
                     _rl = _ans.get("rel_label", _disp)
-                    sql = (f'SELECT a.*, t."{_disp}" AS "{_rl}" '
-                           f'FROM "{primary}" a LEFT JOIN "{_tt}" t ON a."{_fkc}" = t."{_tpk}"'
-                           + (f' WHERE {_w}' if _w else '') + _rank_tail_a)
                     _anchor_cols = [c.split(".", 1)[1] for c in all_cols
                                     if c.split(".", 1)[0] == primary]
+                    # Business-facing anchor projection instead of `a.*` (every anchor
+                    # column) — same recommended_projection() every other deterministic
+                    # branch uses; allowed_columns below is UNCHANGED (still every
+                    # anchor column, for validation) so this only narrows what's shown.
+                    _ans_proj_cols = recommended_projection(primary, _anchor_cols, results,
+                                                            sm, query)
+                    _ans_proj = ", ".join(f'a."{c}"' for c in _ans_proj_cols) or "a.*"
+                    sql = (f'SELECT {_ans_proj}, t."{_disp}" AS "{_rl}" '
+                           f'FROM "{primary}" a LEFT JOIN "{_tt}" t ON a."{_fkc}" = t."{_tpk}"'
+                           + (f' WHERE {_w}' if _w else '') + _rank_tail_a)
                     allowed_columns = (_anchor_cols + [_disp, _fkc, _tpk]
                                        + [f["column"] for f in _arb_filters])
-                    _proj_desc = f"a.* + {_tt}.{_disp} AS {_rl}"
+                    _proj_desc = f"{_ans_proj} + {_tt}.{_disp} AS {_rl}"
                 else:
                     # WHO → just the person's distinct name.
                     sql = (f'SELECT DISTINCT t."{_disp}" '
@@ -844,7 +904,16 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                 _or = " OR ".join(
                     f"""lower("{c}"::text) = lower('{str(v).replace("'", "''")}')"""
                     for c, v in _fk["pairs"])
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 _wparts = [f'"{_fk["anchor_col"]}" IN '
                            f'(SELECT "{_fk["target_col"]}" FROM "{_fk["target"]}" WHERE {_or})']
                 if _tpred:
@@ -866,7 +935,16 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                       + (f" + {_tcol} window" if _tcol else "") + "  — deterministic, no LLM")
             elif _mh:
                 # Multi-hop junction membership: WHERE anchor_pk IN (<nested IN-subquery>).
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 _wparts = [f'"{_mh["anchor_col"]}" IN ({_mh["subquery"]})']
                 if _tpred:
                     _wparts.append(_tpred)
@@ -884,7 +962,16 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                 # anchor table by construction (anchor_filters filtered on `primary`).
                 # where_clause compares lower(col) to value_norm, so High/high/HIGH match.
                 from query.value_arbiter import where_clause as _arb_where
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 _wparts = [_arb_where(_arb_filters)]
                 if _tpred:
                     _wparts.append(_tpred)        # value filter + temporal stays deterministic
@@ -902,7 +989,16 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
             elif _tpred:
                 # Temporal-only deterministic projection ("users created last month") — no
                 # value/FK filter, just the date window on the canonical temporal column.
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 sql = f'SELECT {_proj} FROM "{primary}" WHERE {_tpred}' + _rank_tail
                 allowed_columns = allowed_columns + [_tcol]
                 _llm_sql = False                 # deterministic — skip IR-equivalence
@@ -915,7 +1011,16 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                 # recency word (or none at all), so there's no real date-RANGE filter
                 # to apply (see _skip_vague_window above) — just ORDER BY the anchor's
                 # canonical temporal column + LIMIT N. Deterministic, no LLM.
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 sql = f'SELECT {_proj} FROM "{primary}"' + _rank_tail
                 allowed_columns = allowed_columns + [_tcol]
                 _llm_sql = False                 # deterministic — skip IR-equivalence
@@ -963,8 +1068,11 @@ def run_query(query, sm, all_cols, return_result=False, on_event=None):
                         if _pt == primary and _pc in _allowed_set:
                             _term_map.append((_phrase, _pc))
                 t_sql = time.time()
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
                 sql = generate_sql(query, primary, allowed_columns, tf,
-                                   col_glossary=_gloss, term_map=_term_map, time_col=_tcol)
+                                   col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
+                                   recommended_projection=_proj_cols)
                 print(f"  [L5] SQL gen       {time.time()-t_sql:.1f}s"
                       + (f"  (+{len(_gloss)} col defs)" if _gloss else "")
                       + (f"  (+{len(_term_map)} term→col)" if _term_map else ""))

@@ -779,6 +779,13 @@ TYPED_ANCHOR_RERANK_WEIGHT  = 0.2
 # words ('market', 'absolute'); demotion only costs latency on rare wrong picks.
 FASTPATH_EVIDENCE_GUARD = True
 QSR_FP_EVIDENCE_FLOOR = 0.3
+# Business-facing SELECT projection (veda/routing.py::recommended_projection): a soft
+# ceiling on how many columns the deterministic branches project, composed from
+# default_display_columns + this query's retrieval relevance + HIGH-importance columns
+# — NOT a re-ranking budget, just a safety cap against a wide table's HIGH-importance
+# set alone blowing past what's actually business-readable. Explicitly user-named
+# columns are added before this cap is applied, so they always survive it.
+RECOMMENDED_PROJECTION_MAX_COLS = 12
 # Heavy-lane time budgets (Phase C): skip Tier-2 when the deterministic head already
 # overspent (retrieval/grounding struggled — Tier-2 rarely rescues those), and give
 # Tier-2 a hard deadline enforced between SLM rounds. Measured 2026-07-12: without

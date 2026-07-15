@@ -206,7 +206,18 @@ def _describe_frame(frame: QueryFrame) -> str:
     ALREADY-correct frame (rebuilt first, on drill_up), never for this
     function to second-guess it.
     """
-    entity = frame.get("entity_display") or frame.get("entity") or ""
+    # Both the business-facing display name AND the raw table name — display
+    # name alone (e.g. "Payment Transactions") was observed (2026-07 live
+    # testing) to be ambiguous enough that a bare "go back" re-resolved to a
+    # DIFFERENT, similarly-named table (reminders_reminderpaymenttransaction
+    # instead of accounts_paymenttransaction) — the raw table name is the
+    # exact, unambiguous identifier retrieval already indexes on; the display
+    # name stays too since it's what makes the phrase read naturally.
+    raw_entity, display = frame.get("entity"), frame.get("entity_display")
+    if display and raw_entity and display.lower() != raw_entity.lower():
+        entity = f"{display} ({raw_entity})"
+    else:
+        entity = display or raw_entity or ""
     filters = list(frame.get("filters") or [])
     filter_phrases = [f"{f['field']} {f.get('operator', 'equals')} {f['value']}"
                       for f in filters if f.get("field") and f.get("value") is not None]

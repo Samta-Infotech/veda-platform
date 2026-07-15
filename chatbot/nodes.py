@@ -135,6 +135,29 @@ _RESET_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Deterministic fast path for "pop one drill level" navigation ("go back",
+# "go back again", "undo that filter", "zoom out"). These words carry NO data
+# content of their own — sent through the LLM classifier, they were observed
+# (2026-07 memory-layer testing) to be non-deterministically misjudged as
+# smalltalk turn-to-turn (same exact message, different verdict on repeat
+# runs), and even when correctly routed to "followup", the classifier's own
+# delta_type still defaulted to "new_topic" (its own prompt instructs that for
+# any smalltalk verdict), which then made render_frame_as_query() send the
+# literal word "back"/"again" to the SQL engine as if it were part of the
+# question — the engine then tried (and failed) to match it against columns/
+# values. Anchored whole-message match (same style as _RESET_RE above) so it
+# never misfires on a real question that merely contains "back" mid-sentence.
+# Only fires when there's an actual drill level to pop (frame + non-empty
+# drill_stack) — otherwise falls through to the normal LLM classification,
+# since "go back" with nothing to go back FROM isn't unambiguous.
+_DRILL_UP_RE = re.compile(
+    r"^\s*(go\s+back(\s+(again|once\s+more|one\s+more\s+time))?|back\s+up|"
+    r"go\s+up(\s+(a|one)\s+level)?|(zoom|step)\s+out|previous(\s+(level|view|step))?|"
+    r"undo(\s+(that|it|the\s+(last|previous)\s+filter))?|"
+    r"remove\s+(that|the\s+(last|previous))\s+filter)\s*[.,!?]*\s*$",
+    re.IGNORECASE,
+)
+
 
 def _canned_smalltalk_reply(message: str) -> str | None:
     """Instant reply for the fast-path patterns above — None means "not a fast
@@ -151,15 +174,21 @@ def _canned_smalltalk_reply(message: str) -> str | None:
     return None
 
 
-def _emit(config: RunnableConfig | None, phase: str, message: str) -> None:
+def _emit(config: RunnableConfig | None, phase: str, message: str,
+          extra: dict | None = None) -> None:
     """Best-effort progress callback — a broken/absent UI callback must never
     sink the turn it's merely reporting on. Callers stash `on_event` in
-    config["configurable"] (see chatbot/run.py::run_chat_turn)."""
+    config["configurable"] (see chatbot/run.py::run_chat_turn).
+
+    `extra`: the inference tier's own per-phase structured fields (e.g.
+    "route"'s intent=, "sub_query"'s index=/total=/sub_query=) — forwarded
+    verbatim so the chat UI gets the same structured data the inference SSE
+    stream carried, not just the flattened phase/message text."""
     on_event = ((config or {}).get("configurable") or {}).get("on_event")
     if on_event is None:
         return
     try:
-        on_event(phase, message)
+        on_event(phase, message, extra or {})
     except Exception:
         logger.exception("_emit: on_event callback raised for phase=%s", phase)
 
@@ -213,6 +242,15 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # self-contained regardless of history.
         action = "runtime_context"
         logger.info("classify_node: deterministic runtime-context match, message=%r", message)
+    elif frame.get("entity") and state.get("drill_stack") and _DRILL_UP_RE.match(message):
+        # Deterministic fast path: "go back" navigation, only when there's an
+        # actual drill level to pop (see _DRILL_UP_RE's docstring for why).
+        # Sets delta_type directly too — this is the ONE fast path (besides
+        # the LLM branch below) that needs to, since context_resolve_node
+        # reads it to trigger pop_drill()/rebuild_frame_from_stack().
+        action = "followup"
+        delta_type = "drill_up"
+        logger.info("classify_node: deterministic drill_up match, message=%r", message)
     else:
         _emit(config, "supervisor_classify", "Understanding your message...")
         raw = call_slm(
@@ -249,8 +287,20 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # in this bucket (see chatbot/nodes.py's module docstring history / the
     # incidents this responds to), and asking a model "could this secretly
     # depend on context" for them was producing real false positives.
-    if (action == "smalltalk" and history and _REFERENTIAL_HINTS.search(message)
-            and _depends_on_history(message, history)):
+    if (action == "smalltalk" and history and frame.get("entity")
+            and _REFERENTIAL_HINTS.search(message) and _depends_on_history(message, history)):
+        # frame.get("entity") gate (2026-07 fix): a message can't meaningfully
+        # be a "followup" when there's nothing real to follow up ON. Without
+        # this, a bare "what about the other one" right after small talk (no
+        # QueryFrame ever established — no real prior data question) still
+        # got forced into "followup", sent to the engine as raw unresolved
+        # text, and the engine's own retrieval "successfully" matched it
+        # against a totally unrelated table — a confident-looking but
+        # fabricated answer, the exact thing refuse-over-guess exists to
+        # prevent. Requires the SAME grounding signal already used everywhere
+        # else in this file (drill_up's gate, the vague-topical override
+        # below) rather than a new keyword/phrase list — the fix generalizes
+        # instead of patching one more phrasing.
         logger.warning(
             "classify_node: LLM said smalltalk but message depends on the prior "
             "conversation, overriding to 'followup': %r", message,
@@ -280,6 +330,29 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             "overriding to 'followup': %r", frame.get("entity"), message,
         )
         action = "followup"
+
+    if (action in ("followup", "answer") and not frame.get("entity")
+            and _REFERENTIAL_HINTS.search(message) and not _DATA_QUESTION_HINTS.search(message)):
+        # Universal backstop, independent of HOW `action` got here (the LLM's
+        # own direct verdict, OR any override above): a message that is
+        # PURELY referential ("other", "that", "it", ...) with no data-
+        # question content of its own, and no QueryFrame to resolve it
+        # against, has nothing real to be a followup TO. Left as "followup"/
+        # "answer", context_resolve_node's render_frame_as_query() returns the
+        # raw ambiguous text unchanged (frame is empty) and forwards it to the
+        # engine as if self-contained — the engine's own retrieval then
+        # "successfully" matches it against an UNRELATED table (observed:
+        # "what about the other one" right after a bare "hi" returned a
+        # different table's real row, including a real name/email — a
+        # confident-looking fabrication, not a refusal). smalltalk_node has
+        # zero DB access, so downgrading here is a hard guarantee this can't
+        # happen, not just a lower-probability one.
+        logger.warning(
+            "classify_node: action=%r but message is purely referential with no "
+            "QueryFrame to resolve against — downgrading to 'smalltalk' rather "
+            "than forward ungrounded text to the engine: %r", action, message,
+        )
+        action = "smalltalk"
 
     logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state
@@ -500,7 +573,8 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
             request_id=state.get("request_id"),
         ):
             if kind == "progress":
-                _emit(config, data.get("phase", "progress"), data.get("message", ""))
+                _extra = {k: v for k, v in data.items() if k not in ("phase", "message")}
+                _emit(config, data.get("phase", "progress"), data.get("message", ""), _extra)
             elif kind == "error":
                 logger.warning("call_engine_node: inference stream error for query=%r: %s", query, data)
                 return {"engine_result": {}, "status": "unavailable", "engine_unavailable": True}
