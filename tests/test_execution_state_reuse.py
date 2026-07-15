@@ -269,6 +269,52 @@ def test_serialize_strips_context_even_as_a_bare_dataclass_field():
     assert payload["cols"] == ["a"]
 
 
+def test_serialize_converts_decimal_to_float_not_string():
+    """Regression: psycopg2 returns Decimal for NUMERIC/SUM/AVG columns (e.g.
+    monetary "amount" fields). Decimal used to fall through to the generic
+    str(obj) branch, turning every such value into a STRING on the wire
+    (e.g. "423.000") — which silently broke apps/chat/visualization.py's
+    _is_numeric()/_to_number() downstream (that code's own comment already
+    assumes it receives a real Decimal to convert, not a pre-stringified
+    one), so no chart was ever produced for a query whose measure was a
+    NUMERIC/DECIMAL column — only INTEGER aggregates (COUNT(*)) worked,
+    since those already survive as native JSON ints."""
+    import inference.routes.hybrid as hybrid_route
+    from decimal import Decimal
+
+    out = hybrid_route._serialize(Decimal("423.000"))
+    assert out == 423.0
+    assert isinstance(out, float)
+
+
+def test_serialize_decimal_inside_rows_still_a_real_number():
+    """Same fix, exercised through the actual nested shape a query result
+    takes (rows = list of tuples with mixed types) — not just the bare
+    Decimal case above."""
+    import inference.routes.hybrid as hybrid_route
+    from decimal import Decimal
+
+    payload = hybrid_route._serialize({
+        "cols": ["amount", "label"],
+        "rows": [[Decimal("423.000"), "rent"], [Decimal("50000.00"), "Rent"]],
+    })
+    amounts = [row[0] for row in payload["rows"]]
+    assert amounts == [423.0, 50000.0]
+    assert all(isinstance(v, float) for v in amounts)
+
+
+def test_serialize_still_passes_through_primitives_unchanged():
+    """Regression guard: the Decimal special-case must not affect the
+    existing str/int/float/bool/None passthrough behavior."""
+    import inference.routes.hybrid as hybrid_route
+
+    assert hybrid_route._serialize("hello") == "hello"
+    assert hybrid_route._serialize(42) == 42
+    assert hybrid_route._serialize(3.14) == 3.14
+    assert hybrid_route._serialize(True) is True
+    assert hybrid_route._serialize(None) is None
+
+
 def test_reuse_log_does_not_overstate_query_understanding_reuse(monkeypatch, capsys):
     """The other confirmed bug: the reuse log must only claim what's ACTUALLY
     functionally consumed. query_understanding/sql_planning are populated on

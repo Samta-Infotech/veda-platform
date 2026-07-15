@@ -9,7 +9,7 @@ from typing import Iterator
 from chatbot.run import run_chat_turn
 
 from .models import ChatMessage, ChatSession, MessageType
-from .thinking_messages import business_friendly_message, visualization_prep_message
+from .thinking_messages import business_friendly_message
 from .visualization import VisualizationRecommender
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
@@ -251,11 +251,9 @@ class ConversationQueryService:
             # Only emitted when a chart is actually about to be shown — a
             # text/table-only answer never yields this, so it's never a
             # "thinking" message describing work that isn't happening.
-            # Context-aware (Phase 2, per the original ticket's own "Future
-            # Scope") — see thinking_messages.visualization_prep_message.
             yield {"event": "thinking",
                   "data": {"phase": "visualization_prep",
-                           "message": visualization_prep_message(res0.get("explain"))}}
+                           "message": business_friendly_message("visualization_prep", "")}}
         for block in self._build_content_blocks(response, res0):
             yield {"event": "content", "data": block}
         for viz in vizzes:

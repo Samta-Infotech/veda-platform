@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import threading
+from decimal import Decimal
 from typing import Any
 
 try:
@@ -70,6 +71,18 @@ def _serialize(obj: Any) -> Any:
         return [_serialize(v) for v in obj]
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
+    if isinstance(obj, Decimal):
+        # psycopg2 returns Decimal for NUMERIC/SUM/AVG columns (e.g. monetary
+        # "amount" fields) — falling through to the generic str(obj) below
+        # turned every such value into a STRING on the wire (e.g. "423.000"),
+        # which silently broke every downstream numeric check that expects a
+        # real number: apps/chat/visualization.py's _is_numeric()/_to_number()
+        # (its own comment already assumes it receives a Decimal to convert,
+        # not a pre-stringified one) — no chart was ever produced for a query
+        # whose measure was a NUMERIC/DECIMAL column, only INTEGER aggregates
+        # (e.g. COUNT(*), which survive as native JSON ints) worked. float()
+        # matches what that downstream code already does with a real Decimal.
+        return float(obj)
     return str(obj)
 
 
