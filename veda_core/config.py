@@ -583,6 +583,15 @@ GRAPH_EDGE_WEIGHTS = {
     "in_section":      1.0,   # P3 chunk → section
     "derived_from":    1.5,   # P2.3/P3 derived table → doc
     "next_chunk":      0.4,   # P3 chunk → adjacent chunk
+    # --- Semantic bridge (docs/SEMANTIC_ENTITY_BRIDGE.md, Tier A) ---
+    # chunk → column by M3 cosine against the structured semantic layer. Deliberately
+    # BELOW the exact `value_of` (1.5) bridge so literal links always dominate PPR
+    # ranking; the semantic lane only widens recall. It is chunk→column (never
+    # column↔column), so it can never authorize a federated SQL join by construction.
+    "semantic_about":  0.9,
+    # Tier B value-level bridge: entity(span-matched value) → column. More precise than
+    # topical semantic_about, so weighted higher — but still below exact value_of (1.5).
+    "semantic_value_of": 1.1,
 }
 GRAPH_DISCOVERED_FK_TIER_WEIGHT = {"HIGH": 1.0, "MEDIUM": 0.6}
 
@@ -630,6 +639,58 @@ GRAPH_LINK_VALUE_OVERLAP_MIN  = 0.15
 GRAPH_LINK_NAME_MIN_TOKEN_LEN = 4
 GRAPH_LINK_EMBED_SIM_MIN      = 0.45
 GRAPH_LINK_MAX_EDGES_PER_CHUNK = 8
+
+# --- Semantic bridge: unstructured chunks → structured semantic layer ---
+# (docs/SEMANTIC_ENTITY_BRIDGE.md, Tier A). ingestion/semantic_linker.py matches each
+# chunk's M3 vector against the column vectors already in graph_node_embeddings (the
+# structured semantic layer) and emits `semantic_about` (chunk→column) edges. This is
+# the ADDITIVE semantic lane alongside entity_linker's exact/value bridge — it widens
+# recall on synonyms/paraphrases without ever driving a SQL join (chunk→column edges
+# are structurally join-incapable). Env-overridable so it can be tuned per deployment.
+SEMANTIC_BRIDGE_ENABLED  = _os_env.environ.get("VEDA_SEMANTIC_BRIDGE", "1").strip().lower() \
+    in ("1", "true", "yes", "on")
+# M3 cosine floor to admit a chunk→column semantic edge. M3 cosines run tighter/higher
+# than MiniLM's, so this is stricter than the legacy GRAPH_LINK_EMBED_SIM_MIN (0.45);
+# calibrate on the golden set before loosening (see doc §5).
+SEMANTIC_BRIDGE_MIN_SIM  = float(_os_env.environ.get("VEDA_SEMANTIC_BRIDGE_MIN_SIM", "0.55"))
+# Max semantic columns bridged per chunk (keeps the graph sparse).
+SEMANTIC_BRIDGE_TOPK     = int(_os_env.environ.get("VEDA_SEMANTIC_BRIDGE_TOPK", "5"))
+# Optional top1-vs-top2 cosine margin: when > 0, a chunk that is near MANY columns
+# (ambiguous) emits nothing. 0.0 disables the guard (top-K + threshold only).
+SEMANTIC_BRIDGE_MARGIN   = float(_os_env.environ.get("VEDA_SEMANTIC_BRIDGE_MARGIN", "0.0"))
+# Memory backstop on candidate column vectors loaded per doc ingest (very wide tenants).
+SEMANTIC_BRIDGE_MAX_COLS = int(_os_env.environ.get("VEDA_SEMANTIC_BRIDGE_MAX_COLS", "20000"))
+SEMANTIC_BRIDGE_EDGE_TYPE = "semantic_about"
+
+# --- Semantic bridge Tier B: value-level (docs/SEMANTIC_ENTITY_BRIDGE.md §3.1) ---
+# Column-level (Tier A above) links a chunk to a COLUMN topically. Tier B links a
+# chunk SPAN to the actual DB VALUE it paraphrases — the true "ACME Corporation" ↔
+# stored "ACME-CORP" bridge. At structured ingest we embed each sampled display value
+# of eligible columns into `entity_value_embeddings` (ingestion/value_embedder.py);
+# at doc ingest we extract candidate spans, embed them, and ANN-match against that
+# index, emitting an entity node + `semantic_value_of` (entity→column) edge. Kept
+# BELOW the exact `value_of` (1.5) so literal value hits always dominate. Like Tier A
+# it is chunk/entity→column, never column↔column, so it can never drive a SQL join.
+SEMANTIC_VALUE_BRIDGE_ENABLED = _os_env.environ.get("VEDA_SEMANTIC_VALUE_BRIDGE", "1") \
+    .strip().lower() in ("1", "true", "yes", "on")
+SEMANTIC_VALUE_EMB_TABLE   = "entity_value_embeddings"
+# Semantic types whose VALUES carry natural-language meaning worth embedding. IDENTIFIER
+# is excluded on purpose: ids/codes have no semantic synonyms, so embedding them adds
+# cost and noise — the exact/pattern detectors already own id/code matching.
+SEMANTIC_VALUE_ELIGIBLE_TYPES = ("CATEGORY", "FREE_TEXT")
+# Distinct display values embedded per column (frequency-ordered by the sampler), a
+# backstop against high-cardinality FREE_TEXT columns.
+SEMANTIC_VALUE_MAX_PER_COL = int(_os_env.environ.get("VEDA_SEMANTIC_VALUE_MAX_PER_COL", "200"))
+# Cosine floor for a span↔value match. Stricter than the column-level floor: a value
+# bridge asserts "this span IS that value", so it must be tight.
+SEMANTIC_VALUE_MIN_SIM     = float(_os_env.environ.get("VEDA_SEMANTIC_VALUE_MIN_SIM", "0.62"))
+# Max value matches kept per candidate span.
+SEMANTIC_VALUE_TOPK        = int(_os_env.environ.get("VEDA_SEMANTIC_VALUE_TOPK", "3"))
+# Candidate spans per chunk cap (bounds encode cost on large docs).
+SEMANTIC_VALUE_MAX_SPANS_PER_CHUNK = int(
+    _os_env.environ.get("VEDA_SEMANTIC_VALUE_MAX_SPANS", "40"))
+# Memory backstop on value vectors loaded per doc ingest.
+SEMANTIC_VALUE_MAX_VECTORS = int(_os_env.environ.get("VEDA_SEMANTIC_VALUE_MAX_VECTORS", "200000"))
 
 GRAPH_EMBED_ENABLED       = True
 GRAPH_NODE_EMB_TABLE      = "graph_node_embeddings"

@@ -80,9 +80,14 @@ def _load_all_edges(source_ids: Optional[List[str]]):
             # inherently cross-source, so load them tenant-wide too — a query scoped to
             # the relational source still traverses doc→entity→column even though those
             # edges are now stamped with the ingesting doc source (for idempotent cleanup).
+            # semantic_about is the additive semantic bridge (chunk → structured column,
+            # docs/SEMANTIC_ENTITY_BRIDGE.md): also chunk↔column cross-source, so load it
+            # tenant-wide for the same reason — a relational-scoped query still reaches doc
+            # chunks that are semantically about its columns.
             cur.execute(f"SELECT src_node_id, dst_node_id, weight FROM {GRAPH_EDGES_TABLE} "
                         f"WHERE source_id IN ({ph}) OR edge_type IN "
-                        f"('cross_source_fk', 'value_of', 'mentions_entity')",
+                        f"('cross_source_fk', 'value_of', 'mentions_entity', 'semantic_about', "
+                        f"'semantic_value_of')",
                         list(source_ids))
         else:
             cur.execute(f"SELECT src_node_id, dst_node_id, weight FROM {GRAPH_EDGES_TABLE}")
