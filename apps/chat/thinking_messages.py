@@ -69,3 +69,17 @@ def business_friendly_message(phase: str, fallback: str) -> str:
     its raw message instead of silently disappearing, until it's added here.
     """
     return THINKING_PHASE_MESSAGES.get(phase, fallback)
+
+
+def visualization_prep_message(explain: dict | None) -> str:
+    """Context-aware "creating a chart" message (Phase 2 — see this module's
+    own "Future Scope" precedent): reuses the dataset name
+    veda_core/veda/business_explain.py's build_explain() ALREADY computed
+    deterministically as `explain["data_used"]["datasets"]` — no new call, no
+    LLM, no pipeline change. Falls back to the generic
+    THINKING_PHASE_MESSAGES["visualization_prep"] entry when `explain` or its
+    datasets aren't available (e.g. business_explain failed server-side)."""
+    datasets = ((explain or {}).get("data_used") or {}).get("datasets") or []
+    if datasets:
+        return f"📊 Creating a visual summary of {datasets[0]}..."
+    return THINKING_PHASE_MESSAGES["visualization_prep"]
