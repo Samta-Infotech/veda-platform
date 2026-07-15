@@ -146,10 +146,17 @@ def _get_rerank_docs() -> dict:
 
 
 def _precomputed_rerank_text(item_id, is_table: bool):
-    """Precomputed rerank text for a column/table id, or None when the id isn't covered."""
+    """Precomputed rerank text for a column/table id, or None when the id isn't covered
+    OR the artifact hasn't been built yet. Deliberately swallows the artifact-missing
+    RuntimeError here (not just "id not covered") — enrichment is an ADDITIVE quality
+    improvement (Phase 2.1); it must never be the reason the primary-path rerank stage
+    fails outright when a fresh deployment hasn't run ingestion's rerank_docs step yet."""
     if not item_id:
         return None
-    bucket = _get_rerank_docs().get("tables" if is_table else "columns", {})
+    try:
+        bucket = _get_rerank_docs().get("tables" if is_table else "columns", {})
+    except Exception:
+        return None
     return bucket.get(item_id)
 
 
@@ -161,13 +168,32 @@ def _table_text(c: RetrievalResult) -> str:
     return c.table_name or c.col_name or ""
 
 
+def enriched_pair_text(col_id: str, fallback_col_name: str, fallback_table_name: str) -> str:
+    """Shape-agnostic enriched cross-encoder text for a column candidate — precomputed
+    (WP7) if the rerank-docs artifact covers this col_id, else the bare 'col table' name.
+
+    Takes plain strings rather than a RetrievalResult object so it works identically for
+    BOTH RetrievalResult shapes in this codebase (retrieval_engine_phase3's — the PRIMARY/
+    Tier1 path, fields col_id/column_name/table_name — and ingestion.vector_store's — the
+    Tier2 path, fields col_id/col_name/table_id). The two use different field names for
+    the same concept (column_name vs col_name); building the fallback string OUTSIDE this
+    function, from whichever attribute the caller's object actually has, avoids the
+    AttributeError a shared object-typed helper would risk on the path whose attribute
+    name doesn't match.
+
+    Never raises for a missing/uncovered col_id — always returns a usable string (that
+    IS the fallback), so callers on the SQL-generation critical path can't be broken by
+    Phase 2.1's enrichment being partially built or briefly unavailable."""
+    _pre = _precomputed_rerank_text(col_id, is_table=False)
+    if _pre is not None:
+        return _pre[:RERANKER_MAX_TEXT_LEN]
+    return (fallback_col_name + " " + (fallback_table_name or ""))[:RERANKER_MAX_TEXT_LEN]
+
+
 def _col_text(c: RetrievalResult, sampled: dict) -> str:
     """Cross-encoder text for a column candidate — precomputed enriched text (WP7), else
     the bare name+table. The per-query build_enriched_column_text assembly was removed."""
-    _pre = _precomputed_rerank_text(c.col_id, is_table=False)
-    if _pre is not None:
-        return _pre[:RERANKER_MAX_TEXT_LEN]
-    return (c.col_name + " " + (c.table_name or ""))[:RERANKER_MAX_TEXT_LEN]
+    return enriched_pair_text(c.col_id, c.col_name, c.table_name)
 
 
 def _apply_cutoff(scored: list, top_n: int, n_candidate_tables: int = 1) -> list:

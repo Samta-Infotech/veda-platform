@@ -99,20 +99,30 @@ class InferenceClient:
 
         try:
             event, data_lines = None, []
-            for raw_line in resp:
-                line = raw_line.decode("utf-8").rstrip("\n").rstrip("\r")
-                if line.startswith("event:"):
-                    event = line[len("event:"):].strip()
-                elif line.startswith("data:"):
-                    data_lines.append(line[len("data:"):].strip())
-                elif line == "":  # blank line terminates one SSE frame
-                    if event is not None:
-                        try:
-                            data = json.loads("".join(data_lines)) if data_lines else {}
-                        except ValueError:
-                            data = {}
-                        yield event, data
-                    event, data_lines = None, []
+            try:
+                for raw_line in resp:
+                    line = raw_line.decode("utf-8").rstrip("\n").rstrip("\r")
+                    if line.startswith("event:"):
+                        event = line[len("event:"):].strip()
+                    elif line.startswith("data:"):
+                        data_lines.append(line[len("data:"):].strip())
+                    elif line == "":  # blank line terminates one SSE frame
+                        if event is not None:
+                            try:
+                                data = json.loads("".join(data_lines)) if data_lines else {}
+                            except ValueError:
+                                data = {}
+                            yield event, data
+                        event, data_lines = None, []
+            except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
+                # A connection drop/timeout mid-stream (e.g. a slow pipeline run
+                # outliving a proxy/gateway timeout) must surface the same way an
+                # unreachable inference tier does — never as a silently empty
+                # engine_result (the caller's broad except would otherwise turn
+                # this into an untraceable "no result" instead of a clear outage).
+                raise InferenceUnavailable(
+                    f"inference stream dropped mid-response at {req.full_url}: {exc}"
+                ) from exc
         finally:
             resp.close()
 

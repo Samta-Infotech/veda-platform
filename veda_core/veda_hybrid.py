@@ -523,7 +523,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         from veda.pipeline import run_query
         _head_t0 = time.time()
         res = precomputed_sql if isinstance(precomputed_sql, dict) \
-            else run_query(query, sm, cols, return_result=True)
+            else run_query(query, sm, cols, return_result=True, on_event=on_event)
         _head_s = time.time() - _head_t0
         # Tier-2 fallback: if the deterministic head couldn't answer (refuse / dropped
         # qualifier / ungrounded / no table), let the LLM emit IR → deterministic
@@ -571,8 +571,15 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                     else:
                         _emit(on_event, "answer", "Tier-2 SQL answered the query")
                         return "deterministic", t2
-        else:
+        elif isinstance(res, dict) and res.get("ok"):
             _emit(on_event, "answer", "SQL query executed")
+        else:
+            # Not tier-2-retried (status outside the retry list above, e.g.
+            # clarify/invalid/ir_mismatch) AND not ok — the pipeline did NOT
+            # actually answer. Emitting "SQL query executed" here would lie
+            # to the caller about what happened (audit fix: this progress
+            # event used to fire unconditionally in this branch).
+            _emit(on_event, "answer", "SQL query could not be answered")
         return "deterministic", res
 
     # ── RAG → integrated document retrieval + synthesis ───────────────────────
@@ -598,7 +605,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         # Run the DETERMINISTIC SQL head first and feed its EXECUTED rows into the
         # fusion (the correct-by-construction numbers), instead of letting the fusion
         # rely on LLM-written SQL. (Also supplies the previously-missing sql_columns.)
-        sqlres = run_query(query, sm, cols, return_result=True)
+        sqlres = run_query(query, sm, cols, return_result=True, on_event=on_event)
         sql_result = None
         if isinstance(sqlres, dict) and sqlres.get("ok"):
             _c, _r = sqlres.get("cols", []), sqlres.get("rows", [])
@@ -625,7 +632,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     # ── default safety net ────────────────────────────────────────────────────
     sm, cols = _load_semantic_model()
     from veda.pipeline import run_query
-    return "deterministic", run_query(query, sm, cols, return_result=True)
+    return "deterministic", run_query(query, sm, cols, return_result=True, on_event=on_event)
 
 
 def _to_subresult(sub_query, route, result):
@@ -798,6 +805,20 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
     visualization = None
     if NL_ANSWER_ENABLED and cols:
         row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
+        # Safe default FIRST, same as veda/pipeline.py's L7b (the Tier-1 path) —
+        # previously this function only set result["answer"] on a SUCCESSFUL
+        # insight/NL-answer call; run_insight_engine/run_nl_answer already
+        # degrade to a deterministic fallback internally on an SLM failure, but
+        # an exception from ANALYSIS itself (e.g. analyze_result()/extract_sql_
+        # facts() raising, before the SLM call is even attempted) skipped both
+        # try blocks entirely, leaving "answer" absent from the result dict —
+        # worse than Tier-1's raw-text fallback: format_reply_node's own
+        # generic "Here's what I found." masked that a Tier-2 turn had silently
+        # produced NO grounded summary at all. Always overwritten below by a
+        # real summary when either call succeeds.
+        from query.nl_answer import deterministic_fallback_answer
+        result["answer"] = deterministic_fallback_answer(query, list(cols), row_dicts)
+        got_real_answer = False
 
         if INSIGHT_ENGINE_ENABLED:
             try:
@@ -808,6 +829,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
                 insight = run_insight_engine(ctx)
                 if getattr(insight, "answer", None):
                     result["answer"] = insight.answer
+                    got_real_answer = True
                 result["insights"] = insight.insights
                 result["follow_up_questions"] = insight.follow_up_questions
                 result["visualization"] = insight.visualization
@@ -817,7 +839,11 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
                 print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
 
-        if "answer" not in result:
+        # got_real_answer (not "answer" in result — that key is ALWAYS present
+        # now, see the deterministic default set above): still tries plain
+        # run_nl_answer whenever insight-engine didn't produce a genuine
+        # summary, exactly as before this fix.
+        if not got_real_answer:
             try:
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,

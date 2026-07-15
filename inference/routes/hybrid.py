@@ -23,6 +23,7 @@ from __future__ import annotations
 import dataclasses
 import json
 import threading
+from decimal import Decimal
 from typing import Any
 
 try:
@@ -45,6 +46,18 @@ except ImportError:
 _INTERNAL_ONLY_KEYS = frozenset({"context", "trace"})
 
 
+def _verbose() -> bool:
+    """Container-log verbosity for the query pipeline, controlled by env.
+
+    VEDA_INFERENCE_VERBOSE=1 (default) → run_hybrid_query(verbose=True): the full
+    stage-by-stage detail (classify, routing, tier decisions, reuse logging) prints
+    to stdout where `docker logs inference` captures it. Set 0 to quiet it down.
+    Read per-request (not at import) so it can be flipped without a code change —
+    just restart the container with the new env value."""
+    import os
+    return os.environ.get("VEDA_INFERENCE_VERBOSE", "1") not in ("0", "false", "False")
+
+
 def _serialize(obj: Any) -> Any:
     """Best-effort JSON-safe conversion that preserves the MultiResult shape.
     Strips _INTERNAL_ONLY_KEYS from any dict encountered, at any nesting depth —
@@ -58,6 +71,18 @@ def _serialize(obj: Any) -> Any:
         return [_serialize(v) for v in obj]
     if isinstance(obj, (str, int, float, bool)) or obj is None:
         return obj
+    if isinstance(obj, Decimal):
+        # psycopg2 returns Decimal for NUMERIC/SUM/AVG columns (e.g. monetary
+        # "amount" fields) — falling through to the generic str(obj) below
+        # turned every such value into a STRING on the wire (e.g. "423.000"),
+        # which silently broke every downstream numeric check that expects a
+        # real number: apps/chat/visualization.py's _is_numeric()/_to_number()
+        # (its own comment already assumes it receives a Decimal to convert,
+        # not a pre-stringified one) — no chart was ever produced for a query
+        # whose measure was a NUMERIC/DECIMAL column, only INTEGER aggregates
+        # (e.g. COUNT(*), which survive as native JSON ints) worked. float()
+        # matches what that downstream code already does with a real Decimal.
+        return float(obj)
     return str(obj)
 
 
@@ -75,7 +100,8 @@ if APIRouter is not None:
         from inference.concurrency import run_in_threadpool_with_context
         from veda_core.veda_hybrid import run_hybrid_query
 
-        result = await run_in_threadpool_with_context(run_hybrid_query, req.query)
+        result = await run_in_threadpool_with_context(run_hybrid_query, req.query,
+                                                      verbose=_verbose())
         payload = _serialize(result)
         # Surface a top-level status for callers that don't walk items (§19 item 1).
         items = payload.get("items") if isinstance(payload, dict) else None
@@ -105,7 +131,7 @@ if APIRouter is not None:
 
         def _run():
             try:
-                result = run_hybrid_query(req.query, on_event=on_event)
+                result = run_hybrid_query(req.query, verbose=_verbose(), on_event=on_event)
                 payload = _serialize(result)
                 items = payload.get("items") if isinstance(payload, dict) else None
                 top_status = (

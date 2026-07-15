@@ -112,11 +112,16 @@ class VisualizationRecommender:
     dimension) correctly return no chart — the markdown table remains the
     fallback, not a guess.
 
-    Returns a list (0+ specs) rather than a single Optional spec, matching
-    the frontend contract's "response can include multiple chart blocks"
-    shape. In practice a single query result almost always yields at most
-    one meaningful chart — synthesizing multiple unrelated charts from one
-    result set isn't attempted."""
+    Returns a list (0+ specs), matching the frontend contract's "response can
+    include multiple chart blocks" shape. Multi-viz support (2026-07): when a
+    result naturally supports more than one EQUALLY VALID rendering of the
+    SAME data — a small category breakdown (pie + bar) or a time series
+    (line + bar) — both are returned, in the same order today's single-chart
+    behavior already picked (so a caller that only reads specs[0] sees zero
+    change). This is never "synthesizing" unrelated charts from one result;
+    every additional spec reuses the exact same (labels, values)/(slices)
+    data and confidence the primary spec already computed — no new
+    recommendation logic, no guessing."""
 
     def recommend(self, cols: list, rows: list) -> list[VisualizationSpec]:
         if not cols or not rows:
@@ -142,14 +147,24 @@ class VisualizationRecommender:
                 return [combo]
 
         if temporal_idx and numeric_idx and len(rows) > 1:
-            spec = self._line(cols, rows, temporal_idx[0], numeric_idx[0])
-            if spec.confidence >= _CONFIDENCE_THRESHOLD:
-                return [spec]
+            line_spec = self._line(cols, rows, temporal_idx[0], numeric_idx[0])
+            if line_spec.confidence >= _CONFIDENCE_THRESHOLD:
+                # Bar-over-time is an equally valid read of the SAME (labels,
+                # values) data as the line chart — same confidence, since it's
+                # the identical underlying data, just a different chart
+                # geometry, not a separately-justified guess. Line stays
+                # first (today's single-chart behavior — any caller that
+                # only reads specs[0] sees no change at all); bar is the new
+                # additive second chart (multi-viz support).
+                bar_spec = self._bar_over_time(cols, rows, temporal_idx[0], numeric_idx[0],
+                                               line_spec.confidence)
+                return [line_spec, bar_spec]
 
         if categorical_idx and numeric_idx:
-            spec = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0])
-            if spec is not None and spec.confidence >= _CONFIDENCE_THRESHOLD:
-                return [spec]
+            specs = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0])
+            confident = [s for s in specs if s.confidence >= _CONFIDENCE_THRESHOLD]
+            if confident:
+                return confident
 
         return []
 
@@ -181,7 +196,7 @@ class VisualizationRecommender:
 
     # --- chart builders ------------------------------------------------------
 
-    def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> VisualizationSpec | None:
+    def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> list[VisualizationSpec]:
         # SQL upstream doesn't guarantee GROUP BY on the category column, so the
         # same category name can appear across multiple rows — sum them here
         # rather than plotting one slice/bar per raw row.
@@ -193,17 +208,32 @@ class VisualizationRecommender:
             totals[name] = totals.get(name, 0) + _to_number(row[val_idx])
         pairs = list(totals.items())
         if len(pairs) < 2:
-            return None  # a single category isn't a chart — never force one
+            return []  # a single category isn't a chart — never force one
 
         title = f"{cols[val_idx]} by {cols[cat_idx]}"
         if len(pairs) <= _MAX_PIE_SLICES:
             slices = [{"name": name, "value": value} for name, value in pairs]
-            return VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
-                                     confidence=0.9)
+            pie = VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
+                                    confidence=0.9)
+            # Bar is an equally valid read of the SAME totals — same
+            # confidence as pie (identical data, different geometry), not a
+            # separately-justified guess. Pie stays first (today's single-
+            # chart behavior — any caller that only reads specs[0] sees no
+            # change at all); bar is the new additive second chart.
+            labels = [name for name, _ in pairs]
+            values = [value for _, value in pairs]
+            bar = VisualizationSpec(
+                type=ChartType.BAR, title=title, x_axis_title=cols[cat_idx], y_axis_title=cols[val_idx],
+                chart_data={"labels": labels, "values": values}, confidence=0.9,
+            )
+            return [pie, bar]
 
         # Long tail: keep the top N by value, collapse the rest into "Other"
         # rather than dropping the chart entirely — this is what makes bar/pie
-        # work for ANY category count, not just small ones.
+        # work for ANY category count, not just small ones. Bar-only here
+        # (unchanged) — a pie with this many slices is genuinely unreadable,
+        # so this stays a single-chart case on purpose (see the architecture
+        # review: "many categories -> bar only").
         ranked = sorted(pairs, key=lambda p: p[1], reverse=True)
         top, rest = ranked[:_TOP_N_CATEGORIES], ranked[_TOP_N_CATEGORIES:]
         slices = [{"name": name, "value": value} for name, value in top]
@@ -211,15 +241,15 @@ class VisualizationRecommender:
             slices.append({"name": "Other", "value": sum(value for _, value in rest)})
 
         if len(slices) <= _MAX_PIE_SLICES:
-            return VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
-                                     confidence=0.75)
+            return [VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
+                                      confidence=0.75)]
 
         labels = [s["name"] for s in slices]
         values = [s["value"] for s in slices]
-        return VisualizationSpec(
+        return [VisualizationSpec(
             type=ChartType.BAR, title=title, x_axis_title=cols[cat_idx], y_axis_title=cols[val_idx],
             chart_data={"labels": labels, "values": values}, confidence=0.7,
-        )
+        )]
 
     @staticmethod
     def _line(cols: list, rows: list, x_idx: int, y_idx: int) -> VisualizationSpec:
@@ -230,6 +260,22 @@ class VisualizationRecommender:
         confidence = 0.9 if non_null_x == len(ordered) and len(ordered) >= 3 else 0.7
         return VisualizationSpec(
             type=ChartType.LINE, title=f"{cols[y_idx]} over {cols[x_idx]}",
+            x_axis_title=cols[x_idx], y_axis_title=cols[y_idx],
+            chart_data={"labels": [str(row[x_idx]) for row in ordered],
+                       "values": [_to_number(row[y_idx]) for row in ordered]},
+            confidence=confidence,
+        )
+
+    @staticmethod
+    def _bar_over_time(cols: list, rows: list, x_idx: int, y_idx: int, confidence: float) -> VisualizationSpec:
+        """Bar-chart rendering of the SAME (labels, values) data _line() plots
+        — an equally valid read of a temporal+numeric result, not a separate
+        recommendation. `confidence` is passed in from the caller's already-
+        computed line confidence rather than recomputed here, since it's the
+        identical underlying data."""
+        ordered = sorted(rows, key=lambda row: (row[x_idx] is None, row[x_idx]))
+        return VisualizationSpec(
+            type=ChartType.BAR, title=f"{cols[y_idx]} over {cols[x_idx]}",
             x_axis_title=cols[x_idx], y_axis_title=cols[y_idx],
             chart_data={"labels": [str(row[x_idx]) for row in ordered],
                        "values": [_to_number(row[y_idx]) for row in ordered]},

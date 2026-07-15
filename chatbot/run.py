@@ -20,19 +20,21 @@ def run_chat_turn(
     source_id: Optional[int] = None,
     source_ids: Optional[list] = None,
     request_id: str = "",
-    on_event: Optional[Callable[[str, str], None]] = None,
+    on_event: Optional[Callable[[str, str, dict], None]] = None,
 ) -> dict:
     """The ONE function a caller (apps/chat) invokes per user turn.
 
     `session_id` -> LangGraph `thread_id`: the checkpointer persists this
     graph's state per session automatically (§ checkpointer.py).
 
-    `on_event(phase, message)`, if given, is stashed in the graph's
+    `on_event(phase, message, extra)`, if given, is stashed in the graph's
     config["configurable"] and invoked synchronously by nodes as the turn
     progresses (see nodes.py::_emit) — callers that want live progress (e.g.
     apps/chat/services.py's SSE stream) should run this on a background
     thread and drain events via a queue, since this call itself blocks until
-    the whole turn is done.
+    the whole turn is done. `extra` is the inference tier's own per-phase
+    structured fields (route's intent=, sub_query's index=/total=, ...),
+    forwarded verbatim — {} when a phase carries none.
     """
     graph = get_graph()
     result = graph.invoke(

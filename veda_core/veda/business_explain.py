@@ -113,11 +113,18 @@ def _business_field_name(table: str, col: str, sm: Optional[dict]) -> str:
     return _humanize(col)
 
 
-def _extract(sql: str) -> Dict[str, Any]:
+def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """One self-contained sqlglot pass over the final SQL. Deliberately NOT a
     reuse of veda/ir_equivalence.py's extract_sql_ir — that module's shape is
     owned by SQL-safety validation and free to change for validation reasons;
-    this module's contract must stay independently stable for explainability."""
+    this module's contract must stay independently stable for explainability.
+
+    `sql` is the EXECUTED sql — veda/validation.py's validate_and_parameterize()
+    rewrites every filter literal into a %s placeholder (bound separately in
+    `params`, in the same left-to-right order they appear in the rendered SQL)
+    for safe execution. Without `params`, every filter's value would come back
+    None (a placeholder has no exp.Literal to find) — `params` lets filter
+    values be resolved back by position for explainability/memory purposes."""
     import sqlglot
     from sqlglot import exp
 
@@ -129,6 +136,15 @@ def _extract(sql: str) -> Dict[str, Any]:
         return out
     if tree is None:
         return out
+
+    # Map each Placeholder node (by identity) to its bound value, in the SAME
+    # left-to-right document order validate_and_parameterize() used to build
+    # `params` — find_all() walks the tree in source order, matching that.
+    placeholder_values = {}
+    if params:
+        for i, ph in enumerate(tree.find_all(exp.Placeholder)):
+            if i < len(params):
+                placeholder_values[id(ph)] = params[i]
 
     out["entities"] = sorted({t.name for t in tree.find_all(exp.Table) if t.name})
     out["distinct"] = tree.find(exp.Distinct) is not None
@@ -191,18 +207,22 @@ def _extract(sql: str) -> Dict[str, Any]:
                 val = lit.name
             else:
                 b = pred.find(exp.Boolean)
-                val = str(b.this) if b is not None else None
+                if b is not None:
+                    val = str(b.this)
+                else:
+                    ph = pred.find(exp.Placeholder)
+                    val = placeholder_values.get(id(ph)) if ph is not None else None
             out["filters"].append((col.name, type(pred).__name__, val))
     return out
 
 
-def extract_sql_facts(sql: str) -> Dict[str, Any]:
+def extract_sql_facts(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """Public entry point onto `_extract()` — the same zero-LLM sqlglot pass
     business_explain already runs, exposed for callers outside this module
     (e.g. veda/result_analyzer.py's InsightContext) that need the same
     entities/filters/aggregations/groupings/orderings/limit facts without a
     second SQL parse."""
-    return _extract(sql)
+    return _extract(sql, params=params)
 
 
 def _filter_phrase(field: str, op_class: str, val: Optional[str]) -> str:
@@ -245,7 +265,9 @@ def _build_understanding(*, dataset: str, aggregations: List[Tuple[str, Optional
 
 def build_explain(*, sql: str, table: str, sm: Optional[dict],
                    checks: Optional[List[dict]] = None,
-                   visualization: Optional[dict] = None) -> Dict[str, Any]:
+                   visualization: Optional[dict] = None,
+                   params: Optional[List[Any]] = None,
+                   timeline: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
     Returns a plain dict matching the documented explainability schema.
 
@@ -253,8 +275,20 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     (query/result_explainer.py's validate_visualization — never the raw,
     unvalidated SLM suggestion), when one was produced. Optional and additive:
     omitted entirely from the returned dict when None, so every existing
-    caller/consumer of build_explain() is unaffected."""
-    ir = _extract(sql or "")
+    caller/consumer of build_explain() is unaffected.
+
+    `params`: the bound values validate_and_parameterize() rewrote `sql`'s
+    filter literals into %s placeholders for (veda/pipeline.py's `params`,
+    same order) — without these every filter's value comes back None (see
+    _extract()'s docstring).
+
+    `timeline`: the run's own `_tick()` (phase, message) checkpoints
+    (veda/pipeline.py's `_ticks`), passively collected — NOT recomputed or
+    re-derived here, just relayed. Always present in the returned dict as a
+    list (possibly empty), same "always-present, empty/None default" schema
+    convention as `confidence` below — unlike `visualization`, which is
+    omitted entirely when not applicable rather than genuinely unknown."""
+    ir = _extract(sql or "", params=params)
     entities = ir["entities"] or ([table] if table else [])
     primary = entities[0] if entities else table
 
@@ -305,9 +339,16 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         for label in _CHECK_LABELS.get(c.get("name"), [c.get("name")]):
             check_items.append({"label": label, "passed": passed})
 
+    # One short phrase per operation/filter, for callers that want a
+    # breakdown instead of parsing the single run-on `summary` sentence —
+    # pure assembly of `operations`/`filter_phrases`, both already computed
+    # above; no new derivation. Additive alongside `summary`, which stays
+    # unchanged for any existing consumer relying on it as one string.
+    breakdown = [op["summary"] for op in operations] + filter_phrases
+
     out = {
         "version": "1.0",
-        "understanding": {"summary": understanding},
+        "understanding": {"summary": understanding, "breakdown": breakdown},
         "data_used": {"datasets": datasets, "fields": fields},
         "operations": operations,
         "filters": {
@@ -319,6 +360,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         },
         "validation": {"passed": all_passed, "checks": check_items},
         "sql": {"enabled": True, "query": sql or None},
+        # Placeholder key for the separately-scoped "universal routing confidence"
+        # work — schema-only, deliberately not computed here (no fake number).
+        # Always present (None until populated), matching _NO_EXPLAIN's own
+        # "key present, value None" convention for not-yet-available fields
+        # (apps/chat/services.py) rather than visualization's omit-when-N/A one.
+        "confidence": None,
+        "timeline": [{"phase": p, "message": m} for p, m in (timeline or [])],
     }
     if visualization:
         vtype = visualization.get("type")
@@ -333,3 +381,26 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
                       if f],
         }
     return out
+
+
+def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dict[str, Any]]:
+    """The refusal-path counterpart to build_explain() — same explainability
+    CONTRACT (a structured object the chat UI can render), but for a turn
+    that never produced SQL. Deliberately thin: reuses veda/feedback.py's
+    explain_failure() output verbatim (why/what_needed/suggestions are
+    already deterministic, human-authored-template sentences, per status —
+    see that module) rather than re-deriving anything from `sql`/`sm`, which
+    don't exist for a refusal. Returns None when there's no feedback to show
+    (FEEDBACK_ENABLED=False, or explain_failure() itself failed) — the same
+    "no explain object" signal build_explain()'s own caller already handles
+    via the existing `explain = None` init in pipeline.py::_done()."""
+    if not feedback:
+        return None
+    return {
+        "version": "1.0",
+        "status": status,
+        "understanding": {"summary": feedback.get("why")},
+        "why": feedback.get("why"),
+        "what_would_help": feedback.get("what_needed"),
+        "suggestions": feedback.get("suggestions") or [],
+    }
