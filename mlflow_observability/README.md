@@ -36,10 +36,12 @@ query → pipeline (unchanged) ──append──▶ logs/explain_trace.jsonl
 
 | Kind | Examples |
 |---|---|
-| **Params** | `query`, `route`, `intent`, `action`, `table`, `anchor`, `status`, `refusal`, per-section strings (`schema_linking.selected_table`, …) |
+| **Params** | `query`, `route`, `intent`, `action`, `table`, `anchor`, `status`, `refusal`, per-section strings (`schema_linking.selected_table`, …), `retrieval.top1_column`, `retrieval.top_columns`, `columns.used_in_sql`, `rerank.top1_before/after` |
 | **Metrics** | `total_latency_ms`, `<section>.duration_ms` + `<section>.start_offset_ms` for all 9 layers, `routing_confidence`, `join_confidence`, `answer_confidence`, `pipeline_success`, `retrieval_candidate_tables/_columns`, `graph_columns_added`, `validation_checks_passed/failed`, `repair_count`, `sql_length`, `sql_join_count`, `limit_present` |
+| **Signal scores** | `retrieval.top1_score` / `retrieval.score_mean` / `retrieval.score_top1_vs_top2_gap` — same trio for every spec Layer-2 signal found on a candidate (`semantic_score`, `bm25_score`, `graph_score`, `fk_score`, `value_score`, `rrf_score`, `cross_encoder_score`, `final_score`); `routing.top1_signal_<name>` per anchor-routing signal; `reranker_changed_top1` when before/after lists exist |
+| **Column selection** | `columns.candidate_count`, `columns.used_in_sql_count`, `columns.selection_ratio` — which retrieved/graph-added columns the final SQL actually used |
 | **Tags** | `veda.route`, `veda.status`, `veda.intent`, `veda.table`, `veda.query_hash`, `veda.environment`, `veda.line_fingerprint` (dedupe/audit) |
-| **Artifacts** | `layers/query_understanding.json`, `layers/retrieval_candidates.json`, `layers/graph_expansion.json`, `layers/routing.json`, `layers/validation.json`, `layers/final_response.json`, `sql/generated_sql.sql`, `trace/full_trace.json`, `trace/why.txt`, `coverage.json` |
+| **Artifacts** | `layers/query_understanding.json`, `layers/retrieval_candidates.json`, `layers/signal_scores.json` (per-candidate score breakdown + present/missing signals), `layers/selected_columns.json` (candidates → graph-added → selected table → columns used in SQL), `layers/graph_expansion.json`, `layers/routing.json`, `layers/validation.json`, `layers/final_response.json`, `sql/generated_sql.sql`, `trace/full_trace.json`, `trace/why.txt`, `coverage.json` |
 
 A generic sweep also promotes **every** scalar the pipeline recorded in any trace
 section (numeric → metric `<section>.<key>`, string → param), so new datapoints added
@@ -140,7 +142,20 @@ The spec asks for token counts, cost, tenant/session identity, and memory/summar
 visualization metrics. The engine's trace does not emit these today, and capturing
 them would require touching pipeline code (e.g. a `usage` return in
 `slm/_call_slm.py`, `request_id`/tenant stamped into the trace) — explicitly out of
-scope for this zero-touch framework. The schema is designed for them now (per the
+scope for this zero-touch framework.
+
+Per-signal retrieval scores ARE emitted (three additive engine edits, 2026-07-15):
+`retrieval_engine_phase3.py::_results_from_tuples` stamps the per-signal fields
+onto each `RetrievalResult`, and `veda/pipeline.py` writes every retrieved
+candidate (no top-15 cap) into `retrieval.top_columns` with the spec's key names
+(`semantic_score`, `bm25_score`, `graph_score`, `fk_score`, `value_score`,
+`rrf_score`, `final_score`, plus `cross_encoder_score` and
+`top_before_rerank`/`top_after_rerank` when the primary rerank ran). Caveats:
+cache-hit retrievals return tuples without signal data, so their signals read
+0.0; rerank keys are absent when the rerank was skipped (that absence is itself
+the signal); every run's `coverage.json` / `layers/signal_scores.json` still
+reports present-vs-missing per run. `python -m mlflow_observability demo` seeds
+runs with ALL signals populated so the end-state is explorable without the engine. The schema is designed for them now (per the
 spec's "Future Evaluation Support"): they are enumerated in every run's
 `coverage.json`, and the generic sweep means that the moment the trace starts
 carrying them, they appear in MLflow with **zero exporter changes**.

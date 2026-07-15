@@ -82,9 +82,17 @@ def _cmd_status(args) -> int:
 
 
 def _sample_records():
-    """Realistic trace records shaped exactly like ExplainTrace.finish() output."""
+    """Realistic trace records shaped exactly like ExplainTrace.finish() output.
+
+    Envelope + section keys mirror the REAL emitters (verified against the
+    engine): pipeline.py's tr.set(...) calls, routing.py's anchor_selection
+    (signals = lexical/position/retrieval/graph from query/join_planner.py),
+    and finish() — which is called WITHOUT a route argument (pipeline.py
+    `tr.finish(status)`), so production lines carry route="". The ONLY
+    deliberately future-shape parts are marked ASPIRATIONAL below.
+    """
     base = {
-        "route": "sql", "intent": "COUNT", "table": "incident",
+        "route": "", "intent": "COUNT", "table": "incident",
         "anchor": "incident", "anchor_conf": 0.93, "join_conf": None,
         "action": "single_table", "status": "answered", "confidence": 0.9,
         "refusal": None, "total_ms": 1834.2,
@@ -92,14 +100,60 @@ def _sample_records():
             "query": "how many incidents are escalated", "total_ms": 1834.2,
             "verbose": True,
             "sections": {
-                "query_understanding": {"_ms": 0.2, "intent": "COUNT",
-                                        "temporal": None, "existence": None},
+                "query_understanding": {"_ms": 0.2,
+                                        "query": "how many incidents are escalated",
+                                        "intent": "COUNT", "temporal": None,
+                                        "existence": None, "aggregation": None,
+                                        "superlative": None, "grouped": None,
+                                        "ratio": None},
                 "retrieval": {"_ms": 41.7,
                               "candidate_tables": ["incident", "workflow_state"],
-                              "n_columns": 34},
-                "schema_linking": {"_ms": 512.0, "selected_table": "incident"},
+                              "n_columns": 34,
+                              # ASPIRATIONAL: production top_columns items carry
+                              # only {col, score, type} (score == final_score,
+                              # pipeline.py). The per-signal keys and the
+                              # before/after-rerank lists below are the shape
+                              # the engine emits once RetrievalResult's signal
+                              # fields are traced (spec Layer 2 "Signal Scores")
+                              "top_columns": [
+                                  {"col": "incident.state", "score": 0.914, "type": "status",
+                                   "semantic_score": 0.83, "bm25_score": 0.42,
+                                   "graph_score": 0.31, "fk_score": 0.0,
+                                   "value_score": 0.66, "rrf_score": 0.048,
+                                   "cross_encoder_score": 0.914, "final_score": 0.914},
+                                  {"col": "incident.escalated_at", "score": 0.782, "type": "timestamp",
+                                   "semantic_score": 0.79, "bm25_score": 0.55,
+                                   "graph_score": 0.12, "fk_score": 0.0,
+                                   "value_score": 0.0, "rrf_score": 0.041,
+                                   "cross_encoder_score": 0.782, "final_score": 0.782},
+                                  {"col": "workflow_state.name", "score": 0.512, "type": "category",
+                                   "semantic_score": 0.61, "bm25_score": 0.18,
+                                   "graph_score": 0.44, "fk_score": 0.35,
+                                   "value_score": 0.0, "rrf_score": 0.029,
+                                   "cross_encoder_score": 0.512, "final_score": 0.512},
+                              ],
+                              "top_before_rerank": ["incident.escalated_at", "incident.state"],
+                              "top_after_rerank": ["incident.state", "incident.escalated_at"]},
+                "graph_expansion": {"_ms": 120.3, "seeds": ["incident"],
+                                    "synonyms": {"incident": ["ticket", "case"]},
+                                    "added": ["workflow_state.name"]},
+                "schema_linking": {"_ms": 512.0, "selected_table": "incident",
+                                   "router_primary": "incident",
+                                   "candidate_tables": ["incident", "workflow_state"]},
+                # signals keys are the REAL score_anchors() composite signals
+                # (query/join_planner.py): lexical / position / retrieval / graph
                 "anchor_selection": {"_ms": 604.9, "anchor": "incident",
-                                     "confidence": 0.93, "margin": 0.41},
+                                     "confidence": 0.93, "margin": 0.41,
+                                     "router_primary": "incident",
+                                     "overrode_router": False, "source": "router",
+                                     "alternatives": [
+                                         {"table": "incident", "score": 0.93,
+                                          "signals": {"lexical": 0.88, "position": 0.95,
+                                                      "retrieval": 0.91, "graph": 0.5}},
+                                         {"table": "workflow_state", "score": 0.52,
+                                          "signals": {"lexical": 0.31, "position": 0.4,
+                                                      "retrieval": 0.55, "graph": 0.5}},
+                                     ]},
                 "sql_planning": {"_ms": 918.4, "action": "single_table",
                                  "table": "incident"},
                 "validation": {"_ms": 1633.0,
@@ -165,8 +219,10 @@ def _cmd_selftest(args) -> int:
     from .exporter import export_once
     from .settings import Settings
 
+    # production-exact envelope: pipeline.py calls tr.finish(status) with no
+    # route argument, so real lines carry route=""
     sample = {
-        "route": "sql", "intent": "COUNT", "table": "incident",
+        "route": "", "intent": "COUNT", "table": "incident",
         "anchor": "incident", "anchor_conf": 0.93, "join_conf": None,
         "action": "single_table", "status": "answered", "confidence": 0.9,
         "refusal": None, "total_ms": 1834.2,
@@ -177,7 +233,12 @@ def _cmd_selftest(args) -> int:
                 "query_understanding": {"_ms": 0.2, "intent": "COUNT",
                                         "temporal": None, "existence": None},
                 "retrieval": {"_ms": 41.7, "candidate_tables": ["incident", "workflow_state"],
-                              "n_columns": 34},
+                              "n_columns": 34,
+                              # today's real engine shape: {col, score, type},
+                              # score == final_score (veda/pipeline.py)
+                              "top_columns": [
+                                  {"col": "incident.state", "score": 0.91, "type": "status"},
+                                  {"col": "workflow_state.name", "score": 0.55, "type": None}]},
                 "schema_linking": {"_ms": 512.0, "selected_table": "incident"},
                 "anchor_selection": {"_ms": 604.9, "anchor": "incident",
                                      "confidence": 0.93, "margin": 0.41},
@@ -231,11 +292,21 @@ def _cmd_selftest(args) -> int:
         row = runs.iloc[-1]
         assert row["metrics.total_latency_ms"] > 0
         assert row["params.query"].startswith("how many")
+        # signal scores + selected columns (mapper's Layer-2 block)
+        assert row["metrics.retrieval.top1_score"] == 0.91
+        assert abs(row["metrics.retrieval.score_top1_vs_top2_gap"] - 0.36) < 1e-9
+        assert row["metrics.columns.candidate_count"] == 2
+        assert row["metrics.columns.used_in_sql_count"] == 1  # `state` in the SQL
+        assert row["params.columns.used_in_sql"] == "incident.state"
         client = mlflow.MlflowClient()
         arts = {a.path for a in client.list_artifacts(row["run_id"])}
         assert "trace" in arts and "layers" in arts and "coverage.json" in arts, arts
+        layer_arts = {a.path for a in client.list_artifacts(row["run_id"], "layers")}
+        assert "layers/signal_scores.json" in layer_arts, layer_arts
+        assert "layers/selected_columns.json" in layer_arts, layer_arts
     print("selftest OK - 3 runs exported (2 answered, 1 refused), "
-          "metrics/params/artifacts verified, torn line correctly deferred")
+          "metrics/params/artifacts + signal scores/selected columns verified, "
+          "torn line correctly deferred")
     return 0
 
 

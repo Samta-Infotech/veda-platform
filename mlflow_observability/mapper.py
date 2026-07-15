@@ -62,6 +62,33 @@ SPEC_GAPS = [
     "summary_tokens", "chart_type", "chart_confidence",
 ]
 
+# Spec Layer-2 "Signal Scores" (mlflow_impl.md). The engine's RetrievalResult
+# defines these fields, but the trace's retrieval.top_columns today carries
+# only {col, score, type} — `score` is final_score (post-rerank when the
+# reranker ran). map_record() promotes EVERY one of these keys it finds on a
+# candidate, so the moment the engine starts stamping the others into the
+# trace they appear in MLflow with zero exporter changes; coverage.json and
+# layers/signal_scores.json report per run which are present vs missing.
+SIGNAL_SCORE_KEYS = [
+    "semantic_score", "bm25_score", "graph_score", "subgraph_score", "fk_score",
+    "value_score", "rrf_score", "cross_encoder_score", "final_score", "score",
+]
+
+# One spec signal, two engine spellings: RetrievalResult calls the graph
+# signal `subgraph_score` while mlflow_impl.md calls it `graph_score`, and the
+# trace's candidate `score` IS final_score (veda/pipeline.py copies it).
+# Either spelling present means the signal is covered.
+_ALIAS_GROUPS = [{"graph_score", "subgraph_score"}, {"final_score", "score"}]
+
+
+def missing_signals(present: List[str]) -> List[str]:
+    """Spec signal keys not carried by this run's candidates (alias-aware)."""
+    have = set(present)
+    for group in _ALIAS_GROUPS:
+        if have & group:
+            have |= group
+    return [k for k in SIGNAL_SCORE_KEYS if k != "score" and k not in have]
+
 
 @dataclass
 class RunSpec:
@@ -75,6 +102,21 @@ class RunSpec:
 
 def _san_key(key: str) -> str:
     return _KEY_OK.sub("_", str(key))[:250]
+
+
+def _col_short_name(col_id: Any) -> str:
+    """'table.column' -> 'column' (trace column ids are table-qualified)."""
+    s = str(col_id)
+    return s.split(".", 1)[1] if "." in s else s
+
+
+def _first_col(seq: Any) -> Optional[str]:
+    """Top entry of a candidate list — items are either 'table.col' strings or
+    {col: ...} dicts (both shapes appear in traces)."""
+    if isinstance(seq, list) and seq:
+        head = seq[0]
+        return str(head.get("col")) if isinstance(head, dict) else str(head)
+    return None
 
 
 def _num(v: Any) -> Optional[float]:
@@ -197,6 +239,90 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
         m["sql_join_count"] = float(len(re.findall(r"\bJOIN\b", sql, re.IGNORECASE)))
         m["limit_present"] = 1.0 if re.search(r"\bLIMIT\b", sql, re.IGNORECASE) else 0.0
 
+    # ── Layer-2 signal scores (spec "Signal Scores") ─────────────────────────
+    # retrieval.top_columns is the engine's per-candidate list ({col, score,
+    # type} today; any SIGNAL_SCORE_KEYS the engine adds are promoted too).
+    top_cols = [c for c in (retr.get("top_columns") or []) if isinstance(c, dict)]
+    signals_present: List[str] = []
+    if top_cols:
+        m["retrieval.top_columns_count"] = float(len(top_cols))
+        p["retrieval.top1_column"] = _short(top_cols[0].get("col", ""), param_value_max)
+        p["retrieval.top_columns"] = _short(
+            ", ".join(str(c.get("col", "")) for c in top_cols), param_value_max)
+        for key in SIGNAL_SCORE_KEYS:
+            vals = [v for v in (_num(c.get(key)) for c in top_cols) if v is not None]
+            if not vals:
+                continue
+            signals_present.append(key)
+            m[f"retrieval.top1_{key}"] = vals[0]
+            m[f"retrieval.{key}_mean"] = round(sum(vals) / len(vals), 6)
+            if len(vals) > 1:
+                m[f"retrieval.{key}_top1_vs_top2_gap"] = round(vals[0] - vals[1], 6)
+
+    # anchor routing signals (spec Layer 3) — alternatives carry a per-signal
+    # breakdown ({table, score, signals}) straight from veda/routing.py.
+    anch = sections.get("anchor_selection") or {}
+    alts = [x for x in (anch.get("alternatives") or []) if isinstance(x, dict)]
+    if alts:
+        m["routing.alternatives_count"] = float(len(alts))
+        sig0 = alts[0].get("signals")
+        if isinstance(sig0, dict):
+            for k, v in sig0.items():
+                n = _num(v)
+                if n is not None:
+                    m[f"routing.top1_signal_{_san_key(k)}"] = n
+
+    # ── reranker contribution (spec Layer 2b) ────────────────────────────────
+    # No rerank section is emitted yet; recognise one (or before/after lists on
+    # retrieval) as soon as it exists. Scalars inside a rerank section are also
+    # picked up by the generic sweep below.
+    rr = sections.get("rerank") or sections.get("reranking") or {}
+    before = _first_col(rr.get("top_before") or retr.get("top_before_rerank"))
+    after = _first_col(rr.get("top_after") or retr.get("top_after_rerank"))
+    if before is not None and after is not None:
+        m["reranker_changed_top1"] = 0.0 if before == after else 1.0
+        p["rerank.top1_before"] = _short(before, param_value_max)
+        p["rerank.top1_after"] = _short(after, param_value_max)
+
+    # ── selected columns through the funnel (spec "Contribution Metrics") ────
+    # retrieval candidates → graph-added → selected table → columns the final
+    # SQL actually uses (matched by column name against the generated SQL).
+    sl = sections.get("schema_linking") or {}
+    graph_added = [str(x) for x in (graph.get("added") or [])]
+    cand_cols = [str(c.get("col", "")) for c in top_cols if c.get("col")]
+    known_cols = list(dict.fromkeys(cand_cols + graph_added))
+    used_in_sql = [c for c in known_cols
+                   if re.search(rf"\b{re.escape(_col_short_name(c))}\b", sql)] if sql else []
+    if known_cols:
+        m["columns.candidate_count"] = float(len(known_cols))
+        if sql:
+            m["columns.used_in_sql_count"] = float(len(used_in_sql))
+            m["columns.selection_ratio"] = round(len(used_in_sql) / len(known_cols), 4)
+            if used_in_sql:
+                p["columns.used_in_sql"] = _short(", ".join(used_in_sql), param_value_max)
+
+    if top_cols or alts:
+        a["layers/signal_scores.json"] = json.dumps({
+            "signals_present": signals_present,
+            "signals_not_emitted_by_engine": missing_signals(signals_present),
+            "note": "`score` on a candidate is the engine's final_score "
+                    "(post-rerank when the reranker ran); per-signal keys are "
+                    "promoted to metrics automatically once the engine emits them.",
+            "retrieval_candidates": top_cols,
+            "anchor_alternatives": alts,
+        }, indent=2, default=str)
+    if known_cols or alts or sl:
+        a["layers/selected_columns.json"] = json.dumps({
+            "selected_table": sl.get("selected_table"),
+            "router_primary": sl.get("router_primary"),
+            "candidate_tables": retr.get("candidate_tables") or sl.get("candidate_tables"),
+            "retrieval_top_columns": top_cols,
+            "graph_added_columns": graph_added,
+            "anchor_alternatives": alts,
+            "columns_used_in_final_sql": used_in_sql,
+            "final_sql": sql or None,
+        }, indent=2, default=str)
+
     # ── generic per-section sweep (nothing recorded is dropped) ──────────────
     for name, body in sections.items():
         if not isinstance(body, dict):
@@ -224,6 +350,8 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
         a["trace/why.txt"] = "\n".join(why_lines)
     a["coverage.json"] = json.dumps(
         {"captured_sections": sorted(sections.keys()),
+         "signal_scores_present": signals_present,
+         "signal_scores_missing": missing_signals(signals_present),
          "spec_datapoints_not_yet_emitted_by_engine": SPEC_GAPS},
         indent=2)
 

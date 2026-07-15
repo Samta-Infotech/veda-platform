@@ -428,6 +428,7 @@ def run_query(query, sm, all_cols, return_result=False):
             same_table = _results[0].col_id.split(".")[0] == _results[1].col_id.split(".")[0]
             return same_table and (s0 - s1) >= RERANK_SKIP_GAP
 
+        _rk_before = _rk_after = None   # top-5 col_ids around the rerank (trace only)
         if PRIMARY_RERANK_ENABLED and results and not _rrf_gap_unambiguous(results):
             try:
                 from query.reranker import _get_reranker
@@ -454,8 +455,10 @@ def run_query(query, sm, all_cols, return_result=False):
                         print(f"  [L2b] Primary rerank UNINFORMATIVE (max {_smax:.5f} < "
                               f"{RERANK_NOISE_FLOOR}) — keeping RRF order")
                     else:
+                        _rk_before = [r.col_id for r in results[:5]]   # pre-rerank order (trace)
                         _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
                         for _s, _r in _ranked:
+                            _r.cross_encoder_score = float(_s)   # keep the CE score visible (trace)
                             _r.final_score = float(_s)   # anchor reads final_score → now reranked
                         # SCALE GUARD (H-0): reranked head carries cross-encoder scores, the tail
                         # keeps RRF scores — incomparable, so floor the tail below the head to keep
@@ -466,6 +469,7 @@ def run_query(query, sm, all_cols, return_result=False):
                             for _i, _r in enumerate(_tail):
                                 _r.final_score = _floor - 1.0 - _i * 1e-6
                         results = [_r for _, _r in _ranked] + _tail
+                        _rk_after = [r.col_id for r in results[:5]]   # post-rerank order (trace)
                         print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
             except Exception as _rr_e:
                 print(f"  [L2b] primary rerank skipped: {type(_rr_e).__name__}: {str(_rr_e)[:100]}")
@@ -507,10 +511,26 @@ def run_query(query, sm, all_cols, return_result=False):
             for r in results[:15]
         ]
         tr.set("retrieval", candidate_tables=_cand_tabs[:8], n_columns=len(results))
-        for r in results[:15]:
-            tr.cand("retrieval", "top_columns",
-                    {"col": r.col_id, "score": round(getattr(r, "final_score", 0.0), 3),
-                     "type": getattr(r, "semantic_type", None)})
+        if _rk_before is not None:
+            # reranker contribution (trace only): pre/post top-5 col_ids
+            tr.set("retrieval", top_before_rerank=_rk_before, top_after_rerank=_rk_after)
+        for r in results:
+            # ALL retrieved candidates, with the per-signal breakdown (spec Layer 2
+            # "Signal Scores"; keys use the spec's names — sparse→bm25, subgraph→graph,
+            # fk_path→fk, value_index→value). Observability only, verbose-gated.
+            _tc = {"col": r.col_id, "score": round(getattr(r, "final_score", 0.0), 3),
+                   "type": getattr(r, "semantic_type", None),
+                   "semantic_score": round(getattr(r, "semantic_score", 0.0), 4),
+                   "bm25_score": round(getattr(r, "sparse_score", 0.0), 4),
+                   "graph_score": round(getattr(r, "subgraph_score", 0.0), 4),
+                   "fk_score": round(getattr(r, "fk_path_score", 0.0), 4),
+                   "value_score": round(getattr(r, "value_index_score", 0.0), 4),
+                   "rrf_score": round(getattr(r, "rrf_score", 0.0), 6),
+                   "final_score": round(getattr(r, "final_score", 0.0), 4)}
+            _ce = getattr(r, "cross_encoder_score", None)
+            if _ce is not None:
+                _tc["cross_encoder_score"] = round(float(_ce), 4)
+            tr.cand("retrieval", "top_columns", _tc)
         tr.set("schema_linking", selected_table=primary,
                router_primary=_router_primary, candidate_tables=_cand_tabs[:8])
         print(f"  [L3] Routing       {len(results)} cols across {len(_cand_tabs)} tables "
