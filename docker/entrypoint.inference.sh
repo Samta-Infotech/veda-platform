@@ -15,7 +15,15 @@ WORKERS="${WORKERS:?set WORKERS explicitly — sized from measured per-worker RS
 RELOAD_ARGS=()
 if [ "${DEV_AUTORELOAD:-0}" = "1" ]; then
     if [ "${WORKERS}" = "1" ]; then
-        RELOAD_ARGS=(--reload)
+        # --reload-dir /app (not just the default cwd, /app/veda_core below):
+        # uvicorn --reload with no --reload-dir only watches the CURRENT
+        # WORKING DIRECTORY, which this service sets to /app/veda_core
+        # (engine cwd-relative paths). Edits under sibling directories at the
+        # same PYTHONPATH root — inference/ (this image's own routes),
+        # apps/, chatbot/ — were silently never picked up (confirmed: a fix
+        # to inference/routes/hybrid.py stayed dead until a manual restart,
+        # 2026-07). Watching the whole /app tree covers all of them.
+        RELOAD_ARGS=(--reload --reload-dir /app)
     else
         echo "entrypoint.inference.sh: DEV_AUTORELOAD=1 but WORKERS=${WORKERS} (>1)" \
              "— uvicorn --reload only supports a single worker, skipping autoreload" >&2

@@ -805,6 +805,20 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
     visualization = None
     if NL_ANSWER_ENABLED and cols:
         row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
+        # Safe default FIRST, same as veda/pipeline.py's L7b (the Tier-1 path) —
+        # previously this function only set result["answer"] on a SUCCESSFUL
+        # insight/NL-answer call; run_insight_engine/run_nl_answer already
+        # degrade to a deterministic fallback internally on an SLM failure, but
+        # an exception from ANALYSIS itself (e.g. analyze_result()/extract_sql_
+        # facts() raising, before the SLM call is even attempted) skipped both
+        # try blocks entirely, leaving "answer" absent from the result dict —
+        # worse than Tier-1's raw-text fallback: format_reply_node's own
+        # generic "Here's what I found." masked that a Tier-2 turn had silently
+        # produced NO grounded summary at all. Always overwritten below by a
+        # real summary when either call succeeds.
+        from query.nl_answer import deterministic_fallback_answer
+        result["answer"] = deterministic_fallback_answer(query, list(cols), row_dicts)
+        got_real_answer = False
 
         if INSIGHT_ENGINE_ENABLED:
             try:
@@ -815,6 +829,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
                 insight = run_insight_engine(ctx)
                 if getattr(insight, "answer", None):
                     result["answer"] = insight.answer
+                    got_real_answer = True
                 result["insights"] = insight.insights
                 result["follow_up_questions"] = insight.follow_up_questions
                 result["visualization"] = insight.visualization
@@ -824,7 +839,11 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
                 print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
 
-        if "answer" not in result:
+        # got_real_answer (not "answer" in result — that key is ALWAYS present
+        # now, see the deterministic default set above): still tries plain
+        # run_nl_answer whenever insight-engine didn't produce a genuine
+        # summary, exactly as before this fix.
+        if not got_real_answer:
             try:
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,
