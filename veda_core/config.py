@@ -791,6 +791,15 @@ TIER2_TIME_BUDGET_S       = 120.0
 # too generic to count as dropped qualifiers.
 QSR_REFERENT_MIN_IDF  = 0.35
 QSR_REFERENT_MAX_COLS = 20
+# Qualifier salvage (generic wrong-anchor recovery, any schema): when the qualifier
+# gate is about to refuse, QSR first types the dropped token (referent_tables). If
+# every referent table is OUTSIDE the generated SQL, the ANCHOR was wrong — not the
+# query — so retry ONCE with that table forced as primary (the full gate battery
+# still judges the retried plan), else clarify naming what the token actually is in
+# this scope. Runs only on would-be refusals: an answered query can never regress.
+QUALIFIER_SALVAGE_ENABLED     = True
+QUALIFIER_REANCHOR_RETRY      = True
+QUALIFIER_REANCHOR_MAX_HEAD_S = 45.0   # skip the retry when the head already overspent
 
 # --- Reranker: enriched text + dynamic cutoff (Gaps 1, 2, 3) ---
 # A/B data: bare names score sharper (0.89) than enriched text (0.15) for the cross-encoder;

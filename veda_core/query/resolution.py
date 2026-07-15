@@ -145,14 +145,21 @@ def _scope(sm=None):
     from semantic.name_tokens import table_tokens, token_table_idf
     # column-NAME token vocabulary (no aliases): engineer-written words only —
     # the high-precision referent set the strict qualifier gate keys on.
-    colname_tokens = set()
+    # Owners/counts alongside: referent_tables needs WHICH tables own a column
+    # word and HOW MANY columns carry it (generic-word guard) — same loop.
+    colname_owners: Dict[str, set] = defaultdict(set)
+    colname_counts: Dict[str, int] = defaultdict(int)
     for cid in (sm.get("columns") or {}):
-        _, col = _split_col_id(cid)
-        colname_tokens.update(_words(col))
+        t, col = _split_col_id(cid)
+        for w in set(_words(col)):
+            colname_owners[w].add(t)
+            colname_counts[w] += 1
     ent = {"ncols": len(sm.get("columns", {}) or {}),
            "sm": sm, "measures": measures, "dimensions": dimensions,
            "entity_index": _build_entity_index(sm, table_tokens),
-           "colname_tokens": frozenset(colname_tokens),
+           "colname_tokens": frozenset(colname_owners),
+           "colname_owners": {w: sorted(s) for w, s in colname_owners.items()},
+           "colname_counts": dict(colname_counts),
            "idf": token_table_idf(sm)}
     _SCOPES[key] = ent
     while len(_SCOPES) > _SCOPES_MAX:
@@ -315,6 +322,69 @@ def has_schema_referent(token: str, sm=None) -> bool:
         return sw in ent["colname_tokens"] or token in ent["colname_tokens"]
     except Exception:
         return False
+
+
+def referent_tables(token: str, sm=None) -> List[dict]:
+    """Ranked tables `token` refers to in this scope — the qualifier-salvage
+    resolver. When the qualifier gate is about to refuse a dropped token, the
+    honest next question is "what IS this token here?": a sampled value (its
+    owner/FK-referring tables), an entity word, or a word engineers put in a
+    column name. All referents come from the scope's own artifacts — no word
+    lists, no schema names in code — so the behavior is identical on any source.
+
+    Ranking mirrors typed_anchor_evidence's role discipline: per table the MAX
+    class weight counts (direct value 1.0, label store 0.3, FK-closed 0.6,
+    entity 0.4+0.4·idf gated by QSR_REFERENT_MIN_IDF, column-name word 0.5
+    guarded by QSR_REFERENT_MAX_COLS so request verbs matching every boolean
+    column stay out). Deterministically sorted. Never raises; [] on any failure.
+
+    Returns [{"table": str, "score": float, "why": [str]}], best first."""
+    token = (token or "").lower().strip()
+    if len(token) < 3:
+        return []
+    try:
+        from config import QSR_REFERENT_MIN_IDF, QSR_REFERENT_MAX_COLS
+    except Exception:
+        QSR_REFERENT_MIN_IDF, QSR_REFERENT_MAX_COLS = 0.35, 20
+    try:
+        ent = _scope(sm)
+    except Exception:
+        return []
+    sw = _singularize(token)
+    scores: Dict[str, float] = {}
+    why: Dict[str, list] = defaultdict(list)
+
+    def _credit(t, w, reason):
+        if w > scores.get(t, 0.0):
+            scores[t] = w
+        if reason not in why[t]:
+            why[t].append(reason)
+
+    vr = value_referents(token)
+    closed_vias = {r.get("via_table") for r in vr["closed"] if r.get("via_table")}
+    for r in vr["direct"]:
+        w = 0.3 if r["table"] in closed_vias else 1.0
+        _credit(r["table"], w, f"value of {r['column']}")
+    for r in vr["closed"]:
+        _credit(r["table"], 0.6, f"value via {r['column']}")
+
+    idf = ent["idf"]
+    _w_idf = idf.get(sw, idf.get(token, 0.0))
+    if _w_idf >= QSR_REFERENT_MIN_IDF:
+        for t in ent["entity_index"].get(sw, ()):
+            _credit(t, 0.4 + 0.4 * min(_w_idf, 1.0),
+                    f"entity word (idf {round(_w_idf, 2)})")
+
+    owners = ent.get("colname_owners", {})
+    counts = ent.get("colname_counts", {})
+    for key in ((sw,) if sw == token else (sw, token)):
+        cnt = counts.get(key, 0)
+        if 0 < cnt <= QSR_REFERENT_MAX_COLS:
+            for t in owners.get(key, ()):
+                _credit(t, 0.5, f"column-name word ({cnt} column{'s' if cnt > 1 else ''})")
+
+    return [{"table": t, "score": round(s, 3), "why": why[t]}
+            for t, s in sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))]
 
 
 def domain_via(table: str, fk_column: str, via_column: Optional[str] = None,

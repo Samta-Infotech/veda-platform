@@ -94,13 +94,19 @@ def _temporal_predicate(table, sm, tf):
     return f"{q} <= '{tf.end}'"
 
 
-def run_query(query, sm, all_cols, return_result=False):
+def run_query(query, sm, all_cols, return_result=False, anchor_hint=None):
     """Run one NL→SQL→result. Reuses the shared engine; never closes it.
 
     Returns an int status code (0 ok / 1 error) by default — backward-compatible.
     With return_result=True, returns a dict {status, ok, cols, rows, answer, sql, …}
     so callers (the hybrid fusion, the Tier-2 fallback) can use the executed rows and
-    distinguish 'answered' from 'refused'/'clarify'/error (the int code can't)."""
+    distinguish 'answered' from 'refused'/'clarify'/error (the int code can't).
+
+    anchor_hint (internal, qualifier salvage): force this table as the primary anchor
+    — set only by the salvage retry after a first pass refused with a dropped
+    qualifier whose QSR referent lives in a table retrieval never surfaced. Every
+    downstream correctness gate still judges the plan; the hint also marks the run as
+    a retry so salvage can never recurse."""
     start = time.time()
     join_constraints = None
     fanout_guard = None
@@ -479,6 +485,18 @@ def run_query(query, sm, all_cols, return_result=False):
                 _cand_tabs.append(_t)
         _router_primary = select_primary_table(results, query, sm)
         primary = vet_primary(query, _router_primary, results, sm, trace=tr)
+        if anchor_hint and anchor_hint in (sm.get("tables") or {}):
+            # Qualifier-salvage retry: the first pass refused with a dropped qualifier
+            # whose QSR referent lives in anchor_hint — retrieval/vetting never
+            # surfaced it (single-table planning takes its columns from all_cols, not
+            # from retrieval, so the miss doesn't matter). Overrides a clarify verdict
+            # too: this run exists to test the hinted anchor against the full gates.
+            if primary != anchor_hint:
+                print(f"  [L3] Anchor hint   "
+                      f"{(_router_primary if isinstance(primary, dict) else primary)!r}"
+                      f" → {anchor_hint!r} (qualifier salvage)")
+                tr.note("schema_linking", f"anchor_hint override → {anchor_hint}")
+            primary = anchor_hint
         if isinstance(primary, dict):
             # single-table ambiguity gate: two sub-margin, differently-named subjects —
             # ask which grain the user means instead of silently picking one.
@@ -977,6 +995,66 @@ def run_query(query, sm, all_cols, return_result=False):
     ok_q, missing = qualifier_completeness(query, sql, sm)
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
+        _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
+        # QUALIFIER SALVAGE (generic, schema-agnostic): before refusing, ask QSR what
+        # `missing` IS in this scope. Referent tables entirely OUTSIDE the SQL mean
+        # the ANCHOR was wrong, not the query ("payment" refused against a
+        # document-type table while a payment table exists) — retry ONCE with that
+        # table forced as primary; the retried plan faces every gate above, including
+        # this one (anchor_hint marks the retry, so salvage can't recurse). Runs only
+        # on would-be refusals — an answered query can never regress through here.
+        _refs = []
+        try:
+            from config import (QUALIFIER_SALVAGE_ENABLED, QUALIFIER_REANCHOR_RETRY,
+                                QUALIFIER_REANCHOR_MAX_HEAD_S)
+        except Exception:
+            QUALIFIER_SALVAGE_ENABLED, QUALIFIER_REANCHOR_RETRY = True, True
+            QUALIFIER_REANCHOR_MAX_HEAD_S = 45.0
+        if QUALIFIER_SALVAGE_ENABLED and anchor_hint is None:
+            try:
+                from query.resolution import referent_tables
+                _refs = [r for r in referent_tables(missing, sm)
+                         if r["table"] not in _sql_tabs]
+                # Anchor preference: a table backed by ENTITY/COLUMN-NAME evidence
+                # beats a value-only home — the latter is usually a shared label
+                # store ('payment' exists as a ROW in list_of_values), which is
+                # filter evidence, not an anchor. Measured on the trigger query:
+                # retrying against the label store refuses; retrying against the
+                # entity table lands the grounded domain clarify.
+                _refs.sort(key=lambda r: (
+                    not any("entity" in w or "column-name" in w for w in r["why"]),
+                    -r["score"], r["table"]))
+            except Exception:
+                _refs = []
+            if (_refs and QUALIFIER_REANCHOR_RETRY
+                    and (time.time() - start) <= QUALIFIER_REANCHOR_MAX_HEAD_S):
+                print(f"  [L6b] Qualifier salvage  '{missing}' → {_refs[0]['table']} "
+                      f"({'; '.join(_refs[0]['why'][:2])}) — re-anchored retry")
+                tr.note("validation", f"qualifier salvage retry → {_refs[0]['table']}")
+                try:
+                    _retry = run_query(query, sm, all_cols, return_result=True,
+                                       anchor_hint=_refs[0]["table"])
+                except Exception:
+                    _retry = None
+                # Surface the retry when it ANSWERED, or when it refused with
+                # something MORE grounded than the original qualifier_dropped:
+                # a clarify (grounded question) or an ungrounded value on the
+                # re-anchored table ("'completed' is not a value of
+                # payment_status — did you mean captured/authorized/…") — the
+                # value-level diagnosis on the RIGHT anchor is strictly more
+                # actionable than an entity-level clarify. Any other refusal
+                # falls through to the referent clarify below.
+                if isinstance(_retry, dict) and (_retry.get("ok")
+                        or _retry.get("status") in ("clarify", "ungrounded")):
+                    try:
+                        _retry.setdefault("salvage", {
+                            "reanchored_to": _refs[0]["table"],
+                            "dropped_qualifier": missing})
+                    except Exception:
+                        pass
+                    log_route(_route + ".salvage_reanchor", query,
+                              (time.time() - start) * 1000)
+                    return _retry if return_result else 0
         # Grounded clarify upgrade: when the dropped token is NOT a real data value
         # anywhere (no direct/closed referent) and the queried table exposes FK label
         # domains, the honest answer is the domain, not a generic refusal —
@@ -987,7 +1065,6 @@ def run_query(query, sm, all_cols, return_result=False):
             from query.join_planner import load_graph
             _vr = value_referents(missing)
             if not _vr["direct"] and not _vr["closed"]:
-                _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
                 _qw = set(re.findall(r"[a-z]+", query.lower()))
                 _doms = []
                 for _e in load_graph().get("edges", []):
@@ -1009,6 +1086,21 @@ def run_query(query, sm, all_cols, return_result=False):
                     return _done(0, "clarify", msg=_msg, feedback=fb)
         except Exception:
             pass
+        if _refs:
+            # Referent clarify: the retry didn't rescue it (or is off/over budget),
+            # but QSR knows what the token IS here — tell the user, grounded in the
+            # schema's own vocabulary, instead of "couldn't map 'X'".
+            try:
+                from query.superlative_plan import _human
+                _names = list(dict.fromkeys(_human(r["table"], sm) for r in _refs[:2]))
+            except Exception:
+                _names = list(dict.fromkeys(r["table"] for r in _refs[:2]))
+            _msg = (f"'{missing}' here refers to {' / '.join(_names)}, which this "
+                    f"answer never touched — ask about {_names[0]} directly, or say "
+                    f"how '{missing}' relates to your question.")
+            fb = _feedback("clarify", msg=_msg)
+            log_route(_route + ".salvage_clarify", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_msg, feedback=fb)
         fb = _feedback("qualifier_dropped", missing=missing)
         log_route(_route + ".qualifier_dropped", query, (time.time() - start) * 1000)
         return _done(0, "qualifier_dropped", missing=missing, feedback=fb)
