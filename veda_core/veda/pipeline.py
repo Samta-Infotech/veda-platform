@@ -5,7 +5,7 @@ from veda.cache import save_verified_query, verified_cache_lookup
 from veda.execution import execute_sql
 from veda.generation import generate_sql
 from veda.planning import existence_mode, try_multitable
-from veda.routing import select_primary_table, vet_primary
+from veda.routing import recommended_projection, select_primary_table, vet_primary
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
 from utils.logger import get_logger
@@ -54,6 +54,20 @@ def _resolve_rank_metric_column(table, sm):
     return candidates[0] if len(candidates) == 1 else None
 
 
+def _rank_sort_column(rank, table, sm, tcol):
+    """The single column (if any) `_rank_order_limit_sql` below will actually
+    ORDER BY for this ranking request — extracted as its own function so
+    callers that need to know (recommended_projection's must_include, so a
+    "latest 10 X" result is never sorted by a column it doesn't also show)
+    don't duplicate this basis/temporal/metric branching. None means no
+    ranking was requested (plain LIMIT, no ORDER BY)."""
+    if rank.basis == "temporal" and tcol:
+        return tcol
+    if rank.basis == "metric":
+        return _resolve_rank_metric_column(table, sm)
+    return None
+
+
 def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
     """Shared ' ORDER BY ... LIMIT ...' tail for every hand-built single-table SQL
     branch (FK / multi-hop / value-filter / temporal-only / plain listing) — so
@@ -66,14 +80,10 @@ def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
     join) — the ORDER BY column must be qualified there to stay unambiguous."""
     limit = rank.top_n if rank.top_n is not None else 100
     prefix = f"{alias}." if alias else ""
-    if rank.basis == "temporal" and tcol:
+    sort_col = _rank_sort_column(rank, table, sm, tcol)
+    if sort_col:
         direction = "ASC" if rank.direction == "asc" else "DESC"
-        return f' ORDER BY {prefix}"{tcol}" {direction} LIMIT {limit}'
-    if rank.basis == "metric":
-        metric_col = _resolve_rank_metric_column(table, sm)
-        if metric_col:
-            direction = "ASC" if rank.direction == "asc" else "DESC"
-            return f' ORDER BY {prefix}"{metric_col}" {direction} LIMIT {limit}'
+        return f' ORDER BY {prefix}"{sort_col}" {direction} LIMIT {limit}'
     return f' LIMIT {limit}'
 
 
@@ -94,13 +104,19 @@ def _temporal_predicate(table, sm, tf):
     return f"{q} <= '{tf.end}'"
 
 
-def run_query(query, sm, all_cols, return_result=False):
+def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None):
     """Run one NL→SQL→result. Reuses the shared engine; never closes it.
 
     Returns an int status code (0 ok / 1 error) by default — backward-compatible.
     With return_result=True, returns a dict {status, ok, cols, rows, answer, sql, …}
     so callers (the hybrid fusion, the Tier-2 fallback) can use the executed rows and
-    distinguish 'answered' from 'refused'/'clarify'/error (the int code can't)."""
+    distinguish 'answered' from 'refused'/'clarify'/error (the int code can't).
+
+    anchor_hint (internal, qualifier salvage): force this table as the primary anchor
+    — set only by the salvage retry after a first pass refused with a dropped
+    qualifier whose QSR referent lives in a table retrieval never surfaced. Every
+    downstream correctness gate still judges the plan; the hint also marks the run as
+    a retry so salvage can never recurse."""
     start = time.time()
     join_constraints = None
     fanout_guard = None
@@ -109,6 +125,21 @@ def run_query(query, sm, all_cols, return_result=False):
     from veda.execution_state import ExecutionState
     tr = new_trace(query)
     es = ExecutionState()
+
+    _ticks: list = []   # passive (phase, message) record of every _tick() below,
+                        # for build_explain()'s "timeline" — see _done()'s return.
+
+    def _tick(phase, message):
+        """Fire a live, user-facing thinking event. Static string only — no LLM/SLM
+        call, no extra DB round-trip. A no-op when on_event is None or itself raises,
+        so progress reporting can never fail a query."""
+        _ticks.append((phase, message))
+        if on_event is None:
+            return
+        try:
+            on_event(phase, message, {})
+        except Exception:
+            logger.exception("_tick: on_event callback raised for phase=%s", phase)
 
     def _feedback(status, **ctx):
         """Build + print actionable failure guidance (why / what's needed / suggestions).
@@ -132,6 +163,8 @@ def run_query(query, sm, all_cols, return_result=False):
             _refusal = kw.get("msg") or kw.get("error") or kw.get("missing")
             tr.set("output", refusal=_refusal)
             es.refusal_reason = _refusal
+        else:
+            _tick("output", "Done — here's your answer")
         tr.finish(status)
         # Tier2 continuation context (Tier1→Tier2 propagation) — deliberately NOT the
         # full trace (that stays below, for debugging); just what Tier2 needs to avoid
@@ -146,9 +179,23 @@ def run_query(query, sm, all_cols, return_result=False):
                         sql=kw.get("sql") or "", table=kw.get("table") or "", sm=sm,
                         checks=tr.sections.get("validation", {}).get("checks", []),
                         visualization=kw.get("visualization"),
+                        params=params,
+                        timeline=_ticks,
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
+            elif kw.get("feedback"):
+                # Refusal path: same structured-explainability CONTRACT as a
+                # success, built from the feedback _feedback() already computed
+                # above (why/what_needed/suggestions) — not from SQL, which
+                # doesn't exist for a refusal. None when no feedback dict is
+                # available (invalid/exec_error's _done() calls don't build
+                # one — see those call sites), same as before this change.
+                try:
+                    from veda.business_explain import build_refusal_explain
+                    explain = build_refusal_explain(status, kw.get("feedback"))
+                except Exception:
+                    logger.exception("build_refusal_explain failed — refusal explainability omitted")
             return {"status": status, "ok": (status == "answered"),
                     "trace": tr.to_dict(), "explain": explain, "context": es, **kw}
         return rc
@@ -341,13 +388,34 @@ def run_query(query, sm, all_cols, return_result=False):
                     cached_sql = None
         except Exception:
             pass
+    if cached_sql:
+        # QUALIFIER re-check (distinct from the table-level evidence guard above):
+        # the evidence guard only asks "is THIS query plausibly about the cached
+        # SQL's table(s)" — it can't catch a same-table cache entry whose WHERE
+        # clause answers a DIFFERENT question (found in production: a cached
+        # "properties in the UAE" answer replayed verbatim for "properties priced
+        # above 10,000" — same table, unrelated filter, similarity ≥0.85 anyway).
+        # Reuses the SAME gate the main pipeline already applies to freshly-built
+        # SQL (below, ~line 1090) — a cache hit must clear the identical bar a
+        # fresh answer would, not a lesser one just because it was pre-verified
+        # once under possibly-older code.
+        try:
+            ok_cache_q, missing_cache_q = qualifier_completeness(query, cached_sql, sm)
+            if not ok_cache_q:
+                print(f"  [cache] demoted: cached SQL drops qualifier {missing_cache_q!r} "
+                      f"for THIS query — recompute")
+                tr.note("schema_linking",
+                        f"verified-cache hit demoted (dropped qualifier {missing_cache_q!r})")
+                cached_sql = None
+        except Exception:
+            pass
     if fp:
         print(f"  [FastPath] {fp.route}  ({'; '.join(fp.why)})  — no retrieval / no LLM")
         sql, primary, from_cache = fp.sql, fp.primary, False
         allowed_tables, allowed_columns = set(fp.tables), list(fp.columns)
     elif cached_sql:
         print(f"  [cache] verified-query hit (sim={sim:.2f}) — skipping retrieval + SLM")
-        sql, primary, from_cache = cached_sql, "(cached)", True
+        sql, from_cache = cached_sql, True
         import sqlglot
         from sqlglot import exp
         try:
@@ -355,6 +423,15 @@ def run_query(query, sm, all_cols, return_result=False):
             allowed_tables = {t.name for t in ct.find_all(exp.Table) if t.name}
         except Exception:
             allowed_tables = set()
+        # The real table name, derived from the cached SQL text itself — NOT the
+        # literal string "(cached)" this used to be (a display-only leftover that
+        # ended up as engine_result["table"], then as the QueryFrame's "entity"
+        # via harvest_frame(), poisoning memory/topic-switch detection on every
+        # cache-hit turn). Multi-table cached query: pick deterministically
+        # (first alphabetically) rather than guess — never crashes downstream,
+        # which only special-cases an empty/unknown primary already.
+        primary = (next(iter(allowed_tables)) if len(allowed_tables) == 1
+                   else (sorted(allowed_tables)[0] if allowed_tables else ""))
         allowed_columns = [k.split(".", 1)[1] for k in all_cols
                            if k.split(".", 1)[0] in allowed_tables]
     else:
@@ -415,7 +492,7 @@ def run_query(query, sm, all_cols, return_result=False):
         # map (it uses the generated domain_synonyms). Graceful: any failure keeps RRF order.
         try:
             from config import (PRIMARY_RERANK_ENABLED, RERANKER_BATCH_SIZE,
-                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES)
+                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES, RERANKER_MAX_TEXT_LEN)
         except Exception:
             PRIMARY_RERANK_ENABLED = False
 
@@ -431,13 +508,27 @@ def run_query(query, sm, all_cols, return_result=False):
         _rk_before = _rk_after = None   # top-5 col_ids around the rerank (trace only)
         if PRIMARY_RERANK_ENABLED and results and not _rrf_gap_unambiguous(results):
             try:
-                from query.reranker import _get_reranker
+                from query.reranker import _get_reranker, _precomputed_rerank_text
                 _rk = _get_reranker()
                 if _rk is not None:
                     # F4: cap candidate width — the tail never wins anchor selection.
                     _head = results[:RERANK_MAX_CANDIDATES]
                     _tail = results[RERANK_MAX_CANDIDATES:]
-                    _pairs = [[_search, f"{r.column_name} {r.table_name}"] for r in _head]
+                    # Same enriched cross-encoder text query/reranker.py's own _col_text()
+                    # uses (business definition/aliases/role/etc., precomputed at ingestion,
+                    # WP7) — not bare column_name+table_name. This is the SAME model as
+                    # rerank_columns()/rerank_tables(); it was just seeing less context here
+                    # than at that other call site. Falls back to the bare name pair when no
+                    # precomputed doc exists for a column (identical fallback _col_text uses).
+                    _pairs = [
+                        [_search, (_precomputed_rerank_text(r.col_id, is_table=False)
+                                   or f"{r.column_name} {r.table_name}")[:RERANKER_MAX_TEXT_LEN]]
+                        for r in _head
+                    ]
+                    _enriched_n = sum(1 for r in _head
+                                      if _precomputed_rerank_text(r.col_id, is_table=False) is not None)
+                    print(f"  [L2b] Enriched rerank input: {_enriched_n}/{len(_head)} candidates "
+                          f"used precomputed metadata, {len(_head) - _enriched_n} fell back to bare name")
                     _sc = _rk.predict(_pairs, batch_size=RERANKER_BATCH_SIZE)
                     # NOISE FLOOR: the cross-encoder's output is calibrated (sigmoid) — when
                     # its BEST pair is near zero it is affirmatively saying NO candidate is
@@ -481,8 +572,20 @@ def run_query(query, sm, all_cols, return_result=False):
             _t = r.col_id.split(".")[0]
             if _t not in _cand_tabs:
                 _cand_tabs.append(_t)
-        _router_primary = select_primary_table(results, query, sm)
+        _router_primary = select_primary_table(results, query, sm, trace=tr)
         primary = vet_primary(query, _router_primary, results, sm, trace=tr)
+        if anchor_hint and anchor_hint in (sm.get("tables") or {}):
+            # Qualifier-salvage retry: the first pass refused with a dropped qualifier
+            # whose QSR referent lives in anchor_hint — retrieval/vetting never
+            # surfaced it (single-table planning takes its columns from all_cols, not
+            # from retrieval, so the miss doesn't matter). Overrides a clarify verdict
+            # too: this run exists to test the hinted anchor against the full gates.
+            if primary != anchor_hint:
+                print(f"  [L3] Anchor hint   "
+                      f"{(_router_primary if isinstance(primary, dict) else primary)!r}"
+                      f" → {anchor_hint!r} (qualifier salvage)")
+                tr.note("schema_linking", f"anchor_hint override → {anchor_hint}")
+            primary = anchor_hint
         if isinstance(primary, dict):
             # single-table ambiguity gate: two sub-margin, differently-named subjects —
             # ask which grain the user means instead of silently picking one.
@@ -511,34 +614,32 @@ def run_query(query, sm, all_cols, return_result=False):
             for r in results[:15]
         ]
         tr.set("retrieval", candidate_tables=_cand_tabs[:8], n_columns=len(results))
-        if _rk_before is not None:
-            # reranker contribution (trace only): pre/post top-5 col_ids
-            tr.set("retrieval", top_before_rerank=_rk_before, top_after_rerank=_rk_after)
-        for r in results:
-            # ALL retrieved candidates, with the per-signal breakdown (spec Layer 2
-            # "Signal Scores"; keys use the spec's names — sparse→bm25, subgraph→graph,
-            # fk_path→fk, value_index→value). Observability only, verbose-gated.
-            _tc = {"col": r.col_id, "score": round(getattr(r, "final_score", 0.0), 3),
-                   "type": getattr(r, "semantic_type", None),
-                   "semantic_score": round(getattr(r, "semantic_score", 0.0), 4),
-                   "bm25_score": round(getattr(r, "sparse_score", 0.0), 4),
-                   "graph_score": round(getattr(r, "subgraph_score", 0.0), 4),
-                   "fk_score": round(getattr(r, "fk_path_score", 0.0), 4),
-                   "value_score": round(getattr(r, "value_index_score", 0.0), 4),
-                   "rrf_score": round(getattr(r, "rrf_score", 0.0), 6),
-                   "final_score": round(getattr(r, "final_score", 0.0), 4)}
-            _ce = getattr(r, "cross_encoder_score", None)
-            if _ce is not None:
-                _tc["cross_encoder_score"] = round(float(_ce), 4)
-            tr.cand("retrieval", "top_columns", _tc)
+        for r in results[:15]:
+            # Per-signal scores (semantic_score/sparse_score/subgraph_score/fk_path_score/
+            # value_index_score) are now actually populated (retrieval_engine_phase3.py) —
+            # surface them here so the trace explains WHY a candidate ranked well, not just
+            # that it did. "type" used to read `semantic_type`, a field RetrievalResult
+            # never had (always None) — replaced with real signal-level evidence.
+            tr.cand("retrieval", "top_columns",
+                    {"col": r.col_id, "score": round(getattr(r, "final_score", 0.0), 3),
+                     "signals": {
+                         "semantic": round(getattr(r, "semantic_score", 0.0), 3),
+                         "sparse":   round(getattr(r, "sparse_score", 0.0), 3),
+                         "subgraph": round(getattr(r, "subgraph_score", 0.0), 3),
+                         "fk_path":  round(getattr(r, "fk_path_score", 0.0), 3),
+                         "value":    round(getattr(r, "value_index_score", 0.0), 3),
+                     }})
         tr.set("schema_linking", selected_table=primary,
                router_primary=_router_primary, candidate_tables=_cand_tabs[:8])
+        if primary:
+            _tick("schema_linking", f"Using {primary} for this")
         print(f"  [L3] Routing       {len(results)} cols across {len(_cand_tabs)} tables "
               f"({', '.join(_cand_tabs[:4])}…) → primary: {primary}")
         if not primary:
             fb = _feedback("no_table", candidates=_cand_tabs)
             log_route("no_table", query, (time.time() - start) * 1000)
-            return _done(1, "no_table", feedback=fb)
+            return _done(1, "no_table", feedback=fb,
+                         msg="no single table confidently matched the question")
         from_cache = False
 
         # Multi-table: deterministic join plan (LLM never writes joins). Fires for
@@ -561,6 +662,7 @@ def run_query(query, sm, all_cols, return_result=False):
             _rec_plan(p)
             tr.set("sql_planning", action="existence", anchor=mt["anchor"],
                    mode=mt["mode"], tables=sorted(mt["tables"]))
+            _tick("sql_planning", "Checking which records match")
             print(f"  [L4b] Existence    {mt['mode']}  {mt['anchor']} ⟕ "
                   f"{' '.join(t for t in mt['tables'] if t != mt['anchor'])}")
             for w in p["why"]:
@@ -575,6 +677,7 @@ def run_query(query, sm, all_cols, return_result=False):
             tr.set("sql_planning", action="aggregate", anchor=mt["anchor"],
                    measures=mt.get("metrics"), dimension=mt.get("group_col"),
                    threshold=mt.get("threshold"), top_n=mt.get("top_n"))
+            _tick("sql_planning", "Calculating the numbers")
             thr = mt.get("threshold")
             print(f"  [L4c] Grain plan   {mt['anchor']} ⟕ {', '.join(mt['metrics'])}"
                   + (f"  (filter {thr}+)" if thr is not None else ""))
@@ -587,6 +690,7 @@ def run_query(query, sm, all_cols, return_result=False):
             p = mt["plan"]
             _rec_plan(p)
             tr.set("sql_planning", action="sql", tables=sorted(mt["tables"]))
+            _tick("sql_planning", "Building the query")
             _llm_sql = True
             print(f"  [L4b] Join plan    {' ⋈ '.join(sorted(mt['tables']))}  "
                   f"(conf {p['confidence']}, fan-out {p['max_fanout']})")
@@ -728,6 +832,11 @@ def run_query(query, sm, all_cols, return_result=False):
                      if _tcol and not _skip_vague_window else "")
             _rank_tail = _rank_order_limit_sql(_rank, primary, sm, _tcol)
             _rank_tail_a = _rank_order_limit_sql(_rank, primary, sm, _tcol, alias="a")
+            # Whatever column the tail above actually ORDER BY's on (if any) must
+            # always be part of what's shown — a "latest 10 X" result sorted by a
+            # date the recommendation happened not to pick would be confusing.
+            # Computed once, reused as recommended_projection's must_include below.
+            _rank_sort_col = _rank_sort_column(_rank, primary, sm, _tcol)
             # Postgres requires SELECT DISTINCT's ORDER BY expressions to appear in the
             # select list — the WHO/distinct-name branch below projects only the display
             # column, so it can honor an explicit count but not an ORDER BY on a column
@@ -775,14 +884,21 @@ def run_query(query, sm, all_cols, return_result=False):
                     # "incidents and their handler" → show the anchor rows + the handler NAME.
                     # LEFT JOIN so anchor rows with no related person still appear.
                     _rl = _ans.get("rel_label", _disp)
-                    sql = (f'SELECT a.*, t."{_disp}" AS "{_rl}" '
-                           f'FROM "{primary}" a LEFT JOIN "{_tt}" t ON a."{_fkc}" = t."{_tpk}"'
-                           + (f' WHERE {_w}' if _w else '') + _rank_tail_a)
                     _anchor_cols = [c.split(".", 1)[1] for c in all_cols
                                     if c.split(".", 1)[0] == primary]
+                    # Business-facing anchor projection instead of `a.*` (every anchor
+                    # column) — same recommended_projection() every other deterministic
+                    # branch uses; allowed_columns below is UNCHANGED (still every
+                    # anchor column, for validation) so this only narrows what's shown.
+                    _ans_proj_cols = recommended_projection(primary, _anchor_cols, results,
+                                                            sm, query)
+                    _ans_proj = ", ".join(f'a."{c}"' for c in _ans_proj_cols) or "a.*"
+                    sql = (f'SELECT {_ans_proj}, t."{_disp}" AS "{_rl}" '
+                           f'FROM "{primary}" a LEFT JOIN "{_tt}" t ON a."{_fkc}" = t."{_tpk}"'
+                           + (f' WHERE {_w}' if _w else '') + _rank_tail_a)
                     allowed_columns = (_anchor_cols + [_disp, _fkc, _tpk]
                                        + [f["column"] for f in _arb_filters])
-                    _proj_desc = f"a.* + {_tt}.{_disp} AS {_rl}"
+                    _proj_desc = f"{_ans_proj} + {_tt}.{_disp} AS {_rl}"
                 else:
                     # WHO → just the person's distinct name.
                     sql = (f'SELECT DISTINCT t."{_disp}" '
@@ -796,6 +912,7 @@ def run_query(query, sm, all_cols, return_result=False):
                 tr.set("sql_planning", action="answer_entity", table=primary,
                        target=_tt, project=_proj_desc, via=_fkc,
                        filters=[(f["column"], f["op"], f["value"]) for f in _arb_filters])
+                _tick("sql_planning", "Looking up who's involved")
                 print(f"  [L4e] answer-entity  {_ans.get('mode','who')}: JOIN {_tt} → {_proj_desc}"
                       f"{(' + ' + str(len(_arb_filters)) + ' filter(s)') if _arb_filters else ''}"
                       "  — deterministic, no LLM")
@@ -804,7 +921,16 @@ def run_query(query, sm, all_cols, return_result=False):
                 _or = " OR ".join(
                     f"""lower("{c}"::text) = lower('{str(v).replace("'", "''")}')"""
                     for c, v in _fk["pairs"])
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 _wparts = [f'"{_fk["anchor_col"]}" IN '
                            f'(SELECT "{_fk["target_col"]}" FROM "{_fk["target"]}" WHERE {_or})']
                 if _tpred:
@@ -819,13 +945,23 @@ def run_query(query, sm, all_cols, return_result=False):
                 tr.set("sql_planning", action="fk_value_resolution", table=primary,
                        target=_fk["target"], via=_fk["anchor_col"],
                        filters=[c for c, _ in _fk["pairs"]], temporal=_tcol)
+                _tick("sql_planning", "Matching that to the right record")
                 print(f"  [L4d] FK value     {primary}.{_fk['anchor_col']} → "
                       f"{_fk['target']}.({', '.join(c for c, _ in _fk['pairs'])}) "
                       f"= '{_fk['pairs'][0][1]}'"
                       + (f" + {_tcol} window" if _tcol else "") + "  — deterministic, no LLM")
             elif _mh:
                 # Multi-hop junction membership: WHERE anchor_pk IN (<nested IN-subquery>).
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 _wparts = [f'"{_mh["anchor_col"]}" IN ({_mh["subquery"]})']
                 if _tpred:
                     _wparts.append(_tpred)
@@ -836,13 +972,23 @@ def run_query(query, sm, all_cols, return_result=False):
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="multihop_fk_resolution", table=primary,
                        path=_mh["path"], anchor_col=_mh["anchor_col"], temporal=_tcol)
+                _tick("sql_planning", "Tracing the connection through related records")
             elif _arb_filters:
                 # Deterministic single-table SQL with arbiter-grounded categorical
                 # filters (= for VALUE, != for NEGATED_VALUE). All columns belong to the
                 # anchor table by construction (anchor_filters filtered on `primary`).
                 # where_clause compares lower(col) to value_norm, so High/high/HIGH match.
                 from query.value_arbiter import where_clause as _arb_where
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 _wparts = [_arb_where(_arb_filters)]
                 if _tpred:
                     _wparts.append(_tpred)        # value filter + temporal stays deterministic
@@ -854,16 +1000,27 @@ def run_query(query, sm, all_cols, return_result=False):
                 tr.set("sql_planning", action="value_arbiter_filter", table=primary,
                        filters=[(f["column"], f["op"], f["value"]) for f in _arb_filters],
                        temporal=_tcol)
+                _tick("sql_planning", "Applying your filters")
                 print(f"  [L4c] value filter {primary} WHERE {' AND '.join(_wparts)}"
                       "  — deterministic, no LLM")
             elif _tpred:
                 # Temporal-only deterministic projection ("users created last month") — no
                 # value/FK filter, just the date window on the canonical temporal column.
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 sql = f'SELECT {_proj} FROM "{primary}" WHERE {_tpred}' + _rank_tail
                 allowed_columns = allowed_columns + [_tcol]
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="temporal_only", table=primary, temporal=_tcol)
+                _tick("sql_planning", "Narrowing to that time period")
                 print(f"  [L4e] Temporal     {primary} WHERE {_tcol} in window"
                       "  — deterministic, no LLM")
             elif _want_rank_order and _tcol:
@@ -871,12 +1028,22 @@ def run_query(query, sm, all_cols, return_result=False):
                 # recency word (or none at all), so there's no real date-RANGE filter
                 # to apply (see _skip_vague_window above) — just ORDER BY the anchor's
                 # canonical temporal column + LIMIT N. Deterministic, no LLM.
-                _proj = ", ".join(f'"{c}"' for c in allowed_columns) or "*"
+                # Business-facing SELECT list — NOT the validation allow-list.
+                # allowed_columns (extended a few lines below with WHERE/JOIN-only
+                # helper columns like _tcol) stays exactly what it was: the AST
+                # firewall's allow-list. This is a SEPARATE, smaller list for what
+                # actually gets projected — composed from metadata VEDA already
+                # computed at ingestion + this query's own retrieval relevance
+                # (veda/routing.py::recommended_projection — never re-ranked here).
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
                 sql = f'SELECT {_proj} FROM "{primary}"' + _rank_tail
                 allowed_columns = allowed_columns + [_tcol]
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="ranked_temporal_only", table=primary,
                        temporal=_tcol, top_n=_rank.top_n, direction=_rank.direction)
+                _tick("sql_planning", "Sorting and picking the top results")
                 print(f"  [L4e] Ranked       {primary} ORDER BY {_tcol} "
                       f"{_rank.direction.upper()} LIMIT {_rank.top_n or 100}"
                       "  — deterministic, no LLM")
@@ -895,6 +1062,7 @@ def run_query(query, sm, all_cols, return_result=False):
                     log_route("refuse", query, (time.time() - start) * 1000)
                     return _done(0, "refuse", msg=_msg, feedback=fb)
                 tr.set("sql_planning", action="single_table", table=primary)
+                _tick("sql_planning", "Building the query")
                 _llm_sql = True
                 # in-scope column glossary (business_definition + aliases) → SQL prompt hint
                 _gloss = {}
@@ -917,8 +1085,11 @@ def run_query(query, sm, all_cols, return_result=False):
                         if _pt == primary and _pc in _allowed_set:
                             _term_map.append((_phrase, _pc))
                 t_sql = time.time()
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
                 sql = generate_sql(query, primary, allowed_columns, tf,
-                                   col_glossary=_gloss, term_map=_term_map, time_col=_tcol)
+                                   col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
+                                   recommended_projection=_proj_cols)
                 print(f"  [L5] SQL gen       {time.time()-t_sql:.1f}s"
                       + (f"  (+{len(_gloss)} col defs)" if _gloss else "")
                       + (f"  (+{len(_term_map)} term→col)" if _term_map else ""))
@@ -997,6 +1168,66 @@ def run_query(query, sm, all_cols, return_result=False):
     ok_q, missing = qualifier_completeness(query, sql, sm)
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
+        _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
+        # QUALIFIER SALVAGE (generic, schema-agnostic): before refusing, ask QSR what
+        # `missing` IS in this scope. Referent tables entirely OUTSIDE the SQL mean
+        # the ANCHOR was wrong, not the query ("payment" refused against a
+        # document-type table while a payment table exists) — retry ONCE with that
+        # table forced as primary; the retried plan faces every gate above, including
+        # this one (anchor_hint marks the retry, so salvage can't recurse). Runs only
+        # on would-be refusals — an answered query can never regress through here.
+        _refs = []
+        try:
+            from config import (QUALIFIER_SALVAGE_ENABLED, QUALIFIER_REANCHOR_RETRY,
+                                QUALIFIER_REANCHOR_MAX_HEAD_S)
+        except Exception:
+            QUALIFIER_SALVAGE_ENABLED, QUALIFIER_REANCHOR_RETRY = True, True
+            QUALIFIER_REANCHOR_MAX_HEAD_S = 45.0
+        if QUALIFIER_SALVAGE_ENABLED and anchor_hint is None:
+            try:
+                from query.resolution import referent_tables
+                _refs = [r for r in referent_tables(missing, sm)
+                         if r["table"] not in _sql_tabs]
+                # Anchor preference: a table backed by ENTITY/COLUMN-NAME evidence
+                # beats a value-only home — the latter is usually a shared label
+                # store ('payment' exists as a ROW in list_of_values), which is
+                # filter evidence, not an anchor. Measured on the trigger query:
+                # retrying against the label store refuses; retrying against the
+                # entity table lands the grounded domain clarify.
+                _refs.sort(key=lambda r: (
+                    not any("entity" in w or "column-name" in w for w in r["why"]),
+                    -r["score"], r["table"]))
+            except Exception:
+                _refs = []
+            if (_refs and QUALIFIER_REANCHOR_RETRY
+                    and (time.time() - start) <= QUALIFIER_REANCHOR_MAX_HEAD_S):
+                print(f"  [L6b] Qualifier salvage  '{missing}' → {_refs[0]['table']} "
+                      f"({'; '.join(_refs[0]['why'][:2])}) — re-anchored retry")
+                tr.note("validation", f"qualifier salvage retry → {_refs[0]['table']}")
+                try:
+                    _retry = run_query(query, sm, all_cols, return_result=True,
+                                       anchor_hint=_refs[0]["table"])
+                except Exception:
+                    _retry = None
+                # Surface the retry when it ANSWERED, or when it refused with
+                # something MORE grounded than the original qualifier_dropped:
+                # a clarify (grounded question) or an ungrounded value on the
+                # re-anchored table ("'completed' is not a value of
+                # payment_status — did you mean captured/authorized/…") — the
+                # value-level diagnosis on the RIGHT anchor is strictly more
+                # actionable than an entity-level clarify. Any other refusal
+                # falls through to the referent clarify below.
+                if isinstance(_retry, dict) and (_retry.get("ok")
+                        or _retry.get("status") in ("clarify", "ungrounded")):
+                    try:
+                        _retry.setdefault("salvage", {
+                            "reanchored_to": _refs[0]["table"],
+                            "dropped_qualifier": missing})
+                    except Exception:
+                        pass
+                    log_route(_route + ".salvage_reanchor", query,
+                              (time.time() - start) * 1000)
+                    return _retry if return_result else 0
         # Grounded clarify upgrade: when the dropped token is NOT a real data value
         # anywhere (no direct/closed referent) and the queried table exposes FK label
         # domains, the honest answer is the domain, not a generic refusal —
@@ -1007,7 +1238,6 @@ def run_query(query, sm, all_cols, return_result=False):
             from query.join_planner import load_graph
             _vr = value_referents(missing)
             if not _vr["direct"] and not _vr["closed"]:
-                _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
                 _qw = set(re.findall(r"[a-z]+", query.lower()))
                 _doms = []
                 for _e in load_graph().get("edges", []):
@@ -1029,6 +1259,21 @@ def run_query(query, sm, all_cols, return_result=False):
                     return _done(0, "clarify", msg=_msg, feedback=fb)
         except Exception:
             pass
+        if _refs:
+            # Referent clarify: the retry didn't rescue it (or is off/over budget),
+            # but QSR knows what the token IS here — tell the user, grounded in the
+            # schema's own vocabulary, instead of "couldn't map 'X'".
+            try:
+                from query.superlative_plan import _human
+                _names = list(dict.fromkeys(_human(r["table"], sm) for r in _refs[:2]))
+            except Exception:
+                _names = list(dict.fromkeys(r["table"] for r in _refs[:2]))
+            _msg = (f"'{missing}' here refers to {' / '.join(_names)}, which this "
+                    f"answer never touched — ask about {_names[0]} directly, or say "
+                    f"how '{missing}' relates to your question.")
+            fb = _feedback("clarify", msg=_msg)
+            log_route(_route + ".salvage_clarify", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_msg, feedback=fb)
         fb = _feedback("qualifier_dropped", missing=missing)
         log_route(_route + ".qualifier_dropped", query, (time.time() - start) * 1000)
         return _done(0, "qualifier_dropped", missing=missing, feedback=fb)
@@ -1130,7 +1375,8 @@ def run_query(query, sm, all_cols, return_result=False):
                                (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
                 ctx = analyze_result(query, param_sql, list(cols), row_dicts, sm=sm,
                                      table=str(primary), max_rows=RESULT_ANALYZER_MAX_ROWS,
-                                     query_intent=intent, confidence_inputs=_conf_inputs)
+                                     query_intent=intent, confidence_inputs=_conf_inputs,
+                                     params=params)
                 insight = run_insight_engine(ctx, rank_column=_rank_column_for_nl)
                 if getattr(insight, "answer", None):
                     nl_answer_text = insight.answer

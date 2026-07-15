@@ -175,3 +175,38 @@ def test_tier2_finish_insight_engine_falls_back_on_failure(monkeypatch):
     # never propagates the exception or drops the (correct) rows/status.
     assert result["status"] == "answered"
     assert "answer" in result
+
+
+def test_tier2_finish_answer_never_missing_even_when_both_paths_fail_outside_their_own_try(monkeypatch):
+    """Regression (2026-07): unlike run_insight_engine/run_nl_answer's OWN
+    internal SLM-call fallback (already covered above), an exception from
+    OUTSIDE both of those calls entirely — e.g. analyze_result() AND
+    run_nl_answer() both raising before reaching their internal try/except —
+    used to leave "answer" completely ABSENT from the Tier-2 result. That's
+    worse than a raw-text fallback: chatbot/nodes.py's format_reply_node then
+    shows its own generic "Here's what I found.", silently masking that
+    Tier-2 produced NO grounded summary at all. _tier2_finish must now set a
+    deterministic fallback UPFRONT (mirroring veda/pipeline.py's L7b), so
+    "answer" is guaranteed present regardless of where the failure occurs."""
+    import config
+    from veda_hybrid import _tier2_finish
+
+    monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
+
+    import veda.result_analyzer as ra_mod
+    monkeypatch.setattr(ra_mod, "analyze_result",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("analysis boom")))
+
+    # _tier2_finish imports run_nl_answer from the query.nl_answer shim (not
+    # directly from result_explainer) — patch where it's actually looked up.
+    import query.nl_answer as nl_answer_mod
+    monkeypatch.setattr(nl_answer_mod, "run_nl_answer",
+                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nl_answer boom")))
+
+    result = _tier2_finish(
+        "how many payments", sm=None, cols=["id", "amount"], rows=[(1, 100), (2, 200)],
+        sql="SELECT id, amount FROM payments", source="tier2",
+    )
+    assert result["status"] == "answered"
+    assert "answer" in result and result["answer"]
+    assert "Returned" in result["answer"] or "row" in result["answer"].lower()

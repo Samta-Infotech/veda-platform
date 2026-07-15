@@ -417,16 +417,19 @@ class RetrievalEnginePhase3:
             self.cache.set(enriched_tokens, cutoff_results, raw_query=query)
             logger.info(f"✓ Cached {len(cutoff_results)} results")
 
-        # CONVERT TO RESULT OBJECTS (stamping per-signal scores — observability
-        # only, final_score/ordering untouched; mlflow_impl.md "Signal Scores")
+        # CONVERT TO RESULT OBJECTS — carry the per-signal scores through instead of
+        # discarding them (they were computed above, then silently dropped: every
+        # RetrievalResult.*_score field defaulted to 0.0 regardless of what each signal
+        # actually contributed). Cheap: dict() over lists already in scope, no recompute.
         results = self._results_from_tuples(
             cutoff_results,
-            semantic=dict(signal1_semantic or []),
-            sparse=dict(signal2_sparse or []),
-            subgraph=signal3_subgraph_signals,
-            fk=signal4_fk_signals,
-            value=signal5_value_signals,
-            rrf=dict(fused or []),
+            semantic_map=dict(signal1_semantic),
+            sparse_map=dict(signal2_sparse),
+            subgraph_map=signal3_subgraph_signals,
+            fk_map=signal4_fk_signals,
+            value_map=signal5_value_signals,
+            rrf_map=dict(fused),
+            boosted_map=dict(boosted),
         )
 
         # TIMING
@@ -442,17 +445,19 @@ class RetrievalEnginePhase3:
     def _results_from_tuples(
         self,
         tuples: List[Tuple[str, float]],
-        semantic: Optional[Dict[str, float]] = None,
-        sparse: Optional[Dict[str, float]] = None,
-        subgraph: Optional[Dict[str, float]] = None,
-        fk: Optional[Dict[str, float]] = None,
-        value: Optional[Dict[str, float]] = None,
-        rrf: Optional[Dict[str, float]] = None,
+        semantic_map: Optional[Dict[str, float]] = None,
+        sparse_map:   Optional[Dict[str, float]] = None,
+        subgraph_map: Optional[Dict[str, float]] = None,
+        fk_map:       Optional[Dict[str, float]] = None,
+        value_map:    Optional[Dict[str, float]] = None,
+        rrf_map:      Optional[Dict[str, float]] = None,
+        boosted_map:  Optional[Dict[str, float]] = None,
     ) -> List[RetrievalResult]:
-        """Convert (col_id, score) tuples to RetrievalResult objects. The
-        optional per-signal maps fill the dataclass's signal fields (pure
-        observability — final_score and ordering are untouched). Callers
-        without them (cache hit) leave the fields at their 0.0 default."""
+        """Convert (col_id, score) tuples to RetrievalResult objects. The optional
+        *_map arguments carry each signal's OWN contribution through onto the result
+        (RetrievalResult already declares these fields "for debugging" — they were
+        just never populated). All optional and default to 0.0 (the dataclass's own
+        default), so any caller that doesn't pass them gets byte-identical behavior."""
         results = []
         for col_id, score in tuples:
             table_name, col_name = col_id.rsplit(".", 1) if "." in col_id else (col_id, col_id)
@@ -461,12 +466,13 @@ class RetrievalEnginePhase3:
                 column_name=col_name,
                 table_name=table_name,
                 final_score=score,
-                semantic_score=float((semantic or {}).get(col_id, 0.0)),
-                sparse_score=float((sparse or {}).get(col_id, 0.0)),
-                subgraph_score=float((subgraph or {}).get(col_id, 0.0)),
-                fk_path_score=float((fk or {}).get(col_id, 0.0)),
-                value_index_score=float((value or {}).get(col_id, 0.0)),
-                rrf_score=float((rrf or {}).get(col_id, 0.0)),
+                semantic_score=(semantic_map or {}).get(col_id, 0.0),
+                sparse_score=(sparse_map or {}).get(col_id, 0.0),
+                subgraph_score=(subgraph_map or {}).get(col_id, 0.0),
+                fk_path_score=(fk_map or {}).get(col_id, 0.0),
+                value_index_score=(value_map or {}).get(col_id, 0.0),
+                rrf_score=(rrf_map or {}).get(col_id, 0.0),
+                boosted_score=(boosted_map or {}).get(col_id, 0.0),
             )
             results.append(result)
         return results

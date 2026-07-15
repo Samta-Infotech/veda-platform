@@ -37,10 +37,15 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:?set OLLAMA_URL to the mini-1 LAN IP in .env}
       METAL_EMBED_URL: ${METAL_EMBED_URL:?set METAL_EMBED_URL to the mini-2 LAN IP in .env}
       METAL_EMBED_TIMEOUT: ${METAL_EMBED_TIMEOUT:-60}
+      # OVERRIDE the base compose's dev default — this box runs a stable demo,
+      # not an actively-edited dev tree; no reason to pay the reload watcher's
+      # cost or risk a mid-demo restart from an unrelated file touch.
+      DEV_AUTORELOAD: "0"
 
   api:
     environment:
       ROLE: api
       DJANGO_SETTINGS_MODULE: config.settings.dev
       VEDA_ALLOW_ANONYMOUS: "1"             # demo: hit /api/v1/query with no token
+      DEV_AUTORELOAD: "0"                   # see inference's override above — same reason
     ports: ["8000:8000"]                    # query the API directly — no nginx/TLS needed

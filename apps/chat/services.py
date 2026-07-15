@@ -9,7 +9,9 @@ from typing import Iterator
 from chatbot.run import run_chat_turn
 
 from .models import ChatMessage, ChatSession, MessageType
+from .thinking_messages import business_friendly_message
 from .visualization import VisualizationRecommender
+from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -191,8 +193,17 @@ class ConversationQueryService:
         """
         q: "queue.Queue[tuple[str, object]]" = queue.Queue()
 
-        def on_event(phase: str, evt_message: str) -> None:
-            q.put(("thinking", {"phase": phase, "message": evt_message}))
+        def on_event(phase: str, evt_message: str, extra: dict | None = None) -> None:
+            # `extra` carries the inference tier's per-phase structured fields
+            # (route's intent=, sub_query's index=/total=/sub_query=, ...) —
+            # merged in so the SSE "thinking" payload isn't just flattened
+            # phase/message text. phase/message win on key collision (unlikely,
+            # but they're the guaranteed-present fields).
+            # `phase` itself is forwarded verbatim (never renamed — logs/tracing
+            # upstream are unaffected); only the displayed `message` is swapped
+            # for a business-friendly one (thinking_messages.py, UX Phase 1).
+            q.put(("thinking", {**(extra or {}), "phase": phase,
+                               "message": business_friendly_message(phase, evt_message)}))
 
         def target() -> None:
             try:
@@ -232,9 +243,20 @@ class ConversationQueryService:
 
     def _build_reply_events(self, response: dict):
         res0 = response.get("engine_result") or {}
+        # Computed (fast, synchronous, no LLM — same call as before) BEFORE any
+        # content streams, so the thinking message below completes the
+        # "thinking" sequence rather than interleaving mid-answer.
+        vizzes = self._build_visualizations(res0)
+        if vizzes:
+            # Only emitted when a chart is actually about to be shown — a
+            # text/table-only answer never yields this, so it's never a
+            # "thinking" message describing work that isn't happening.
+            yield {"event": "thinking",
+                  "data": {"phase": "visualization_prep",
+                           "message": business_friendly_message("visualization_prep", "")}}
         for block in self._build_content_blocks(response, res0):
             yield {"event": "content", "data": block}
-        for viz in self._build_visualizations(res0):
+        for viz in vizzes:
             yield {"event": "visualization", "data": viz}
         # veda_core (veda/business_explain.py) builds this deterministically from the
         # final validated SQL + semantic model — never from retrieval/routing internals

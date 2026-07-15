@@ -13,10 +13,17 @@ case "$ROLE" in
     api)
         python manage.py migrate --noinput
         python manage.py collectstatic --noinput
+        # (2026-07, traced across several live fixes this session). gunicorn's
+        # own --reload watches the tree and restarts all workers on change.
+        RELOAD_ARGS=()
+        if [ "${DEV_AUTORELOAD:-0}" = "1" ]; then
+            RELOAD_ARGS=(--reload)
+        fi
         exec gunicorn config.wsgi:application \
             --bind 0.0.0.0:8000 \
             --workers "${GUNICORN_WORKERS:-4}" \
-            --timeout "${GUNICORN_TIMEOUT:-60}"
+            --timeout "${GUNICORN_TIMEOUT:-60}" \
+            "${RELOAD_ARGS[@]}"
         ;;
     worker)
         exec celery -A config worker \

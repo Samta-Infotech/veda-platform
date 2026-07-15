@@ -81,8 +81,25 @@ def _term_directive_block(term_map) -> str:
             + "\n".join(lines))
 
 
+def _recommended_projection_block(recommended, columns) -> str:
+    """Render the business-facing projection VEDA already computed (veda/routing.py::
+    recommended_projection — default_display_columns + this query's own retrieval
+    relevance + HIGH-importance columns, composed deterministically, no LLM) as a
+    SEPARATE section from the full "Columns:" validation list. This does not
+    restrict SQL correctness: `columns` (all validated table columns) remains fully
+    available for WHERE/JOIN/GROUP BY/ORDER BY/HAVING and as a SELECT fallback — this
+    block only steers the SELECT clause toward the smaller business-relevant set
+    when the model can satisfy the question with it. Empty when there's nothing to
+    recommend beyond the full column list (nothing narrowed, or the caller passed
+    none) — an existing caller that never passes `recommended` sees an unchanged
+    prompt, byte for byte."""
+    if not recommended or list(recommended) == list(columns):
+        return ""
+    return "Recommended Projection: " + ", ".join(recommended) + "\n"
+
+
 def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=None,
-                 time_col=None):
+                 time_col=None, recommended_projection=None):
     """Ask Qwen for ONE read-only SELECT over the chosen table's real columns."""
     import urllib.request
 
@@ -111,13 +128,22 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
     system = ("You are a PostgreSQL expert. Output ONE read-only SELECT statement "
               "and nothing else — no markdown, no commentary, no semicolon." + _domain_line())
     _limit = _extract_requested_limit(query)
+    _proj_block = _recommended_projection_block(recommended_projection, columns)
     user = (f"Question: {query}\n"
             f"Table: {table}\n"
-            f"Columns: {', '.join(columns)}{date_line}{order_line}"
+            f"{_proj_block}"
+            f"Available Columns: {', '.join(columns)}{date_line}{order_line}"
             f"{_column_glossary_block(col_glossary)}"
             f"{_term_directive_block(term_map)}\n"
-            f"Rules: SELECT only, FROM {table}. Use only listed columns. "
-            f"Always end with LIMIT {_limit}.")
+            f"Rules: SELECT only, FROM {table}. Use only listed (Available) columns "
+            f"anywhere in the query."
+            + (" For the SELECT clause: use ONLY the Recommended Projection columns, "
+               "UNLESS the question explicitly names a column not in that list — only "
+               "then pull the specific column(s) it needs from Available Columns too. "
+               "Do not add other Available Columns 'just in case'. Available Columns "
+               "remains fully usable for WHERE/JOIN/GROUP BY/ORDER BY/HAVING regardless."
+               if _proj_block else "")
+            + f" Always end with LIMIT {_limit}.")
 
     # temperature 0 + fixed seed → greedy, reproducible decoding. SQL generation
     # must be DETERMINISTIC: the same question had been returning different WHERE
@@ -233,17 +259,25 @@ def _join_glossary_block(alias_map, sm) -> str:
             "conditions not asked for):\n" + "\n".join(lines))
 
 
-def generate_join_sql(query, skeleton, alias_map, sm, tf):
+def generate_join_sql(query, skeleton, alias_map, sm, tf, results=None):
     """LLM fills SELECT/WHERE/GROUP BY on a FIXED, deterministic FROM/JOIN block.
     The join keys + polymorphic predicates are never the LLM's to write, and the
-    entity LABEL columns are resolved deterministically (not invented)."""
+    entity LABEL columns are resolved deterministically (not invented).
+
+    `results`: this query's per-column retrieval relevance (RetrievalResult list,
+    already computed before try_multitable runs — veda/planning.py forwards it
+    unchanged). Optional — omitting it degrades to today's behavior (no
+    Recommended Projection section), same additive contract as the single-table
+    generate_sql()'s own `recommended_projection` param."""
     import urllib.request
     cols = sm.get("columns", {})
     # alias_map is occurrence-keyed: alias -> table. The same table may appear under
     # two aliases (same-table-twice / self-join) — emit one block per OCCURRENCE.
     blocks = []
+    per_alias_cols = {}   # al -> full column list, reused below for recommended_projection
     for al, tbl in alias_map.items():
         tcols = [k.split(".", 1)[1] for k in cols if k.startswith(tbl + ".")][:20]
+        per_alias_cols[al] = (tbl, tcols)
         blocks.append(f"  {al} = {tbl}: {', '.join(tcols)}")
     # Deterministic display-column guidance: tell the LLM the REAL label column per
     # table so it can't hallucinate (org_name). Validation remains the backstop.
@@ -255,6 +289,27 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf):
     display_block = ("\nEntity label columns (use these exact columns when projecting an "
                      "entity's name; never invent a column):\n" + "\n".join(display_lines)
                      ) if display_lines else ""
+    # Per-alias Recommended Projection — the SAME veda/routing.py::
+    # recommended_projection() every deterministic single-table branch and the
+    # single-table LLM prompt already use, just run once per joined table
+    # instead of once for a lone primary. Additive: empty when `results` isn't
+    # given, or when every alias's own recommendation collapses to its full
+    # column list (nothing to narrow).
+    recommended_lines = []
+    if results is not None:
+        try:
+            from veda.routing import recommended_projection
+            for al, (tbl, tcols) in per_alias_cols.items():
+                rec = recommended_projection(tbl, tcols, results, sm, query)
+                if rec and rec != tcols:
+                    recommended_lines.append(f"  {al}: {', '.join(rec)}")
+        except Exception:
+            recommended_lines = []
+    recommended_block = ("\nRecommended Projection (prefer these columns per alias for the "
+                         "SELECT clause when they can answer the question; the full column "
+                         "lists above remain usable for WHERE/JOIN/GROUP BY/ORDER BY/HAVING "
+                         "and as a SELECT fallback):\n" + "\n".join(recommended_lines)
+                         ) if recommended_lines else ""
     date_line = ""
     if tf and (tf.start or tf.end):
         date_line = (f"\nIf the question implies a time window, filter a datetime column "
@@ -286,9 +341,17 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf):
     _limit = _extract_requested_limit(query)
     user = (f"Question: {query}\n\nFIXED FROM/JOIN (use exactly):\n{skeleton}\n\n"
             f"Aliases → table: columns:\n" + "\n".join(blocks) + display_block
+            + recommended_block
             + _join_glossary_block(alias_map, sm) + _term_directive_block(_join_term_map)
             + date_line +
-            f"\nRules: prefix every column with its alias; SELECT only; end with LIMIT {_limit}.")
+            f"\nRules: prefix every column with its alias; SELECT only; end with LIMIT {_limit}."
+            + (" For the SELECT clause: for EACH alias, use ONLY that alias's Recommended "
+               "Projection columns, UNLESS the question explicitly names a column of that "
+               "table not in its Recommended Projection list — only then pull the specific "
+               "column(s) it needs from that alias's full column list too. Do not add other "
+               "columns 'just in case'. The full per-alias column lists remain usable for "
+               "WHERE/JOIN/GROUP BY/ORDER BY/HAVING regardless."
+               if recommended_lines else ""))
     from slm import call_slm
     sql = call_slm(
         user, system=system, purpose="sql_join",

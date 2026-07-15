@@ -27,6 +27,9 @@ from config import (
     NL_SUMMARY_MAX_TOKENS,
     INSIGHT_ENGINE_TIMEOUT_MS,
 )
+from utils.logger import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
@@ -235,6 +238,13 @@ def run_nl_answer(
     except Exception as e:
         answer = template_answer(query, columns, rows) or \
             deterministic_fallback_answer(query, columns, rows)
+        # Unconditional (not gated behind verbose=True, which neither pipeline.py's
+        # L7b nor veda_hybrid.py's _tier2_finish ever pass) — previously a raw/
+        # generic answer could reach the user with NO record anywhere of why the
+        # SLM call didn't produce one (timeout vs. connection error vs. empty
+        # response vs. bad JSON), making "sometimes the summary is raw" undiagnosable.
+        logger.warning("run_nl_answer: SLM unavailable/failed (%s: %s) — using fallback answer",
+                       type(e).__name__, e)
         if verbose:
             print(f"  [ResultExplainer] SLM unavailable ({e}) — using fallback answer")
 
@@ -487,6 +497,9 @@ def run_insight_engine(ctx, verbose: bool = False, timeout: Optional[float] = No
     except Exception as e:
         summary = _fallback_summary(ctx)
         insights, follow_ups, visualization = [], [], None
+        # Unconditional — see run_nl_answer's identical logging fix above for why.
+        logger.warning("run_insight_engine: SLM unavailable/invalid (%s: %s) — using fallback answer",
+                       type(e).__name__, e)
         if verbose:
             print(f"  [InsightEngine] SLM unavailable/invalid ({e}) — using fallback answer")
 
