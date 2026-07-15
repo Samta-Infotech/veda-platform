@@ -25,6 +25,7 @@ anyio
 psycopg2-binary
 redis
 langgraph
+langgraph-checkpoint-redis  # chatbot/checkpointer.py (imported via chatbot.run in the worker)
 langchain-core
 sqlglot
 # Cross-source knowledge graph plan (docs/CROSSSOURCE_GRAPH.md). This image also
