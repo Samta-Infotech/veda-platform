@@ -69,15 +69,22 @@ class GraphEmbedResult:
 # =============================================================================
 
 def _create_node_emb_table(cursor) -> None:
-    # Drop table if embedding dimension has changed (e.g. MiniLM 384 → BGE 1024)
+    # Drop table ONLY if the embedding dimension genuinely changed (e.g. MiniLM 384 →
+    # BGE 1024). pgvector stores the dimension DIRECTLY in atttypmod (vector(N) →
+    # atttypmod = N; an unspecified `vector` → -1). The old code did `atttypmod - 4`
+    # (correct for varchar/VARHDRSZ, WRONG for pgvector) so it read 1020 for a
+    # vector(1024) column, mismatched 1024, and DROPPED THE TABLE ON EVERY CALL —
+    # meaning each source's embed wiped every other source's node embeddings, leaving
+    # only the last-ingested source. Compare atttypmod directly and only when it is a
+    # real, positive, differing dimension.
     try:
         cursor.execute(f"""
-            SELECT atttypmod - 4 AS dim
+            SELECT atttypmod AS dim
             FROM pg_attribute JOIN pg_class ON pg_class.oid = pg_attribute.attrelid
             WHERE pg_class.relname = '{GRAPH_NODE_EMB_TABLE}' AND pg_attribute.attname = 'embedding'
         """)
         row = cursor.fetchone()
-        if row and row[0] != GRAPH_NODE_EMB_DIM:
+        if row and row[0] is not None and row[0] > 0 and row[0] != GRAPH_NODE_EMB_DIM:
             cursor.execute(f"DROP TABLE IF EXISTS {GRAPH_NODE_EMB_TABLE};")
     except Exception:
         pass

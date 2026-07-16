@@ -129,16 +129,19 @@ def _eligible_values(sc) -> List[Tuple[str, str]]:
 
 # --------------------------------------------------------------------------- ddl
 def _create_value_emb_table(cursor) -> None:
-    # Drop + recreate if the embedding dimension ever changes (mirrors graph_embedder).
+    # Drop + recreate ONLY on a genuine dimension change. pgvector stores the dimension
+    # DIRECTLY in atttypmod (vector(N) → N; unspecified → -1) — compare it as-is. (An
+    # earlier `atttypmod - 4` form dropped the table on every call and wiped prior
+    # sources; see graph_embedder._create_node_emb_table for the full write-up.)
     try:
         cursor.execute(f"""
-            SELECT atttypmod - 4 AS dim FROM pg_attribute
+            SELECT atttypmod AS dim FROM pg_attribute
             JOIN pg_class ON pg_class.oid = pg_attribute.attrelid
             WHERE pg_class.relname = '{SEMANTIC_VALUE_EMB_TABLE}'
               AND pg_attribute.attname = 'embedding'
         """)
         row = cursor.fetchone()
-        if row and row[0] != GRAPH_NODE_EMB_DIM:
+        if row and row[0] is not None and row[0] > 0 and row[0] != GRAPH_NODE_EMB_DIM:
             cursor.execute(f"DROP TABLE IF EXISTS {SEMANTIC_VALUE_EMB_TABLE};")
     except Exception:
         pass
