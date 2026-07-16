@@ -30,6 +30,7 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework.authtoken",  # token auth (§6.2)
+    "corsheaders",
     "apps.core",
     "apps.sources",
     "apps.substrate",
@@ -157,6 +158,18 @@ REST_FRAMEWORK = {
 # Dev convenience: allow anonymous queries (tenant defaults). Set to "0" in prod to
 # require a token and derive tenant from the principal (§6.2).
 VEDA_ALLOW_ANONYMOUS = os.environ.get("VEDA_ALLOW_ANONYMOUS", "1") == "1"
+
+# Base CORS/CSRF trusted origins; not CORS_ALLOW_ALL_ORIGINS, so env-specific
+# settings (dev.py/prod.py) should extend these with += rather than replace them.
+CORS_ALLOWED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
+
+CSRF_TRUSTED_ORIGINS = [
+    "http://localhost:5173",
+    "http://127.0.0.1:5173",
+]
 
 # Engine flags bridged from veda_core.config — the single source of truth (§9).
 VEDA = build_veda_settings()
