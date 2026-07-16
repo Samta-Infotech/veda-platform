@@ -109,29 +109,29 @@ def _sample_records():
                 "retrieval": {"_ms": 41.7,
                               "candidate_tables": ["incident", "workflow_state"],
                               "n_columns": 34,
-                              # ASPIRATIONAL: production top_columns items carry
-                              # only {col, score, type} (score == final_score,
-                              # pipeline.py). The per-signal keys and the
-                              # before/after-rerank lists below are the shape
-                              # the engine emits once RetrievalResult's signal
-                              # fields are traced (spec Layer 2 "Signal Scores")
+                              # production-exact top_columns shape (pipeline.py
+                              # tr.cand): per-signal scores NESTED under
+                              # `signals` with short names; `score` is
+                              # final_score (post-rerank). The mapper flattens
+                              # these to spec keys (semantic_score, bm25_score…)
                               "top_columns": [
-                                  {"col": "incident.state", "score": 0.914, "type": "status",
-                                   "semantic_score": 0.83, "bm25_score": 0.42,
-                                   "graph_score": 0.31, "fk_score": 0.0,
-                                   "value_score": 0.66, "rrf_score": 0.048,
-                                   "cross_encoder_score": 0.914, "final_score": 0.914},
-                                  {"col": "incident.escalated_at", "score": 0.782, "type": "timestamp",
-                                   "semantic_score": 0.79, "bm25_score": 0.55,
-                                   "graph_score": 0.12, "fk_score": 0.0,
-                                   "value_score": 0.0, "rrf_score": 0.041,
-                                   "cross_encoder_score": 0.782, "final_score": 0.782},
-                                  {"col": "workflow_state.name", "score": 0.512, "type": "category",
-                                   "semantic_score": 0.61, "bm25_score": 0.18,
-                                   "graph_score": 0.44, "fk_score": 0.35,
-                                   "value_score": 0.0, "rrf_score": 0.029,
-                                   "cross_encoder_score": 0.512, "final_score": 0.512},
+                                  {"col": "incident.state", "score": 0.914,
+                                   "signals": {"semantic": 0.83, "sparse": 0.42,
+                                               "subgraph": 0.31, "fk_path": 0.0,
+                                               "value": 0.66}},
+                                  {"col": "incident.escalated_at", "score": 0.782,
+                                   "signals": {"semantic": 0.79, "sparse": 0.55,
+                                               "subgraph": 0.12, "fk_path": 0.0,
+                                               "value": 0.0}},
+                                  {"col": "workflow_state.name", "score": 0.512,
+                                   "signals": {"semantic": 0.61, "sparse": 0.18,
+                                               "subgraph": 0.44, "fk_path": 0.35,
+                                               "value": 0.0}},
                               ],
+                              # ASPIRATIONAL: the engine reranks (pipeline.py
+                              # cross-encoder) but does not trace before/after
+                              # lists yet; the mapper picks these up (and emits
+                              # reranker_changed_top1) the day it does.
                               "top_before_rerank": ["incident.escalated_at", "incident.state"],
                               "top_after_rerank": ["incident.state", "incident.escalated_at"]},
                 "graph_expansion": {"_ms": 120.3, "seeds": ["incident"],
@@ -160,6 +160,15 @@ def _sample_records():
                                "checks": [{"name": "ast_readonly_parameterized_fanout",
                                            "status": "pass"}],
                                "repairs": []},
+                # stamped by ExplainTrace.finish() from slm/_call_slm.py
+                # per-query token accounting (keyed by call_slm `purpose`)
+                "llm_usage": {"calls": 3, "total_prompt_tokens": 2841,
+                              "total_completion_tokens": 412, "total_tokens": 3253,
+                              "per_purpose": {
+                                  "ir_emit": {"calls": 1, "prompt_tokens": 1130,
+                                              "completion_tokens": 96},
+                                  "nl_answer": {"calls": 2, "prompt_tokens": 1711,
+                                                "completion_tokens": 316}}},
                 "output": {"_ms": 1800.1, "status": "answered",
                            "sql": "SELECT COUNT(*) FROM incident WHERE state = %s",
                            "params": ["escalated"], "confidence": 0.9},
@@ -234,11 +243,22 @@ def _cmd_selftest(args) -> int:
                                         "temporal": None, "existence": None},
                 "retrieval": {"_ms": 41.7, "candidate_tables": ["incident", "workflow_state"],
                               "n_columns": 34,
-                              # today's real engine shape: {col, score, type},
-                              # score == final_score (veda/pipeline.py)
+                              # today's real engine shape (veda/pipeline.py):
+                              # score == final_score, per-signal scores nested
+                              # under `signals` with short names
                               "top_columns": [
-                                  {"col": "incident.state", "score": 0.91, "type": "status"},
-                                  {"col": "workflow_state.name", "score": 0.55, "type": None}]},
+                                  {"col": "incident.state", "score": 0.91,
+                                   "signals": {"semantic": 0.83, "sparse": 0.42,
+                                               "subgraph": 0.31, "fk_path": 0.0,
+                                               "value": 0.66}},
+                                  {"col": "workflow_state.name", "score": 0.55,
+                                   "signals": {"semantic": 0.61, "sparse": 0.18,
+                                               "subgraph": 0.44, "fk_path": 0.35,
+                                               "value": 0.0}}]},
+                "graph_expansion": {"_ms": 120.3, "seeds": ["incident"],
+                                    # real shape: synonyms is {seed: [synonyms]}
+                                    "synonyms": {"incident": ["ticket", "case"]},
+                                    "added": ["workflow_state.name"]},
                 "schema_linking": {"_ms": 512.0, "selected_table": "incident"},
                 "anchor_selection": {"_ms": 604.9, "anchor": "incident",
                                      "confidence": 0.93, "margin": 0.41},
@@ -248,6 +268,11 @@ def _cmd_selftest(args) -> int:
                                "checks": [{"name": "ast_readonly_parameterized_fanout",
                                            "status": "pass"}],
                                "repairs": []},
+                "llm_usage": {"calls": 2, "total_prompt_tokens": 1900,
+                              "total_completion_tokens": 250, "total_tokens": 2150,
+                              "per_purpose": {"ir_emit": {"calls": 2,
+                                                          "prompt_tokens": 1900,
+                                                          "completion_tokens": 250}}},
                 "output": {"_ms": 1800.1, "status": "answered",
                            "sql": "SELECT COUNT(*) FROM incident WHERE state = %s",
                            "params": ["escalated"], "confidence": 0.9},
@@ -295,6 +320,15 @@ def _cmd_selftest(args) -> int:
         # signal scores + selected columns (mapper's Layer-2 block)
         assert row["metrics.retrieval.top1_score"] == 0.91
         assert abs(row["metrics.retrieval.score_top1_vs_top2_gap"] - 0.36) < 1e-9
+        # nested `signals` short names flattened to flat spec metrics
+        assert row["metrics.retrieval.top1_semantic_score"] == 0.83
+        assert row["metrics.retrieval.top1_bm25_score"] == 0.42   # nested `sparse`
+        assert row["metrics.retrieval.top1_fk_score"] == 0.0      # nested `fk_path`
+        assert row["metrics.graph_synonyms_followed"] == 2        # dict {seed: [syns]}
+        # per-query token usage (engine's llm_usage section → spec-named metrics)
+        assert row["metrics.total_tokens"] == 2150
+        assert row["metrics.total_prompt_tokens"] == 1900
+        assert row["metrics.llm_calls"] == 2
         assert row["metrics.columns.candidate_count"] == 2
         assert row["metrics.columns.used_in_sql_count"] == 1  # `state` in the SQL
         assert row["params.columns.used_in_sql"] == "incident.state"
@@ -327,7 +361,7 @@ def main(argv=None) -> int:
     p.set_defaults(fn=_cmd_watch)
 
     p = sub.add_parser("ui", help="launch the MLflow UI (local stores)")
-    p.add_argument("--port", type=int, default=5000)
+    p.add_argument("--port", type=int, default=5001)  # not 5000: macOS AirPlay squats on it
     p.add_argument("--host", default="127.0.0.1")
     p.set_defaults(fn=_cmd_ui)
 
