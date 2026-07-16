@@ -33,32 +33,32 @@ from __future__ import annotations
 # is doing", not which internal action fired.
 THINKING_PHASE_MESSAGES: dict[str, str] = {
     # chatbot/nodes.py — node-local phases, precede the engine call
-    "supervisor_classify": "🧠 Understanding your question...",
-    "supervisor_followup": "📖 Understanding the context of your request...",
+    "supervisor_classify": "Understanding your question...",
+    "supervisor_followup": "Understanding the context of your request...",
 
     # veda_core/veda_hybrid.py
-    "classify": "🧭 Analyzing your question...",
-    "route": "🎯 Determining the best way to answer your question...",
-    "sql_probe": "⚡ Checking for a fast answer...",
-    "decompose": "🧩 Breaking down your question...",
-    "sub_query": "🔄 Answering part of your question...",
-    "tier2": "🔍 Digging deeper to find your answer...",
-    "rag": "📄 Searching through your documents...",
-    "hybrid": "🔗 Combining information from multiple sources...",
-    "nosql": "🔍 Searching your records...",
-    "answer": "📝 Preparing your answer...",
+    "classify": "Analyzing your question...",
+    "route": "Determining the best way to answer your question...",
+    "sql_probe": "Checking for a fast answer...",
+    "decompose": "Breaking down your question...",
+    "sub_query": "Answering part of your question...",
+    "tier2": "Digging deeper to find your answer...",
+    "rag": "Searching through your documents...",
+    "hybrid": "Combining information from multiple sources...",
+    "nosql": "Searching your records...",
+    "answer": "Preparing your answer...",
 
     # veda_core/veda/pipeline.py
-    "schema_linking": "🗂 Finding the required business information...",
-    "sql_planning": "📋 Preparing the analysis...",
-    "output": "✅ Finalizing the results...",
+    "schema_linking": "Finding the required business information...",
+    "sql_planning": "Preparing the analysis...",
+    "output": "Finalizing the results...",
 
     # apps/chat/services.py — api-tier-local, NOT forwarded from veda_core/
     # chatbot (there's no pipeline phase for chart-building; it happens
     # synchronously inside _build_reply_events). Only emitted when a chart is
     # actually about to be shown (see that call site) — a text/table-only
     # answer never shows this, so it's never a message with nothing behind it.
-    "visualization_prep": "📊 Creating a visual summary...",
+    "visualization_prep": "Creating a visual summary...",
 }
 
 
