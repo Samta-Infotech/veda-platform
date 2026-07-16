@@ -256,8 +256,17 @@ class ConversationQueryService:
                            "message": business_friendly_message("visualization_prep", "")}}
         for block in self._build_content_blocks(response, res0):
             yield {"event": "content", "data": block}
-        for viz in vizzes:
-            yield {"event": "visualization", "data": viz}
+        if vizzes:
+            # ONE event carrying every recommended chart (2026-07, multi-viz):
+            # was previously one "visualization" event PER spec. This IS a
+            # wire-contract change (unlike the earlier multi-spec support in
+            # VisualizationRecommender itself, which only changed cardinality
+            # of an already-list-shaped return) — any existing frontend
+            # reading `data.type`/`data.chart_data` directly off a
+            # "visualization" event must move to `data.visualizations[i].type`
+            # etc. instead. Order is preserved — vizzes[0] is still today's
+            # single-chart choice (see visualization.py's own docstring).
+            yield {"event": "visualization", "data": {"visualizations": vizzes}}
         # veda_core (veda/business_explain.py) builds this deterministically from the
         # final validated SQL + semantic model — never from retrieval/routing internals
         # (those live only in res0["trace"], for our own debugging, never sent over SSE).

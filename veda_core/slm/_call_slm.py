@@ -36,7 +36,76 @@ import os
 import threading
 import urllib.error
 import urllib.request
+from contextvars import ContextVar
 from typing import Optional
+
+
+# ---------------------------------------------------------------------------
+# Per-query token accounting. Both backends already RETURN token counts on
+# every response (Ollama: prompt_eval_count/eval_count; vLLM: OpenAI-style
+# `usage`) — this captures them into a ContextVar accumulator keyed by the
+# existing `purpose` label. Purely additive: call_slm()'s contract is
+# unchanged, and every step is best-effort (accounting can never fail a call).
+#
+# Lifecycle: veda/explain.new_trace() calls reset_usage() at query start;
+# ExplainTrace.finish() reads get_usage() into the trace's llm_usage section.
+# When reset_usage() was never called (standalone/ingestion use) folding is a
+# no-op. ContextVar scoping: worker threads start with an empty context, so
+# SLM calls made INSIDE a thread pool are not attributed (none exist on the
+# query path today; context.with_context is the carry-over pattern if needed).
+# ---------------------------------------------------------------------------
+_USAGE_ACC: ContextVar[Optional[dict]] = ContextVar("veda_slm_usage", default=None)
+_PENDING: ContextVar[Optional[tuple]] = ContextVar("veda_slm_pending", default=None)
+
+
+def reset_usage() -> None:
+    """Start a fresh per-query accumulator (called at query start)."""
+    _USAGE_ACC.set({"calls": 0, "prompt_tokens": 0, "completion_tokens": 0,
+                    "per_purpose": {}})
+
+
+def get_usage() -> Optional[dict]:
+    """Deep-copied snapshot of the accumulator; None if reset_usage() never ran."""
+    acc = _USAGE_ACC.get()
+    return json.loads(json.dumps(acc)) if acc else None
+
+
+def _note_usage(body: dict) -> None:
+    """Stash this response's token counts for call_slm() to fold. Called by the
+    backends right after a successful POST; shape-tolerant, never raises."""
+    try:
+        u = body.get("usage")
+        if isinstance(u, dict):          # vLLM / OpenAI-compatible
+            pt = int(u.get("prompt_tokens") or 0)
+            ct = int(u.get("completion_tokens") or 0)
+        else:                            # Ollama
+            pt = int(body.get("prompt_eval_count") or 0)
+            ct = int(body.get("eval_count") or 0)
+        _PENDING.set((pt, ct))
+    except Exception:
+        _PENDING.set(None)
+
+
+def _fold_usage(purpose: str) -> None:
+    """Fold the just-noted call into the per-query accumulator (no-op when
+    there is no accumulator or the backend noted nothing). NEVER raises —
+    accounting must not be able to fail a query."""
+    try:
+        pending, acc = _PENDING.get(), _USAGE_ACC.get()
+        _PENDING.set(None)
+        if pending is None or acc is None:
+            return
+        pt, ct = pending
+        acc["calls"] += 1
+        acc["prompt_tokens"] += pt
+        acc["completion_tokens"] += ct
+        pp = acc["per_purpose"].setdefault(
+            purpose, {"calls": 0, "prompt_tokens": 0, "completion_tokens": 0})
+        pp["calls"] += 1
+        pp["prompt_tokens"] += pt
+        pp["completion_tokens"] += ct
+    except Exception:
+        pass
 
 
 # ---------------------------------------------------------------------------
@@ -191,6 +260,7 @@ class OllamaBackend:
         if json_format:
             payload["format"] = "json"
         body = _post_json(f"{self.base_url}/api/chat", payload, timeout)
+        _note_usage(body)
         content = (body.get("message", {}) or {}).get("content", "")
         if not content:
             raise RuntimeError(

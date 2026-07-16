@@ -21,10 +21,12 @@ from typing import Any, Dict, List, Optional
 
 _TRACE_LOG = "logs/explain_trace.jsonl"
 
-# The 8 sections, in display order.
+# The sections, in display order. llm_usage is stamped by finish() (per-query
+# SLM token accounting from slm/_call_slm.py), not by a pipeline stage.
 _SECTIONS = [
     "query_understanding", "retrieval", "graph_expansion", "schema_linking",
-    "anchor_selection", "join_planning", "sql_planning", "validation", "output",
+    "anchor_selection", "join_planning", "sql_planning", "validation",
+    "llm_usage", "output",
 ]
 
 
@@ -128,6 +130,18 @@ class ExplainTrace:
         the full dict. Persistence failures never break the query path."""
         self.total_ms = round((time.time() - self._t0) * 1000, 2)
         self.sections.setdefault("output", {}).setdefault("status", status)
+        try:  # best-effort: token accounting can never break the query path
+            from slm._call_slm import get_usage
+            u = get_usage()
+            if u and u.get("calls"):
+                self.sections.setdefault("llm_usage", {}).update(
+                    calls=u["calls"],
+                    total_prompt_tokens=u["prompt_tokens"],
+                    total_completion_tokens=u["completion_tokens"],
+                    total_tokens=u["prompt_tokens"] + u["completion_tokens"],
+                    per_purpose=u["per_purpose"])
+        except Exception:
+            pass
         try:
             from config import EXPLAIN_TRACE_PERSIST
         except Exception:
@@ -276,6 +290,11 @@ def render_trace(d: Optional[Dict[str, Any]], verbose: bool = False) -> str:
 
 def new_trace(query: str):
     """Factory: a real trace if enabled, else a zero-cost _NullTrace."""
+    try:  # best-effort: start a fresh per-query SLM token accumulator
+        from slm._call_slm import reset_usage
+        reset_usage()
+    except Exception:
+        pass
     try:
         from config import EXPLAIN_TRACE_ENABLED, EXPLAIN_TRACE_VERBOSE
     except Exception:

@@ -34,7 +34,8 @@ _KEY_OK = re.compile(r"[^A-Za-z0-9_\-./ ]+")
 # Section display order (mirrors veda/explain.py _SECTIONS).
 SECTIONS = [
     "query_understanding", "retrieval", "graph_expansion", "schema_linking",
-    "anchor_selection", "join_planning", "sql_planning", "validation", "output",
+    "anchor_selection", "join_planning", "sql_planning", "validation",
+    "llm_usage", "output",
 ]
 
 # Spec artifact file name per section (mlflow_impl.md).
@@ -50,16 +51,10 @@ _SECTION_ARTIFACT = {
     "output": "layers/final_response.json",
 }
 
-# mlflow_impl.md datapoints the platform does NOT emit yet (the trace has no
-# tenant/session identity, and a few layers still lack model/latency
-# attribution). Logged to coverage.json per run so the gap is visible instead
-# of silently absent. Token fields (total_prompt_tokens, sql_model, etc.) are
-# now captured via veda_core/slm/_call_slm.py's usage accumulator — see
-# ExplainTrace.compact() and the "output"/"nl_summary" trace sections.
-# estimated_cost / *_cost from the spec are deliberately NOT emitted and never
-# will be while the engine is self-hosted SLMs — there is no real per-token
-# billing to estimate a cost from, so a nonzero-looking placeholder would be
-# misleading. Not tracked as a gap.
+# mlflow_impl.md datapoints the platform does not necessarily emit (the trace
+# has no tenant/session identity; token totals exist only when the engine's
+# llm_usage section is present — coverage.json drops from this list whatever
+# THIS run actually carried, so the report stays truthful per record).
 SPEC_GAPS = [
     "tenant_id", "conversation_id", "session_id", "user_id", "pipeline_version",
     "git_commit", "cpu_usage", "memory_usage",
@@ -67,17 +62,28 @@ SPEC_GAPS = [
     "chart_type", "chart_confidence",
 ]
 
-# Spec Layer-2 "Signal Scores" (mlflow_impl.md). The engine's RetrievalResult
-# defines these fields, but the trace's retrieval.top_columns today carries
-# only {col, score, type} — `score` is final_score (post-rerank when the
-# reranker ran). map_record() promotes EVERY one of these keys it finds on a
-# candidate, so the moment the engine starts stamping the others into the
-# trace they appear in MLflow with zero exporter changes; coverage.json and
+# Spec Layer-2 "Signal Scores" (mlflow_impl.md). The engine (veda/pipeline.py
+# tr.cand("retrieval", "top_columns", ...)) emits each candidate as
+#   {col, score, signals: {semantic, sparse, subgraph, fk_path, value}}
+# — `score` is final_score (post-rerank when the reranker ran) and the
+# per-signal scores sit NESTED under `signals` with short names. Older traces
+# and pre-upgrade records carry flat *_score keys instead. _flat_signals()
+# normalizes both shapes to the flat spec names below, and map_record()
+# promotes EVERY signal key it finds on a candidate, so new signals appear in
+# MLflow with zero exporter changes; coverage.json and
 # layers/signal_scores.json report per run which are present vs missing.
 SIGNAL_SCORE_KEYS = [
     "semantic_score", "bm25_score", "graph_score", "subgraph_score", "fk_score",
     "value_score", "rrf_score", "cross_encoder_score", "final_score", "score",
 ]
+
+# Engine's nested `signals` short names → flat spec names (`sparse` IS the
+# BM25/lexical signal; `fk_path`/`value` are RetrievalResult's
+# fk_path_score/value_index_score).
+_NESTED_SIGNAL_NAME = {
+    "semantic": "semantic_score", "sparse": "bm25_score",
+    "subgraph": "subgraph_score", "fk_path": "fk_score", "value": "value_score",
+}
 
 # One spec signal, two engine spellings: RetrievalResult calls the graph
 # signal `subgraph_score` while mlflow_impl.md calls it `graph_score`, and the
@@ -93,6 +99,18 @@ def missing_signals(present: List[str]) -> List[str]:
         if have & group:
             have |= group
     return [k for k in SIGNAL_SCORE_KEYS if k != "score" and k not in have]
+
+
+def _flat_signals(cand: Dict[str, Any]) -> Dict[str, Any]:
+    """Candidate with any nested `signals` dict promoted to flat spec-named
+    keys. Flat keys already on the candidate win (older traces carry both)."""
+    sig = cand.get("signals")
+    if not isinstance(sig, dict):
+        return cand
+    flat = dict(cand)
+    for k, v in sig.items():
+        flat.setdefault(_NESTED_SIGNAL_NAME.get(k, k), v)
+    return flat
 
 
 @dataclass
@@ -225,8 +243,12 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
     graph = sections.get("graph_expansion") or {}
     for src, name in (("seeds", "graph_seed_terms"), ("synonyms", "graph_synonyms_followed"),
                       ("added", "graph_columns_added")):
-        if isinstance(graph.get(src), list):
-            m[name] = float(len(graph[src]))
+        v = graph.get(src)
+        if isinstance(v, list):
+            m[name] = float(len(v))
+        elif isinstance(v, dict):
+            # synonyms is {seed: [synonyms]} (graph/query_graph.suggest_expansions)
+            m[name] = float(sum(len(x) if isinstance(x, list) else 1 for x in v.values()))
     if graph:
         m["graph_expansion_used"] = 1.0 if graph.get("added") else 0.0
 
@@ -240,6 +262,18 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
     repairs = val.get("repairs") or []
     m["repair_count"] = float(len(repairs))
 
+    # ── LLM token usage (spec total_*_tokens) — engine's llm_usage section ──
+    # (stamped by ExplainTrace.finish() from slm/_call_slm.py accounting; the
+    # per-purpose breakdown lands in layers/llm_usage.json via the sweep)
+    lu = sections.get("llm_usage") or {}
+    for src, name in (("total_prompt_tokens", "total_prompt_tokens"),
+                      ("total_completion_tokens", "total_completion_tokens"),
+                      ("total_tokens", "total_tokens"),
+                      ("calls", "llm_calls")):
+        v = _num(lu.get(src))
+        if v is not None:
+            m[name] = v
+
     out = sections.get("output") or {}
     sql = out.get("sql") or ""
     if sql:
@@ -249,16 +283,21 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
         m["limit_present"] = 1.0 if re.search(r"\bLIMIT\b", sql, re.IGNORECASE) else 0.0
 
     # ── Layer-2 signal scores (spec "Signal Scores") ─────────────────────────
-    # retrieval.top_columns is the engine's per-candidate list ({col, score,
-    # type} today; any SIGNAL_SCORE_KEYS the engine adds are promoted too).
-    top_cols = [c for c in (retr.get("top_columns") or []) if isinstance(c, dict)]
+    # retrieval.top_columns is the engine's per-candidate list; nested
+    # `signals` short names are flattened to spec keys, and any extra *_score
+    # key a future engine adds is promoted too (nothing recorded is dropped).
+    top_cols = [_flat_signals(c) for c in (retr.get("top_columns") or [])
+                if isinstance(c, dict)]
     signals_present: List[str] = []
     if top_cols:
         m["retrieval.top_columns_count"] = float(len(top_cols))
         p["retrieval.top1_column"] = _short(top_cols[0].get("col", ""), param_value_max)
         p["retrieval.top_columns"] = _short(
             ", ".join(str(c.get("col", "")) for c in top_cols), param_value_max)
-        for key in SIGNAL_SCORE_KEYS:
+        promote = SIGNAL_SCORE_KEYS + sorted(
+            {k for c in top_cols for k in c if k.endswith("_score")}
+            - set(SIGNAL_SCORE_KEYS))
+        for key in promote:
             vals = [v for v in (_num(c.get(key)) for c in top_cols) if v is not None]
             if not vals:
                 continue
@@ -315,8 +354,9 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
             "signals_present": signals_present,
             "signals_not_emitted_by_engine": missing_signals(signals_present),
             "note": "`score` on a candidate is the engine's final_score "
-                    "(post-rerank when the reranker ran); per-signal keys are "
-                    "promoted to metrics automatically once the engine emits them.",
+                    "(post-rerank when the reranker ran); nested `signals` "
+                    "short names (semantic/sparse/subgraph/fk_path/value) are "
+                    "normalized to flat spec keys and promoted to metrics.",
             "retrieval_candidates": top_cols,
             "anchor_alternatives": alts,
         }, indent=2, default=str)
@@ -357,11 +397,12 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
                  for w in ((sections.get(s) or {}).get("why") or [])]
     if why_lines:
         a["trace/why.txt"] = "\n".join(why_lines)
+    gaps = [k for k in SPEC_GAPS if _num(lu.get(k)) is None]
     a["coverage.json"] = json.dumps(
         {"captured_sections": sorted(sections.keys()),
          "signal_scores_present": signals_present,
          "signal_scores_missing": missing_signals(signals_present),
-         "spec_datapoints_not_yet_emitted_by_engine": SPEC_GAPS},
+         "spec_datapoints_not_yet_emitted_by_engine": gaps},
         indent=2)
 
     return spec
