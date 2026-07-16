@@ -149,6 +149,8 @@ class ConversationQueryView(APIView):
     def _json_response(self, service, chat, message, rid):
         logger.info("conversation query AI processing started chat_id=%s", chat.pk)
         content_blocks, explainability, thinking_text, summary_text, error = [], None, "", "", None
+        usage = {}
+        insights = None
         for evt in service.run_turn(chat, message, request_id=rid):
             kind, payload = evt["event"], evt["data"]
             if kind == "thinking":
@@ -159,6 +161,10 @@ class ConversationQueryView(APIView):
                     summary_text = payload.get("content", "")
             elif kind == "explainability":
                 explainability = payload
+            elif kind == "usage":
+                usage = payload
+            elif kind == "insights":
+                insights = payload
             elif kind == "error":
                 error = payload
         logger.info("conversation query AI processing completed chat_id=%s", chat.pk)
@@ -171,21 +177,26 @@ class ConversationQueryView(APIView):
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        metadata = {"thinking": thinking_text, "explainability": explainability}
+        metadata = {"thinking": thinking_text, "explainability": explainability, "usage": usage}
         assistant_msg = service.save_assistant_message(chat, content_blocks, metadata)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
 
+        response_data = {
+            "chat_id": chat.pk,
+            "message_id": assistant_msg.pk,
+            "summary": summary_text,
+            "response": content_blocks,
+            "metadata": metadata,
+        }
+        if insights is not None:
+            response_data["insights"] = insights["insights"]
+            response_data["follow_up_questions"] = insights["follow_up_questions"]
+
         return Response({
             "status_code": status.HTTP_200_OK,
             "message": "Query processed successfully.",
-            "data": {
-                "chat_id": chat.pk,
-                "message_id": assistant_msg.pk,
-                "summary": summary_text,
-                "response": content_blocks,
-                "metadata": metadata,
-            },
+            "data": response_data,
         }, status=status.HTTP_200_OK)
 
     def _stream_response(self, service, chat, message, rid):
@@ -201,6 +212,7 @@ class ConversationQueryView(APIView):
     def _sse_generator(self, service, chat, message, rid):
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
         content_blocks, explainability, thinking_text, summary_text = [], None, "", ""
+        usage = {}
         try:
             for evt in service.run_turn(chat, message, request_id=rid, stream=True):
                 kind, payload = evt["event"], evt["data"]
@@ -212,6 +224,8 @@ class ConversationQueryView(APIView):
                         summary_text = payload.get("content", "")
                 elif kind == "explainability":
                     explainability = payload
+                elif kind == "usage":
+                    usage = payload
                 elif kind == "error":
                     yield _sse_format("error", payload)
                     logger.warning("conversation query streaming error chat_id=%s: %s",
@@ -223,7 +237,7 @@ class ConversationQueryView(APIView):
             yield _sse_format("error", {"code": "STREAM_ERROR", "message": str(exc)})
             return
 
-        metadata = {"thinking": thinking_text, "explainability": explainability}
+        metadata = {"thinking": thinking_text, "explainability": explainability, "usage": usage}
         assistant_msg = service.save_assistant_message(chat, content_blocks, metadata)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
@@ -358,6 +372,9 @@ def _serialize_history_message(msg) -> dict:
             "metadata": {
                 "thinking": meta.get("thinking", ""),
                 "explainability": meta.get("explainability"),
+                "usage": meta.get("usage") or {
+                    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
+                },
             },
         }
     else:

@@ -50,16 +50,21 @@ _SECTION_ARTIFACT = {
     "output": "layers/final_response.json",
 }
 
-# mlflow_impl.md datapoints the platform does NOT emit yet (the engine has no
-# token/cost accounting and the trace has no tenant/session identity). Logged
-# to coverage.json per run so the gap is visible instead of silently absent.
+# mlflow_impl.md datapoints the platform does NOT emit yet (the trace has no
+# tenant/session identity, and a few layers still lack model/latency
+# attribution). Logged to coverage.json per run so the gap is visible instead
+# of silently absent. Token fields (total_prompt_tokens, sql_model, etc.) are
+# now captured via veda_core/slm/_call_slm.py's usage accumulator — see
+# ExplainTrace.compact() and the "output"/"nl_summary" trace sections.
+# estimated_cost / *_cost from the spec are deliberately NOT emitted and never
+# will be while the engine is self-hosted SLMs — there is no real per-token
+# billing to estimate a cost from, so a nonzero-looking placeholder would be
+# misleading. Not tracked as a gap.
 SPEC_GAPS = [
     "tenant_id", "conversation_id", "session_id", "user_id", "pipeline_version",
-    "git_commit", "total_prompt_tokens", "total_completion_tokens",
-    "total_tokens", "estimated_cost", "cpu_usage", "memory_usage",
-    "rerank_model", "rerank_latency", "sql_model", "prompt_tokens",
-    "completion_tokens", "memory_hits", "memory_injected", "summary_model",
-    "summary_tokens", "chart_type", "chart_confidence",
+    "git_commit", "cpu_usage", "memory_usage",
+    "rerank_model", "rerank_latency", "memory_hits", "memory_injected",
+    "chart_type", "chart_confidence",
 ]
 
 # Spec Layer-2 "Signal Scores" (mlflow_impl.md). The engine's RetrievalResult
@@ -188,6 +193,10 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
     # ── spec-named metrics ───────────────────────────────────────────────────
     if total_ms is not None:
         m["total_latency_ms"] = total_ms
+    for src in ("total_prompt_tokens", "total_completion_tokens", "total_tokens"):
+        v = _num(record.get(src))
+        if v is not None:
+            m[src] = v
     for src, name in (("anchor_conf", "routing_confidence"),
                       ("join_conf", "join_confidence"),
                       ("confidence", "answer_confidence")):

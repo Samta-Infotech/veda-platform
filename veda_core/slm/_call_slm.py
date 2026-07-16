@@ -21,6 +21,13 @@
 #
 # Zero-egress: both backends live on the internal network (OLLAMA_URL / VLLM_URL);
 # nothing here dials outside the deployment.
+#
+# Token usage: both backends' responses carry token counts (Ollama:
+# prompt_eval_count/eval_count; vLLM: usage.{prompt,completion}_tokens).
+# call_slm() records them into whatever collect_usage() scope is open (see
+# below) without changing its own str return contract — wrap a query's whole
+# processing in `with collect_usage() as u:` and read `u.calls()`/
+# `usage_totals(u.calls())` afterwards.
 # =============================================================================
 from __future__ import annotations
 
@@ -43,6 +50,64 @@ class _slm_circuit_breaker:
 
     def __exit__(self, exc_type, exc, tb):
         return False  # never swallow — call sites own their degrade behaviour
+
+
+# ---------------------------------------------------------------------------
+# Token usage capture — one thread-local buffer per active collection scope.
+# Every call_slm() records its usage here (no-op if no scope is open), and
+# callers that want the numbers open a `with collect_usage() as u:` around a
+# whole query. Nestable: an inner collect_usage() (e.g. a Tier-1 run_query()
+# invoked from inside Tier-2's dispatch) is a harmless no-op re-entry — the
+# outermost scope is the one that actually collects and clears the buffer.
+# ---------------------------------------------------------------------------
+_usage_tls = threading.local()
+
+
+def _record_usage(purpose: str, model: Optional[str],
+                   prompt_tokens: Optional[int], completion_tokens: Optional[int]) -> None:
+    buf = getattr(_usage_tls, "calls", None)
+    if buf is None:
+        return  # no active collection scope — zero overhead
+    buf.append({
+        "purpose": purpose,
+        "model": model,
+        "prompt_tokens": prompt_tokens or 0,
+        "completion_tokens": completion_tokens or 0,
+    })
+
+
+class collect_usage:
+    """Context manager: opens a per-thread usage buffer for the duration of
+    one user query. Nestable — an inner scope is a no-op passthrough; only
+    the outermost scope collects and clears on exit."""
+
+    def __enter__(self):
+        self._owns = getattr(_usage_tls, "calls", None) is None
+        if self._owns:
+            _usage_tls.calls = []
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._owns:
+            _usage_tls.calls = None
+        return False
+
+    def calls(self) -> list:
+        return list(getattr(_usage_tls, "calls", None) or [])
+
+
+def usage_totals(calls: list) -> dict:
+    """Sum a list of per-call usage dicts (as produced by collect_usage().calls())
+    into the aggregate shape shared by explain_trace, MLflow, ChatMessage.metadata
+    and QueryLog. No cost figure: self-hosted SLMs have no real per-token
+    billing, so there is nothing meaningful to estimate a $ cost from."""
+    pt = sum(c.get("prompt_tokens", 0) for c in calls)
+    ct = sum(c.get("completion_tokens", 0) for c in calls)
+    return {
+        "prompt_tokens": pt,
+        "completion_tokens": ct,
+        "total_tokens": pt + ct,
+    }
 
 
 def _config():
@@ -99,7 +164,7 @@ class OllamaBackend:
 
     def call(self, user_message, *, system=None, timeout=None, temperature=0.0,
              num_predict=None, num_ctx=None, seed=None, json_format=False,
-             endpoint="chat", model=None) -> str:
+             endpoint="chat", model=None) -> tuple:
         timeout = timeout or self.default_timeout
         options = {"temperature": temperature}
         if num_predict is not None:
@@ -113,7 +178,9 @@ class OllamaBackend:
             payload = {"model": model or self.model, "prompt": user_message,
                        "stream": False, "keep_alive": "24h", "options": options}
             body = _post_json(f"{self.base_url}/api/generate", payload, timeout)
-            return (body.get("response") or "").strip()
+            usage = {"prompt_tokens": body.get("prompt_eval_count"),
+                      "completion_tokens": body.get("eval_count")}
+            return (body.get("response") or "").strip(), usage
 
         messages = []
         if system:
@@ -129,7 +196,9 @@ class OllamaBackend:
             raise RuntimeError(
                 f"SLM returned empty content from {self.base_url}/api/chat: "
                 f"{json.dumps(body)[:300]}")
-        return content
+        usage = {"prompt_tokens": body.get("prompt_eval_count"),
+                  "completion_tokens": body.get("eval_count")}
+        return content, usage
 
 
 class VLLMBackend:
@@ -150,7 +219,7 @@ class VLLMBackend:
 
     def call(self, user_message, *, system=None, timeout=None, temperature=0.0,
              num_predict=None, num_ctx=None, seed=None, json_format=False,
-             endpoint="chat", model=None) -> str:
+             endpoint="chat", model=None) -> tuple:
         timeout = timeout or self.default_timeout
         messages = []
         if system:
@@ -175,7 +244,10 @@ class VLLMBackend:
         content = content.strip()
         if not content:
             raise RuntimeError(f"SLM returned empty content from {self.base_url}")
-        return content
+        _u = body.get("usage") or {}
+        usage = {"prompt_tokens": _u.get("prompt_tokens"),
+                  "completion_tokens": _u.get("completion_tokens")}
+        return content, usage
 
 
 _BACKEND = {"v": None}
@@ -211,12 +283,18 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
              json_format: bool = False, endpoint: str = "chat",
              model: Optional[str] = None) -> str:
     """The one SLM entry point. `purpose` is a label for tracing/metrics only
-    (e.g. "ir_emit", "nl_answer", "decompose") — it never changes routing."""
+    (e.g. "ir_emit", "nl_answer", "decompose") — it never changes routing.
+    Return contract is unchanged (plain str); token usage is recorded on the
+    side into whatever collect_usage() scope is currently open, if any."""
+    backend = get_backend()
     with _slm_circuit_breaker():
-        return get_backend().call(
+        content, usage = backend.call(
             user_message, system=system, timeout=timeout, temperature=temperature,
             num_predict=num_predict, num_ctx=num_ctx, seed=seed,
             json_format=json_format, endpoint=endpoint, model=model)
+    _record_usage(purpose, model or backend.model,
+                  usage.get("prompt_tokens"), usage.get("completion_tokens"))
+    return content
 
 
 def prewarm(model: Optional[str] = None, timeout: int = 120) -> None:

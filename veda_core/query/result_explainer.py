@@ -292,14 +292,20 @@ def _shape_line(ctx) -> str:
     return f"\n\n{hint}" if hint else ""
 
 
-def _synthesize_confidence(ctx) -> float:
+def synthesize_confidence(confidence_inputs: Optional[Dict[str, float]]) -> float:
     """Weakest-link confidence from whatever gating signals the caller already
     computed upstream (e.g. veda/pipeline.py's anchor-selection + join-plan
-    confidence) — reused via ctx.confidence_inputs, never invented and never
-    the SLM's own self-report. 1.0 (fully confident) when the caller supplied
-    nothing, matching the engine's existing default-confidence convention."""
-    vals = list((getattr(ctx, "confidence_inputs", None) or {}).values())
+    confidence) — never invented and never the SLM's own self-report. 1.0
+    (fully confident) when the caller supplied nothing, matching the engine's
+    existing default-confidence convention. Public so callers that don't run
+    the Insight Engine (INSIGHT_ENGINE_ENABLED=False) can still get a
+    deterministic confidence for every answered query."""
+    vals = list((confidence_inputs or {}).values())
     return round(min(vals), 3) if vals else 1.0
+
+
+def _synthesize_confidence(ctx) -> float:
+    return synthesize_confidence(getattr(ctx, "confidence_inputs", None))
 
 
 def _fallback_summary(ctx) -> str:
