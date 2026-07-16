@@ -270,16 +270,31 @@ class ConversationQueryService:
         # veda_core (veda/business_explain.py) builds this deterministically from the
         # final validated SQL + semantic model — never from retrieval/routing internals
         # (those live only in res0["trace"], for our own debugging, never sent over SSE).
+        # Confidence lives INSIDE explain (build_explain()'s "confidence" key) —
+        # one canonical place, not duplicated as a second top-level field. It's a
+        # deterministic weakest-link value from anchor/join gating signals
+        # (veda/pipeline.py's _done(), query/result_explainer.py's
+        # synthesize_confidence) — never an LLM self-report — always present for
+        # an answered Tier-1 query, regardless of INSIGHT_ENGINE_ENABLED.
         yield {"event": "explainability", "data": res0.get("explain") or _NO_EXPLAIN}
-        # Insight Engine (additive, new event type): only present when
-        # INSIGHT_ENGINE_ENABLED produced these keys server-side (veda/pipeline.py's
-        # _done()) — absent entirely when the flag is off, so old clients that only
-        # listen for content/visualization/explainability/error see nothing new.
-        if "insights" in res0 or "follow_up_questions" in res0 or "confidence" in res0:
+        # Token usage (veda_core/slm/_call_slm.py's usage accumulator, surfaced
+        # via veda/pipeline.py's _done() / veda_hybrid.py's Tier-2 dispatch).
+        # Always a 3-key dict — {0,0,0} for deterministic fast paths that never
+        # call an SLM — so the UI never special-cases absence. No cost figure:
+        # self-hosted SLMs have no real per-token billing. latency_ms rides
+        # along on the same event (total end-to-end query time, tr.total_ms /
+        # veda_hybrid.py's Tier-2 timer) — None when unavailable (e.g. a
+        # refusal path that never reached _done()).
+        yield {"event": "usage", "data": {
+            **(res0.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
+            "latency_ms": res0.get("latency_ms"),
+        }}
+        # Insight Engine (additive event type): only present when
+        # INSIGHT_ENGINE_ENABLED produced these keys server-side.
+        if "insights" in res0 or "follow_up_questions" in res0:
             yield {"event": "insights", "data": {
                 "insights": res0.get("insights") or [],
                 "follow_up_questions": res0.get("follow_up_questions") or [],
-                "confidence": res0.get("confidence"),
             }}
 
     @staticmethod

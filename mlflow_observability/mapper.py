@@ -57,11 +57,9 @@ _SECTION_ARTIFACT = {
 # THIS run actually carried, so the report stays truthful per record).
 SPEC_GAPS = [
     "tenant_id", "conversation_id", "session_id", "user_id", "pipeline_version",
-    "git_commit", "total_prompt_tokens", "total_completion_tokens",
-    "total_tokens", "estimated_cost", "cpu_usage", "memory_usage",
-    "rerank_model", "rerank_latency", "sql_model", "prompt_tokens",
-    "completion_tokens", "memory_hits", "memory_injected", "summary_model",
-    "summary_tokens", "chart_type", "chart_confidence",
+    "git_commit", "cpu_usage", "memory_usage",
+    "rerank_model", "rerank_latency", "memory_hits", "memory_injected",
+    "chart_type", "chart_confidence",
 ]
 
 # Spec Layer-2 "Signal Scores" (mlflow_impl.md). The engine (veda/pipeline.py
@@ -213,6 +211,10 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
     # ── spec-named metrics ───────────────────────────────────────────────────
     if total_ms is not None:
         m["total_latency_ms"] = total_ms
+    for src in ("total_prompt_tokens", "total_completion_tokens", "total_tokens"):
+        v = _num(record.get(src))
+        if v is not None:
+            m[src] = v
     for src, name in (("anchor_conf", "routing_confidence"),
                       ("join_conf", "join_confidence"),
                       ("confidence", "answer_confidence")):

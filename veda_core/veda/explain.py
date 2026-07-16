@@ -55,6 +55,9 @@ class ExplainTrace:
     _t0: float = field(default_factory=time.time)
     sections: Dict[str, Dict[str, Any]] = field(default_factory=dict)
     total_ms: float = 0.0
+    total_prompt_tokens: int = 0
+    total_completion_tokens: int = 0
+    total_tokens: int = 0
 
     # ── recording API (all cheap dict ops) ──────────────────────────────────
     def _sec(self, section: str) -> Dict[str, Any]:
@@ -116,6 +119,9 @@ class ExplainTrace:
             "confidence": out.get("confidence"),
             "refusal": out.get("refusal"),
             "total_ms": self.total_ms,
+            "total_prompt_tokens": self.total_prompt_tokens,
+            "total_completion_tokens": self.total_completion_tokens,
+            "total_tokens": self.total_tokens,
         }
 
     # ── persistence + human view ──────────────────────────────────────────────

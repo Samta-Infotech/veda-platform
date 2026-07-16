@@ -123,8 +123,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     _llm_sql = False          # True only when the SQL's SELECT/WHERE was LLM-written
     from veda.explain import new_trace
     from veda.execution_state import ExecutionState
+    from slm._call_slm import collect_usage, usage_totals
     tr = new_trace(query)
     es = ExecutionState()
+    _usage = collect_usage()
+    _usage.__enter__()  # closed in _done() — the single funnel for every exit below
 
     _ticks: list = []   # passive (phase, message) record of every _tick() below,
                         # for build_explain()'s "timeline" — see _done()'s return.
@@ -165,6 +168,22 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             es.refusal_reason = _refusal
         else:
             _tick("output", "Done — here's your answer")
+        _calls = _usage.calls()
+        _totals = usage_totals(_calls)
+        tr.total_prompt_tokens = _totals["prompt_tokens"]
+        tr.total_completion_tokens = _totals["completion_tokens"]
+        tr.total_tokens = _totals["total_tokens"]
+        _sql_calls = [c for c in _calls if c["purpose"] in ("sql_single_table", "sql_join")]
+        if _sql_calls:
+            tr.set("output", prompt_tokens=_sql_calls[-1]["prompt_tokens"],
+                   completion_tokens=_sql_calls[-1]["completion_tokens"],
+                   sql_model=_sql_calls[-1]["model"])
+        _nl_calls = [c for c in _calls if c["purpose"] in ("nl_answer", "insight_engine")]
+        if _nl_calls:
+            tr.set("nl_summary",
+                   summary_tokens=_nl_calls[-1]["prompt_tokens"] + _nl_calls[-1]["completion_tokens"],
+                   summary_model=_nl_calls[-1]["model"])
+        _usage.__exit__(None, None, None)
         tr.finish(status)
         # Tier2 continuation context (Tier1→Tier2 propagation) — deliberately NOT the
         # full trace (that stays below, for debugging); just what Tier2 needs to avoid
@@ -173,6 +192,16 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if return_result:
             explain = None
             if status == "answered":
+                _confidence = None
+                try:
+                    from query.result_explainer import synthesize_confidence
+                    _anchor_conf = tr.sections.get("anchor_selection", {}).get("confidence")
+                    _join_conf = tr.sections.get("join_planning", {}).get("confidence")
+                    _conf_inputs = {k: v for k, v in
+                                   (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
+                    _confidence = synthesize_confidence(_conf_inputs)
+                except Exception:
+                    logger.exception("synthesize_confidence failed — result confidence omitted")
                 try:
                     from veda.business_explain import build_explain
                     explain = build_explain(
@@ -181,6 +210,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         visualization=kw.get("visualization"),
                         params=params,
                         timeline=_ticks,
+                        confidence=_confidence,
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
@@ -197,7 +227,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 except Exception:
                     logger.exception("build_refusal_explain failed — refusal explainability omitted")
             return {"status": status, "ok": (status == "answered"),
-                    "trace": tr.to_dict(), "explain": explain, "context": es, **kw}
+                    "trace": tr.to_dict(), "explain": explain,
+                    "usage": {"prompt_tokens": tr.total_prompt_tokens,
+                              "completion_tokens": tr.total_completion_tokens,
+                              "total_tokens": tr.total_tokens},
+                    "latency_ms": tr.total_ms,
+                    "context": es, **kw}
         return rc
 
     def _rec_plan(p):

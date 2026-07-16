@@ -70,10 +70,13 @@ class QueryView(APIView):
         sql = res0.get("sql") if isinstance(res0, dict) else ""
         # Cache hit: the verified-query path tags the answer table "(cached)" (§6.6).
         cache_hit = isinstance(res0, dict) and res0.get("table") == "(cached)"
+        usage = res0.get("usage") if isinstance(res0, dict) else None
         self._audit(query, tenant, source_id, status_str, latency, route=route, sql=sql or "",
-                    rid=rid, cache_hit=cache_hit)
+                    rid=rid, cache_hit=cache_hit, usage=usage)
         return Response({"status": status_str, "result": result, "latency_ms": latency,
-                         "request_id": rid, "cache_hit": cache_hit})
+                         "request_id": rid, "cache_hit": cache_hit,
+                         "usage": usage or {"prompt_tokens": 0, "completion_tokens": 0,
+                                            "total_tokens": 0}})
 
     @staticmethod
     def _resolve_scope(data, tenant) -> list:
@@ -120,13 +123,17 @@ class QueryView(APIView):
 
     @staticmethod
     def _audit(query, tenant, source_id, status_str, latency, route="", sql="", refusal="",
-               rid="", cache_hit=False):
+               rid="", cache_hit=False, usage=None):
+        usage = usage or {}
         try:
             QueryLog.objects.create(
                 source_id=source_id, tenant=tenant, query_text=query,
                 route=route or "", status=status_str, executed_sql=sql or "",
                 refusal_reason=refusal or "", latency_ms=latency, request_id=rid or "",
                 cache_hit=cache_hit,
+                prompt_tokens=usage.get("prompt_tokens"),
+                completion_tokens=usage.get("completion_tokens"),
+                total_tokens=usage.get("total_tokens"),
             )
         except Exception:  # audit must never break the response
             pass
