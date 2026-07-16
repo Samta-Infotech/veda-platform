@@ -73,7 +73,7 @@ python -m mlflow_observability demo
 python -m mlflow_observability watch          # Ctrl-C to stop (or `export` for one pass)
 
 # 2) in a second terminal — the UI
-python -m mlflow_observability ui             # → http://127.0.0.1:5000
+python -m mlflow_observability ui             # → http://127.0.0.1:5001
 ```
 
 Local defaults: sqlite store + artifacts + checkpoint under `mlflow_observability/mlflow_data/`
@@ -87,7 +87,7 @@ A dedicated override file — existing compose files are untouched:
 ```bash
 COMPOSE="docker compose -f docker-compose.yml -f docker-compose.mlflow.yml"
 $COMPOSE up -d mlflow mlflow-exporter
-# UI → http://<host>:5000   (MLFLOW_UI_PORT to change)
+# UI → http://<host>:5001   (MLFLOW_UI_PORT to change; default avoids macOS AirPlay on 5000)
 ```
 
 * `mlflow` — tracking server + UI, store/artifacts on the `mlflow_data` volume.
