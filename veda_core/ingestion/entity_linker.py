@@ -214,7 +214,8 @@ def detect_entities(text: str, value_index: Dict[str, List[dict]]) -> Dict[str, 
 
 
 # ------------------------------------------------------------------- scoped delete
-_ENTITY_EDGE_TYPES = ("mentions_entity", "value_of", "mentions", "name_match", "about")
+_ENTITY_EDGE_TYPES = ("mentions_entity", "value_of", "mentions", "name_match", "about",
+                      "semantic_about", "semantic_value_of")
 
 
 def _scoped_delete(source_id: str) -> None:
@@ -242,16 +243,22 @@ def _scoped_delete(source_id: str) -> None:
         release_internal_connection(conn)
 
 
+# An entity is "linked" (not an orphan) if it is the source of a value_of edge (exact
+# bridge) OR a semantic_value_of edge (Tier B value bridge). Both admit an entity; the
+# prune must honour both or it deletes every semantic-only entity and leaves its
+# semantic_value_of / mentions_entity edges dangling.
+_ENTITY_LINK_EDGE_TYPES = ("value_of", "semantic_value_of")
+
+
 def _prune_orphan_entities() -> int:
-    """Delete entity nodes with no remaining value_of edge (e.g. after a re-ingest drops
-    the links that admitted them). Tenant-wide and safe: an entity still referenced by
-    another source keeps its value_of edges and survives. Also clears their dangling
-    mentions_entity edges. Returns nodes pruned."""
+    """Delete entity nodes with no remaining value_of / semantic_value_of edge (e.g. after
+    a re-ingest drops the links that admitted them). Tenant-wide and safe: an entity still
+    referenced by another source keeps its linking edges and survives. Also clears their
+    dangling mentions_entity edges. Returns nodes pruned."""
     if not INTERNAL_DB_AVAILABLE:
         before = len(GP._IN_MEMORY_NODES)
-        linked = {e["dst_node_id"] if e["edge_type"] == "value_of" else None
-                  for e in GP._IN_MEMORY_EDGES}
-        srcd = {e["src_node_id"] for e in GP._IN_MEMORY_EDGES if e["edge_type"] == "value_of"}
+        srcd = {e["src_node_id"] for e in GP._IN_MEMORY_EDGES
+                if e["edge_type"] in _ENTITY_LINK_EDGE_TYPES}
         GP._IN_MEMORY_NODES = [n for n in GP._IN_MEMORY_NODES
                                if not (n["node_type"] == "entity" and n["node_id"] not in srcd)]
         return before - len(GP._IN_MEMORY_NODES)
@@ -259,13 +266,15 @@ def _prune_orphan_entities() -> int:
     try:
         with conn:
             with conn.cursor() as cur:
+                ph = ",".join(["%s"] * len(_ENTITY_LINK_EDGE_TYPES))
                 cur.execute(f"""
                     DELETE FROM {GRAPH_NODES_TABLE} gn
                     WHERE gn.node_type = 'entity'
                       AND NOT EXISTS (
                         SELECT 1 FROM {GRAPH_EDGES_TABLE} e
-                        WHERE e.src_node_id = gn.node_id AND e.edge_type = 'value_of')
-                """)
+                        WHERE e.src_node_id = gn.node_id
+                          AND e.edge_type IN ({ph}))
+                """, _ENTITY_LINK_EDGE_TYPES)
                 pruned = cur.rowcount or 0
                 if pruned:
                     # sweep their now-dangling mentions_entity edges
@@ -336,6 +345,35 @@ def link_entities(chunks, source_id: str, tenant: str = "default",
                                        evidence=f"value_of:{col['col_name']}",
                                        attrs={"col_source": col["source_id"]}))
 
+    # Semantic bridge (docs/SEMANTIC_ENTITY_BRIDGE.md, Tier A): additive semantic lane
+    # linking these chunks to the structured semantic layer (column vectors already in
+    # graph_node_embeddings) by M3 cosine — widens recall on synonyms/paraphrases the
+    # exact detectors above miss. Best-effort; a failure never fails entity linking. Its
+    # `semantic_about` edges are cleaned by _scoped_delete (listed in _ENTITY_EDGE_TYPES).
+    semantic_edges = 0
+    try:
+        from ingestion.semantic_linker import build_semantic_edges
+        sem = build_semantic_edges(chunks, source_id, tenant=tenant, verbose=verbose)
+        edges.extend(sem)
+        semantic_edges = len(sem)
+    except Exception as e:
+        logger.warning("entity_linker: semantic bridge (Tier A) skipped (%s)", e)
+
+    # Tier B value-level semantic bridge (docs/SEMANTIC_ENTITY_BRIDGE.md §3.1): chunk
+    # SPAN → structured VALUE it paraphrases. Emits entity nodes + mentions_entity +
+    # semantic_value_of; its entity ids reuse entity_node_id so they merge with the
+    # exact-bridge entities above. Best-effort; a failure never fails entity linking.
+    semantic_value_edges = 0
+    try:
+        from ingestion.semantic_linker import build_value_bridge
+        sv_nodes, sv_edges = build_value_bridge(chunks, source_id, tenant=tenant, verbose=verbose)
+        for n in sv_nodes:
+            entity_nodes.setdefault(n.node_id, n)
+        edges.extend(sv_edges)
+        semantic_value_edges = len(sv_edges)
+    except Exception as e:
+        logger.warning("entity_linker: semantic value bridge (Tier B) skipped (%s)", e)
+
     cn = GP.upsert_nodes(chunk_nodes, verbose=verbose)
     en = GP.upsert_nodes(list(entity_nodes.values()), verbose=verbose)
     ew = GP.upsert_edges(edges, verbose=verbose)
@@ -346,7 +384,9 @@ def link_entities(chunks, source_id: str, tenant: str = "default",
     vo = sum(1 for e in edges if e.edge_type == "value_of")
     dur = round(time.time() - t0, 3)
     if verbose:
-        logger.info("entity_linker: %d chunks, %d entities, %d mentions_entity, %d value_of (%.2fs)",
-                    cn, en, me, vo, dur)
+        logger.info("entity_linker: %d chunks, %d entities, %d mentions_entity, %d value_of, "
+                    "%d semantic_about, %d semantic_value (%.2fs)",
+                    cn, en, me, vo, semantic_edges, semantic_value_edges, dur)
     return EntityLinkResult(cn, en, me, vo, source_id, backend, dur,
-                            stats={"edges_written": ew})
+                            stats={"edges_written": ew, "semantic_about": semantic_edges,
+                                   "semantic_value_of": semantic_value_edges})

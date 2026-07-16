@@ -236,6 +236,26 @@ def _run_schema_pipeline(
         except Exception as e:
             _sfail(source_id, "Graph embedder", e)
 
+    # ── Step 7d: Semantic value embedder (Tier B, docs/SEMANTIC_ENTITY_BRIDGE.md) ──
+    # Embed this source's eligible sampled VALUES into entity_value_embeddings so a later
+    # document ingest can bridge chunk spans to the values they paraphrase
+    # (semantic_value_of). Best-effort — never fails the structured ingest.
+    from config import SEMANTIC_VALUE_BRIDGE_ENABLED
+    if UNIFIED_GRAPH_ENABLED and SEMANTIC_VALUE_BRIDGE_ENABLED and ctx.get("vs_result") is not None:
+        t0 = time.time()
+        try:
+            import os as _os_ve
+            from ingestion.value_embedder import embed_source_values
+            ve = embed_source_values(
+                source_id, ctx["vs_result"].sampled_columns,
+                tenant=_os_ve.environ.get("VEDA_TENANT", "default"), verbose=verbose)
+            ctx["value_embed_result"] = ve
+            _sok(source_id,
+                 f"Value embedder — {ve.values_embedded} value vectors, {ve.columns} cols",
+                 time.time() - t0)
+        except Exception as e:
+            _sfail(source_id, "Value embedder", e)
+
     # Steps 8/9 (ensemble encoder → tfidf/svd pkls + column_embeddings_lt/_hybrid
     # vector store) were removed: the MiniLM/RELGT ensemble retrieval signal is never
     # executed at query time (BGE-only spine), so those artifacts were write-only. The
