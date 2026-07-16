@@ -43,6 +43,21 @@ from config import (
 )
 
 
+def _emit(on_event, phase, message, **extra):
+    """Fire the optional SSE progress callback — same contract as
+    veda_hybrid.py's own _emit (self-contained copy, not a shared import:
+    veda_hybrid.py imports FROM this module, so importing _emit back from
+    there would be circular). A no-op when on_event is None, and it never
+    raises into the pipeline — progress reporting must not be able to fail
+    a query."""
+    if on_event is None:
+        return
+    try:
+        on_event(phase, message, extra)
+    except Exception:
+        pass
+
+
 # =============================================================================
 # Output data structures
 # =============================================================================
@@ -320,6 +335,7 @@ def run_rag_layer(
     top_k:           int = RAG_TOP_K,
     temporal_filter: object = None,    # Improvement 1: TemporalFilter from L1
     verbose:         bool = False,
+    on_event:        Any = None,
 ) -> RAGResult:
     """
     Pure document retrieval + synthesis.
@@ -335,6 +351,12 @@ def run_rag_layer(
     top_k           : chunks to retrieve
     temporal_filter : TemporalFilter from L1 temporal_parser (or None)
     verbose         : print progress
+    on_event        : optional progress callback (phase, message, extra) —
+                       previously this whole function was a silent black box
+                       between the caller's "Retrieving relevant documents..."
+                       and "Synthesized answer..." ticks (veda_hybrid.py), with
+                       no visibility into the actual retrieval or the SLM
+                       synthesis call — often the slowest, most opaque step.
     """
     t0 = time.time()
 
@@ -381,8 +403,10 @@ def run_rag_layer(
     if verbose:
         print(f"  Chunks retrieved : {len(chunks)}")
         print(f"  Top similarity   : {confidence:.4f}")
+    _emit(on_event, "rag_retrieve", f"Found {len(chunks)} relevant passage(s)", chunks=len(chunks))
 
     # Synthesise answer
+    _emit(on_event, "rag_synthesize", "Reading through what was found")
     try:
         user_msg = _build_rag_user_message(query, chunks)
         answer   = _call_ollama(_RAG_SYSTEM_PROMPT, user_msg)
@@ -422,6 +446,7 @@ def run_hybrid_layer(
     temporal_filter: object = None,
     sql_result:      object = None,    # Phase 1B: ExecutionResult from L6
     verbose:         bool = False,
+    on_event:        Any = None,
 ) -> HybridResult:
     """
     Hybrid query: fuses SQL column context and document chunk context via RRF,
@@ -438,6 +463,10 @@ def run_hybrid_layer(
     sql_result      : ExecutionResult from L6 — when present, actual query rows
                       are included in the synthesis prompt for definitive answers
     verbose         : print progress
+    on_event        : optional progress callback (phase, message, extra) —
+                       same rationale as run_rag_layer's own on_event: the
+                       RRF fusion + SLM synthesis steps were previously a
+                       silent black box between the caller's outer ticks.
     """
     t0 = time.time()
 
@@ -474,6 +503,9 @@ def run_hybrid_layer(
 
     if verbose:
         print(f"  After RRF fusion : {len(top_sql_cols)} SQL cols + {len(top_doc_chunks)} doc chunks")
+    _emit(on_event, "hybrid_retrieve",
+          f"Combined {len(top_sql_cols)} data point(s) and {len(top_doc_chunks)} document passage(s)",
+          sql_cols=len(top_sql_cols), doc_chunks=len(top_doc_chunks))
 
     # When SQL ground truth is available, drop doc chunks below this similarity
     # threshold — low-relevance documents add noise that causes the LLM to
@@ -493,6 +525,7 @@ def run_hybrid_layer(
         (c.doc_name + (f" (p.{c.page_num})" if c.page_num else ""))
         for c in top_doc_chunks
     ))
+    _emit(on_event, "hybrid_synthesize", "Piecing together an answer from everything found")
 
     # Hallucination guard (Fix 2):
     # When zero doc chunks were retrieved, the SLM has no document context.

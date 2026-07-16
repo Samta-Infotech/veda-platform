@@ -587,7 +587,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         from query.rag_layer import run_rag_layer
         _emit(on_event, "rag", "Retrieving relevant documents...")
         rag = run_rag_layer(query, source_ids=source_ids,
-                            temporal_filter=_temporal(query), verbose=verbose)
+                            temporal_filter=_temporal(query), verbose=verbose, on_event=on_event)
         if getattr(rag, "error", None):
             print(f"  [RAG] ✗ {rag.error}")
         else:
@@ -614,7 +614,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                 row_count=len(_r), error=None)
         hy = run_hybrid_layer(query, sql_columns=[], source_ids=source_ids,
                              temporal_filter=_temporal(query),
-                             sql_result=sql_result, verbose=verbose)
+                             sql_result=sql_result, verbose=verbose, on_event=on_event)
         if getattr(hy, "error", None):
             print(f"  [Hybrid] ✗ {hy.error}")
         else:
@@ -625,7 +625,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     # ── NoSQL → integrated native-query builder + execution ───────────────────
     if intent == "nosql":
         _emit(on_event, "nosql", "Querying document store...")
-        result = _run_nosql(query, source_ids, verbose=verbose)
+        result = _run_nosql(query, source_ids, verbose=verbose, on_event=on_event)
         _emit(on_event, "answer", "NoSQL query executed")
         return "nosql", result
 
@@ -1073,8 +1073,13 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         return None
 
 
-def _run_nosql(query, source_ids, verbose=False):
-    """Compact NoSQL path: resolve the source, infer schema, build + execute."""
+def _run_nosql(query, source_ids, verbose=False, on_event=None):
+    """Compact NoSQL path: resolve the source, infer schema, build + execute.
+
+    on_event: optional progress callback — previously schema inference + the
+    LLM-based query-building step (run_nosql_builder) were a silent black box
+    between the caller's outer "Querying document store..."/"NoSQL query
+    executed" ticks (_dispatch_single)."""
     from config import get_source, SQL_DEFAULT_LIMIT
     from connectors.base import build_connector
     from query.nosql_builder import run_nosql_builder
@@ -1088,6 +1093,7 @@ def _run_nosql(query, source_ids, verbose=False):
                 continue
             collections = conn.get_nosql_schema()
             conn.disconnect()
+            _emit(on_event, "nosql_build", "Figuring out how to query your data")
             nb = run_nosql_builder(query=query, source_id=sid,
                                    engine=src.get("engine", "mongodb"),
                                    collections=collections, verbose=verbose)

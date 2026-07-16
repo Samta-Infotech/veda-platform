@@ -28,6 +28,12 @@ _REAL_PHASES = {
     "tier2", "rag", "hybrid", "nosql", "answer",
     "schema_linking", "sql_planning", "output",
     "visualization_prep",
+    # veda_core/query/rag_layer.py + veda_hybrid.py::_run_nosql sub-steps
+    # (2026-07-16) — see thinking_messages.py's own comments for why these
+    # were added (previously silent black boxes around the SLM/query-
+    # building calls inside the rag/hybrid/nosql paths).
+    "rag_retrieve", "rag_synthesize", "hybrid_retrieve", "hybrid_synthesize",
+    "nosql_build",
 }
 
 _FORBIDDEN_TERMS = re.compile(
