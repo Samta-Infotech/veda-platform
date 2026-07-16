@@ -1,7 +1,8 @@
-# Token Usage — API Contract
+# Token Usage + Latency — API Contract
 
 Adds a `usage` field to the chat and query APIs so clients can show per-turn
-LLM token counts. This document is the frontend integration reference.
+LLM token counts and total query latency. This document is the frontend
+integration reference.
 
 ## Shape
 
@@ -10,6 +11,7 @@ type Usage = {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
+  latency_ms: number | null;   // chat endpoints only — see §1/§2
 };
 ```
 
@@ -19,16 +21,19 @@ meaningful to compute a `$` cost from, so it's deliberately not part of this
 contract (an earlier draft had a nominal `estimated_cost` field; it was
 removed as misleading).
 
-`usage` is **always present** with this exact 3-key shape — never a missing
-key, never partially populated. For turns that never call an LLM
-(deterministic fast paths, smalltalk, cache hits), it is the zero value:
+Token counts (`prompt_tokens`/`completion_tokens`/`total_tokens`) are
+**always present**, zero for turns that never call an LLM (deterministic
+fast paths, smalltalk, cache hits):
 
 ```json
 {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 ```
 
-Clients should treat this as "no LLM was used for this turn," not as an
-error or missing-data state.
+Clients should treat zero token counts as "no LLM was used for this turn,"
+not as an error or missing-data state. `latency_ms` (chat endpoints only,
+see below) can be `null` independently of the token counts — a refusal path
+that never reaches `_done()` has no latency figure to report even though its
+token counts are still a valid zero.
 
 ---
 
@@ -63,12 +68,18 @@ error or missing-data state.
       "usage": {
         "prompt_tokens": 1240,
         "completion_tokens": 312,
-        "total_tokens": 1552
+        "total_tokens": 1552,
+        "latency_ms": 2400
       }
     }
   }
 }
 ```
+
+`latency_ms` here is the total end-to-end query time (`ExplainTrace.total_ms`
+for Tier-1, an equivalent timer for Tier-2's LLM-IR fallback) — engine-side,
+**not** the HTTP round-trip. Compare with §3's `latency_ms`, which is a
+different (Django-side, HTTP-inclusive) timer on the raw query endpoint.
 
 `explainability.confidence` — see `CHAT_API_CONTRACT.md` for the full
 confidence contract; the short version is: it's a real number for every
@@ -98,7 +109,7 @@ event: explainability
 data: {"version": "1.0", "understanding": {...}, "sql": {...}, "confidence": 0.87, "timeline": [...]}
 
 event: usage
-data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552}
+data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552, "latency_ms": 2400}
 
 event: completed
 data: {"chat_id": 42, "message_id": 501, "summary": "The 5 most recent asset accounting entries are dated ...", "is_complete": true}
@@ -113,6 +124,9 @@ The same `usage` object is persisted into `metadata.usage` on the saved
 ## 3. `POST /api/v1/query` (raw query endpoint, non-chat)
 
 `usage` is a **top-level key**, sibling to `status` / `result` / `latency_ms`.
+This `usage` does **not** carry `latency_ms` inside it — latency is already
+its own top-level field on this endpoint (a separate, pre-existing,
+Django-side timer around the whole HTTP call, not engine-internal).
 
 ```json
 {
@@ -145,8 +159,11 @@ The same `usage` object is persisted into `metadata.usage` on the saved
 
 `result.items[0].result.usage` also carries the same numbers (it's the raw
 engine payload passed through) — clients should read the **top-level**
-`usage` key; it's the one guaranteed to always resolve to a clean 3-key dict
-even if the engine payload is malformed or missing.
+`usage` key; it's the one guaranteed to always resolve to a clean dict even
+if the engine payload is malformed or missing. Top-level `latency_ms` is
+always present (int, milliseconds) — unlike the chat endpoints' `usage.latency_ms`,
+it's never `null`, since it's measured unconditionally around the whole
+request in the Django view.
 
 Note: this endpoint does **not** currently surface `confidence` anywhere in
 its response (unlike the chat endpoint's `explainability.confidence`) — it's
@@ -158,9 +175,9 @@ only wired into the chat path today.
 
 - **Stage-by-stage latency breakdown** (a "plan 0.6s · SQL 0.3s · run 1.1s ·
   render 0.4s" style breakdown) is **not part of this contract** — only the
-  aggregate `total_ms` (pre-existing, inside `explainability.timeline`) and
-  the token numbers above are live. Treat as a separate, future addition
-  if/when needed.
+  aggregate latency (now surfaced via `usage.latency_ms` on chat endpoints,
+  and the pre-existing top-level `latency_ms` on the raw query endpoint) is
+  live. Treat per-stage timing as a separate, future addition if/when needed.
 - Backward compatible: existing clients that don't read `usage` are
   unaffected — it's an additive key/event, nothing existing changed shape.
 - Where the numbers are stored server-side: `ExplainTrace` → `explain_trace.jsonl`

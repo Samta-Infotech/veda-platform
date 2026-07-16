@@ -65,7 +65,8 @@ Send a user message, get the assistant's reply. Two modes controlled by
       "usage": {
         "prompt_tokens": 1240,
         "completion_tokens": 312,
-        "total_tokens": 1552
+        "total_tokens": 1552,
+        "latency_ms": 2400
       }
     },
     "insights": [],
@@ -73,6 +74,13 @@ Send a user message, get the assistant's reply. Two modes controlled by
   }
 }
 ```
+
+`metadata.usage.latency_ms` is the total end-to-end query time in
+milliseconds (`ExplainTrace.total_ms` for Tier-1, an equivalent timer around
+the Tier-2 LLM-IR fallback path) — `null` if unavailable (e.g. a path that
+never reached the pipeline's `_done()`). It's not the HTTP round-trip time —
+see `TOKEN_USAGE_API_CONTRACT.md` for the distinction from `/api/v1/query`'s
+`latency_ms`, which is a different, Django-side timer.
 
 `response[]` is an ordered array of content blocks — `type` is one of
 `"text"` / `"table"` / a chart type (`"line"`, `"bar"`, `"pie"`, ...) for
@@ -137,7 +145,7 @@ event: explainability
 data: {"version": "1.0", "understanding": {...}, "sql": {...}, "confidence": 0.87, "timeline": [...]}
 
 event: usage
-data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552}
+data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552, "latency_ms": 2400}
 
 event: insights
 data: {"insights": [], "follow_up_questions": []}
@@ -152,7 +160,7 @@ data: {"chat_id": 42, "message_id": 501, "summary": "The 5 most recent asset acc
 | `content` | 1+ times | one per content block, same shape as `response[]` items above |
 | `visualization` | 0+ times | only when a chart is actually produced |
 | `explainability` | always, once | `res0.explain` or a neutral fallback object. **`confidence` lives here** — see §1a |
-| `usage` | always, once | see `TOKEN_USAGE_API_CONTRACT.md`. Always the 3-key shape, zeros if no LLM call happened this turn |
+| `usage` | always, once | see `TOKEN_USAGE_API_CONTRACT.md`. Token counts default to zero if no LLM call happened this turn; `latency_ms` is the total query time (may be `null`) |
 | `insights` | conditionally, once | only emitted if `insights`/`follow_up_questions` are non-empty server-side (Insight Engine ran) |
 | `error` | on failure, terminates stream | `{"code": "...", "message": "..."}` — no further events after this |
 | `completed` | always, last (success path) | signals the turn is fully persisted; carries `message_id` for later reference |
@@ -213,7 +221,8 @@ Read a full conversation back (used to hydrate a chat window on load/reload).
             "usage": {
               "prompt_tokens": 1240,
               "completion_tokens": 312,
-              "total_tokens": 1552
+              "total_tokens": 1552,
+              "latency_ms": 2400
             }
           }
         },
@@ -229,7 +238,7 @@ Read a full conversation back (used to hydrate a chat window on load/reload).
 | `role` | `"USER"` / `"ASSISTANT"` / `"SYSTEM"` / `"TOOL"` (`MessageType` uppercased) |
 | USER message `content` | plain string — the raw message text |
 | ASSISTANT message `content` | object: `{response: [...], metadata: {...}}` — same shape as query endpoint's `data.response` / `data.metadata` |
-| ASSISTANT `metadata.usage` | same 3-key shape as the query endpoint. Falls back to the zero-value object if the stored message predates this change (old rows have no `usage` in their saved `metadata`) |
+| ASSISTANT `metadata.usage` | same shape as the query endpoint, including `latency_ms`. Falls back to the zero-value object if the stored message predates this change (old rows have no `usage` in their saved `metadata`) |
 | ASSISTANT `metadata.explainability.confidence` | **persisted and replayed** — same value the turn originally produced, survives page reload |
 | `insights` / `follow_up_questions` | **not** included in history — they're only ever streamed live via the SSE `insights` event at the time the turn originally ran, never written into `metadata` |
 

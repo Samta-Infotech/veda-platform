@@ -231,6 +231,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     "usage": {"prompt_tokens": tr.total_prompt_tokens,
                               "completion_tokens": tr.total_completion_tokens,
                               "total_tokens": tr.total_tokens},
+                    "latency_ms": tr.total_ms,
                     "context": es, **kw}
         return rc
 

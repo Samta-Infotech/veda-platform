@@ -555,6 +555,7 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
                 from slm._call_slm import collect_usage
+                _t2_t0 = time.time()
                 with collect_usage() as _t2_usage:
                     t2 = _tier2_sql(query, sm, cols, verbose=verbose,
                                     deadline=time.time() + TIER2_TIME_BUDGET_S,
@@ -562,6 +563,8 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                 if isinstance(t2, dict) and "usage" not in t2:
                     from slm._call_slm import usage_totals
                     t2["usage"] = usage_totals(_t2_usage.calls())
+                if isinstance(t2, dict) and "latency_ms" not in t2:
+                    t2["latency_ms"] = round((_head_s + (time.time() - _t2_t0)) * 1000, 2)
                 if t2 is not None:
                     if isinstance(t2, dict) and t2.get("status") == "tier2_rejected":
                         # Tier-2 exists to RESCUE a refusal; a candidate its own
