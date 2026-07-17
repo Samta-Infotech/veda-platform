@@ -241,14 +241,43 @@ def _maybe_federated(query, verbose=False):
         if verbose:
             print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
         return None
-    _fed_usage_totals = usage_totals(_fed_usage.calls())
+    _fed_calls = _fed_usage.calls()
+    _fed_usage_totals = usage_totals(_fed_calls)
     _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
     if payload is None:
         return None                      # single-source plan → normal path
+    # Diagnostic only (never reaches the client — see "_debug" in
+    # inference/routes/hybrid.py's _INTERNAL_ONLY_KEYS): run_federated() always
+    # calls call_slm() at least once on a genuine "ok" answer (structured/free-form
+    # plan generation, or the flat-SQL fallback, plus _nl_answer) — zero recorded
+    # calls alongside a real answer means collect_usage() missed something, not
+    # that no LLM ran. Flags the mismatch instead of silently reporting usage=0.
+    _fed_debug = None
+    if payload.get("status") == "ok" and not _fed_calls:
+        _fed_debug = {"federated_usage_anomaly": True,
+                      "note": "run_federated() returned status=ok but collect_usage() "
+                              "recorded zero call_slm() invocations — expected at least "
+                              "one (plan/SQL generation + _nl_answer)."}
     if payload.get("status") == "ok":
         r = payload.get("result") or {}
-        sql = payload.get("sql") or ""
-        table = "federated"
+        # Two success shapes (federated_route.py::run_federated): compose_federated()'s
+        # flat single-SELECT path has "sql" directly; compose_federated_plan()'s
+        # structured/free-form per-metric path (the PREFERRED one — see that
+        # function's own "PREFERRED: DETERMINISTIC join-path planner" comment) has
+        # no single "sql" key at all, only "plan": {group_by, metrics: [{alias, sql}]}
+        # — each metric aggregated+joined independently, never one flat statement.
+        # Join the per-metric SQL fragments so explain/the SQL panel show the real
+        # generated queries instead of an empty string (which made build_explain()
+        # invent a generic "Federateds" table name from nothing — payload.get("sql")
+        # was always None on this path, never a bug in build_explain() itself).
+        plan = payload.get("plan") or {}
+        metric_sqls = [m.get("sql") for m in (plan.get("metrics") or []) if m.get("sql")]
+        sql = payload.get("sql") or "\n\n".join(metric_sqls) or ""
+        # group_table is DuckDB-qualified (src_2.public."assets_asset") — strip to the
+        # bare table name for display; _business_table_name() would otherwise humanize
+        # the dots/quotes verbatim into garbage.
+        _group_table = plan.get("group_table") or ""
+        table = _group_table.rsplit(".", 1)[-1].strip('"') if _group_table else "federated"
         try:
             from veda.business_explain import build_explain
             explain = build_explain(sql=sql, table=table, sm=None)
@@ -260,6 +289,8 @@ def _maybe_federated(query, verbose=False):
                   "provenance": payload.get("provenance"), "sources": payload.get("sources"),
                   "explain": explain, "usage": _fed_usage_totals,
                   "latency_ms": _fed_latency_ms}
+        if _fed_debug:
+            result["_debug"] = _fed_debug
         return MultiResult(items=[_to_subresult(query, "federated", result)])
     # A federated EXECUTION/planning FAILURE (the generated cross-source SQL was invalid —
     # binder error, hallucinated column, unparseable, no plan) means the LLM mis-planned,
