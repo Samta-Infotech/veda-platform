@@ -113,7 +113,7 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
         why = msg or "I couldn't answer this query."
         what = "Try rephrasing it."
 
-    lines = [f"❌ {why}"]
+    lines = [f"{why}"]
     if what:
         lines.append(f"   → {what}")
     if sugg:
