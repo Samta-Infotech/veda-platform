@@ -158,6 +158,29 @@ def _collect_allowed_numbers(facts: dict, patterns: Optional[List[str]]) -> List
     return allowed
 
 
+_CURRENCY_SYMS = "$₹€£¥₩₽"
+
+
+def _strip_invented_currency(answer: str, facts: dict) -> str:
+    """Remove any currency symbol the SLM prefixed that ISN'T present in the data
+    (2026-07-17). The platform is multi-source/multi-tenant with currency itself a
+    data column (see apps/chat/table_rendering.py's same rule), so a guessed symbol
+    ($ on INR data, etc.) is actively misleading. Only strips a symbol absent from
+    the facts payload — if the data genuinely carries one, it's kept. Deterministic
+    backstop for the prompt's 'never introduce a currency not in the data' rule,
+    which a 7B model doesn't always obey."""
+    if not answer:
+        return answer
+    # ensure_ascii=False is REQUIRED: the default escapes non-ASCII (₹ → "₹"),
+    # which would make the "symbol present in data?" check fail for every non-$
+    # currency and wrongly strip a ₹/€/£/¥ the data genuinely carries.
+    facts_text = json.dumps(facts, default=str, ensure_ascii=False)
+    for sym in _CURRENCY_SYMS:
+        if sym not in facts_text:
+            answer = answer.replace(sym, "")
+    return answer
+
+
 def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[str]]) -> bool:
     """True when EVERY number the summary states is traceable to the precomputed
     facts/metrics/patterns (within ±2%, floor ±2) — or is a small count/position
@@ -421,7 +444,10 @@ def run_nl_answer(
         f"column names verbatim, do not explain SQL, no markdown, no bullet points.\n"
         f"IMPORTANT: use ONLY numbers that appear above (the data, the metrics, and the "
         f"findings — totals/averages/min/max are already computed for you). Never "
-        f"calculate, sum, or estimate a new figure of your own."
+        f"calculate, sum, or estimate a new figure of your own.\n"
+        f"State ONLY what the data and findings show. Do NOT infer causes, reasons, or "
+        f"business meaning that isn't given — e.g. never explain WHY a value is missing, "
+        f"high, or low, and never guess what a blank/empty column implies."
     )
 
     _slm_timeout = NL_SUMMARY_TIMEOUT_MS / 1000.0 if timeout is None else timeout
@@ -448,6 +474,9 @@ def run_nl_answer(
             logger.warning("run_nl_answer: summary stated an ungrounded number — "
                            "falling back to deterministic answer. summary=%r", answer)
             raise ValueError("ungrounded number in SLM summary")
+        # Deterministic backstop: drop any currency symbol the model prefixed that
+        # the data doesn't actually carry (7B doesn't always obey the prompt rule).
+        answer = _strip_invented_currency(answer, facts)
         slm_used = True   # the SLM wove the findings into its prose — caller must NOT re-append
     except Exception as e:
         # Deterministic fallback: blend the findings in ourselves (naturally, not a
