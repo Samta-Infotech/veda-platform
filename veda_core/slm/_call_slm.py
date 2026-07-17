@@ -315,6 +315,19 @@ class VLLMBackend:
         if not content:
             raise RuntimeError(f"SLM returned empty content from {self.base_url}")
         _u = body.get("usage") or {}
+        if not _u:
+            # TEMP DIAGNOSTIC (2026-07): logs the raw top-level response keys
+            # whenever a /v1/chat/completions response has no "usage" object,
+            # so a real occurrence can be confirmed from inference logs
+            # instead of a manual monitor capture. Remove once root-caused —
+            # note this backend is NOT expected to be in use on the current
+            # Mac-mini deployment (docker-compose.demo.yml sets
+            # SLM_BACKEND=ollama), so this should rarely if ever fire there.
+            import logging
+            logging.getLogger("veda.slm").warning(
+                "OpenAI-compatible /v1/chat/completions response has no usage "
+                "field — response keys: %s",
+                list(body.keys()) if isinstance(body, dict) else type(body).__name__)
         usage = {"prompt_tokens": _u.get("prompt_tokens"),
                   "completion_tokens": _u.get("completion_tokens")}
         return content, usage
@@ -362,6 +375,12 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
             user_message, system=system, timeout=timeout, temperature=temperature,
             num_predict=num_predict, num_ctx=num_ctx, seed=seed,
             json_format=json_format, endpoint=endpoint, model=model)
+    # TEMP DIAGNOSTIC (2026-07): unconditional — tracing why federated queries'
+    # usage sometimes comes back all-zero despite a genuine answer. Remove once
+    # root-caused. Deliberately logs BEFORE _record_usage so a bug in recording
+    # itself (vs. the backend never returning real counts) is distinguishable.
+    print(f"  [call_slm] purpose={purpose} backend={backend.name} "
+          f"raw_usage={usage} has_scope={getattr(_usage_tls, 'calls', None) is not None}")
     _record_usage(purpose, model or backend.model,
                   usage.get("prompt_tokens"), usage.get("completion_tokens"))
     return content
