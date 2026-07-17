@@ -39,6 +39,13 @@ from query.multi_result import (
     MultiResult, SubResult, STATUS_OK, STATUS_REFUSED, STATUS_ERROR,
 )
 
+try:
+    from utils.logger import get_logger
+    logger = get_logger(__name__)
+except Exception:  # pragma: no cover
+    import logging
+    logger = logging.getLogger("veda.veda_hybrid")
+
 _SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (P5)
 
 
@@ -230,18 +237,54 @@ def _maybe_federated(query, verbose=False):
     sids = list(getattr(ctx, "source_ids", ()) or ()) if ctx is not None else []
     if len(sids) < 2:
         return None
+    from slm._call_slm import collect_usage, usage_totals
+    _fed_t0 = time.time()
+    _fed_calls = []
     try:
-        from query.federated_route import run_federated
-        payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
-                                source_ids=sids, verbose=verbose)
+        with collect_usage() as _fed_usage:
+            from query.federated_route import run_federated
+            payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
+                                    source_ids=sids, verbose=verbose)
+            # MUST read calls() INSIDE the with block — collect_usage().__exit__()
+            # clears the thread-local buffer on exit (it's the outermost scope
+            # here), so reading it after the block always returns empty. This
+            # was the actual root cause of every federated-route usage=0 report:
+            # call_slm() genuinely ran and recorded real tokens (confirmed from
+            # prod logs — federated_struct_plan/federated_answer calls with
+            # real prompt/completion counts), but by the time this function
+            # read _fed_usage.calls(), the buffer had already been reset.
+            _fed_calls = _fed_usage.calls()
     except Exception as e:
         if verbose:
             print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
         return None
+    _fed_usage_totals = usage_totals(_fed_calls)
+    _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
+    logger.debug("_maybe_federated status=%s calls_captured=%d purposes=%s tokens=%s",
+                payload.get("status") if payload else None, len(_fed_calls),
+                [c["purpose"] for c in _fed_calls], _fed_usage_totals)
     if payload is None:
         return None                      # single-source plan → normal path
     if payload.get("status") == "ok":
         r = payload.get("result") or {}
+        # Two success shapes (federated_route.py::run_federated): compose_federated()'s
+        # flat single-SELECT path has "sql" directly; compose_federated_plan()'s
+        # structured/free-form per-metric path (the PREFERRED one — see that
+        # function's own "PREFERRED: DETERMINISTIC join-path planner" comment) has
+        # no single "sql" key at all, only "plan": {group_by, metrics: [{alias, sql}]}
+        # — each metric aggregated+joined independently, never one flat statement.
+        # Join the per-metric SQL fragments so explain/the SQL panel show the real
+        # generated queries instead of an empty string (which made build_explain()
+        # invent a generic "Federateds" table name from nothing — payload.get("sql")
+        # was always None on this path, never a bug in build_explain() itself).
+        plan = payload.get("plan") or {}
+        metric_sqls = [m.get("sql") for m in (plan.get("metrics") or []) if m.get("sql")]
+        sql = payload.get("sql") or "\n\n".join(metric_sqls) or ""
+        # group_table is DuckDB-qualified (src_2.public."assets_asset") — strip to the
+        # bare table name for display; _business_table_name() would otherwise humanize
+        # the dots/quotes verbatim into garbage.
+        _group_table = plan.get("group_table") or ""
+        table = _group_table.rsplit(".", 1)[-1].strip('"') if _group_table else "federated"
         # No single-source semantic model applies across a federated query, but
         # build_explain() parses the SQL text itself (sm=None degrades table/column
         # labels to humanized raw names, never crashes) — so a federated answer gets
@@ -252,14 +295,15 @@ def _maybe_federated(query, verbose=False):
         explain = None
         try:
             from veda.business_explain import build_explain
-            explain = build_explain(sql=payload.get("sql") or "", table="federated", sm=None)
+            explain = build_explain(sql=sql, table=table, sm=None)
         except Exception as e:
             if verbose:
                 print(f"  [federated] business_explain failed ({type(e).__name__}: {e}) — explainability omitted")
         result = {"ok": True, "status": "answered", "route": "federated",
-                  "sql": payload.get("sql"), "cols": r.get("columns"), "rows": r.get("rows"),
-                  "table": "federated", "answer": payload.get("answer"), "explain": explain,
-                  "provenance": payload.get("provenance"), "sources": payload.get("sources")}
+                  "sql": sql, "cols": r.get("columns"), "rows": r.get("rows"),
+                  "table": table, "answer": payload.get("answer"), "explain": explain,
+                  "provenance": payload.get("provenance"), "sources": payload.get("sources"),
+                  "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
         # Deterministic analytics for the federated result too — degraded mode
         # (no single-table semantic model, so grounding fields stay empty), but
         # column stats, result shape, chart candidates and detected patterns all
@@ -269,7 +313,7 @@ def _maybe_federated(query, verbose=False):
             _fc, _fr = result.get("cols") or [], result.get("rows") or []
             if _fc and _fr:
                 _frd = [row if isinstance(row, dict) else dict(zip(_fc, row)) for row in _fr]
-                _fctx = analyze_result(query, payload.get("sql") or "", list(_fc), _frd)
+                _fctx = analyze_result(query, sql, list(_fc), _frd)
                 result["analytics"] = analytics_summary(_fctx)
                 if _fctx.patterns:
                     from query.result_explainer import blend_patterns
@@ -301,7 +345,8 @@ def _maybe_federated(query, verbose=False):
     # refused/blocked federation is a real, explained outcome — surface it, don't silently
     # fall back to a single-source answer that would drop a source.
     result = {"ok": False, "status": "federated_refused",
-              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql")}
+              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql"),
+              "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
@@ -328,6 +373,12 @@ def run_hybrid_query(query, verbose=False, on_event=None):
     caller applying it (or not) itself. Off by default → zero added hot-path latency."""
     # L0 — NL simplifier (shared front-door step). No-op when the flag is off or the
     # simplifier is unavailable, so the original query flows through unchanged.
+    # Its own call_slm() usage (purpose="nl_simplify") would otherwise never be
+    # captured — it runs before any collect_usage() scope opens below — so it
+    # gets its own small scope here, merged into whatever result is finally
+    # returned via _merge_l0_usage() at every return point past this.
+    from slm._call_slm import collect_usage as _collect_usage_l0, usage_totals as _usage_totals_l0
+    _l0_calls = []
     try:
         from config import NL_SIMPLIFIER_ENABLED
     except Exception:
@@ -335,12 +386,15 @@ def run_hybrid_query(query, verbose=False, on_event=None):
     if NL_SIMPLIFIER_ENABLED:
         try:
             from query.nl_simplifier import run_nl_simplifier
-            _l0 = run_nl_simplifier(query, verbose=verbose)
+            with _collect_usage_l0() as _l0_usage:
+                _l0 = run_nl_simplifier(query, verbose=verbose)
+                _l0_calls = _l0_usage.calls()
             if getattr(_l0, "was_simplified", False):
                 print(f"  [L0] Simplified: {_l0.simplified_query!r} ({_l0.duration_ms}ms)")
                 query = _l0.simplified_query
         except Exception:
             pass  # fall back to the original query silently
+    _l0_usage_totals = _usage_totals_l0(_l0_calls)
 
     # Runtime Context Provider (L0): pure system-value questions ("what's the
     # current date") need no table/SQL/LLM — answer directly before retrieval
@@ -357,14 +411,16 @@ def run_hybrid_query(query, verbose=False, on_event=None):
             # No on_event/"thinking" emit here — same as classify_node's smalltalk
             # fast path: an instant, deterministic answer has nothing to narrate.
             print(f"  [L0] Runtime context: {_rc['answer']!r}")
-            return MultiResult(items=[_to_subresult(query, "runtime_context", _rc)])
+            return _merge_extra_usage(
+                MultiResult(items=[_to_subresult(query, "runtime_context", _rc)]),
+                _l0_usage_totals)
 
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
     # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.
     fed = _maybe_federated(query, verbose=verbose)
     if fed is not None:
-        return fed
+        return _merge_extra_usage(fed, _l0_usage_totals)
 
     try:
         from config import QUERY_DECOMPOSE_ENABLED
@@ -373,7 +429,8 @@ def run_hybrid_query(query, verbose=False, on_event=None):
 
     if not QUERY_DECOMPOSE_ENABLED:
         route, res = _dispatch_single(query, verbose=verbose, on_event=on_event)
-        return MultiResult(items=[_to_subresult(query, route, res)])
+        return _merge_extra_usage(
+            MultiResult(items=[_to_subresult(query, route, res)]), _l0_usage_totals)
 
     _emit(on_event, "classify", "Classifying query intent...")
     intent, _source_ids = classify(query, verbose=verbose)
@@ -400,13 +457,18 @@ def run_hybrid_query(query, verbose=False, on_event=None):
             _emit(on_event, "answer",
                   "Deterministic SQL answered the query" if det.get("ok")
                   else "Asked a clarifying question")
-            return MultiResult(items=[_to_subresult(query, "deterministic", det)])
+            return _merge_extra_usage(
+                MultiResult(items=[_to_subresult(query, "deterministic", det)]),
+                _l0_usage_totals)
         # Deterministic couldn't fully answer → maybe it was several questions.
-        return _maybe_split(query, verbose=verbose, precomputed_sql=det,
-                            probe_trace=probe.getvalue(), on_event=on_event)
+        return _merge_extra_usage(
+            _maybe_split(query, verbose=verbose, precomputed_sql=det,
+                        probe_trace=probe.getvalue(), on_event=on_event),
+            _l0_usage_totals)
 
     # RAG/hybrid/NoSQL self-certify nothing → decompose before dispatching (silent-drop guard).
-    return _maybe_split(query, verbose=verbose, on_event=on_event)
+    return _merge_extra_usage(
+        _maybe_split(query, verbose=verbose, on_event=on_event), _l0_usage_totals)
 
 
 def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, on_event=None):
@@ -418,15 +480,21 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, o
     or refuse-as-nested (there it would be a misleading 'couldn't answer' message)."""
     import io, contextlib
     from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
+    from slm._call_slm import collect_usage as _collect_usage_dc, usage_totals as _usage_totals_dc
     _emit(on_event, "decompose", "Checking whether this is a compound question...")
     # Capture the decomposer's own chatter so the on-screen order stays CHRONOLOGICAL. The
     # deterministic probe ran FIRST (its trace is in probe_trace); the decomposer runs AFTER.
     # Without capture, the decomposer prints live and appears BEFORE the replayed probe trace
     # — the scramble. We replay buffers in the order things actually happened.
     _dbuf = io.StringIO()
+    _dc_calls = []
     with contextlib.redirect_stdout(_dbuf):
-        decomp = run_decomposer(query, verbose=verbose)
+        with _collect_usage_dc() as _dc_usage:
+            decomp = run_decomposer(query, verbose=verbose)
+            # MUST read calls() INSIDE the with block — see _maybe_federated() for why.
+            _dc_calls = _dc_usage.calls()
     _decomp_trace = _dbuf.getvalue()
+    _dc_usage_totals = _usage_totals_dc(_dc_calls)
 
     if decomp.should_split:
         # Compound: the probe trace is a misleading "couldn't answer" for a query that was
@@ -435,7 +503,8 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, o
         print(f"\n  [Hybrid] compound query → {len(decomp.sub_queries)} independent sub-queries")
         _emit(on_event, "decompose", f"Split into {len(decomp.sub_queries)} sub-queries",
               sub_queries=list(decomp.sub_queries))
-        return _fan_out(decomp.sub_queries, verbose=verbose, on_event=on_event)
+        return _merge_extra_usage(
+            _fan_out(decomp.sub_queries, verbose=verbose, on_event=on_event), _dc_usage_totals)
 
     if decomp.type == DECOMP_DEPENDENT:
         # One part needs another's RESULT — these recompose into one query, which v1
@@ -461,7 +530,8 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, o
     sys.stdout.write(_decomp_trace)
     route, res = _dispatch_single(query, verbose=verbose, precomputed_sql=precomputed_sql,
                                    on_event=on_event)
-    return MultiResult(items=[_to_subresult(query, route, res)])
+    return _merge_extra_usage(
+        MultiResult(items=[_to_subresult(query, route, res)]), _dc_usage_totals)
 
 
 def _run_sub(sq, verbose=False, on_event=None, index=None, total=None):
@@ -592,16 +662,28 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             elif TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
-                from slm._call_slm import collect_usage
+                from slm._call_slm import collect_usage, usage_totals
                 _t2_t0 = time.time()
+                _t2_calls = []
                 with collect_usage() as _t2_usage:
                     t2 = _tier2_sql(query, sm, cols, verbose=verbose,
                                     deadline=time.time() + TIER2_TIME_BUDGET_S,
                                     execution_state=res.get("context") if isinstance(res, dict) else None,
                                 on_event=on_event)
+                    _t2_calls = _t2_usage.calls()  # read INSIDE the with — see _maybe_federated()
                 if isinstance(t2, dict) and "usage" not in t2:
-                    from slm._call_slm import usage_totals
-                    t2["usage"] = usage_totals(_t2_usage.calls())
+                    # Combine with Tier-1's own already-attempted usage (res["usage"],
+                    # from run_query() above) — this fallback only fires because Tier-1
+                    # tried and failed, so its SQL-gen tokens were genuinely spent on
+                    # THIS query too, not just Tier-2's. Reporting Tier-2-only would
+                    # undercount every query that fell through to this path.
+                    _head_usage = (res.get("usage") if isinstance(res, dict) else None) or {}
+                    _t2_totals = usage_totals(_t2_calls)
+                    t2["usage"] = {
+                        "prompt_tokens": _head_usage.get("prompt_tokens", 0) + _t2_totals["prompt_tokens"],
+                        "completion_tokens": _head_usage.get("completion_tokens", 0) + _t2_totals["completion_tokens"],
+                        "total_tokens": _head_usage.get("total_tokens", 0) + _t2_totals["total_tokens"],
+                    }
                 if isinstance(t2, dict) and "latency_ms" not in t2:
                     t2["latency_ms"] = round((_head_s + (time.time() - _t2_t0)) * 1000, 2)
                 if t2 is not None:
@@ -709,6 +791,27 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     sm, cols = _load_semantic_model()
     from veda.pipeline import run_query
     return "deterministic", run_query(query, sm, cols, return_result=True, on_event=on_event)
+
+
+def _merge_extra_usage(mr, extra_usage):
+    """Fold token counts spent BEFORE any collect_usage() scope opened (currently
+    just L0's nl_simplify — see run_hybrid_query()) into the first sub-result's
+    "usage", so a query-wide token total is never silently short by whatever ran
+    at the very front door. No-op when extra_usage is zero or the first item's
+    result isn't dict-shaped (RAG/hybrid/NoSQL results are objects with no usage
+    key today — unaffected, not regressed)."""
+    if not extra_usage.get("total_tokens") or not mr.items:
+        return mr
+    result = mr.items[0].result
+    if not isinstance(result, dict):
+        return mr
+    base = result.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+    result["usage"] = {
+        "prompt_tokens": base.get("prompt_tokens", 0) + extra_usage["prompt_tokens"],
+        "completion_tokens": base.get("completion_tokens", 0) + extra_usage["completion_tokens"],
+        "total_tokens": base.get("total_tokens", 0) + extra_usage["total_tokens"],
+    }
+    return mr
 
 
 def _to_subresult(sub_query, route, result):
@@ -928,6 +1031,17 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
             except Exception as _ie:
                 print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
+                # Record the attempt even though it failed — call_slm() only records
+                # usage on a SUCCESSFUL backend.call() return, so an exception here
+                # means zero tokens get attributed to this attempt even if the SLM
+                # was actually contacted. Without this, usage.total_tokens == 0 is
+                # indistinguishable from "no LLM call was needed this turn." Tier-2
+                # has no ExplainTrace to record onto (unlike Tier-1's tr.set("nl_summary",
+                # ...)), so this lives under "_debug" — a key inference/routes/hybrid.py's
+                # _INTERNAL_ONLY_KEYS strips at every nesting depth, same guarantee as
+                # "trace"/"context", so it never reaches the client-facing response.
+                result.setdefault("_debug", {})["insight_engine_failed"] = True
+                result["_debug"]["insight_engine_error"] = f"{type(_ie).__name__}: {str(_ie)[:200]}"
 
         # got_real_answer (not "answer" in result — that key is ALWAYS present
         # now, see the deterministic default set above): still tries plain

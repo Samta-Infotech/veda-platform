@@ -21,9 +21,24 @@ meaningful to compute a `$` cost from, so it's deliberately not part of this
 contract (an earlier draft had a nominal `estimated_cost` field; it was
 removed as misleading).
 
+**Scope (chat endpoints only):** `usage` on `/api/v1/conversations/query`
+covers the FULL turn, not just the engine. It's the sum of two independently
+captured totals — the engine's own token spend (SQL generation, NL-answer/
+Insight Engine summarization, envelope/IR emission — `veda_core/slm/_call_slm.py`)
+**plus** the LangGraph supervisor's own SLM calls that run before the engine
+is even reached (`chatbot/llm.py`: intent classification, smalltalk replies,
+follow-up-context resolution, the standalone-question second-opinion check —
+`chatbot/run.py::run_chat_turn()` sums both). `/api/v1/query` (the raw,
+non-chat endpoint) has no supervisor layer, so its `usage` is engine-only.
+
 Token counts (`prompt_tokens`/`completion_tokens`/`total_tokens`) are
-**always present**, zero for turns that never call an LLM (deterministic
-fast paths, smalltalk, cache hits):
+**always present**, zero only when NEITHER the supervisor NOR the engine
+called an LLM this turn — e.g. a canned-pattern smalltalk reply
+(`_canned_smalltalk_reply`, no LLM at all) answered by a deterministic
+fast-path/cached SQL query with the Insight Engine disabled. A smalltalk
+reply that falls through to the LLM, or a cache-hit query that still
+generates a fresh NL summary, will show nonzero tokens even though SQL
+generation itself was skipped:
 
 ```json
 {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

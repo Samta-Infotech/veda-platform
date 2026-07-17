@@ -1458,6 +1458,13 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             except Exception as _ie:
                 print(f"  [L7b] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
+                # Record the attempt even though it failed — otherwise usage.total_tokens
+                # == 0 is indistinguishable from "no LLM call was needed this turn" vs.
+                # "the SLM call was attempted and timed out/errored before returning"
+                # (call_slm() only records usage on a SUCCESSFUL backend.call() return —
+                # an exception means nothing was recorded for this attempt at all).
+                tr.set("nl_summary", insight_engine_failed=True,
+                       insight_engine_error=f"{type(_ie).__name__}: {str(_ie)[:200]}")
                 INSIGHT_ENGINE_ENABLED = False   # this turn only — fall through below
 
         if not INSIGHT_ENGINE_ENABLED:
