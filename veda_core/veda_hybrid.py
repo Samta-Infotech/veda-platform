@@ -244,28 +244,8 @@ def _maybe_federated(query, verbose=False):
     _fed_calls = _fed_usage.calls()
     _fed_usage_totals = usage_totals(_fed_calls)
     _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
-    # Unconditional (NOT gated behind `if verbose`, unlike every other print in this
-    # function) — _maybe_federated()'s success path otherwise never logs anything at
-    # all (the two existing [federated] prints only fire on a route-error/plan-failure),
-    # so a successful federated answer was previously invisible in prod logs, making
-    # the usage=0 anomaly impossible to diagnose from logs alone.
-    print(f"  [federated] run_federated status={payload.get('status') if payload else None} "
-          f"calls_captured={len(_fed_calls)} purposes={[c['purpose'] for c in _fed_calls]} "
-          f"tokens={_fed_usage_totals}")
     if payload is None:
         return None                      # single-source plan → normal path
-    # Diagnostic only (never reaches the client — see "_debug" in
-    # inference/routes/hybrid.py's _INTERNAL_ONLY_KEYS): run_federated() always
-    # calls call_slm() at least once on a genuine "ok" answer (structured/free-form
-    # plan generation, or the flat-SQL fallback, plus _nl_answer) — zero recorded
-    # calls alongside a real answer means collect_usage() missed something, not
-    # that no LLM ran. Flags the mismatch instead of silently reporting usage=0.
-    _fed_debug = None
-    if payload.get("status") == "ok" and not _fed_calls:
-        _fed_debug = {"federated_usage_anomaly": True,
-                      "note": "run_federated() returned status=ok but collect_usage() "
-                              "recorded zero call_slm() invocations — expected at least "
-                              "one (plan/SQL generation + _nl_answer)."}
     if payload.get("status") == "ok":
         r = payload.get("result") or {}
         # Two success shapes (federated_route.py::run_federated): compose_federated()'s
@@ -297,8 +277,6 @@ def _maybe_federated(query, verbose=False):
                   "provenance": payload.get("provenance"), "sources": payload.get("sources"),
                   "explain": explain, "usage": _fed_usage_totals,
                   "latency_ms": _fed_latency_ms}
-        if _fed_debug:
-            result["_debug"] = _fed_debug
         return MultiResult(items=[_to_subresult(query, "federated", result)])
     # A federated EXECUTION/planning FAILURE (the generated cross-source SQL was invalid —
     # binder error, hallucinated column, unparseable, no plan) means the LLM mis-planned,
