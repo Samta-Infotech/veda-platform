@@ -244,6 +244,14 @@ def _maybe_federated(query, verbose=False):
     _fed_calls = _fed_usage.calls()
     _fed_usage_totals = usage_totals(_fed_calls)
     _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
+    # Unconditional (NOT gated behind `if verbose`, unlike every other print in this
+    # function) — _maybe_federated()'s success path otherwise never logs anything at
+    # all (the two existing [federated] prints only fire on a route-error/plan-failure),
+    # so a successful federated answer was previously invisible in prod logs, making
+    # the usage=0 anomaly impossible to diagnose from logs alone.
+    print(f"  [federated] run_federated status={payload.get('status') if payload else None} "
+          f"calls_captured={len(_fed_calls)} purposes={[c['purpose'] for c in _fed_calls]} "
+          f"tokens={_fed_usage_totals}")
     if payload is None:
         return None                      # single-source plan → normal path
     # Diagnostic only (never reaches the client — see "_debug" in
