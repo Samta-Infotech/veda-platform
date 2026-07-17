@@ -239,16 +239,25 @@ def _maybe_federated(query, verbose=False):
         return None
     from slm._call_slm import collect_usage, usage_totals
     _fed_t0 = time.time()
+    _fed_calls = []
     try:
         with collect_usage() as _fed_usage:
             from query.federated_route import run_federated
             payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
                                     source_ids=sids, verbose=verbose)
+            # MUST read calls() INSIDE the with block — collect_usage().__exit__()
+            # clears the thread-local buffer on exit (it's the outermost scope
+            # here), so reading it after the block always returns empty. This
+            # was the actual root cause of every federated-route usage=0 report:
+            # call_slm() genuinely ran and recorded real tokens (confirmed from
+            # prod logs — federated_struct_plan/federated_answer calls with
+            # real prompt/completion counts), but by the time this function
+            # read _fed_usage.calls(), the buffer had already been reset.
+            _fed_calls = _fed_usage.calls()
     except Exception as e:
         if verbose:
             print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
         return None
-    _fed_calls = _fed_usage.calls()
     _fed_usage_totals = usage_totals(_fed_calls)
     _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
     logger.debug("_maybe_federated status=%s calls_captured=%d purposes=%s tokens=%s",
