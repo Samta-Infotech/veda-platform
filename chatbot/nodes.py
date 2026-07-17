@@ -81,7 +81,8 @@ def _depends_on_history(message: str, history: list) -> bool:
     Fails closed to False (trust the original "smalltalk" verdict) on any error,
     since this is only a second-opinion check, not the primary classifier."""
     user_prompt = build_standalone_check_user_prompt(message, history)
-    verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5, model=CHATBOT_CLASSIFY_MODEL)
+    verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5,
+                       model=CHATBOT_CLASSIFY_MODEL, purpose="standalone_check")
     return bool(verdict) and "dependent" in verdict.strip().lower()
 
 # Deterministic fast path for the overwhelming majority of smalltalk: pure
@@ -259,6 +260,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                                                       # when `frame` has an entity (see its docstring)
             build_supervisor_user_prompt(message, history),
             model=CHATBOT_CLASSIFY_MODEL,
+            purpose="classify",
         )
         action = "answer"
         if raw:
@@ -397,6 +399,7 @@ def smalltalk_node(state: ChatState) -> dict:
             message,
             max_tokens=60,
             model=CHATBOT_CLASSIFY_MODEL,
+            purpose="smalltalk",
         )
     if not reply:
         reply = FALLBACK_REPLY
@@ -480,6 +483,7 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
             build_followup_user_prompt(message, history),
             max_tokens=80,
             model=CHATBOT_CLASSIFY_MODEL,
+            purpose="followup",
         )
         resolved = (rewritten or message).strip().strip('"')
         logger.info("context_resolve_node: no frame yet, fallback rewrite %r -> %r",

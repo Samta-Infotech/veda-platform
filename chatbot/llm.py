@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -45,6 +46,57 @@ VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1").rstrip("/")
 CHATBOT_CLASSIFY_MODEL = os.environ.get("CHATBOT_CLASSIFY_MODEL") or SLM_MODEL_NAME
 
 
+# ---------------------------------------------------------------------------
+# Token usage capture — same collect_usage()/usage_totals() shape as
+# veda_core/slm/_call_slm.py, deliberately re-implemented here rather than
+# imported (see module docstring: chatbot/ must never import veda_core/).
+# Lets apps/chat/services.py fold the supervisor's own classify/smalltalk/
+# follow-up token spend into the same "usage" total the engine's tokens
+# already flow through, instead of it being silently uncounted.
+# ---------------------------------------------------------------------------
+_usage_tls = threading.local()
+
+
+def _record_usage(purpose: str, model: str | None,
+                  prompt_tokens: int | None, completion_tokens: int | None) -> None:
+    buf = getattr(_usage_tls, "calls", None)
+    if buf is None:
+        return  # no active collection scope — zero overhead
+    buf.append({
+        "purpose": purpose,
+        "model": model,
+        "prompt_tokens": prompt_tokens or 0,
+        "completion_tokens": completion_tokens or 0,
+    })
+
+
+class collect_usage:
+    """Context manager: opens a per-thread usage buffer for the duration of
+    one chat turn. Nestable — an inner scope is a no-op passthrough; only the
+    outermost scope collects and clears on exit. Mirrors
+    veda_core/slm/_call_slm.py's collect_usage() exactly."""
+
+    def __enter__(self):
+        self._owns = getattr(_usage_tls, "calls", None) is None
+        if self._owns:
+            _usage_tls.calls = []
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        if self._owns:
+            _usage_tls.calls = None
+        return False
+
+    def calls(self) -> list:
+        return list(getattr(_usage_tls, "calls", None) or [])
+
+
+def usage_totals(calls: list) -> dict:
+    pt = sum(c.get("prompt_tokens", 0) for c in calls)
+    ct = sum(c.get("completion_tokens", 0) for c in calls)
+    return {"prompt_tokens": pt, "completion_tokens": ct, "total_tokens": pt + ct}
+
+
 def _post_json(url: str, payload: dict, timeout: int) -> dict | None:
     req = urllib.request.Request(
         url, data=json.dumps(payload).encode("utf-8"),
@@ -62,8 +114,9 @@ def _post_json(url: str, payload: dict, timeout: int) -> dict | None:
 
 
 def _call_ollama(system: str, user: str, *, temperature: float, max_tokens: int, timeout: int,
-                 model: str = SLM_MODEL_NAME) -> str | None:
-    """Matches veda_core/slm/_call_slm.py::OllamaBackend.call()'s /api/chat shape."""
+                 model: str = SLM_MODEL_NAME) -> tuple[str | None, dict]:
+    """Matches veda_core/slm/_call_slm.py::OllamaBackend.call()'s /api/chat shape,
+    including reading prompt_eval_count/eval_count for token usage."""
     payload = {
         "model": model,
         "stream": False,
@@ -75,15 +128,19 @@ def _call_ollama(system: str, user: str, *, temperature: float, max_tokens: int,
     }
     body = _post_json(f"{OLLAMA_URL}/api/chat", payload, timeout)
     if body is None:
-        return None
-    return (body.get("message") or {}).get("content", "").strip() or None
+        return None, {}
+    content = (body.get("message") or {}).get("content", "").strip() or None
+    usage = {"prompt_tokens": body.get("prompt_eval_count"),
+              "completion_tokens": body.get("eval_count")}
+    return content, usage
 
 
 def _call_vllm(system: str, user: str, *, temperature: float, max_tokens: int, timeout: int,
-               model: str = SLM_MODEL_NAME) -> str | None:
+               model: str = SLM_MODEL_NAME) -> tuple[str | None, dict]:
     """Matches veda_core/slm/_call_slm.py::VLLMBackend.call()'s OpenAI-compatible
-    shape. VLLM_URL may or may not carry a trailing /v1 (docker-compose.prod.yml
-    sets VLLM_URL=http://vllm:8000/v1) — normalize before appending the path."""
+    shape, including reading usage.{prompt,completion}_tokens. VLLM_URL may or
+    may not carry a trailing /v1 (docker-compose.prod.yml sets
+    VLLM_URL=http://vllm:8000/v1) — normalize before appending the path."""
     base = VLLM_URL[: -len("/v1")] if VLLM_URL.endswith("/v1") else VLLM_URL
     payload = {
         "model": model,
@@ -97,20 +154,32 @@ def _call_vllm(system: str, user: str, *, temperature: float, max_tokens: int, t
     }
     body = _post_json(f"{base}/v1/chat/completions", payload, timeout)
     if body is None:
-        return None
+        return None, {}
     try:
-        return (body["choices"][0]["message"]["content"] or "").strip() or None
+        content = (body["choices"][0]["message"]["content"] or "").strip() or None
     except (KeyError, IndexError, TypeError):
         logger.warning("chatbot.llm: unexpected vLLM response shape: %r", body)
-        return None
+        return None, {}
+    _u = body.get("usage") or {}
+    usage = {"prompt_tokens": _u.get("prompt_tokens"),
+              "completion_tokens": _u.get("completion_tokens")}
+    return content, usage
 
 
 def call_slm(system: str, user: str, *, temperature: float = 0.1,
-             max_tokens: int = 200, timeout: int = 20, model: str = SLM_MODEL_NAME) -> str | None:
+             max_tokens: int = 200, timeout: int = 20, model: str = SLM_MODEL_NAME,
+             purpose: str = "chatbot") -> str | None:
     """One-shot chat completion routed to Ollama or vLLM per SLM_BACKEND.
     Returns None on any failure — callers must have a deterministic fallback
     (refuse-over-guess, same as the rest of this codebase). `model` defaults to
     SLM_MODEL_NAME (unchanged behavior); classify/smalltalk/follow-up call
-    sites in nodes.py pass CHATBOT_CLASSIFY_MODEL instead."""
+    sites in nodes.py pass CHATBOT_CLASSIFY_MODEL instead. `purpose` labels the
+    call for token-usage attribution only (e.g. "classify", "smalltalk",
+    "followup", "standalone_check") — never changes routing. Return contract is
+    unchanged (str | None); token usage is recorded on the side into whatever
+    collect_usage() scope is currently open, if any."""
     fn = _call_vllm if SLM_BACKEND == "vllm" else _call_ollama
-    return fn(system, user, temperature=temperature, max_tokens=max_tokens, timeout=timeout, model=model)
+    content, usage = fn(system, user, temperature=temperature, max_tokens=max_tokens,
+                        timeout=timeout, model=model)
+    _record_usage(purpose, model, usage.get("prompt_tokens"), usage.get("completion_tokens"))
+    return content
