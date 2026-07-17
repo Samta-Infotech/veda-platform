@@ -38,8 +38,8 @@ def test_identifier_columns_never_selected_as_axes():
     assert specs[0].type.value == "line"
     assert specs[1].type.value == "bar"
     for spec in specs:
-        assert spec.x_axis_title == "processed_date"
-        assert spec.y_axis_title == "payment_attempt_count"
+        assert spec.x_axis_title == "Processed Date"
+        assert spec.y_axis_title == "Payment Attempt Count"
 
 
 def test_identifier_only_numeric_columns_produce_no_chart():
@@ -169,3 +169,132 @@ def test_multi_viz_does_not_apply_to_the_dual_measure_combo_chart():
     specs = r.recommend(cols, rows)
     assert len(specs) == 1
     assert specs[0].type.value == "line_histogram"
+
+
+# ---------------------------------------------------------------------------
+# Free-text column exclusion — regression: a free-text column (e.g. `notes`)
+# structurally reads as "categorical" (non-numeric, non-date strings), so
+# without this check it could outrank a real dimension like `label` for the
+# chart's category axis purely because it happened to come first in `cols`.
+# ---------------------------------------------------------------------------
+
+def test_free_text_column_never_outranks_a_real_category_dimension():
+    r = _recommender()
+    cols = ["notes", "label", "amount"]
+    rows = [
+        ["Customer called to follow up on the overdue invoice and payment plan", "west", 100],
+        ["Escalated to collections after repeated missed payment reminders", "east", 200],
+        ["Resolved after partial payment was received and plan restructured", "north", 150],
+    ]
+    specs = r.recommend(cols, rows)
+    assert specs, "expected a chart using 'label' as the dimension"
+    for spec in specs:
+        assert spec.title == "Amount by Label"
+
+
+def test_free_text_name_hint_excludes_short_values_too():
+    """Even when sampled values are short, a name hint (e.g. `email`) alone
+    is enough to exclude a column from ever becoming the chart dimension."""
+    r = _recommender()
+    cols = ["email", "region", "revenue"]
+    rows = [["a@x.com", "west", 100], ["b@x.com", "east", 200], ["c@x.com", "north", 150]]
+    specs = r.recommend(cols, rows)
+    assert specs
+    for spec in specs:
+        assert spec.title == "Revenue by Region"
+
+
+def test_free_text_only_columns_produce_no_chart():
+    r = _recommender()
+    cols = ["notes", "description"]
+    rows = [
+        ["Customer called to follow up on the overdue invoice and payment plan", "Long form detail one here"],
+        ["Escalated to collections after repeated missed payment reminders", "Long form detail two here"],
+    ]
+    assert r.recommend(cols, rows) == []
+
+
+# ---------------------------------------------------------------------------
+# Negative-value pie guard (2026-07-17) — a pie slice can't represent a
+# negative share of a whole (profit/loss, net-change, refund data); bar
+# handles negative fine, pie must never be offered when any total is negative.
+# ---------------------------------------------------------------------------
+
+def test_negative_values_skip_pie_small_category_count():
+    r = _recommender()
+    cols = ["category", "net_change"]
+    rows = [["A", 500], ["B", -200], ["C", 100]]
+    specs = r.recommend(cols, rows)
+    assert specs
+    assert all(s.type.value != "pie" for s in specs)
+    assert any(s.type.value == "bar" for s in specs)
+
+
+def test_negative_values_skip_pie_long_tail():
+    """Same guard in the >MAX_PIE_SLICES branch (top-N + 'Other')."""
+    r = _recommender()
+    cols = ["category", "net_change"]
+    rows = [[f"cat{i}", 100 - i * 20] for i in range(12)]   # last few go negative
+    specs = r.recommend(cols, rows)
+    assert specs
+    assert all(s.type.value != "pie" for s in specs)
+
+
+def test_all_positive_small_category_count_still_gets_pie():
+    """Sanity: the guard only fires on an actual negative value — an
+    all-positive result is unaffected (regression guard for the fix itself)."""
+    r = _recommender()
+    cols = ["category", "amount"]
+    rows = [["A", 500], ["B", 200], ["C", 100]]
+    specs = r.recommend(cols, rows)
+    assert any(s.type.value == "pie" for s in specs)
+
+
+# ---------------------------------------------------------------------------
+# Humanized titles/axis labels (2026-07-17) — consistency with the table's
+# own header humanization (apps/chat/table_rendering.py's fmt_header).
+# ---------------------------------------------------------------------------
+
+def test_line_chart_axis_titles_humanized():
+    r = _recommender()
+    cols = ["order_date", "total_revenue"]
+    rows = [["2026-01-01", 100], ["2026-01-02", 200], ["2026-01-03", 150]]
+    specs = r.recommend(cols, rows)
+    assert specs
+    for spec in specs:
+        assert spec.x_axis_title == "Order Date"
+        assert spec.y_axis_title == "Total Revenue"
+
+
+# ---------------------------------------------------------------------------
+# camelCase identifier detection (2026-07-17) — real gap: a non-Django source
+# (NoSQL/federated/external schema) commonly names ids "AccountID"/"customerId"/
+# "buildId" with no underscore. "accountid".endswith("_id") is False, so these
+# slipped through and got charted as a category/measure ("ids in the label and
+# value" bug report).
+# ---------------------------------------------------------------------------
+
+def test_camelcase_identifier_excluded_from_chart():
+    r = _recommender()
+    cols = ["AccountID", "region", "revenue"]
+    rows = [["acc-1", "west", 100], ["acc-2", "east", 200], ["acc-3", "north", 150]]
+    specs = r.recommend(cols, rows)
+    assert specs
+    for spec in specs:
+        assert "AccountID" not in (spec.title or "")
+        assert spec.x_axis_title != "Accountid" and spec.x_axis_title != "AccountID"
+
+
+def test_camelcase_identifier_variants_detected():
+    r = _recommender()
+    for name in ("AccountID", "CustomerId", "orderID", "buildId"):
+        assert r._is_identifier(name), f"{name!r} should be detected as an identifier"
+
+
+def test_lowercase_english_words_ending_in_id_not_flagged():
+    """Regression guard for the fix itself: ordinary lowercase words that
+    happen to end in 'id' must never be treated as identifiers."""
+    r = _recommender()
+    for word in ("paid", "valid", "invalid", "grid", "hybrid", "android",
+                "void", "avoid", "solid", "rapid", "fluid", "arid", "acid"):
+        assert not r._is_identifier(word), f"{word!r} must NOT be flagged as an identifier"

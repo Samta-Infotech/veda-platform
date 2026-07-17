@@ -542,6 +542,16 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
     res0 = item0.get("result") or {}
     if not isinstance(res0, dict):
         res0 = {}
+    # Contract normalization: the NoSQL head returns a connectors.base.QueryResult
+    # (serialized via asdict), whose tabular field is `columns` — every other
+    # pipeline (SQL/Tier-2/federated/hybrid) and every api-tier consumer
+    # (apps/chat/services.py's viz + table builders, analytics, harvest_frame)
+    # speaks `cols`. Alias it here, the ONE place res0 is assembled, so a NoSQL
+    # answer charts/tables/analyzes exactly like the others instead of silently
+    # having no chart/table (its rows existed under the wrong key). Only fills
+    # `cols` when absent — never clobbers a pipeline that already set it.
+    if "cols" not in res0 and res0.get("columns"):
+        res0["cols"] = res0["columns"]
     return res0, res0.get("status", "error")
 
 

@@ -103,6 +103,10 @@ class SLMResult:
     duration_ms:          float
     error:                Optional[str]  # populated if Ollama call failed
     validation_warnings:  List[str]      = field(default_factory=list)
+    # Advisory-only (rule 16): the model's own one-sentence statement of the
+    # business question, emitted BEFORE the IR. Presentation metadata — never
+    # read by sql_builder/validation, never affects SQL correctness.
+    business_intent:      Optional[str]  = None
 
 
 # =============================================================================
@@ -140,9 +144,12 @@ RULES:
 12. Filter values MUST be real literal values — never use placeholder strings like "<literal>", "<value>", or "<placeholder>". For boolean columns (is_active, is_enabled, is_deleted, etc.) use true or false. For status/category strings use the exact string (e.g. "active", "pending"). For numbers use the number directly. If you genuinely do not know the filter value, omit the filter condition entirely rather than using a placeholder.
 13. Whenever entities[] contains two or more tables, joins[] MUST NOT be empty. Copy the matching join from the join path provided in the user message — use the exact from_table_id, from_col_id, to_table_id, to_col_id UUIDs as given. An IR with multiple entities and empty joins is always wrong and will produce an incorrect SQL query.
 14. Value-matched filters: When a CATEGORY column has example_values and one of them matches a query word (case-insensitive), you MUST add a filter condition for that column: {"col_id": "<col_uuid>", "operator": "EQ", "value": "<exact_example_value>"}. The user message may include a "Value filter hints" section with pre-computed matches — always follow those hints exactly. Example: query "escalated incidents", column incident_status has example_values ["Escalated","Open"] → add {"col_id": incident_status_uuid, "operator": "EQ", "value": "Escalated"} to filter_tree.
+15. The user message may include a "Recommended Projection" section — the business-relevant columns that should appear in entities[].columns (the SELECT clause) for that table. Prefer these over other columns in the REFERENCE TABLE for entities.columns. You MAY still add a column outside this list, but ONLY when the query explicitly names it (rule 11), or it is structurally required for an aggregation, group_by, order_by, or join key. Do not add other REFERENCE TABLE columns to entities.columns "just in case" — the REFERENCE TABLE remains fully available for filter_tree/joins/group_by/order_by regardless of what's in Recommended Projection.
+16. business_intent is ADVISORY ONLY: state, in one short sentence, the business question being answered — BEFORE deciding entities/filters. It is presentation metadata: it must NEVER change or justify any entity, filter, join, aggregation, group_by, order_by, or limit. When business_intent and the query text disagree, the query text wins. Priority is always: SQL correctness > user intent > schema correctness > business presentation.
 
-OUTPUT FORMAT (all top-level fields are required):
+OUTPUT FORMAT (all top-level fields are required; state business_intent FIRST, then derive the IR from the query text):
 {
+  "business_intent": "<one short sentence: the business question being answered>",
   "intent": "SELECT",
   "complexity": "SIMPLE",
   "needs_clarification": false,
@@ -395,6 +402,7 @@ def _build_user_message(
     join_path:            List[JoinEdge],
     must_include_results: List[RetrievalResult] = None,
     is_hybrid:            bool = False,
+    recommended_projection_results: List[RetrievalResult] = None,
 ) -> str:
     parts: List[str] = []
 
@@ -432,6 +440,26 @@ def _build_user_message(
         )
     parts.append("=== END REFERENCE TABLE ===")
     parts.append("")
+
+    # Recommended Projection (2026-07): the business-facing SELECT list VEDA already
+    # computes for Tier1 (veda/routing.py::recommended_projection — default display
+    # column + this query's own retrieval relevance + HIGH-importance columns,
+    # composed deterministically, no LLM). Rendered as a SEPARATE section from the
+    # REFERENCE TABLE, same principle as generation.py::_recommended_projection_block
+    # (Tier1's own prompt): this does not restrict SQL correctness — every REFERENCE
+    # TABLE column stays fully usable for filter_tree/joins/group_by/order_by, this
+    # only steers entities.columns (SELECT) toward the smaller business-relevant set.
+    # Absent entirely when the caller has nothing to recommend — an existing caller
+    # that never passes this sees an unchanged prompt, byte for byte.
+    if recommended_projection_results:
+        proj = [{"col_id": r.col_id, "col_name": r.col_name, "table_name": r.table_name}
+                for r in recommended_projection_results]
+        parts.append(
+            "Recommended Projection — prefer these columns for entities.columns "
+            "(the SELECT clause) per rule 15:"
+        )
+        parts.append(json.dumps(proj, indent=2))
+        parts.append("")
 
     # Must-include columns: pre-computed from the full top_k list in run_slm.
     # Surfaced as a grounding hint so the SLM knows which cols are mandatory.
@@ -936,6 +964,8 @@ def run_slm_layer(
     join_path:       List[JoinEdge],
     verbose:         bool = False,
     is_hybrid:       bool = False,
+    recommended_projection: List[RetrievalResult] = None,
+    on_event=None,
 ) -> SLMResult:
     """
     Layer 3 entry point. Calls the local SLM (Qwen via Ollama) to produce IR JSON.
@@ -947,6 +977,9 @@ def run_slm_layer(
     top_k_columns    : L2 output — ranked candidate columns with UUIDs
     join_path        : L2 output — inferred JOIN edges
     verbose          : Print debug info
+    recommended_projection : optional business-facing SELECT-list guidance (subset of
+                       top_k_columns) — see _build_user_message's "Recommended
+                       Projection" block. None (default) leaves the prompt unchanged.
 
     Returns
     -------
@@ -959,7 +992,8 @@ def run_slm_layer(
         return run_langgraph_pipeline(
             query=query, temporal_filter=temporal_filter,
             top_k_columns=top_k_columns, join_path=join_path,
-            verbose=verbose, is_hybrid=is_hybrid)
+            verbose=verbose, is_hybrid=is_hybrid,
+            recommended_projection=recommended_projection, on_event=on_event)
     t0 = time.time()
 
     logger.debug("L3 SLM: query=%r, top_k_cols=%d, temporal=%s, model=%s",
@@ -995,7 +1029,15 @@ def run_slm_layer(
 
     must_include  = _compute_must_include(query, top_k_columns, join_path)  # full list, not capped
 
-    user_msg = _build_user_message(query, temporal_filter, llm_columns, llm_join_path, must_include, is_hybrid)
+    # Recommended Projection must reference only columns actually present in the
+    # REFERENCE TABLE sent this round (llm_columns, capped at TOP_K_TO_LLM) — a
+    # recommended column outside that cap would violate the UUID-compliance rule
+    # (col_id not in REFERENCE TABLE → the model is told to omit it).
+    llm_col_ids = {r.col_id for r in llm_columns}
+    rec_proj = [r for r in (recommended_projection or []) if r.col_id in llm_col_ids] or None
+
+    user_msg = _build_user_message(query, temporal_filter, llm_columns, llm_join_path, must_include,
+                                   is_hybrid, recommended_projection_results=rec_proj)
 
     if verbose:
         print(f"[SLM] Calling {SLM_MODEL_NAME} via Ollama...")
@@ -1148,6 +1190,7 @@ def run_slm_layer(
         duration_ms          = dur,
         error                = None,
         validation_warnings  = warnings,
+        business_intent      = (str(parsed.get("business_intent") or "").strip() or None),
     )
 
 

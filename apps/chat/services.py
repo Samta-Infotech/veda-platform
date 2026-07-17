@@ -9,6 +9,10 @@ from typing import Iterator
 from chatbot.run import run_chat_turn
 
 from .models import ChatMessage, ChatSession, MessageType
+from .table_rendering import (
+    project_display_columns as _project_display_columns,
+    rows_to_markdown_table as _rows_to_markdown_table,
+)
 from .thinking_messages import business_friendly_message
 from .visualization import VisualizationRecommender
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
@@ -66,15 +70,6 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
     if vtype in ("bar", "pie"):
         return _visualization_recommender._category_numeric(cols, rows, x_idx, y_idx)
     return None
-
-
-def _rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
-    header = "| " + " | ".join(str(c) for c in cols) + " |"
-    sep = "| " + " | ".join("---" for _ in cols) + " |"
-    body_lines = [
-        "| " + " | ".join(str(v) for v in row[:len(cols)]) + " |" for row in rows[:limit]
-    ]
-    return "\n".join([header, sep, *body_lines])
 
 
 class ConversationQueryService:
@@ -305,11 +300,28 @@ class ConversationQueryService:
             # is_summary marks this as the primary answer (vs. supporting content like
             # the table below) so callers can surface it distinctly without a second
             # LLM call or re-deriving which block "is" the summary.
-            blocks.append({"type": "markdown", "content": str(reply_text), "is_summary": True})
+            summary = str(reply_text)
+            # Fold the Insight-Engine observations into the SAME summary block
+            # instead of a separate "insights" event (2026-07-17): one block, not
+            # two. res0["insights"] is List[str] (0-3 factual observations); only
+            # present on answered turns with INSIGHT_ENGINE_ENABLED — never on
+            # smalltalk/clarify, so this is a no-op there. The deterministic
+            # "Analysis:" patterns already live inside reply_text (pipeline.py).
+            insights = [str(i).strip() for i in (res0.get("insights") or []) if str(i).strip()]
+            if insights:
+                summary = summary.rstrip() + "\n\n" + "\n".join(f"- {i}" for i in insights)
+            blocks.append({"type": "markdown", "content": summary, "is_summary": True})
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
             rows = _positional_rows(cols, rows)
-            blocks.append({"type": "markdown", "content": _rows_to_markdown_table(cols, rows)})
+            # Drop non-business columns (e.g. join-only ids) from the rendered
+            # table — the engine's own display_columns already excludes
+            # identifier-role columns (see project_display_columns's docstring).
+            # Fails safe to the original cols/rows when analytics is absent.
+            display_cols = (res0.get("analytics") or {}).get("display_columns")
+            table_cols, table_rows = _project_display_columns(cols, rows, display_cols)
+            blocks.append({"type": "markdown",
+                           "content": _rows_to_markdown_table(table_cols, table_rows)})
         if not blocks:
             blocks.append({"type": "markdown", "content": "No response could be generated."})
         return blocks
@@ -320,7 +332,11 @@ class ConversationQueryService:
         if not cols or not rows:
             return []
         rows = _positional_rows(cols, rows)
-        specs = _visualization_recommender.recommend(cols, rows)
+        # res0["analytics"]: the engine's one deterministic post-execution
+        # analysis (result_analyzer.analytics_summary) — column kinds/roles
+        # computed once server-side, preferred over this tier's own structural
+        # heuristics (which remain the fallback, e.g. for federated results).
+        specs = _visualization_recommender.recommend(cols, rows, analytics=res0.get("analytics"))
         if specs:
             return [spec.to_dict() for spec in specs]
         # Deterministic rules found nothing confident — fall back to the query
@@ -330,5 +346,16 @@ class ConversationQueryService:
         # the SAME chart_data shape via the existing recommender's own builders,
         # never served as a bare column-name suggestion.
         spec = _spec_from_suggestion(cols, rows, res0.get("visualization"))
+        if spec:
+            return [spec.to_dict()]
+        # Second deterministic fallback (2026-07-17): the engine ALSO computes
+        # analytics["chart_candidates"] every turn (result_analyzer.
+        # compute_chart_candidates — shape-driven canonical chart + confidence)
+        # but until now nothing ever read it — pure wasted computation/wire
+        # bytes. Same {type, x_axis, y_axis} shape the suggestion path above
+        # already consumes, so no new plumbing: just try its first (highest-
+        # confidence) candidate before giving up on a chart entirely.
+        candidates = (res0.get("analytics") or {}).get("chart_candidates") or []
+        spec = _spec_from_suggestion(cols, rows, candidates[0]) if candidates else None
         return [spec.to_dict()] if spec else []
 

@@ -43,6 +43,7 @@ def run_chat_turn(
     # scope around run_query()/Tier-2/federated). Folded into engine_result's
     # "usage" below so the supervisor's token spend is never silently dropped —
     # previously only the engine side was captured.
+    _chat_calls = []
     with collect_usage() as _chat_usage:
         result = graph.invoke(
             {
@@ -56,9 +57,15 @@ def run_chat_turn(
             },
             config={"configurable": {"thread_id": session_id, "on_event": on_event}},
         )
+        # MUST read calls() INSIDE the with block — collect_usage().__exit__()
+        # clears the thread-local buffer the instant this block ends, so reading
+        # it after always returns empty (same bug class fixed in
+        # veda_hybrid.py::_maybe_federated() — see that fix's commit for the
+        # full mechanism).
+        _chat_calls = _chat_usage.calls()
 
     engine_result = dict(result.get("engine_result") or {})
-    _chat_totals = usage_totals(_chat_usage.calls())
+    _chat_totals = usage_totals(_chat_calls)
     if _chat_totals["total_tokens"]:
         _engine_usage = engine_result.get("usage") or {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}

@@ -13,7 +13,8 @@ dependencies, and the bug fixes applied on 2026-07-10.
 | Wiring into the chat response stream | `apps/chat/services.py` |
 | API surface (JSON + SSE) | `apps/chat/views.py` |
 
-There is **no dedicated automated test suite** for this module today.
+Automated test suite: `tests/test_chat_visualization.py` (added 2026-07-15,
+extended 2026-07-16 for multi-viz — see §5/§7).
 
 ## 2. What it is not
 
@@ -35,15 +36,21 @@ User query
   → chatbot / LangGraph engine (veda_core)
   → executes SQL, returns res0 = {"cols": [...], "rows": [...], ...}
   → apps/chat/services.py: res0 = response.get("engine_result")
-  → _build_visualizations(res0)                     [services.py:227-231]
+  → _build_visualizations(res0)                     [services.py:294-309]
       → _visualization_recommender.recommend(cols, rows)
-      → returns 0+ VisualizationSpec objects
-      → each .to_dict() is yielded as an SSE event:
-          {"event": "visualization", "data": spec_dict}
+      → returns 0+ VisualizationSpec objects (2026-07-16: often 2 now — see
+        §5's multi-viz update)
+      → ALL specs' .to_dict()s are yielded as ONE SSE event (2026-07-16,
+        changed from one event PER spec):
+          {"event": "visualization", "data": {"visualizations": [spec_dict, ...]}}
   → apps/chat/views.py: both the JSON response builder and the SSE
-    generator append "visualization" events into the response[] array
-    identically to "content" blocks
-  → frontend renders bar / line / pie / line_histogram from the JSON spec
+    generator append this single "visualization" event into the response[]
+    array identically to "content" blocks — so a chart-eligible answer now
+    contributes exactly one response[] entry containing an array, not one
+    entry per chart
+  → frontend renders each entry in data.visualizations[] — order preserved,
+    visualizations[0] is always the SAME chart type this module would have
+    returned before the 2026-07-16 multi-viz change (see §5)
 ```
 
 `res0`'s `cols`/`rows` trace back through:
@@ -102,14 +109,23 @@ dimension-like columns are not charted (they remain visible in the table).
 
 | Priority | Condition | Result |
 |---|---|---|
-| 1 | dimension + **≥2 numeric** columns | `line_histogram`: combo chart using the dimension + the **first two** numeric columns (bars = first numeric, line = second numeric) |
-| 2 | **temporal** dimension + exactly 1 numeric used, >1 row | `line` |
-| 3 | **categorical** dimension + 1 numeric | `pie` if ≤6 distinct categories after aggregation, else top-9-by-value + "Other" bucket → `bar` |
+| 1 | dimension + **≥2 numeric** columns | `line_histogram`: combo chart using the dimension + the **first two** numeric columns (bars = first numeric, line = second numeric). Single chart — see §9, this shape is intentionally NOT extended to multi-viz. |
+| 2 | **temporal** dimension + exactly 1 numeric used, >1 row | **`[line, bar]`** (2026-07-16, was `line` only) — bar is a second, equally-confident rendering of the exact same ordered `(labels, values)` data, not a separate guess. `line` is always `visualizations[0]`. |
+| 3 | **categorical** dimension + 1 numeric, ≤6 distinct categories after aggregation | **`[pie, bar]`** (2026-07-16, was `pie` only) — same totals, same confidence for both. `pie` is always `visualizations[0]`. |
+| 3b | **categorical** dimension + 1 numeric, >6 distinct categories | top-9-by-value + "Other" bucket → `bar` only (unchanged — a pie with this many slices is unreadable, so this deliberately stays single-chart) |
 | — | none match (e.g. all-text columns, single scalar, no dimension) | no chart — table remains the only output |
 
 Priority 1 (combo chart) wins even over a temporal dimension, if a second
 numeric column is present — it's considered more informative than either
 metric charted alone.
+
+**Multi-viz (2026-07-16):** `recommend()` can now return more than one
+`VisualizationSpec` for the SAME result (priorities 2 and 3 above). This is
+never "synthesizing" unrelated charts — every additional spec reuses the
+exact `(labels, values)`/`(slices)` data and confidence the primary spec
+already computed. The response wire format changed accordingly (§3): all
+specs are now sent in one `{"visualizations": [...]}` event instead of one
+event per spec.
 
 Note: the "first two numeric columns" in priority 1 are taken positionally,
 not semantically — if the first numeric column happens to be an ID or row
@@ -150,19 +166,22 @@ slices/bars instead of one summed value. Now sums values per category name
 first.
 
 Then:
-- `len(pairs) <= 6` → `pie`, one slice per category.
+- `len(pairs) <= 6` → **`[pie, bar]`** (2026-07-16, was `pie` only) — one
+  slice per category for the pie; the SAME `pairs` reused as `labels`/
+  `values` for the paired bar, same confidence (0.9) as the pie.
 - `len(pairs) > 6` → rank descending by value, keep top 9, collapse the rest
   into a single `"Other"` slice (sum of their values), then:
-  - if the bucketed result is still ≤6 slices → `pie` (in practice this
+  - if the bucketed result is still ≤6 slices → `pie` only (in practice this
     branch is unreachable, since bucketing only ever runs when the original
     count was >6, and top-9 + "Other" is always ≥7 when rest is non-empty,
     or equal to the original >6 count when rest is empty)
-  - otherwise → `bar`, using `labels`/`values` arrays.
+  - otherwise → `bar` only, using `labels`/`values` arrays — deliberately
+    NOT paired with a pie here; see §5 priority 3b.
 
 ## 7. Output contract (`VisualizationSpec.to_dict()`, `visualization.py:50`)
 
-Every chart is serialized as JSON matching a fixed frontend contract, never
-an image:
+Each individual chart spec's own shape is unchanged and matches a fixed
+frontend contract, never an image:
 
 ```jsonc
 // bar / line
@@ -179,6 +198,23 @@ an image:
  "chart_data": {"labels": ["..."], "histogram_values": [1, 2],
                 "line_values": [3, 4]}}
 ```
+
+**Wire-level wrapper (2026-07-16, wire-contract change — see §3):** what
+actually goes out on the SSE/JSON response is now ALWAYS this array wrapper,
+even when there's only one chart:
+
+```jsonc
+{"visualizations": [
+  {"type": "pie", "title": "...", "chart_data": {"slices": [...]}, "confidence": 0.9},
+  {"type": "bar", "title": "...", "chart_data": {"labels": [...], "values": [...]}, "confidence": 0.9}
+]}
+```
+
+`visualizations[0]` is always the same single chart this module would have
+returned before 2026-07-16 — existing frontend code needs to change from
+reading `data.type`/`data.chart_data` directly off a `"visualization"` event
+to reading `data.visualizations[0].type` etc. (or iterating the whole array
+to render/offer all of them).
 
 `Decimal` values from psycopg2 (`NUMERIC`/`SUM`/`AVG` results) are normalized
 to `float` via `_to_number()` (`visualization.py:59`) so they serialize

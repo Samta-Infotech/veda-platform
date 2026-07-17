@@ -28,6 +28,11 @@ from decimal import Decimal
 from enum import Enum
 from typing import Any
 
+from .table_rendering import fmt_header as _fmt_axis   # "customer_name" -> "Customer Name" —
+# same humanization the table headers use, applied to chart titles/axis labels
+# for consistency (2026-07-17); table_rendering.py has zero Django dependency,
+# so importing it here doesn't pull anything heavier into this module.
+
 
 class ChartType(str, Enum):
     BAR = "bar"
@@ -86,6 +91,18 @@ _TEMPORAL_NAME_HINTS = ("date", "month", "year", "week", "day", "time", "period"
 # appear in the accompanying markdown table, just never charted.
 _IDENTIFIER_SUFFIXES = ("_id", "_uuid", "_key", "_no", "_number", "_num", "_code", "_ref")
 _IDENTIFIER_NAMES = ("id", "uuid", "guid")
+# camelCase identifier suffix (AccountID/customerId/buildId) — see _is_identifier.
+_CAMEL_ID_SUFFIX_RE = re.compile(r"[a-z0-9](Id|ID)$")
+
+# Free-text detection — a self-contained copy of the same heuristic
+# veda_core/veda/result_analyzer.py uses to keep free-text columns (notes,
+# descriptions, addresses...) out of chart axes. Structurally these are
+# "categorical" by _infer_kind's other rules (non-numeric, non-date strings),
+# so without this check a column like `notes` could outrank a real dimension
+# like `label` for the chart's category axis — a real, observed bug (cols =
+# ['notes', 'label', 'amount'] picked 'notes' over 'label').
+_TEXT_NAME_HINTS = ("email", "notes", "description", "remarks", "comment", "address", "bio")
+_TEXT_AVG_LEN_THRESHOLD = 40  # avg sampled value length above this reads as free text, not a category
 
 _MAX_PIE_SLICES = 6
 _TOP_N_CATEGORIES = 9  # + 1 "Other" bucket for the long tail = 10 slices/bars, still readable
@@ -123,12 +140,41 @@ class VisualizationRecommender:
     data and confidence the primary spec already computed — no new
     recommendation logic, no guessing."""
 
-    def recommend(self, cols: list, rows: list) -> list[VisualizationSpec]:
+    def recommend(self, cols: list, rows: list, analytics: dict | None = None) -> list[VisualizationSpec]:
+        """`analytics` (optional): the engine's own deterministic analysis
+        (veda_core result_analyzer's analytics_summary, riding the result dict
+        across the HTTP boundary). When present, its per-column kind/role is
+        AUTHORITATIVE — it was computed once, with semantic-model access this
+        tier doesn't have — and this module's own structural heuristics run
+        only for columns the engine didn't cover (or when analytics is absent
+        entirely, e.g. federated results). Kills the double classification
+        without breaking the api-tier's no-veda_core-import boundary: what
+        crosses is plain data, not an import."""
         if not cols or not rows:
             return []
 
-        kinds = [self._infer_kind(cols[i], [row[i] for row in rows]) for i in range(len(cols))]
-        is_id = [self._is_identifier(c) for c in cols]
+        stats_by_name = {}
+        for s in (analytics or {}).get("column_stats") or []:
+            if isinstance(s, dict) and s.get("name"):
+                stats_by_name[s["name"]] = s
+
+        def _kind(i: int) -> str:
+            st = stats_by_name.get(cols[i])
+            if st:
+                if st.get("role") == "text":
+                    return "text"
+                if st.get("kind") in ("temporal", "numeric", "categorical"):
+                    return st["kind"]
+            return self._infer_kind(cols[i], [row[i] for row in rows])
+
+        def _ident(i: int) -> bool:
+            st = stats_by_name.get(cols[i])
+            if st and st.get("role"):
+                return st["role"] == "identifier"
+            return self._is_identifier(cols[i])
+
+        kinds = [_kind(i) for i in range(len(cols))]
+        is_id = [_ident(i) for i in range(len(cols))]
         # Identifiers are excluded from every candidate pool up front — an id/
         # uuid/code column never becomes a measure OR a dimension, regardless
         # of how numeric/categorical it structurally looks.
@@ -181,18 +227,46 @@ class VisualizationRecommender:
             return "temporal"
         if all(_is_numeric(v) for v in sample):
             return "numeric"
+        # "text" is deliberately distinct from "categorical" — recommend()'s
+        # categorical_idx only collects kind == "categorical", so a free-text
+        # column is naturally excluded from ever becoming the chart's
+        # dimension, the same way an identifier is excluded via is_id. It may
+        # still appear in the markdown table, just never charted.
+        if self._looks_like_free_text(col_name, sample):
+            return "text"
         return "categorical"
 
     @staticmethod
     def _is_identifier(col_name: str) -> bool:
-        name = col_name.lower()
-        return name in _IDENTIFIER_NAMES or name.endswith(_IDENTIFIER_SUFFIXES)
+        name = str(col_name)
+        lname = name.lower()
+        if lname in _IDENTIFIER_NAMES or lname.endswith(_IDENTIFIER_SUFFIXES):
+            return True
+        # camelCase identifier convention from non-Django sources (NoSQL/
+        # federated/external schemas commonly use "AccountID"/"customerId"/
+        # "buildId" with no underscore) — 2026-07-17, a real observed gap:
+        # "accountid".endswith("_id") is False (no underscore), so these slipped
+        # through and got charted as a category/measure. Checked on the
+        # ORIGINAL case and requires the Id/ID segment to follow a lowercase/
+        # digit boundary, so this never false-positives on ordinary lowercase
+        # English words that happen to end in "id" (paid, valid, grid, hybrid,
+        # android, ...) — those are never capitalized mid-word in real data.
+        return bool(_CAMEL_ID_SUFFIX_RE.search(name))
 
     @staticmethod
     def _looks_like_date(v: Any) -> bool:
         if hasattr(v, "isoformat"):  # datetime/date objects
             return True
         return isinstance(v, str) and bool(_DATE_RE.match(v))
+
+    @staticmethod
+    def _looks_like_free_text(col_name: str, sample: list) -> bool:
+        name_lower = col_name.lower()
+        if any(hint in name_lower for hint in _TEXT_NAME_HINTS):
+            return True
+        str_values = [str(v) for v in sample]
+        avg_len = sum(len(v) for v in str_values) / len(str_values)
+        return avg_len > _TEXT_AVG_LEN_THRESHOLD
 
     # --- chart builders ------------------------------------------------------
 
@@ -210,8 +284,22 @@ class VisualizationRecommender:
         if len(pairs) < 2:
             return []  # a single category isn't a chart — never force one
 
-        title = f"{cols[val_idx]} by {cols[cat_idx]}"
+        # A pie slice can't represent a negative share of a whole (loss/refund/
+        # net-change data) — bar handles negative values fine (a bar below the
+        # axis), a pie cannot. Computed once, applied to every branch below.
+        has_negative = any(value < 0 for _, value in pairs)
+
+        title = f"{_fmt_axis(cols[val_idx])} by {_fmt_axis(cols[cat_idx])}"
+        x_title, y_title = _fmt_axis(cols[cat_idx]), _fmt_axis(cols[val_idx])
         if len(pairs) <= _MAX_PIE_SLICES:
+            labels = [name for name, _ in pairs]
+            values = [value for _, value in pairs]
+            bar = VisualizationSpec(
+                type=ChartType.BAR, title=title, x_axis_title=x_title, y_axis_title=y_title,
+                chart_data={"labels": labels, "values": values}, confidence=0.9,
+            )
+            if has_negative:
+                return [bar]
             slices = [{"name": name, "value": value} for name, value in pairs]
             pie = VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
                                     confidence=0.9)
@@ -220,12 +308,6 @@ class VisualizationRecommender:
             # separately-justified guess. Pie stays first (today's single-
             # chart behavior — any caller that only reads specs[0] sees no
             # change at all); bar is the new additive second chart.
-            labels = [name for name, _ in pairs]
-            values = [value for _, value in pairs]
-            bar = VisualizationSpec(
-                type=ChartType.BAR, title=title, x_axis_title=cols[cat_idx], y_axis_title=cols[val_idx],
-                chart_data={"labels": labels, "values": values}, confidence=0.9,
-            )
             return [pie, bar]
 
         # Long tail: keep the top N by value, collapse the rest into "Other"
@@ -240,14 +322,14 @@ class VisualizationRecommender:
         if rest:
             slices.append({"name": "Other", "value": sum(value for _, value in rest)})
 
-        if len(slices) <= _MAX_PIE_SLICES:
+        if len(slices) <= _MAX_PIE_SLICES and not has_negative:
             return [VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
                                       confidence=0.75)]
 
         labels = [s["name"] for s in slices]
         values = [s["value"] for s in slices]
         return [VisualizationSpec(
-            type=ChartType.BAR, title=title, x_axis_title=cols[cat_idx], y_axis_title=cols[val_idx],
+            type=ChartType.BAR, title=title, x_axis_title=x_title, y_axis_title=y_title,
             chart_data={"labels": labels, "values": values}, confidence=0.7,
         )]
 
@@ -259,8 +341,8 @@ class VisualizationRecommender:
         non_null_x = sum(1 for row in ordered if row[x_idx] is not None)
         confidence = 0.9 if non_null_x == len(ordered) and len(ordered) >= 3 else 0.7
         return VisualizationSpec(
-            type=ChartType.LINE, title=f"{cols[y_idx]} over {cols[x_idx]}",
-            x_axis_title=cols[x_idx], y_axis_title=cols[y_idx],
+            type=ChartType.LINE, title=f"{_fmt_axis(cols[y_idx])} over {_fmt_axis(cols[x_idx])}",
+            x_axis_title=_fmt_axis(cols[x_idx]), y_axis_title=_fmt_axis(cols[y_idx]),
             chart_data={"labels": [str(row[x_idx]) for row in ordered],
                        "values": [_to_number(row[y_idx]) for row in ordered]},
             confidence=confidence,
@@ -275,8 +357,8 @@ class VisualizationRecommender:
         identical underlying data."""
         ordered = sorted(rows, key=lambda row: (row[x_idx] is None, row[x_idx]))
         return VisualizationSpec(
-            type=ChartType.BAR, title=f"{cols[y_idx]} over {cols[x_idx]}",
-            x_axis_title=cols[x_idx], y_axis_title=cols[y_idx],
+            type=ChartType.BAR, title=f"{_fmt_axis(cols[y_idx])} over {_fmt_axis(cols[x_idx])}",
+            x_axis_title=_fmt_axis(cols[x_idx]), y_axis_title=_fmt_axis(cols[y_idx]),
             chart_data={"labels": [str(row[x_idx]) for row in ordered],
                        "values": [_to_number(row[y_idx]) for row in ordered]},
             confidence=confidence,
@@ -297,8 +379,9 @@ class VisualizationRecommender:
         confidence = 0.8 if coverage >= 0.8 else 0.6
         return VisualizationSpec(
             type=ChartType.LINE_HISTOGRAM,
-            title=f"{cols[hist_idx]} and {cols[line_idx]} by {cols[dim_idx]}",
-            x_axis_title=cols[dim_idx], histogram_title=cols[hist_idx], line_title=cols[line_idx],
+            title=f"{_fmt_axis(cols[hist_idx])} and {_fmt_axis(cols[line_idx])} by {_fmt_axis(cols[dim_idx])}",
+            x_axis_title=_fmt_axis(cols[dim_idx]), histogram_title=_fmt_axis(cols[hist_idx]),
+            line_title=_fmt_axis(cols[line_idx]),
             chart_data={"labels": [t[0] for t in triples],
                        "histogram_values": [t[1] for t in triples],
                        "line_values": [t[2] for t in triples]},

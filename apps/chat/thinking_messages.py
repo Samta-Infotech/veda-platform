@@ -43,10 +43,37 @@ THINKING_PHASE_MESSAGES: dict[str, str] = {
     "decompose": "Breaking down your question...",
     "sub_query": "Answering part of your question...",
     "tier2": "Digging deeper to find your answer...",
+    # veda_core/query/lg_nodes.py — the 5 Tier-2 LangGraph nodes (2026-07-17).
+    # Each is a separate SLM call; previously they ran as ONE silent gap between
+    # the coarse "tier2" tick above and the terminal "answer" tick. These surface
+    # per-step progress (parity with rag_retrieve/rag_synthesize/nosql_build).
+    # Internal node names (intent/entity/columns/filters/assemble) are NEVER shown
+    # — same rule as every other phase.
+    "tier2_intent":   "Working out what you're asking for...",
+    "tier2_entity":   "Finding the right information...",
+    "tier2_columns":  "Selecting the details to include...",
+    "tier2_filters":  "Applying your conditions...",
+    "tier2_assemble": "Putting your answer together...",
     "rag": "Searching through your documents...",
     "hybrid": "Combining information from multiple sources...",
     "nosql": "Searching your records...",
     "answer": "Preparing your answer...",
+
+    # veda_core/query/rag_layer.py — sub-steps INSIDE run_rag_layer/
+    # run_hybrid_layer (2026-07-16). Previously these were silent black
+    # boxes between the "rag"/"hybrid" tick above and the terminal "answer"
+    # tick — no visibility into the actual retrieval or the SLM synthesis
+    # call, often the slowest, most opaque part of the whole turn.
+    "rag_retrieve": "Found the relevant passages...",
+    "rag_synthesize": "Reading through what was found...",
+    "hybrid_retrieve": "Combining your data with the documents found...",
+    "hybrid_synthesize": "Piecing together an answer from everything found...",
+
+    # veda_core/veda_hybrid.py::_run_nosql — sub-step inside the NoSQL path
+    # (2026-07-16). Schema inference + the LLM-based query-building step
+    # were previously silent between the "nosql" tick and the terminal
+    # "answer" tick.
+    "nosql_build": "Figuring out how to query your data...",
 
     # veda_core/veda/pipeline.py
     "schema_linking": "Finding the required business information...",

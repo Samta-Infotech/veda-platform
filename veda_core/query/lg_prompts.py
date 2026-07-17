@@ -19,6 +19,10 @@ COLUMN_PROMPT = """\
 Select relevant columns from COLUMN REFERENCE.
 Copy col_id EXACTLY — never generate a UUID.
 COUNT with no grouping: selected_col_ids = []
+If a RECOMMENDED PROJECTION list is given, selected_col_ids should come from that list —
+it's the business-relevant set to display. Only add a column outside it when the query
+explicitly names it, or GROUP BY/ORDER BY structurally requires it. Do not add other
+COLUMN REFERENCE columns "just in case".
 Self-check: every col_id must be in COLUMN REFERENCE.
 Output ONLY JSON, no markdown.
 {"selected_col_ids":["<uuid>"],"group_by_col_id":null,"order_by_col_id":null,"order_direction":"ASC"}
