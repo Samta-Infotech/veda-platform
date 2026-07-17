@@ -42,8 +42,11 @@ except ImportError:
 # deliberately excluded from the chat/SSE path — see apps/chat/services.py's own
 # "never sent over SSE" comment); stripped here too so EVERY caller of this route
 # (not just the chat path) gets the same guarantee, not just the ones that happen
-# to allowlist their own fields.
-_INTERNAL_ONLY_KEYS = frozenset({"context", "trace"})
+# to allowlist their own fields. "_debug" is the same idea for paths that have no
+# ExplainTrace to record onto (e.g. Tier-2's _tier2_finish() noting an Insight
+# Engine failure so a zero-token usage reading is distinguishable from "no LLM
+# call was needed" — veda_hybrid.py).
+_INTERNAL_ONLY_KEYS = frozenset({"context", "trace", "_debug"})
 
 
 def _verbose() -> bool:
