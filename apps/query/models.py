@@ -36,6 +36,9 @@ class QueryLog(models.Model):
     executed_sql = models.TextField(blank=True)  # parameterized text only
     refusal_reason = models.TextField(blank=True)
     latency_ms = models.PositiveIntegerField(null=True, blank=True)
+    prompt_tokens = models.PositiveIntegerField(null=True, blank=True)
+    completion_tokens = models.PositiveIntegerField(null=True, blank=True)
+    total_tokens = models.PositiveIntegerField(null=True, blank=True)
     cache_hit = models.BooleanField(default=False)  # verified-query cache served this (§6.6)
     request_id = models.CharField(max_length=64, blank=True, db_index=True)
     created_at = models.DateTimeField(auto_now_add=True)

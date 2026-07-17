@@ -554,9 +554,17 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             elif TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
-                t2 = _tier2_sql(query, sm, cols, verbose=verbose,
-                                deadline=time.time() + TIER2_TIME_BUDGET_S,
-                                execution_state=res.get("context") if isinstance(res, dict) else None)
+                from slm._call_slm import collect_usage
+                _t2_t0 = time.time()
+                with collect_usage() as _t2_usage:
+                    t2 = _tier2_sql(query, sm, cols, verbose=verbose,
+                                    deadline=time.time() + TIER2_TIME_BUDGET_S,
+                                    execution_state=res.get("context") if isinstance(res, dict) else None)
+                if isinstance(t2, dict) and "usage" not in t2:
+                    from slm._call_slm import usage_totals
+                    t2["usage"] = usage_totals(_t2_usage.calls())
+                if isinstance(t2, dict) and "latency_ms" not in t2:
+                    t2["latency_ms"] = round((_head_s + (time.time() - _t2_t0)) * 1000, 2)
                 if t2 is not None:
                     if isinstance(t2, dict) and t2.get("status") == "tier2_rejected":
                         # Tier-2 exists to RESCUE a refusal; a candidate its own
@@ -803,6 +811,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
         INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS = False, 200
 
     visualization = None
+    _confidence = None
     if NL_ANSWER_ENABLED and cols:
         row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
         # Safe default FIRST, same as veda/pipeline.py's L7b (the Tier-1 path) —
@@ -833,7 +842,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
                 result["insights"] = insight.insights
                 result["follow_up_questions"] = insight.follow_up_questions
                 result["visualization"] = insight.visualization
-                result["confidence"] = insight.confidence
+                _confidence = insight.confidence
                 visualization = insight.visualization
             except Exception as _ie:
                 print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
@@ -856,7 +865,8 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
     try:
         from veda.business_explain import build_explain
         result["explain"] = build_explain(sql=sql or "", table=table or "", sm=sm,
-                                          visualization=visualization)
+                                          visualization=visualization,
+                                          confidence=_confidence)
     except Exception:
         print("  [Tier2] explainability skipped")
     return result

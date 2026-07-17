@@ -267,7 +267,8 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
                    checks: Optional[List[dict]] = None,
                    visualization: Optional[dict] = None,
                    params: Optional[List[Any]] = None,
-                   timeline: Optional[List[Tuple[str, str]]] = None) -> Dict[str, Any]:
+                   timeline: Optional[List[Tuple[str, str]]] = None,
+                   confidence: Optional[float] = None) -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
     Returns a plain dict matching the documented explainability schema.
 
@@ -360,12 +361,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         },
         "validation": {"passed": all_passed, "checks": check_items},
         "sql": {"enabled": True, "query": sql or None},
-        # Placeholder key for the separately-scoped "universal routing confidence"
-        # work — schema-only, deliberately not computed here (no fake number).
-        # Always present (None until populated), matching _NO_EXPLAIN's own
-        # "key present, value None" convention for not-yet-available fields
-        # (apps/chat/services.py) rather than visualization's omit-when-N/A one.
-        "confidence": None,
+        # Weakest-link confidence from the run's own anchor-selection + join-plan
+        # gating signals (veda/pipeline.py's _done(), query/result_explainer.py's
+        # synthesize_confidence) — never an LLM self-report. None only when the
+        # caller couldn't compute one (e.g. synthesize_confidence itself raised).
+        # Always present as a key, matching _NO_EXPLAIN's own "key present, value
+        # None" convention for not-yet-available fields (apps/chat/services.py).
+        "confidence": confidence,
         "timeline": [{"phase": p, "message": m} for p, m in (timeline or [])],
     }
     if visualization:
