@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import re
+import time
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -41,7 +42,11 @@ _TIME_RE = re.compile(
 def answer_runtime_context(query: str) -> Optional[dict]:
     """None when `query` isn't a pure runtime-value question. Otherwise a
     pipeline-shaped result dict — same "answered" contract veda/pipeline.py's
-    run_query() returns — with a deterministic answer and no table/SQL."""
+    run_query() returns — with a deterministic answer and no table/SQL.
+    No LLM call is ever made here, so usage is genuinely zero (not a gap);
+    latency_ms is still measured so the field is never missing/null on this
+    path — same contract shape as every other answered result."""
+    _t0 = time.time()
     now = datetime.now(timezone.utc)
     if _DATETIME_RE.match(query):
         answer = f"The current date and time is {now.strftime('%Y-%m-%d %H:%M')} UTC."
@@ -54,4 +59,6 @@ def answer_runtime_context(query: str) -> Optional[dict]:
     else:
         return None
     return {"ok": True, "status": "answered", "answer": answer,
-            "cols": None, "rows": None, "sql": None, "table": None}
+            "cols": None, "rows": None, "sql": None, "table": None,
+            "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+            "latency_ms": round((time.time() - _t0) * 1000, 2)}

@@ -230,22 +230,36 @@ def _maybe_federated(query, verbose=False):
     sids = list(getattr(ctx, "source_ids", ()) or ()) if ctx is not None else []
     if len(sids) < 2:
         return None
+    from slm._call_slm import collect_usage, usage_totals
+    _fed_t0 = time.time()
     try:
-        from query.federated_route import run_federated
-        payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
-                                source_ids=sids, verbose=verbose)
+        with collect_usage() as _fed_usage:
+            from query.federated_route import run_federated
+            payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
+                                    source_ids=sids, verbose=verbose)
     except Exception as e:
         if verbose:
             print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
         return None
+    _fed_usage_totals = usage_totals(_fed_usage.calls())
+    _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
     if payload is None:
         return None                      # single-source plan → normal path
     if payload.get("status") == "ok":
         r = payload.get("result") or {}
+        sql = payload.get("sql") or ""
+        table = "federated"
+        try:
+            from veda.business_explain import build_explain
+            explain = build_explain(sql=sql, table=table, sm=None)
+        except Exception:
+            explain = None
         result = {"ok": True, "status": "answered", "route": "federated",
-                  "sql": payload.get("sql"), "cols": r.get("columns"), "rows": r.get("rows"),
-                  "table": "federated", "answer": payload.get("answer"),
-                  "provenance": payload.get("provenance"), "sources": payload.get("sources")}
+                  "sql": sql, "cols": r.get("columns"), "rows": r.get("rows"),
+                  "table": table, "answer": payload.get("answer"),
+                  "provenance": payload.get("provenance"), "sources": payload.get("sources"),
+                  "explain": explain, "usage": _fed_usage_totals,
+                  "latency_ms": _fed_latency_ms}
         return MultiResult(items=[_to_subresult(query, "federated", result)])
     # A federated EXECUTION/planning FAILURE (the generated cross-source SQL was invalid —
     # binder error, hallucinated column, unparseable, no plan) means the LLM mis-planned,
@@ -263,7 +277,8 @@ def _maybe_federated(query, verbose=False):
     # refused/blocked federation is a real, explained outcome — surface it, don't silently
     # fall back to a single-source answer that would drop a source.
     result = {"ok": False, "status": "federated_refused",
-              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql")}
+              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql"),
+              "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
@@ -847,6 +862,17 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
             except Exception as _ie:
                 print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
+                # Record the attempt even though it failed — call_slm() only records
+                # usage on a SUCCESSFUL backend.call() return, so an exception here
+                # means zero tokens get attributed to this attempt even if the SLM
+                # was actually contacted. Without this, usage.total_tokens == 0 is
+                # indistinguishable from "no LLM call was needed this turn." Tier-2
+                # has no ExplainTrace to record onto (unlike Tier-1's tr.set("nl_summary",
+                # ...)), so this lives under "_debug" — a key inference/routes/hybrid.py's
+                # _INTERNAL_ONLY_KEYS strips at every nesting depth, same guarantee as
+                # "trace"/"context", so it never reaches the client-facing response.
+                result.setdefault("_debug", {})["insight_engine_failed"] = True
+                result["_debug"]["insight_engine_error"] = f"{type(_ie).__name__}: {str(_ie)[:200]}"
 
         # got_real_answer (not "answer" in result — that key is ALWAYS present
         # now, see the deterministic default set above): still tries plain
