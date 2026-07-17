@@ -153,7 +153,10 @@ def test_tier2_finish_insight_engine_enabled(monkeypatch):
     assert result["insights"] == ["Both payments are for the same amount."]
     assert result["follow_up_questions"] == ["Show only totals above 150"]
     assert result["visualization"]["type"] == "bar"
-    assert "confidence" in result
+    # Confidence is no longer a top-level result key — it now lives inside `explain`
+    # (build_explain's "confidence"), and the api tier reads it from there
+    # (apps/chat/services.py). The Tier-2 result carrying its own confidence was
+    # only meaningful when the removed `insights` SSE event surfaced it.
     assert "explain" in result and result["explain"]["version"] == "1.0"
 
 
