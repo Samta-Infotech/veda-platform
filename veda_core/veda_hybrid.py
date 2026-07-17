@@ -39,6 +39,13 @@ from query.multi_result import (
     MultiResult, SubResult, STATUS_OK, STATUS_REFUSED, STATUS_ERROR,
 )
 
+try:
+    from utils.logger import get_logger
+    logger = get_logger(__name__)
+except Exception:  # pragma: no cover
+    import logging
+    logger = logging.getLogger("veda.veda_hybrid")
+
 _SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (P5)
 
 
@@ -244,6 +251,9 @@ def _maybe_federated(query, verbose=False):
     _fed_calls = _fed_usage.calls()
     _fed_usage_totals = usage_totals(_fed_calls)
     _fed_latency_ms = round((time.time() - _fed_t0) * 1000, 2)
+    logger.debug("_maybe_federated status=%s calls_captured=%d purposes=%s tokens=%s",
+                payload.get("status") if payload else None, len(_fed_calls),
+                [c["purpose"] for c in _fed_calls], _fed_usage_totals)
     if payload is None:
         return None                      # single-source plan → normal path
     if payload.get("status") == "ok":
