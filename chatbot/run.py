@@ -10,6 +10,7 @@ from __future__ import annotations
 from typing import Callable, Optional
 
 from .graph import get_graph
+from .llm import collect_usage, usage_totals
 
 
 def run_chat_turn(
@@ -37,18 +38,35 @@ def run_chat_turn(
     forwarded verbatim — {} when a phase carries none.
     """
     graph = get_graph()
-    result = graph.invoke(
-        {
-            "message": message,
-            "history": history or [],
-            "session_id": session_id,
-            "tenant": tenant,
-            "source_id": source_id,
-            "source_ids": list(source_ids) if source_ids else None,
-            "request_id": request_id,
-        },
-        config={"configurable": {"thread_id": session_id, "on_event": on_event}},
-    )
+    # Wraps the WHOLE turn (classify/smalltalk/followup nodes' own SLM calls —
+    # chatbot/llm.py — plus, nested inside, the engine's own collect_usage()
+    # scope around run_query()/Tier-2/federated). Folded into engine_result's
+    # "usage" below so the supervisor's token spend is never silently dropped —
+    # previously only the engine side was captured.
+    with collect_usage() as _chat_usage:
+        result = graph.invoke(
+            {
+                "message": message,
+                "history": history or [],
+                "session_id": session_id,
+                "tenant": tenant,
+                "source_id": source_id,
+                "source_ids": list(source_ids) if source_ids else None,
+                "request_id": request_id,
+            },
+            config={"configurable": {"thread_id": session_id, "on_event": on_event}},
+        )
+
+    engine_result = dict(result.get("engine_result") or {})
+    _chat_totals = usage_totals(_chat_usage.calls())
+    if _chat_totals["total_tokens"]:
+        _engine_usage = engine_result.get("usage") or {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        engine_result["usage"] = {
+            "prompt_tokens": _engine_usage.get("prompt_tokens", 0) + _chat_totals["prompt_tokens"],
+            "completion_tokens": _engine_usage.get("completion_tokens", 0) + _chat_totals["completion_tokens"],
+            "total_tokens": _engine_usage.get("total_tokens", 0) + _chat_totals["total_tokens"],
+        }
 
     return {
         "session_id": session_id,
@@ -63,7 +81,7 @@ def run_chat_turn(
         # distinction would break this fallback for smalltalk turns.
         "status": result.get("status") or ("smalltalk" if result.get("action") == "smalltalk" else "answered"),
         "engine_unavailable": result.get("engine_unavailable", False),
-        "engine_result": result.get("engine_result") or {},
+        "engine_result": engine_result,
     }
 
 
