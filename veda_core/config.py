@@ -966,15 +966,32 @@ NL_ANSWER_MAX_ROWS     = 50
 NL_ANSWER_FAST_TIMEOUT_MS = int(__import__("os").environ.get("NL_ANSWER_FAST_TIMEOUT_MS", "2500"))
 
 # Result Explanation Layer (query/result_explainer.py) — row-summarization SLM call.
-# Deliberately a SMALL instruct model, distinct from SLM_MODEL_NAME (the 7B coder
-# model used for SQL/IR generation): summarizing a handful of result rows into one
-# sentence doesn't need a code model, and a small model keeps this off the hot path.
-NL_SUMMARY_MODEL       = __import__("os").environ.get("NL_SUMMARY_MODEL", "qwen2.5:1.5b-instruct")
-NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "2500"))
-# 80 was cutting the model off mid-sentence for multi-row answers (a "~1-2 sentence"
-# answer with several named values comfortably needs more than 80 tokens). 120 gives
-# headroom to finish; the prompt itself also now asks for one ~30-word sentence.
-NL_SUMMARY_MAX_TOKENS  = int(__import__("os").environ.get("NL_SUMMARY_MAX_TOKENS", "120"))
+# An INSTRUCT model (not SLM_MODEL_NAME, the 7B *coder* used for SQL/IR generation).
+# Upgraded 2026-07-17 from qwen2.5:1.5b-instruct → qwen2.5:7b-instruct: the summary
+# prompt now asks for a 2-3 sentence business-analyst answer that weaves in the
+# detected patterns (product call), and the 1.5B model produced thin/uneven prose
+# for that. Trade-off (accepted): the 7B model is slower (~4-6s warm vs ~1s), so
+# every answered turn now waits longer on the summary — hence NL_SUMMARY_TIMEOUT_MS
+# is raised to match (see below), and the callers no longer use the 1.5B-era
+# NL_ANSWER_FAST_TIMEOUT_MS. Also lifts run_insight_engine (same NL_SUMMARY_MODEL).
+NL_SUMMARY_MODEL       = __import__("os").environ.get("NL_SUMMARY_MODEL", "qwen2.5:7b-instruct")
+# 2500ms fit the 1.5B model; the 7B instruct model measures ~4-6s warm (same class
+# as INSIGHT_ENGINE_TIMEOUT_MS's 10000ms budget), so 2500ms would time out on nearly
+# every call and silently downgrade to the deterministic fallback. 10000ms gives the
+# 7B model real headroom incl. a cold load.
+NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "10000"))
+# 80 was cutting the model off mid-sentence; 120 suited the old one-sentence prompt.
+# The 2-3 sentence business summary needs more — run_nl_answer adds +50 at call time,
+# and this base gives headroom for the woven-in findings.
+NL_SUMMARY_MAX_TOKENS  = int(__import__("os").environ.get("NL_SUMMARY_MAX_TOKENS", "160"))
+# Anti-hallucination guardrail (2026-07-17): after the summary SLM answers, verify
+# every number it states is grounded in the precomputed facts/metrics/patterns
+# (result_explainer._answer_numbers_grounded). If it invented a figure, fall back to
+# the deterministic blended answer — a plainer-but-correct summary beats a
+# confident wrong number. Lenient matching (±2% / small counts) to avoid downgrading
+# good summaries; toggle off here if it ever over-rejects in the field.
+NL_SUMMARY_NUMERIC_GUARD = __import__("os").environ.get(
+    "NL_SUMMARY_NUMERIC_GUARD", "true").strip().lower() in ("1", "true", "yes", "on")
 NL_SUMMARY_MAX_ROWS    = int(__import__("os").environ.get("NL_SUMMARY_MAX_ROWS", "20"))
 
 # Insight Engine (veda/result_analyzer.py + query/result_explainer.py's
@@ -985,6 +1002,13 @@ NL_SUMMARY_MAX_ROWS    = int(__import__("os").environ.get("NL_SUMMARY_MAX_ROWS",
 # it can affect the response shape (additively — see result_explainer.py).
 INSIGHT_ENGINE_ENABLED     = __import__("os").environ.get(
     "INSIGHT_ENGINE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
+# Follow-up suggestions (one field of the Insight Engine's JSON output) —
+# parked behind their own flag (product call, 2026-07-16): the grounding/
+# validation machinery stays in place, but suggestions are not surfaced until
+# explicitly re-enabled. Deterministic analytics in the summary replace them
+# as the "what next" signal for now.
+INSIGHT_FOLLOW_UPS_ENABLED = __import__("os").environ.get(
+    "INSIGHT_FOLLOW_UPS_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 # Cap on rows scanned for in-memory column stats (nulls/distinct/top-values) —
 # large result sets still get a summary, just profiled from a bounded sample.
 RESULT_ANALYZER_MAX_ROWS   = int(__import__("os").environ.get("RESULT_ANALYZER_MAX_ROWS", "200"))
@@ -994,7 +1018,14 @@ RESULT_ANALYZER_MAX_ROWS   = int(__import__("os").environ.get("RESULT_ANALYZER_M
 # ~240 predicted tokens vs run_nl_answer's 120) — so it needs materially more
 # headroom than NL_SUMMARY_TIMEOUT_MS's 2500ms, not less. 1200ms silently fell back
 # to the deterministic answer on every call in that environment.
-INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "5000"))
+# Re-measured (2026-07-16), after the prompt gained the deterministic patterns +
+# business-context grounding blocks (~432 prompt tokens for a typical grouped
+# result): a WARM call now takes 4.1-4.6s end to end, and a cold model load adds
+# ~1s+ — so the previous 5000ms left effectively zero headroom and timed out on
+# ordinary calls (observed live: "SLM unavailable/invalid (TimeoutError)").
+# 10000ms gives real margin over the measured warm ~4.6s + cold-load worst case;
+# the failure mode remains fail-safe (deterministic fallback answer) either way.
+INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "10000"))
 # Deterministic chart-recommendation gate (veda/result_analyzer.chart_confidence,
 # query/result_explainer.validate_visualization): below this, no visualization is
 # returned at all — a table-only response is always safer than a low-confidence

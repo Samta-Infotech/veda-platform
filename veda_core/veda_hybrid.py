@@ -242,10 +242,42 @@ def _maybe_federated(query, verbose=False):
         return None                      # single-source plan → normal path
     if payload.get("status") == "ok":
         r = payload.get("result") or {}
+        # No single-source semantic model applies across a federated query, but
+        # build_explain() parses the SQL text itself (sm=None degrades table/column
+        # labels to humanized raw names, never crashes) — so a federated answer gets
+        # real explainability (entities/filters/operations from the ACTUAL cross-source
+        # SQL that ran) instead of apps/chat/services.py's generic _NO_EXPLAIN
+        # placeholder, which previously fired for every federated answer even though
+        # cols/rows/sql were all genuinely available.
+        explain = None
+        try:
+            from veda.business_explain import build_explain
+            explain = build_explain(sql=payload.get("sql") or "", table="federated", sm=None)
+        except Exception as e:
+            if verbose:
+                print(f"  [federated] business_explain failed ({type(e).__name__}: {e}) — explainability omitted")
         result = {"ok": True, "status": "answered", "route": "federated",
                   "sql": payload.get("sql"), "cols": r.get("columns"), "rows": r.get("rows"),
-                  "table": "federated", "answer": payload.get("answer"),
+                  "table": "federated", "answer": payload.get("answer"), "explain": explain,
                   "provenance": payload.get("provenance"), "sources": payload.get("sources")}
+        # Deterministic analytics for the federated result too — degraded mode
+        # (no single-table semantic model, so grounding fields stay empty), but
+        # column stats, result shape, chart candidates and detected patterns all
+        # work off (cols, rows) alone. Same "Analysis:" fold-in as Tier-1/Tier-2.
+        try:
+            from veda.result_analyzer import analyze_result, analytics_summary
+            _fc, _fr = result.get("cols") or [], result.get("rows") or []
+            if _fc and _fr:
+                _frd = [row if isinstance(row, dict) else dict(zip(_fc, row)) for row in _fr]
+                _fctx = analyze_result(query, payload.get("sql") or "", list(_fc), _frd)
+                result["analytics"] = analytics_summary(_fctx)
+                if _fctx.patterns:
+                    from query.result_explainer import blend_patterns
+                    result["answer"] = blend_patterns(result.get("answer") or "",
+                                                       [p.detail for p in _fctx.patterns[:2]])
+        except Exception as _fae:
+            if verbose:
+                print(f"  [federated] analytics skipped ({type(_fae).__name__}: {_fae})")
         return MultiResult(items=[_to_subresult(query, "federated", result)])
     # A federated EXECUTION/planning FAILURE (the generated cross-source SQL was invalid —
     # binder error, hallucinated column, unparseable, no plan) means the LLM mis-planned,
@@ -256,7 +288,13 @@ def _maybe_federated(query, verbose=False):
     if any(k in _reason for k in (
             "binder error", "does not have a column", "unparseable", "syntax error",
             "exec_error", "could not build", "no select generated", "does not exist",
-            "unknown column", "not exist", "catalog error", "referenced column")):
+            "unknown column", "not exist", "catalog error", "referenced column",
+            # Infra gaps are never a principled refusal: a missing executor
+            # dependency (e.g. "duckdb not installed" — observed live 2026-07-16,
+            # stale inference image predating requirements/inference.txt's duckdb
+            # line) means WE can't federate right now, not that the question
+            # can't be answered — degrade to the normal single-source path.
+            "not installed", "unavailable", "no module named")):
         if verbose:
             print(f"  [federated] plan failed ({_reason[:80]}) — falling back to single-source")
         return None
@@ -559,7 +597,8 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                 with collect_usage() as _t2_usage:
                     t2 = _tier2_sql(query, sm, cols, verbose=verbose,
                                     deadline=time.time() + TIER2_TIME_BUDGET_S,
-                                    execution_state=res.get("context") if isinstance(res, dict) else None)
+                                    execution_state=res.get("context") if isinstance(res, dict) else None,
+                                on_event=on_event)
                 if isinstance(t2, dict) and "usage" not in t2:
                     from slm._call_slm import usage_totals
                     t2["usage"] = usage_totals(_t2_usage.calls())
@@ -623,6 +662,35 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         hy = run_hybrid_layer(query, sql_columns=[], source_ids=source_ids,
                              temporal_filter=_temporal(query),
                              sql_result=sql_result, verbose=verbose, on_event=on_event)
+        if isinstance(sqlres, dict) and sqlres.get("ok"):
+            # Attach the SQL head's OWN executed rows + already-built explain
+            # (Tier1's _done() computed both from real, validated SQL) — never
+            # recomputed here — so a hybrid answer with real tabular rows gets
+            # the same chart/table/explainability apps/chat/services.py already
+            # gives a plain SQL answer, instead of silently losing them because
+            # HybridResult previously had no field to carry them.
+            hy.cols = sqlres.get("cols") or []
+            hy.rows = sqlres.get("rows") or []
+            hy.explain = sqlres.get("explain")
+            # Analytics + "Analysis:" fold-in on the SQL head's OWN executed rows —
+            # same deterministic pass as Tier-1/Tier-2/federated (never a second
+            # analysis; works off the already-attached cols/rows). Best-effort: a
+            # failure here must never sink the hybrid answer.
+            try:
+                from veda.result_analyzer import analyze_result, analytics_summary
+                if hy.cols and hy.rows:
+                    _hrd = [row if isinstance(row, dict) else dict(zip(hy.cols, row))
+                            for row in hy.rows]
+                    _hctx = analyze_result(query, sqlres.get("sql") or "", list(hy.cols),
+                                           _hrd, sm=sm, table=sqlres.get("table"))
+                    hy.analytics = analytics_summary(_hctx)
+                    if _hctx.patterns:
+                        from query.result_explainer import blend_patterns
+                        hy.answer = blend_patterns(hy.answer or "",
+                                                   [p.detail for p in _hctx.patterns[:2]])
+            except Exception as _hae:
+                if verbose:
+                    print(f"  [Hybrid] analytics skipped ({type(_hae).__name__}: {_hae})")
         if getattr(hy, "error", None):
             print(f"  [Hybrid] ✗ {hy.error}")
         else:
@@ -773,7 +841,7 @@ def _is_param_mismatch(err) -> bool:
         return "parameter mismatch" in str(err or "")
 
 
-def _tier2_finish(query, sm, cols, rows, sql, source):
+def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     """Bring a Tier-2 result to STRUCTURAL PARITY with the deterministic
     (Tier-1, veda/pipeline.py's _done()) response shape — same bug/fix as the
     NoSQL path (_run_nosql), extended: rows were always correct, but
@@ -805,15 +873,31 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
 
     try:
         from config import (NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS,
+                            NL_SUMMARY_TIMEOUT_MS,
                             INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS)
     except Exception:
         NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS = True, 2500
+        NL_SUMMARY_TIMEOUT_MS = 10000
         INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS = False, 200
 
     visualization = None
+    _ictx = None
     _confidence = None
     if NL_ANSWER_ENABLED and cols:
         row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
+        # Deterministic analytics (ALWAYS, not flag-gated) — same single
+        # post-execution analysis pass Tier-1 (veda/pipeline.py L7b) computes:
+        # column stats/roles, result shape, patterns, chart candidates,
+        # grounding metadata. Zero LLM; attached to the result so downstream
+        # consumers read one computation. Only the SLM narrative below stays
+        # gated behind INSIGHT_ENGINE_ENABLED.
+        try:
+            from veda.result_analyzer import analyze_result, analytics_summary
+            _ictx = analyze_result(query, sql, list(cols), row_dicts, sm=sm, table=table,
+                                   max_rows=RESULT_ANALYZER_MAX_ROWS)
+            result["analytics"] = analytics_summary(_ictx)
+        except Exception as _ae:
+            print(f"  [Tier2] Analytics (skipped: {type(_ae).__name__}: {_ae})")
         # Safe default FIRST, same as veda/pipeline.py's L7b (the Tier-1 path) —
         # previously this function only set result["answer"] on a SUCCESSFUL
         # insight/NL-answer call; run_insight_engine/run_nl_answer already
@@ -829,13 +913,10 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
         result["answer"] = deterministic_fallback_answer(query, list(cols), row_dicts)
         got_real_answer = False
 
-        if INSIGHT_ENGINE_ENABLED:
+        if INSIGHT_ENGINE_ENABLED and _ictx is not None:
             try:
-                from veda.result_analyzer import analyze_result
                 from query.result_explainer import run_insight_engine
-                ctx = analyze_result(query, sql, list(cols), row_dicts, sm=sm, table=table,
-                                     max_rows=RESULT_ANALYZER_MAX_ROWS)
-                insight = run_insight_engine(ctx)
+                insight = run_insight_engine(_ictx)   # same ctx as above — one analysis pass
                 if getattr(insight, "answer", None):
                     result["answer"] = insight.answer
                     got_real_answer = True
@@ -852,15 +933,31 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
         # now, see the deterministic default set above): still tries plain
         # run_nl_answer whenever insight-engine didn't produce a genuine
         # summary, exactly as before this fix.
+        # The insight engine's prompt already grounds on the patterns_block, so a
+        # genuine insight answer has ALSO woven the findings in.
+        _pattern_details = ([p.detail for p in _ictx.patterns[:2]]
+                            if (_ictx is not None and getattr(_ictx, "patterns", None)) else [])
+        _slm_wove_patterns = got_real_answer
+
         if not got_real_answer:
             try:
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,
-                                   timeout=NL_ANSWER_FAST_TIMEOUT_MS / 1000.0, semantic_model=sm)
+                                   timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0, semantic_model=sm,
+                                   patterns=_pattern_details,
+                                   result_shape=getattr(_ictx, "result_shape", None))
                 if getattr(nl, "answer", None):
                     result["answer"] = nl.answer
+                    _slm_wove_patterns = True   # SLM prose wove them; fallback blended them itself
             except Exception as _nle:
                 print(f"  [Tier2] Answer (summarisation skipped: {type(_nle).__name__})")
+
+        # Fold the deterministic analytics into the final summary ONLY when no
+        # summary SLM already phrased them — same natural-blend / no-double-statement
+        # rule as Tier-1 (veda/pipeline.py L7b, 2026-07-17). Top 2 only.
+        if _pattern_details and not _slm_wove_patterns:
+            from query.result_explainer import blend_patterns
+            result["answer"] = blend_patterns(result.get("answer") or "", _pattern_details)
 
     try:
         from veda.business_explain import build_explain
@@ -869,10 +966,18 @@ def _tier2_finish(query, sm, cols, rows, sql, source):
                                           confidence=_confidence)
     except Exception:
         print("  [Tier2] explainability skipped")
+    # business_intent (advisory): deterministic reading of the EXECUTED SQL
+    # first (explain.understanding.summary — the source of truth); the SLM's
+    # own advisory claim (`business_intent` param, from the Tier-2 IR envelope)
+    # only fills in when the deterministic one is unavailable. Presentation
+    # metadata only — never feeds validation or SQL.
+    _det_intent = ((result.get("explain") or {}).get("understanding") or {}).get("summary")
+    if _det_intent or business_intent:
+        result["business_intent"] = _det_intent or business_intent
     return result
 
 
-def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_state=None):
+def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_state=None, on_event=None):
     """Tier-2 SQL fallback (only when the deterministic head can't answer).
 
     LLM emits IR → deterministic sql_builder makes the SQL (LLM never writes SQL) →
@@ -956,6 +1061,43 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         except Exception as _ee:
             print(f"  [Tier2] envelope path skipped: {type(_ee).__name__}: {str(_ee)[:120]}")
 
+        # ── RECOMMENDED PROJECTION (2026-07) ───────────────────────────────────────────
+        # Reuse veda/routing.py::recommended_projection() — the same business-facing
+        # SELECT-list composer Tier1 already uses (default display column + this
+        # query's retrieval relevance + HIGH-importance columns) — so the IR path's
+        # SLM gets the same "what should be displayed" guidance instead of self-judging
+        # relevance from a flat retrieval list alone. Computed ONCE here, threaded into
+        # BOTH run_slm_layer's non-langgraph and langgraph (default) branches as plain
+        # data — neither branch recomputes it.
+        #
+        # Primary table: Tier1's own vetted choice when this call is reusing Tier1's
+        # ExecutionState (the common case — Tier2 only runs after Tier1), else
+        # sel.tables[0] (select_retrieval's own top-ranked table — already computed,
+        # no new ranking here).
+        #
+        # NOTE: sel.columns are ingestion.vector_store.RetrievalResult (Tier2's own
+        # retrieval shape: col_id is a UUID). recommended_projection()'s "this query's
+        # retrieval relevance" signal expects retrieval.retrieval_engine_phase3.RetrievalResult
+        # (Tier1's shape: col_id is "table.col", plus .final_score) — that one signal
+        # silently no-ops here (caught by its own try/except in routing.py), but the
+        # display-column and HIGH-importance signals — the two that actually exclude
+        # audit columns — read only `primary`/`sm`/`allowed_columns` and apply in full.
+        _rec_proj_cols = None
+        try:
+            from veda.routing import recommended_projection
+            _t2_primary = (execution_state.primary_table if execution_state is not None else None) \
+                          or (sel.tables[0] if sel.tables else None)
+            if _t2_primary:
+                _t2_allowed = [k.split(".", 1)[1] for k in all_cols
+                               if k.split(".", 1)[0] == _t2_primary]
+                if _t2_allowed:
+                    _rec_names = recommended_projection(_t2_primary, _t2_allowed, sel.columns, sm, query)
+                    _rec_proj_cols = [r for r in sel.columns
+                                      if r.table_name == _t2_primary and r.col_name in _rec_names] or None
+        except Exception as _pe:
+            print(f"  [Tier2] recommended projection skipped: {type(_pe).__name__}: {str(_pe)[:120]}")
+            _rec_proj_cols = None
+
         # ── IR PATH with bounded EXECUTION-FEEDBACK REPAIR loop ───────────────────────
         # The LLM emits IR (never SQL); on a firewall rejection or execution error we feed
         # the classified error back into the SLM prompt (via _repair_hint_for) and retry a
@@ -990,7 +1132,8 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             elif _repair_hint:
                 print(f"  [Tier2] repair attempt {_attempt}/{_max_repairs}")
             l3 = run_slm_layer(query=_q_ir, temporal_filter=tf, top_k_columns=sel.columns,
-                               join_path=sel.join_path, verbose=verbose)
+                               join_path=sel.join_path, verbose=verbose,
+                               recommended_projection=_rec_proj_cols, on_event=on_event)
             if getattr(l3, "error", None) or not getattr(l3, "ir_json", None):
                 print(f"  [Tier2] no usable IR from SLM "
                       f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
@@ -1006,7 +1149,8 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             ent_names = [n for n in dict.fromkeys(id2name.get(e.get("table_id")) for e in ents) if n]
             if LANGGRAPH_SHARED_PLANNER and len(ent_names) >= 2:
                 from veda.planning import build_from_entities
-                act = build_from_entities(query, sm, all_cols, tf, ent_names[0], ent_names[1:])
+                act = build_from_entities(query, sm, all_cols, tf, ent_names[0], ent_names[1:],
+                                          results=sel.columns)
                 if isinstance(act, dict) and act.get("sql"):
                     a_tables = set(act.get("tables", []))
                     a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
@@ -1030,7 +1174,8 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                     print(f"  [Tier2] answered via SHARED planner (graph-verified joins)"
                           f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
                     _print_rows(cols, rows, sql=psql)
-                    return _tier2_finish(query, sm, cols, rows, psql, "tier2_shared_planner")
+                    return _tier2_finish(query, sm, cols, rows, psql, "tier2_shared_planner",
+                                         business_intent=getattr(l3, "business_intent", None))
                 # planner refused/clarified the multi-table join → respect it (refuse-over-guess)
                 if isinstance(act, dict) and act.get("action") in ("refuse", "clarify"):
                     if verbose:
@@ -1074,7 +1219,8 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             print(f"  [Tier2] answered via LLM-IR (graph-verified)"
                   f"{' after repair' if _repair_hint else ''} — {len(rows)} rows")
             _print_rows(cols, rows, sql=psql)
-            return _tier2_finish(query, sm, cols, rows, psql, "tier2")
+            return _tier2_finish(query, sm, cols, rows, psql, "tier2",
+                                 business_intent=getattr(l3, "business_intent", None))
         return None   # repair attempts exhausted → keep the refusal
     except Exception as e:
         # Always surface WHY Tier-2 bailed (Ollama down, retrieval store missing, etc.) —
@@ -1135,6 +1281,25 @@ def _run_nosql(query, source_ids, verbose=False, on_event=None):
                         print(f"  [NoSQL] Answer  {nl.answer}")
                 except Exception:
                     pass
+            # Deterministic analytics + "Analysis:" fold-in — parity with
+            # Tier-1/Tier-2/federated. Degraded mode (no single-table semantic
+            # model / no SQL string for a document store, so grounding fields stay
+            # empty), but column stats, result shape, chart candidates and patterns
+            # all work off (cols, rows) alone. Best-effort: never sink the answer.
+            if cols and rows:
+                try:
+                    from veda.result_analyzer import analyze_result, analytics_summary
+                    _nrd = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
+                    _nctx = analyze_result(query, "", list(cols), _nrd,
+                                           connector_type="nosql")
+                    res.analytics = analytics_summary(_nctx)
+                    if _nctx.patterns:
+                        from query.result_explainer import blend_patterns
+                        res.answer = blend_patterns(getattr(res, "answer", None) or "",
+                                                    [p.detail for p in _nctx.patterns[:2]])
+                except Exception as _nae:
+                    if verbose:
+                        print(f"  [NoSQL] analytics skipped ({type(_nae).__name__}: {_nae})")
             return res
         except Exception as e:
             print(f"  [NoSQL] source {sid} failed: {type(e).__name__}: {e}")

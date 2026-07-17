@@ -131,10 +131,11 @@ def test_tier2_finish_insight_engine_enabled(monkeypatch):
     from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
+    monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: json.dumps({
         "summary": "Two payments were found.",
         "insights": ["Both payments are for the same amount."],
-        "follow_up_questions": ["What is the average payment amount?"],
+        "follow_up_questions": ["Show only totals above 150"],
         "visualization": {"type": "bar", "x_axis": "payer_name", "y_axis": "total",
                           "reason": "category vs numeric"},
     }))
@@ -150,7 +151,7 @@ def test_tier2_finish_insight_engine_enabled(monkeypatch):
     )
     assert result["answer"] == "Two payments were found."
     assert result["insights"] == ["Both payments are for the same amount."]
-    assert result["follow_up_questions"] == ["What is the average payment amount?"]
+    assert result["follow_up_questions"] == ["Show only totals above 150"]
     assert result["visualization"]["type"] == "bar"
     assert "confidence" in result
     assert "explain" in result and result["explain"]["version"] == "1.0"
@@ -161,6 +162,7 @@ def test_tier2_finish_insight_engine_falls_back_on_failure(monkeypatch):
     from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
+    monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
 
     def _broken_analyze_result(*a, **k):
         raise RuntimeError("boom")
@@ -192,6 +194,7 @@ def test_tier2_finish_answer_never_missing_even_when_both_paths_fail_outside_the
     from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
+    monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
 
     import veda.result_analyzer as ra_mod
     monkeypatch.setattr(ra_mod, "analyze_result",

@@ -30,6 +30,25 @@ def _is_uuid(s: Any) -> bool:
     return isinstance(s, str) and bool(_UUID_RE.match(s))
 
 
+def _emit_step(state: "VEDAQueryState", phase: str, message: str) -> None:
+    """Fire the optional SSE progress callback carried in the graph state so the
+    Tier-2 nodes report their own progress — same ``on_event(phase, message, extra)``
+    contract as veda_hybrid.py::_emit. Previously the 5 Tier-2 nodes (each a
+    separate SLM call) ran as ONE silent gap between the coarse "tier2" and
+    "answer" ticks; this surfaces per-step progress the same way run_rag_layer/
+    run_hybrid_layer already do for their own sub-steps. Never raises into a node —
+    progress reporting must not be able to fail query building. Display text is
+    mapped business-friendly in apps/chat/thinking_messages.py (these phase
+    strings are internal-only and never shown verbatim)."""
+    cb = state.get("on_event")
+    if cb is None:
+        return
+    try:
+        cb(phase, message, {})
+    except Exception:
+        pass
+
+
 # =============================================================================
 # State
 # =============================================================================
@@ -41,6 +60,12 @@ class VEDAQueryState(TypedDict, total=False):
     top_k_columns:    List[Dict]           # RetrievalResult as dicts
     join_path:        List[Dict]           # JoinEdge as dicts
     must_include:     List[Dict]           # {col_id, col_name, table_id, table_name}
+    recommended_projection: List[Dict]     # {col_id, col_name, table_name} — business-facing
+                                            # SELECT guidance (veda/routing.py::recommended_projection,
+                                            # computed once by the caller — see slm_langgraph.py)
+    on_event:         Optional[Any]         # SSE progress callback on(phase, message, extra) or None;
+                                            # in-memory only (this graph compiles without a checkpointer,
+                                            # so a non-serializable callable in state is safe) — see _emit_step
 
     # ── node: classify_intent ─────────────────────────────────────────────────
     intent:               str              # SELECT | COUNT | AGGREGATE
@@ -108,6 +133,7 @@ def _call_node(system_prompt: str, user_msg: str) -> Optional[Dict]:
 
 def node_classify_intent(state: VEDAQueryState) -> Dict:
     t0    = time.time()
+    _emit_step(state, "tier2_intent", "Working out what you're asking for...")
     query = state.get("query", "")
     errs  = list(state.get("errors", []))
     times = dict(state.get("node_times", {}))
@@ -150,6 +176,7 @@ def node_classify_intent(state: VEDAQueryState) -> Dict:
 
 def node_select_entity(state: VEDAQueryState) -> Dict:
     t0           = time.time()
+    _emit_step(state, "tier2_entity", "Finding the right information...")
     query        = state.get("query", "")
     top_k        = state.get("top_k_columns", [])
     errs         = list(state.get("errors", []))
@@ -214,12 +241,14 @@ def node_select_entity(state: VEDAQueryState) -> Dict:
 
 def node_select_columns(state: VEDAQueryState) -> Dict:
     t0                  = time.time()
+    _emit_step(state, "tier2_columns", "Selecting the details to include...")
     query               = state.get("query", "")
     intent              = state.get("intent", "SELECT")
     top_k               = state.get("top_k_columns", [])
     primary_table_id    = state.get("primary_table_id", "")
     secondary_table_ids = state.get("secondary_table_ids", [])
     must_include        = state.get("must_include", [])
+    recommended_projection = state.get("recommended_projection", [])
     errs                = list(state.get("errors", []))
     times               = dict(state.get("node_times", {}))
 
@@ -241,11 +270,23 @@ def node_select_columns(state: VEDAQueryState) -> Dict:
         for m in must_include
         if m.get("col_id") in valid_col_ids
     )
+    # Recommended Projection (2026-07): the business-facing SELECT list VEDA already
+    # computes for Tier1 (veda/routing.py::recommended_projection), threaded in by the
+    # caller (slm_langgraph.py) — this node never computes it, only renders it. Absent
+    # entirely when the caller passed nothing, so an existing caller sees an unchanged
+    # prompt, byte for byte.
+    proj_lines = "\n".join(
+        f"  {p['col_id']}  →  {p['table_name']}.{p['col_name']}"
+        for p in recommended_projection
+        if p.get("col_id") in valid_col_ids
+    )
     user_msg = (
         f'Query: "{query}"\n'
         f"Intent: {intent}\n\n"
         f"COLUMN REFERENCE (copy col_id exactly):\n{col_ref_lines}"
     )
+    if proj_lines:
+        user_msg += f"\n\nRECOMMENDED PROJECTION (prefer these for selected_col_ids):\n{proj_lines}"
     if must_lines:
         user_msg += f"\n\nMust-include columns (MUST appear in selected_col_ids):\n{must_lines}"
 
@@ -291,6 +332,7 @@ def node_select_columns(state: VEDAQueryState) -> Dict:
 
 def node_build_filters(state: VEDAQueryState) -> Dict:
     t0               = time.time()
+    _emit_step(state, "tier2_filters", "Applying your conditions...")
     query            = state.get("query", "")
     top_k            = state.get("top_k_columns", [])
     selected_col_ids = state.get("selected_col_ids", [])
@@ -352,6 +394,7 @@ def _clean_filter_tree(node: Any, valid_col_ids: set) -> Any:
 
 def node_assemble_ir(state: VEDAQueryState) -> Dict:
     t0 = time.time()
+    _emit_step(state, "tier2_assemble", "Putting your answer together...")
 
     query               = state.get("query", "")
     intent              = state.get("intent", "SELECT")

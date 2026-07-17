@@ -226,6 +226,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     explain = build_refusal_explain(status, kw.get("feedback"))
                 except Exception:
                     logger.exception("build_refusal_explain failed — refusal explainability omitted")
+            # business_intent (advisory, Phase-1 business-aware output): the
+            # deterministic one-sentence business reading of the EXECUTED SQL —
+            # build_explain's understanding.summary, surfaced as a convenience
+            # top-level key. Derived from the SQL that actually ran (source of
+            # truth), never from an LLM's own claim about what it meant to do.
+            if status == "answered" and explain:
+                kw.setdefault("business_intent",
+                              (explain.get("understanding") or {}).get("summary"))
             return {"status": status, "ok": (status == "answered"),
                     "trace": tr.to_dict(), "explain": explain,
                     "usage": {"prompt_tokens": tr.total_prompt_tokens,
@@ -1378,10 +1386,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # execute_sql returns tuples → zip to the dicts run_nl_answer expects.
     try:
         from config import (NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS,
+                            NL_SUMMARY_TIMEOUT_MS,
                             INSIGHT_ENGINE_ENABLED, RESULT_ANALYZER_MAX_ROWS)
     except Exception:
         NL_ANSWER_ENABLED = False
         NL_ANSWER_FAST_TIMEOUT_MS = 800
+        NL_SUMMARY_TIMEOUT_MS = 10000
         INSIGHT_ENGINE_ENABLED = False
         RESULT_ANALYZER_MAX_ROWS = 200
     nl_answer_text = None
@@ -1393,35 +1403,58 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         from query.nl_answer import deterministic_fallback_answer
         nl_answer_text = deterministic_fallback_answer(query, list(cols), row_dicts)
 
+        # Deterministic analytics (ALWAYS, not flag-gated): the ONE post-execution
+        # analysis pass — column stats/roles, result shape, business patterns,
+        # chart candidates, grounding metadata. Pure Python over ≤RESULT_ANALYZER_
+        # MAX_ROWS sampled rows, zero LLM, zero new SQL. Its JSON-safe summary
+        # rides the result dict (same channel as `explain`) so every downstream
+        # consumer — api-tier visualization included — reads this single
+        # computation instead of re-deriving its own. Enrichment only: cols/rows
+        # are never modified. Only the SLM narrative (Insight Engine) below stays
+        # gated behind INSIGHT_ENGINE_ENABLED.
+        _ictx = None
+        try:
+            from veda.result_analyzer import analyze_result, analytics_summary
+            # Reuse metadata already computed upstream this same run — never a
+            # second reasoning pass: intent (L4 IntentDetector) and the anchor/
+            # join gating confidence already surfaced into the trace.
+            _anchor_conf = tr.sections.get("anchor_selection", {}).get("confidence")
+            _join_conf = tr.sections.get("join_planning", {}).get("confidence")
+            _conf_inputs = {k: v for k, v in
+                           (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
+            _ictx = analyze_result(query, param_sql, list(cols), row_dicts, sm=sm,
+                                   table=str(primary), max_rows=RESULT_ANALYZER_MAX_ROWS,
+                                   query_intent=intent, confidence_inputs=_conf_inputs,
+                                   params=params)
+            _insight_extra["analytics"] = analytics_summary(_ictx)
+        except Exception as _ae:
+            print(f"  [L7b] Analytics    (skipped: {type(_ae).__name__}: {_ae})")
+
         # Insight Engine (additive, flag-gated): ONE combined SLM call producing
         # summary + insights + visualization suggestion + follow-ups, REPLACING
         # (not layering on top of) the plain NL-answer SLM call below — never both,
-        # so there is still only one post-query SLM call either way.
-        if INSIGHT_ENGINE_ENABLED:
+        # so there is still only one post-query SLM call either way. Consumes the
+        # SAME InsightContext computed above — never a second analysis pass.
+        # The top-2 detected patterns, handed to whichever summary SLM runs so it
+        # WEAVES them into the prose (natural insight, not a bolted-on suffix).
+        _pattern_details = ([p.detail for p in _ictx.patterns[:2]]
+                            if (_ictx is not None and getattr(_ictx, "patterns", None)) else [])
+        _slm_wove_patterns = False   # did a summary SLM already phrase the findings?
+
+        if INSIGHT_ENGINE_ENABLED and _ictx is not None:
             try:
-                from veda.result_analyzer import analyze_result
                 from query.result_explainer import run_insight_engine
-                # Reuse metadata already computed upstream this same run — never a
-                # second reasoning pass: intent (L4 IntentDetector) and the anchor/
-                # join gating confidence already surfaced into the trace.
-                _anchor_conf = tr.sections.get("anchor_selection", {}).get("confidence")
-                _join_conf = tr.sections.get("join_planning", {}).get("confidence")
-                _conf_inputs = {k: v for k, v in
-                               (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
-                ctx = analyze_result(query, param_sql, list(cols), row_dicts, sm=sm,
-                                     table=str(primary), max_rows=RESULT_ANALYZER_MAX_ROWS,
-                                     query_intent=intent, confidence_inputs=_conf_inputs,
-                                     params=params)
-                insight = run_insight_engine(ctx, rank_column=_rank_column_for_nl)
+                insight = run_insight_engine(_ictx, rank_column=_rank_column_for_nl)
                 if getattr(insight, "answer", None):
                     nl_answer_text = insight.answer
+                    _slm_wove_patterns = True   # its prompt already grounds on the patterns_block
                     print(f"\n  [L7b] Insight      {insight.answer}")
-                _insight_extra = {
+                _insight_extra.update({          # update, not reassign — keeps "analytics"
                     "insights": insight.insights,
                     "follow_up_questions": insight.follow_up_questions,
                     "visualization": insight.visualization,
                     "confidence": insight.confidence,
-                }
+                })
             except Exception as _ie:
                 print(f"  [L7b] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
@@ -1431,14 +1464,30 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             try:
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,
-                                   timeout=NL_ANSWER_FAST_TIMEOUT_MS / 1000.0,
+                                   # 7B instruct summary (NL_SUMMARY_MODEL) needs the
+                                   # full summary budget, not the 1.5B-era fast timeout.
+                                   timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0,
                                    table=str(primary), semantic_model=sm,
-                                   rank_column=_rank_column_for_nl)
+                                   rank_column=_rank_column_for_nl,
+                                   patterns=_pattern_details,
+                                   result_shape=getattr(_ictx, "result_shape", None))
                 if getattr(nl, "answer", None):
                     nl_answer_text = nl.answer
+                    # run_nl_answer wove the patterns only when the SLM actually ran;
+                    # on its deterministic fallback it already blended them itself.
+                    _slm_wove_patterns = True
                     print(f"\n  [L7b] Answer       {nl.answer}")
             except Exception as _nle:
                 print(f"  [L7b] Answer       (summarisation skipped: {type(_nle).__name__})")
+
+        # Fold the deterministic analytics into the FINAL summary ONLY if no summary
+        # SLM already wove them in (2026-07-17: was an unconditional "Analysis: …"
+        # suffix — mechanical, and doubly-stated on SLM answers that already
+        # discussed the patterns). Now a natural clause, and only as the last-resort
+        # path when the summary SLM was disabled/absent. Top 2 only.
+        if _pattern_details and not _slm_wove_patterns:
+            from query.result_explainer import blend_patterns
+            nl_answer_text = blend_patterns(nl_answer_text, _pattern_details)
 
     is_temporal = bool(tf and (tf.start or tf.end))
     # Don't cache fast-path results — they're already instant and the fast path always

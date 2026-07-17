@@ -70,6 +70,8 @@ def run_langgraph_pipeline(
     join_path:       list,
     verbose:         bool = False,
     is_hybrid:       bool = False,
+    recommended_projection: list = None,
+    on_event=None,
 ) -> SLMResult:
     t0 = time.time()
 
@@ -125,6 +127,15 @@ def run_langgraph_pipeline(
             for r in must_include_results
         ]
 
+        # Recommended Projection must reference only columns actually present in
+        # llm_columns (the capped REFERENCE/COLUMN table sent this round) — same
+        # constraint slm_layer.py's non-langgraph path applies.
+        llm_col_ids = {r.col_id for r in llm_columns}
+        proj_dicts = [
+            {"col_id": r.col_id, "col_name": r.col_name, "table_name": r.table_name}
+            for r in (recommended_projection or []) if r.col_id in llm_col_ids
+        ]
+
         # ── Build initial state ───────────────────────────────────────────────
         initial_state: VEDAQueryState = {
             "query":           query,
@@ -132,6 +143,8 @@ def run_langgraph_pipeline(
             "top_k_columns":   cols_dicts,
             "join_path":       join_dicts,
             "must_include":    must_dicts,
+            "recommended_projection": proj_dicts,
+            "on_event":        on_event,   # per-node SSE progress (see lg_nodes._emit_step)
             "errors":          [],
             "node_times":      {},
         }

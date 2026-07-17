@@ -326,16 +326,21 @@ def test_insight_engine_uses_small_model_and_json_format(monkeypatch):
             "insights": ["Alice's total is over 60% more than Bob's."],
             "visualization": {"type": "bar", "x_axis": "payer_name", "y_axis": "total",
                              "reason": "category vs numeric"},
-            "follow_up_questions": ["Who are the bottom spenders?"],
+            "follow_up_questions": ["Who are the bottom payers by total?",
+                                    "Show customer churn by campaign"],
         })
 
     monkeypatch.setattr(slm, "call_slm", fake_call_slm)
+    import config
+    monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
     result = re_mod.run_insight_engine(_ctx())
 
     assert result.answer == "Alice spent the most at 500."
     assert result.insights == ["Alice's total is over 60% more than Bob's."]
     assert result.visualization["type"] == "bar"
-    assert result.follow_up_questions == ["Who are the bottom spenders?"]
+    # groundedness gate (validate_follow_up_questions): the follow-up naming a
+    # real column survives; the one inventing business concepts is dropped.
+    assert result.follow_up_questions == ["Who are the bottom payers by total?"]
     assert captured["json_format"] is True
     assert captured["model"] == re_mod.NL_SUMMARY_MODEL
     assert captured["model"] != "qwen2.5-coder:7b"

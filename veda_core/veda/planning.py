@@ -833,14 +833,21 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
 
     return _plan_and_build(query, sm, all_cols, tf, graph=graph, junctions=junctions,
                            anchor=anchor, targets=targets,
-                           allowed_intermediates=allowed_intermediates)
+                           allowed_intermediates=allowed_intermediates, results=results)
 
 
-def build_from_entities(query, sm, all_cols, tf, anchor, targets):
+def build_from_entities(query, sm, all_cols, tf, anchor, targets, results=None):
     """Drive the SHARED join engine with EXTERNALLY chosen entities — e.g. the LLM's
     entity selection in the LangGraph path. The LLM never invents joins; the graph-
     verified plan_join_tree does (one join engine for both paths). Same action-dict
-    contract as try_multitable. Caller maps its entity ids → table names first."""
+    contract as try_multitable. Caller maps its entity ids → table names first.
+
+    `results`: this query's per-column retrieval relevance (same optional, additive
+    contract as try_multitable's own `results` param — see _plan_and_build). Tier2's
+    caller passes its own retrieval shape (ingestion.vector_store.RetrievalResult);
+    recommended_projection()'s "user intent" signal is shape-specific and no-ops
+    safely (its own try/except) when col_id isn't the "table.col" format it expects
+    — the display-column and HIGH-importance signals still apply in full."""
     import re as _re
     from veda.routing import _name_toks
     from retrieval.query_enrichment import _singularize
@@ -854,11 +861,11 @@ def build_from_entities(query, sm, all_cols, tf, anchor, targets):
     allowed_intermediates = junctions | named_tables | {anchor} | set(tgts)
     return _plan_and_build(query, sm, all_cols, tf, graph=graph, junctions=junctions,
                            anchor=anchor, targets=tgts,
-                           allowed_intermediates=allowed_intermediates)
+                           allowed_intermediates=allowed_intermediates, results=results)
 
 
 def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, targets,
-                    allowed_intermediates):
+                    allowed_intermediates, results=None):
     """Shared join ENGINE. Given a chosen anchor + targets, plan the graph-verified
     join tree (plan_join_tree), apply necessity pruning + ambiguity / reachability /
     confidence guards, then build SQL (existence / grain pre-aggregation / projection

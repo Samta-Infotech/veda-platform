@@ -104,6 +104,19 @@ class HybridResult:
     duration_ms:     float = 0.0
     error:           Optional[str] = None
     stats:           dict = field(default_factory=dict)
+    # Populated by the caller (veda_hybrid.py) from the deterministic SQL head's
+    # OWN executed rows/explain (never regenerated here) when the "hybrid" intent's
+    # SQL sub-run succeeded — lets apps/chat/services.py chart/table/explain a
+    # hybrid answer exactly like a plain SQL one, instead of it silently having
+    # neither (the SQL rows existed, they just weren't attached to this object).
+    cols:            list = field(default_factory=list)
+    rows:            list = field(default_factory=list)
+    explain:         Optional[dict] = None
+    # Deterministic post-execution analysis (result_analyzer.analytics_summary),
+    # populated by the caller from the SAME attached SQL-head (cols, rows) — parity
+    # with Tier-1/Tier-2/federated so a hybrid answer gets the same charts + the
+    # "Analysis:" summary fold-in. None when there were no tabular rows to analyze.
+    analytics:       Optional[dict] = None
 
 
 # =============================================================================

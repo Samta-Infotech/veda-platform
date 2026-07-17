@@ -186,6 +186,7 @@ class QueryResult:
     error:        Optional[str]     # None on success
     metadata:     dict = field(default_factory=dict)
     answer:       Optional[str] = None  # NL summarization (query/result_explainer.py), when computed
+    analytics:    Optional[dict] = None  # deterministic post-exec analysis (result_analyzer.analytics_summary), when computed
 
 
 # =============================================================================
