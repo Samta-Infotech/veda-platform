@@ -39,6 +39,13 @@ import urllib.request
 from contextvars import ContextVar
 from typing import Optional
 
+try:
+    from utils.logger import get_logger
+    logger = get_logger(__name__)
+except Exception:  # pragma: no cover - importable outside the engine cwd too
+    import logging
+    logger = logging.getLogger("veda.slm")
+
 
 # ---------------------------------------------------------------------------
 # Per-query token accounting. Both backends already RETURN token counts on
@@ -315,6 +322,10 @@ class VLLMBackend:
         if not content:
             raise RuntimeError(f"SLM returned empty content from {self.base_url}")
         _u = body.get("usage") or {}
+        if not _u:
+            logger.debug("vLLM /v1/chat/completions response had no usage field — "
+                        "response keys: %s",
+                        list(body.keys()) if isinstance(body, dict) else type(body).__name__)
         usage = {"prompt_tokens": _u.get("prompt_tokens"),
                   "completion_tokens": _u.get("completion_tokens")}
         return content, usage
@@ -362,6 +373,8 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
             user_message, system=system, timeout=timeout, temperature=temperature,
             num_predict=num_predict, num_ctx=num_ctx, seed=seed,
             json_format=json_format, endpoint=endpoint, model=model)
+    logger.debug("call_slm purpose=%s backend=%s usage=%s scope_open=%s",
+                purpose, backend.name, usage, getattr(_usage_tls, "calls", None) is not None)
     _record_usage(purpose, model or backend.model,
                   usage.get("prompt_tokens"), usage.get("completion_tokens"))
     return content
