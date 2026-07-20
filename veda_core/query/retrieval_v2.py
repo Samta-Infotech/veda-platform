@@ -362,9 +362,14 @@ def _merge_seed_candidates(
         t, c = s.get("table_name"), s.get("col_name")
         if not t or not c or (t, c) in have_cols:
             continue
+        # Preserve the Tier1-resolved semantic_type when the seed carries it (enriched
+        # candidate_fields, RC-5) so this candidate's role (MEASURE/DIMENSION/
+        # IDENTIFIER) survives the handoff instead of degrading to "UNKNOWN"; older
+        # seeds without the key keep the previous "UNKNOWN" behavior.
         added_cols.append(RetrievalResult(
             col_id=f"{t}.{c}", col_name=c, table_id="", table_name=t,
-            semantic_type="UNKNOWN", similarity=float(s.get("score", 0.0)),
+            semantic_type=(s.get("semantic_type") or "UNKNOWN"),
+            similarity=float(s.get("score", 0.0)),
         ))
         have_cols.add((t, c))
     have_tabs = {t.table_name for t in candidate_tables}

@@ -435,7 +435,8 @@ def recommended_projection(primary, allowed_columns, results, sm, query, must_in
     every signal above comes up empty — a missing registry, empty retrieval
     results, or a semantic model with no importance metadata must never
     produce a degraded (or empty) SELECT list."""
-    from config import RECOMMENDED_PROJECTION_MAX_COLS
+    from config import (RECOMMENDED_PROJECTION_MAX_COLS,
+                        RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR)
 
     allowed = list(allowed_columns or [])
     allowed_set = set(allowed)
@@ -498,7 +499,16 @@ def recommended_projection(primary, allowed_columns, results, sm, query, must_in
 
     # 3. Business importance — HIGH-importance columns (ingestion-computed,
     # veda/ingestion/deterministic_metadata.py::compute_importance_class).
+    # FILLER, not flood (2026-07-19): this is the only STATIC signal here — the
+    # same columns for every question — so it only tops the projection up to
+    # RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR when the query-driven signals
+    # (a/b/1/2 above) picked fewer than that. Previously it added EVERY HIGH
+    # column of the table to every SELECT ("top 10 by amount" → 12 columns incl.
+    # payment_signature), drowning the actual question. Query-named/must-include
+    # columns are added before this and are never displaced.
     for c in allowed:
+        if len(picked) >= RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR:
+            break
         meta = cols_meta.get(f"{primary}.{c}", {}) or {}
         if meta.get("importance_class") == "HIGH":
             _add(c)

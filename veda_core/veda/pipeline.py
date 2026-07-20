@@ -649,13 +649,30 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # already spent a whole retrieval+grain-vet pass deciding this table is the
         # anchor, so Tier2's reranker should start from that prior, not from zero.
         # Small and additive — never overrides the cross-encoder's own judgment.
+        # Enriched with retrieval PROVENANCE (RC-5): each entry keeps the raw RRF
+        # score and the cross-encoder score separately (and a `reranked` flag), plus
+        # the field's semantic_type from the model — so Tier2 can tell a resolved
+        # MEASURE from a DIMENSION from an IDENTIFIER and knows which score is raw vs
+        # reranked, instead of receiving one flattened number. The first three keys
+        # are unchanged, so every existing consumer keeps working.
+        _sm_cols = (sm or {}).get("columns", {})
         es.candidate_fields = [
             {"table_name": (_t := r.col_id.split(".", 1)[0]),
              "col_name":   r.col_id.split(".", 1)[1] if "." in r.col_id else r.column_name,
              "score":      float(getattr(r, "final_score", 0.0)) + (PRIMARY_TABLE_SEED_BOOST
-                                                                     if _t == primary else 0.0)}
+                                                                     if _t == primary else 0.0),
+             "semantic_type": (_sm_cols.get(r.col_id, {}) or {}).get("semantic_type"),
+             "rrf_score":   float(getattr(r, "rrf_score", 0.0)),
+             "cross_encoder_score": (float(r.cross_encoder_score)
+                                     if getattr(r, "cross_encoder_score", None) is not None
+                                     else None),
+             "reranked":    getattr(r, "cross_encoder_score", None) is not None}
             for r in results[:15]
         ]
+        # The exact text the cross-encoder reranked against (the ENHANCED query when
+        # enhancement ran, else the raw query) — recorded so Tier2, which reranks
+        # against the RAW query, can tell whether its scores are comparable to these.
+        es.rerank_query = _search if _rk_after is not None else None
         tr.set("retrieval", candidate_tables=_cand_tabs[:8], n_columns=len(results))
         for r in results[:15]:
             # Per-signal scores (semantic_score/sparse_score/subgraph_score/fk_path_score/
@@ -1341,6 +1358,32 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     if _llm_sql:
         print("  [L6b+] IR check    ✓  no unrequested filters / joins / grouping / ordering")
 
+    # ── Shared analytical-semantics check (advisory): the SAME generic, metadata-
+    # driven invariants Tier-2/LangGraph use (veda/semantic_validation.py) — requested
+    # operator preserved, group-by present, user-facing dimension not an unnecessary
+    # identifier. Recorded to the trace for observability + "why" provenance; it does
+    # NOT block (deterministic Tier-1 SQL is already correct by construction; the LLM
+    # branch gets an early signal). graph=None here — join grounding is already
+    # enforced upstream by join_constraints + ir_equivalence, so we skip the graph
+    # load. Fully try/except'd: a check failure can never fail a query.
+    try:
+        from config import SEMANTIC_VALIDATION_ENABLED as _SV_ON
+    except Exception:
+        _SV_ON = False
+    if _SV_ON:
+        try:
+            from veda.semantic_validation import validate_analytical_semantics
+            _sv = validate_analytical_semantics(query, sql, sm, graph=None)
+            if _sv:
+                tr.set("semantic_validation", findings=_sv)
+                for _f in _sv:
+                    tr.note("semantic_validation",
+                            f"{_f['severity']}: {_f['code']} — {_f['detail']}")
+                print(f"  [L6d] Semantics    {len(_sv)} advisory finding(s): "
+                      f"{', '.join(sorted({f['code'] for f in _sv}))}")
+        except Exception:
+            logger.debug("semantic_validation (Tier-1) skipped", exc_info=True)
+
     param_sql, params, err = validate_and_parameterize(sql, allowed_tables, allowed_columns,
                                                         join_constraints=join_constraints,
                                                         fanout_guard=fanout_guard)
@@ -1439,6 +1482,27 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # WEAVES them into the prose (natural insight, not a bolted-on suffix).
         _pattern_details = ([p.detail for p in _ictx.patterns[:2]]
                             if (_ictx is not None and getattr(_ictx, "patterns", None)) else [])
+        # ALL verified findings for the summarizer (it selects how many to narrate by
+        # mode); the top-2 above are only the deterministic-fallback blend.
+        _all_findings = ([p.detail for p in _ictx.patterns]
+                         if (_ictx is not None and getattr(_ictx, "patterns", None)) else [])
+        # Resolved analytical context — REUSED from this run's own understanding
+        # (operation via the canonical aggregate normalizer, ranking column, temporal
+        # window, explicit-id request), never re-derived in the summary layer. Lets the
+        # narrator speak to the user's actual intent + preserve explicit id requests.
+        _analytical_ctx = None
+        try:
+            from veda.planning import aggregate_operator as _agg_op
+            from veda.semantic_validation import user_requested_identifier as _uri
+            _analytical_ctx = {
+                "intent": intent,
+                "operation": _agg_op(query),
+                "ranking": _rank_column_for_nl,
+                "temporal": (f"{tf.start} to {tf.end}" if (tf and (tf.start or tf.end)) else None),
+                "explicit_identifier": _uri(query),
+            }
+        except Exception:
+            _analytical_ctx = None
         _slm_wove_patterns = False   # did a summary SLM already phrase the findings?
 
         if INSIGHT_ENGINE_ENABLED and _ictx is not None:
@@ -1469,8 +1533,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                    timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0,
                                    table=str(primary), semantic_model=sm,
                                    rank_column=_rank_column_for_nl,
-                                   patterns=_pattern_details,
-                                   result_shape=getattr(_ictx, "result_shape", None))
+                                   patterns=_all_findings,
+                                   result_shape=getattr(_ictx, "result_shape", None),
+                                   analytical_context=_analytical_ctx)
                 if getattr(nl, "answer", None):
                     nl_answer_text = nl.answer
                     # run_nl_answer wove the patterns only when the SLM actually ran;

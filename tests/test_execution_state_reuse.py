@@ -78,6 +78,23 @@ def test_merge_seed_candidates_adds_new_and_dedups():
     assert {t.table_name for t in tbls} == {"users", "orders"}
 
 
+def test_merge_seed_preserves_semantic_type_provenance():
+    # RC-5 handoff: enriched seeds carry semantic_type; the merge must preserve it so
+    # the candidate's role (MEASURE/DIMENSION/IDENTIFIER) survives into Tier-2 instead
+    # of degrading to "UNKNOWN". Seeds without the key keep the old "UNKNOWN" behavior.
+    from query.retrieval_v2 import _merge_seed_candidates
+    seeds = [
+        {"table_name": "sales", "col_name": "region", "score": 0.8, "semantic_type": "CATEGORY"},
+        {"table_name": "sales", "col_name": "amount", "score": 0.7, "semantic_type": "MONETARY"},
+        {"table_name": "sales", "col_name": "legacy", "score": 0.6},  # no key → UNKNOWN
+    ]
+    cols, _ = _merge_seed_candidates([], [], seeds)
+    by = {c.col_name: c.semantic_type for c in cols}
+    assert by["region"] == "CATEGORY"
+    assert by["amount"] == "MONETARY"
+    assert by["legacy"] == "UNKNOWN"
+
+
 def test_merge_seed_candidates_noop_without_seeds():
     from query.retrieval_v2 import _merge_seed_candidates
 

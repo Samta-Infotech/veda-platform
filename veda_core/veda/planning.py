@@ -128,15 +128,42 @@ def superlative_mode(query):
     return None
 
 
+def aggregate_operator(query):
+    """Canonical SQL aggregate operator a query REQUESTS, or None — GENERIC SQL
+    semantics, never schema vocabulary. "average carpet area" → 'AVG', "total
+    revenue" → 'SUM', "how many orders" → 'COUNT'. Longest-phrase-first so
+    "how much" (SUM) beats a bare token and multi-word wording wins. This is the
+    single source of truth for operator normalization: the deterministic planner
+    reads it to PRESERVE the requested operator instead of assuming SUM, and the
+    semantic-validation layer reads it to check the operator survived into SQL.
+    Returns one of 'AVG' | 'SUM' | 'MIN' | 'MAX' | 'COUNT'."""
+    from config import AGGREGATE_OPERATORS
+    ql = f" {query.lower()} "
+    best, best_len = None, 0
+    for op, words in AGGREGATE_OPERATORS.items():
+        for w in words:
+            hit = (w in ql) if " " in w else bool(re.search(rf"\b{re.escape(w)}\b", ql))
+            if hit and len(w) > best_len:
+                best, best_len = op, len(w)
+    return best
+
+
 def grouped_mode(query):
     """Grammar-level grouped-measure breakdown detection, or None.
 
-    "how much does each category contribute" / "total amount per type" declares a
-    GROUPED SUM over a measure (GROUP BY dim) — the non-ranked sibling of the
-    superlative shape. Deliberately SEPARATE from aggregate_mode (whose dict drives
-    the COUNT-based grain planner) and mutually exclusive with superlative_mode
-    (ranking owns the query when both could match). Grammar words only
-    (config.QUERY_GRAMMAR — the language layer), no schema vocabulary."""
+    "how much does each category contribute" / "total amount per type" / "average
+    <measure> per <dim>" declares a GROUPED AGGREGATION over a measure (GROUP BY dim)
+    — the non-ranked sibling of the superlative shape. Deliberately SEPARATE from
+    aggregate_mode (whose dict drives the COUNT-based grain planner) and mutually
+    exclusive with superlative_mode (ranking owns the query when both could match).
+
+    Returns {"grouped": True, "op": <AVG|SUM|MIN|MAX>} — the operator is PRESERVED
+    (config.AGGREGATE_OPERATORS, generic SQL semantics) so the builder emits the
+    requested aggregate instead of always SUM. The legacy trigger words (total / sum
+    / how much / contribute…) all normalize to SUM, so this keeps the previous SUM
+    routing byte-for-byte and only GAINS AVG/MIN/MAX coverage. COUNT-per-dimension is
+    intentionally NOT handled here — it needs no measure column and has its own
+    counting machinery — so a COUNT request falls through to that path."""
     from config import QUERY_GRAMMAR
     ql = f" {query.lower()} "
 
@@ -148,9 +175,12 @@ def grouped_mode(query):
 
     if superlative_mode(query):
         return None                     # ranked aggregation — the superlative planner owns it
-    if not (has("grouping") and has("measure_agg")):
+    if not has("grouping"):
         return None
-    return {"grouped": True}
+    op = aggregate_operator(query)
+    if op is None or op == "COUNT":
+        return None                     # no measure aggregate requested (or COUNT — other path)
+    return {"grouped": True, "op": op}
 
 
 def ratio_mode(query):

@@ -37,6 +37,17 @@ def _to_number(v: Any):
     return float(v) if isinstance(v, Decimal) else v
 
 
+def _fmt_num(v: Any) -> str:
+    """Compact human number for finding text — integers without a trailing .0,
+    floats to 2 dp. Deterministic; no locale/currency/unit assumptions (those are
+    the data's own, never invented here)."""
+    try:
+        f = float(v)
+    except (TypeError, ValueError):
+        return str(v)
+    return str(int(f)) if f == int(f) else f"{round(f, 2)}"
+
+
 def _looks_like_date(v: Any) -> bool:
     if hasattr(v, "isoformat"):
         return True
@@ -351,8 +362,14 @@ _MAX_PATTERNS        = 6
 
 def detect_patterns(result_shape: str, column_stats: List[ColumnStat], rows: List[dict],
                     filters: List[Tuple[str, str, Optional[str]]],
-                    measures: List[str]) -> List[Pattern]:
-    """Deterministic pattern sweep over the sampled result rows.
+                    measures: List[str],
+                    dimensions: Optional[List[str]] = None) -> List[Pattern]:
+    """Deterministic pattern sweep over the result rows.
+
+    `rows` is the FULL result (analyze_result passes every returned row, not the
+    display sample) so any statistic surfaced here — outlier means, missing ratios,
+    dominance shares — is over the same population the NL summarizer aggregates over
+    (population-consistency invariant, VEDA_NLSQL_ROOTCAUSE_AUDIT RC-4).
 
     Trivial-insight guard: a dimension the query ALREADY pins with an equality
     filter is never reported as dominant — "DEBIT is the dominant entry type"
@@ -375,7 +392,7 @@ def detect_patterns(result_shape: str, column_stats: List[ColumnStat], rows: Lis
         miss = len(vals) - len(non_null)
         if n >= 5 and miss / n >= _MISSING_RATIO:
             pats.append(Pattern("missing_values", col,
-                f"{miss} of {n} sampled rows have no {col} value", round(miss / n, 3)))
+                f"{miss} of {n} rows have no {col} value", round(miss / n, 3)))
 
         if stat.role in ("dimension", "boolean") and col not in filtered_eq and len(non_null) >= 5:
             counts = Counter(str(v) for v in non_null)
@@ -422,15 +439,49 @@ def detect_patterns(result_shape: str, column_stats: List[ColumnStat], rows: Lis
         m_col = next((m for m in (measures or [])
                       if m in stats_by and stats_by[m].role != "identifier"), None) or \
                 next((s.name for s in column_stats if s.role == "measure"), None)
+        # The dimension column that LABELS each group — role-driven (dimension/date/
+        # boolean), NEVER an identifier, preferring the query's own GROUP BY columns.
+        # Its VALUES are used verbatim as the leader/laggard label: when the SQL
+        # grouped by the display column (the canonical upstream semantic decision),
+        # these are already business-readable names — we never re-derive id→name here.
+        d_col = next((d for d in (dimensions or [])
+                      if d in stats_by and stats_by[d].role in ("dimension", "date", "boolean")), None) \
+                or next((s.name for s in column_stats
+                         if s.role in ("dimension", "date", "boolean")), None)
         if m_col:
-            nums = [_to_number(r.get(m_col)) for r in rows if _is_numeric(r.get(m_col))]
-            if len(nums) >= 3:
+            # Single O(n) streaming pass — (label, value) pairs; no per-value list blowup
+            # beyond the numeric column already in hand.
+            pairs = [(r.get(d_col) if d_col else None, _to_number(r.get(m_col)))
+                     for r in rows if _is_numeric(r.get(m_col))]
+            nums = [v for _, v in pairs]
+            n = len(nums)
+            # LEADER / LAGGARD — the strongest and weakest group, labeled by the
+            # dimension's own value. Only when there are >=2 distinct-valued groups.
+            if n >= 2 and d_col:
+                hi = max(pairs, key=lambda p: p[1])
+                lo = min(pairs, key=lambda p: p[1])
+                if hi[0] is not None and hi[1] != lo[1]:
+                    pats.append(Pattern("leader", m_col,
+                        f"{hi[0]} has the highest {m_col} at {_fmt_num(hi[1])}", 0.95))
+                    if lo[0] is not None:
+                        pats.append(Pattern("laggard", m_col,
+                            f"{lo[0]} has the lowest {m_col} at {_fmt_num(lo[1])}", 0.72))
+            if n >= 3:
                 total = sum(nums)
                 if total > 0 and max(nums) / total >= _CONCENTRATION_SHARE:
                     pats.append(Pattern("concentration", m_col,
                         f"the top {m_col} entry holds {round(max(nums) / total * 100)}% of the total",
                         round(max(nums) / total, 3)))
-            if result_shape == "RANKING" and len(nums) >= 2 and nums[1] and abs(nums[1]) > 0:
+                # DISTRIBUTION — how many groups sit above the average, and the spread.
+                mean = statistics.fmean(nums)
+                above = sum(1 for v in nums if v > mean)
+                pats.append(Pattern("distribution", m_col,
+                    f"{above} of {n} {(d_col or 'groups')} are above the average {m_col} "
+                    f"of {_fmt_num(mean)}", 0.55))
+                pats.append(Pattern("spread", m_col,
+                    f"{m_col} ranges from {_fmt_num(min(nums))} to {_fmt_num(max(nums))} "
+                    f"across {n} groups", 0.5))
+            if result_shape == "RANKING" and n >= 2 and nums[1] and abs(nums[1]) > 0:
                 gap = (nums[0] - nums[1]) / abs(nums[1])
                 if gap >= _GAP_RATIO:
                     pats.append(Pattern("top_gap", m_col,
@@ -538,7 +589,21 @@ def analyze_result(
     primary_entity = ((sm or {}).get("tables", {}).get(table or "", {}) or {}).get("primary_entity")
     available_measures, available_dimensions = _available_columns(sm, table)
     related_entities = _related_entities(table)
-    patterns = detect_patterns(result_shape, stats, sample, facts["filters"], measures)
+    # Patterns run over the result population bounded by ANALYSIS_MAX_ROWS (NOT the
+    # tiny display `sample`). Two invariants held together:
+    #  · RC-4 population-consistency: the NL summarizer's numeric aggregates apply the
+    #    SAME ANALYSIS_MAX_ROWS bound (result_explainer), so a pattern's "vs average X"
+    #    is over the same population the headline mean uses — never a full-vs-sample mix.
+    #  · Phase-7 scalability: an unbounded O(rows) scan on a very large enterprise
+    #    result is an OOM/latency risk, so both sides cap at the same deterministic bound.
+    # row_count above stays the TRUE total; only the analysis scan is bounded.
+    try:
+        from config import ANALYSIS_MAX_ROWS as _ANALYSIS_MAX
+    except Exception:
+        _ANALYSIS_MAX = 50000
+    _scan = rows if row_count <= _ANALYSIS_MAX else rows[:_ANALYSIS_MAX]
+    patterns = detect_patterns(result_shape, stats, _scan, facts["filters"], measures,
+                               dimensions=dimensions)
     chart_candidates = compute_chart_candidates(result_shape, stats, dimensions, measures)
 
     return InsightContext(

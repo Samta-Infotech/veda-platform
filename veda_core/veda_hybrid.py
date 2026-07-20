@@ -230,16 +230,28 @@ def _maybe_federated(query, verbose=False):
     sids = list(getattr(ctx, "source_ids", ()) or ()) if ctx is not None else []
     if len(sids) < 2:
         return None
-    try:
-        from query.federated_route import run_federated
-        payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
-                                source_ids=sids, verbose=verbose)
-    except Exception as e:
-        if verbose:
-            print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
-        return None
-    if payload is None:
-        return None                      # single-source plan → normal path
+    # Token usage + latency accounting for the federated path (mirrors the Tier-2
+    # wrap at ~line 597): run_federated may issue SLM calls (cross-source plan +
+    # NL answer), so collect them here — otherwise the federated route reported
+    # zero tokens / null latency to the API (Tier-1/Tier-2 both account for it).
+    import time as _fed_time
+    from slm._call_slm import collect_usage as _collect_usage, usage_totals as _usage_totals
+    _fed_t0 = _fed_time.time()
+    with _collect_usage() as _fed_usage:
+        try:
+            from query.federated_route import run_federated
+            payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
+                                    source_ids=sids, verbose=verbose)
+        except Exception as e:
+            if verbose:
+                print(f"  [federated] route error ({type(e).__name__}: {e}) — normal path")
+            return None
+        if payload is None:
+            return None                  # single-source plan → normal path
+        # Read usage INSIDE the with: collect_usage clears the (outermost) thread-local
+        # buffer on __exit__, so reading .calls() after the block would see nothing.
+        _fed_usage_totals = _usage_totals(_fed_usage.calls())
+    _fed_latency_ms = round((_fed_time.time() - _fed_t0) * 1000, 2)
     if payload.get("status") == "ok":
         r = payload.get("result") or {}
         # No single-source semantic model applies across a federated query, but
@@ -252,14 +264,25 @@ def _maybe_federated(query, verbose=False):
         explain = None
         try:
             from veda.business_explain import build_explain
-            explain = build_explain(sql=payload.get("sql") or "", table="federated", sm=None)
+            # Plan-path payloads carry a per-metric `plan` (group key + one aggregate
+            # SELECT per metric/source), NOT a single `sql` — so build_explain on an
+            # empty string produced the generic "List records" / "Federateds". Fall back
+            # to a representative metric SELECT so explainability shows the REAL group-by
+            # + aggregate + source table(s) the federated answer computed. The flat-SQL
+            # path already carries `sql`, so it is preferred when present.
+            _fed_sql = payload.get("sql")
+            if not _fed_sql and isinstance(payload.get("plan"), dict):
+                _mets = payload["plan"].get("metrics") or []
+                _fed_sql = next((m.get("sql") for m in _mets if m.get("sql")), None)
+            explain = build_explain(sql=_fed_sql or "", table="federated", sm=None)
         except Exception as e:
             if verbose:
                 print(f"  [federated] business_explain failed ({type(e).__name__}: {e}) — explainability omitted")
         result = {"ok": True, "status": "answered", "route": "federated",
                   "sql": payload.get("sql"), "cols": r.get("columns"), "rows": r.get("rows"),
                   "table": "federated", "answer": payload.get("answer"), "explain": explain,
-                  "provenance": payload.get("provenance"), "sources": payload.get("sources")}
+                  "provenance": payload.get("provenance"), "sources": payload.get("sources"),
+                  "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
         # Deterministic analytics for the federated result too — degraded mode
         # (no single-table semantic model, so grounding fields stay empty), but
         # column stats, result shape, chart candidates and detected patterns all
@@ -301,7 +324,8 @@ def _maybe_federated(query, verbose=False):
     # refused/blocked federation is a real, explained outcome — surface it, don't silently
     # fall back to a single-source answer that would drop a source.
     result = {"ok": False, "status": "federated_refused",
-              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql")}
+              "error": payload.get("reason") or "federation refused", "sql": payload.get("sql"),
+              "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
@@ -592,16 +616,19 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             elif TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
-                from slm._call_slm import collect_usage
+                from slm._call_slm import collect_usage, usage_totals
                 _t2_t0 = time.time()
                 with collect_usage() as _t2_usage:
                     t2 = _tier2_sql(query, sm, cols, verbose=verbose,
                                     deadline=time.time() + TIER2_TIME_BUDGET_S,
                                     execution_state=res.get("context") if isinstance(res, dict) else None,
                                 on_event=on_event)
+                    # Read usage INSIDE the with: collect_usage clears the (outermost)
+                    # thread-local buffer on __exit__, so reading .calls() after the
+                    # block would return nothing — Tier-2/LangGraph tokens came back 0.
+                    _t2_usage_totals = usage_totals(_t2_usage.calls())
                 if isinstance(t2, dict) and "usage" not in t2:
-                    from slm._call_slm import usage_totals
-                    t2["usage"] = usage_totals(_t2_usage.calls())
+                    t2["usage"] = _t2_usage_totals
                 if isinstance(t2, dict) and "latency_ms" not in t2:
                     t2["latency_ms"] = round((_head_s + (time.time() - _t2_t0)) * 1000, 2)
                 if t2 is not None:
@@ -797,6 +824,32 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
                                              temporal_cols=_tcols, llm_generated=llm_written)
     if not ok_ir:
         return False, f"ir_mismatch: {'; '.join(ir_viol)}"
+
+    # ── Shared analytical-semantics check — the SAME generic, metadata-driven
+    # invariants Tier-1 uses (veda/semantic_validation.py). This is the common
+    # boundary for BOTH Tier-2 IR SQL and LangGraph SQL (run_langgraph_pipeline's
+    # output is validated through this same function). Advisory by default (logged);
+    # with SEMANTIC_VALIDATION_ENFORCE a hard operator-loss finding (the LLM ignored
+    # the requested AVG/SUM/…) drives the EXISTING repair/retry loop by returning a
+    # reason, instead of executing SQL that answers a different question. Never raises.
+    try:
+        from config import SEMANTIC_VALIDATION_ENABLED as _SV_ON, SEMANTIC_VALIDATION_ENFORCE as _SV_ENF
+    except Exception:
+        _SV_ON, _SV_ENF = False, False
+    if _SV_ON:
+        try:
+            from veda.semantic_validation import validate_analytical_semantics
+            _sv = validate_analytical_semantics(query, raw_sql, sm, graph=None)
+            _hard = [f for f in _sv if f.get("code") in
+                     ("operator_mismatch", "operator_dropped", "missing_group_by")]
+            if _sv:
+                print(f"  [Tier2] Semantics  {len(_sv)} finding(s): "
+                      f"{', '.join(sorted({f['code'] for f in _sv}))}"
+                      + (" (enforced)" if (_SV_ENF and _hard) else " (advisory)"))
+            if _SV_ENF and _hard:
+                return False, f"semantic: {_hard[0]['code']} — {_hard[0]['detail']}"
+        except Exception:
+            pass
     return True, ""
 
 

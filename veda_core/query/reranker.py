@@ -11,8 +11,11 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import logging
 import warnings
 from typing import List, Optional
+
+logger = logging.getLogger(__name__)
 
 from config import (
     RERANKER_MODEL,
@@ -77,6 +80,15 @@ def _load_local_crossencoder():
         from sentence_transformers import CrossEncoder
         return CrossEncoder(RERANKER_MODEL, device=RERANKER_DEVICE)
     except Exception as e:
+        # FAIL-LOUD (2026-07-17): RERANKER_ENABLED=True but the model didn't load
+        # means every query silently degrades to pure RRF order (see _rerank's
+        # `reranker is None` pass-through) with NO other signal — a permanent,
+        # invisible accuracy loss in an air-gapped deploy. Log at ERROR so ops
+        # actually sees it; behaviour is unchanged (still returns None → graceful
+        # RRF fallback), this only makes the silent failure visible.
+        logger.error("[Reranker] RERANKER_ENABLED but model '%s' FAILED to load (%s: %s) "
+                     "— retrieval is now pure RRF (degraded) for EVERY query until fixed",
+                     RERANKER_MODEL, type(e).__name__, e)
         warnings.warn(f"[Reranker] Could not load model '{RERANKER_MODEL}': {e}")
         return None
 

@@ -122,7 +122,7 @@ def test_anti_inference_line_in_prompt(monkeypatch):
     monkeypatch.setattr(re_mod, "NL_SUMMARY_NUMERIC_GUARD", False, raising=False)
     re_mod.run_nl_answer("q", ["a", "b"], [{"a": 1, "b": 2}])
     assert "Do NOT infer causes" in seen["p"]
-    assert "what a blank/empty column implies" in seen["p"]
+    assert "never explain WHY a value is high/low/missing" in seen["p"]
 
 
 def test_strip_keeps_non_ascii_currency_present_in_data():

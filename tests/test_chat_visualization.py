@@ -298,3 +298,52 @@ def test_lowercase_english_words_ending_in_id_not_flagged():
     for word in ("paid", "valid", "invalid", "grid", "hybrid", "android",
                 "void", "avoid", "solid", "rapid", "fluid", "arid", "acid"):
         assert not r._is_identifier(word), f"{word!r} must NOT be flagged as an identifier"
+
+
+# ---------------------------------------------------------------------------
+# RANKING rescue (2026-07-19): id-labelled bar for engine-classified rankings
+# ---------------------------------------------------------------------------
+
+def test_ranking_rescue_charts_id_labelled_leaderboard():
+    """An engine-classified RANKING with a measure but only identifier labels
+    (id/reference-heavy schemas) now gets a bar leaderboard instead of nothing."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["payment_reference_number", "paid_amount"]
+    rows = [[f"order_R{i}", 100000 - i * 1000] for i in range(10)]
+    analytics = {"result_shape": "RANKING", "column_stats": [
+        {"name": "payment_reference_number", "kind": "categorical", "role": "identifier"},
+        {"name": "paid_amount", "kind": "numeric", "role": "measure"},
+    ]}
+    specs = VisualizationRecommender().recommend(cols, rows, analytics=analytics)
+    assert specs and specs[0].type.value == "bar"
+    d = specs[0].to_dict()
+    assert d["chart_data"]["labels"][0] == "order_R0"
+    assert d["chart_data"]["values"][0] == 100000
+
+
+def test_ranking_rescue_needs_engine_shape():
+    """Without the engine's own RANKING classification the identifier exclusion
+    stands unchanged — same data, no shape → no chart (pinned behaviour)."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["payment_reference_number", "paid_amount"]
+    rows = [[f"order_R{i}", 100000 - i * 1000] for i in range(10)]
+    analytics = {"column_stats": [
+        {"name": "payment_reference_number", "kind": "categorical", "role": "identifier"},
+        {"name": "paid_amount", "kind": "numeric", "role": "measure"},
+    ]}
+    assert VisualizationRecommender().recommend(cols, rows, analytics=analytics) == []
+
+
+def test_ranking_rescue_prefers_non_identifier_label():
+    """When a real name column exists alongside the id, the rescue labels by the
+    name, not the id."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["payment_id", "payer_note", "paid_amount"]
+    rows = [[f"{i}", f"note-{i}", 500 - i] for i in range(5)]
+    analytics = {"result_shape": "RANKING", "column_stats": [
+        {"name": "payment_id", "kind": "categorical", "role": "identifier"},
+        {"name": "payer_note", "kind": "categorical", "role": "text"},
+        {"name": "paid_amount", "kind": "numeric", "role": "measure"},
+    ]}
+    specs = VisualizationRecommender().recommend(cols, rows, analytics=analytics)
+    assert specs and specs[0].to_dict()["chart_data"]["labels"][0] == "note-0"

@@ -847,6 +847,17 @@ QSR_FP_EVIDENCE_FLOOR = 0.3
 # set alone blowing past what's actually business-readable. Explicitly user-named
 # columns are added before this cap is applied, so they always survive it.
 RECOMMENDED_PROJECTION_MAX_COLS = 12
+# HIGH-importance columns are a FILLER, not a flood (2026-07-19): the static
+# per-table importance set only tops the projection up to this floor when the
+# QUERY-DRIVEN signals (must-include / user-named / display column / retrieval
+# relevance) picked fewer than this many columns. Before this, every HIGH column
+# of the table entered every SELECT regardless of the question ("top 10 by
+# amount" pulled 12 columns incl. payment_signature/attempt_count) — noisy
+# tables, bloated prompts. Query-named columns are unaffected (added before,
+# never displaced). Env-overridable; set to RECOMMENDED_PROJECTION_MAX_COLS to
+# restore the old fill-to-cap behaviour.
+RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR = int(__import__("os").environ.get(
+    "RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR", "6"))
 # Heavy-lane time budgets (Phase C): skip Tier-2 when the deterministic head already
 # overspent (retrieval/grounding struggled — Tier-2 rarely rescues those), and give
 # Tier-2 a hard deadline enforced between SLM rounds. Measured 2026-07-12: without
@@ -865,7 +876,15 @@ QSR_REFERENT_MAX_COLS = 20
 # query — so retry ONCE with that table forced as primary (the full gate battery
 # still judges the retried plan), else clarify naming what the token actually is in
 # this scope. Runs only on would-be refusals: an answered query can never regress.
-QUALIFIER_SALVAGE_ENABLED     = True
+#
+# DEFAULT FLIPPED TO OFF (2026-07-17), evidence-based: logs/route_log.jsonl shows
+# 7 salvage attempts → 7 salvage_clarify, 0 answered rescues, each costing 48–63s.
+# In observed traffic the re-anchor recursion NEVER lands an answered result — it
+# only adds ~50s latency before the same clarify. The whole code path is preserved
+# and re-enable is one env flag (QUALIFIER_SALVAGE_ENABLED=true) if a golden-set
+# eval later shows it rescues a meaningful share. Env-overridable, zero code change.
+QUALIFIER_SALVAGE_ENABLED     = __import__("os").environ.get(
+    "QUALIFIER_SALVAGE_ENABLED", "false").strip().lower() in ("1", "true", "yes", "on")
 QUALIFIER_REANCHOR_RETRY      = True
 QUALIFIER_REANCHOR_MAX_HEAD_S = 45.0   # skip the retry when the head already overspent
 
@@ -979,11 +998,31 @@ NL_SUMMARY_MODEL       = __import__("os").environ.get("NL_SUMMARY_MODEL", "qwen2
 # as INSIGHT_ENGINE_TIMEOUT_MS's 10000ms budget), so 2500ms would time out on nearly
 # every call and silently downgrade to the deterministic fallback. 10000ms gives the
 # 7B model real headroom incl. a cold load.
-NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "10000"))
+NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "25000"))
 # 80 was cutting the model off mid-sentence; 120 suited the old one-sentence prompt.
 # The 2-3 sentence business summary needs more — run_nl_answer adds +50 at call time,
 # and this base gives headroom for the woven-in findings.
 NL_SUMMARY_MAX_TOKENS  = int(__import__("os").environ.get("NL_SUMMARY_MAX_TOKENS", "160"))
+# Evidence-adaptive analytical summaries: a grouped/ranked/trend result with several
+# VERIFIED findings earns a short analytical narrative (leaders/laggards, comparisons,
+# spread, trends) rather than a 1-sentence answer — so the analytical MODE gets a
+# larger completion budget. Simple scalar/detail answers keep the tighter budget
+# above. This is depth driven by verified evidence, NOT padding to a length target;
+# the SLM still only narrates precomputed findings (no new arithmetic).
+NL_SUMMARY_ANALYTICAL_MAX_TOKENS = int(__import__("os").environ.get(
+    "NL_SUMMARY_ANALYTICAL_MAX_TOKENS", "320"))
+# Upper bound on findings handed to the analytical summary (brief mode uses 2). Keeps
+# the narrative focused on the strongest verified insights instead of every metric.
+NL_SUMMARY_MAX_FINDINGS = int(__import__("os").environ.get("NL_SUMMARY_MAX_FINDINGS", "5"))
+# Scalability bound for post-execution Python analysis (patterns + numeric aggregates).
+# Cheap O(1)-memory streaming stats aside, the pattern sweep and per-column aggregate
+# lists are O(rows); on a very large enterprise result that is an OOM/latency risk. So
+# BOTH the pattern sweep (result_analyzer) AND the summary's numeric aggregates
+# (result_explainer) scan at most the first ANALYSIS_MAX_ROWS — the SAME deterministic
+# bound in both, so the two never mix populations (RC-4 population-consistency holds
+# even when bounded). row_count reported to the user is always the TRUE total. Default
+# is generous; typical results are fully scanned (bound never triggers).
+ANALYSIS_MAX_ROWS = int(__import__("os").environ.get("ANALYSIS_MAX_ROWS", "50000"))
 # Anti-hallucination guardrail (2026-07-17): after the summary SLM answers, verify
 # every number it states is grounded in the precomputed facts/metrics/patterns
 # (result_explainer._answer_numbers_grounded). If it invented a figure, fall back to
@@ -1025,7 +1064,7 @@ RESULT_ANALYZER_MAX_ROWS   = int(__import__("os").environ.get("RESULT_ANALYZER_M
 # ordinary calls (observed live: "SLM unavailable/invalid (TimeoutError)").
 # 10000ms gives real margin over the measured warm ~4.6s + cold-load worst case;
 # the failure mode remains fail-safe (deterministic fallback answer) either way.
-INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "10000"))
+INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "25000"))
 # Deterministic chart-recommendation gate (veda/result_analyzer.chart_confidence,
 # query/result_explainer.validate_visualization): below this, no visualization is
 # returned at all — a table-only response is always safer than a low-confidence
@@ -1217,6 +1256,25 @@ QUERY_GRAMMAR = {
     # coincides with sampled lookup values).
     "portion": ["percentage", "percent", "share", "proportion", "fraction"],
 }
+
+# Canonical aggregate-operator normalization (GENERIC SQL semantics, NOT schema
+# vocabulary): the natural-language wording of a requested aggregate → the SQL
+# operator it means. This encodes only universal analytical invariants ("average"
+# means AVG, "total" means SUM) — never anything about a specific customer's tables
+# or columns. Order matters only for reporting; detection is longest-phrase-first so
+# "how much" wins over a bare word. The deterministic grouped planner reads this to
+# PRESERVE the requested operator instead of assuming SUM. SUM's trigger words are a
+# superset of the legacy measure_agg list, so grouped_mode keeps its old SUM behavior
+# byte-for-byte and only GAINS AVG/MIN/MAX/COUNT coverage.
+AGGREGATE_OPERATORS = {
+    "AVG":   ["average", "avg", "mean", "average of", "avg of", "mean of"],
+    "SUM":   ["how much", "total", "sum", "sum of", "combined",
+              "contribute", "contributes", "contribution", "contributed"],
+    "MIN":   ["minimum", "min", "smallest", "lowest", "min of", "minimum of"],
+    "MAX":   ["maximum", "max", "largest", "highest", "max of", "maximum of"],
+    "COUNT": ["count", "count of", "number of", "how many"],
+}
+
 # Route detected superlatives into multi-table/grain planning (intent=AGGREGATE).
 # OFF until the grain planner can consume a superlative (dim + measure): the extra
 # planning is pure latency today (measured 2026-07-11: q19/q22/q34/q37 pushed past
@@ -1521,6 +1579,16 @@ TIER2_LLM_FALLBACK = True
 # defined) but off by default; enable per-deployment only if answerability > latency there.
 VALIDATION_REPAIR_LOOP_ENABLED = False
 VALIDATION_MAX_REPAIR_ATTEMPTS = 1
+# Shared analytical-semantics validation (veda/semantic_validation.py) — the same
+# generic, metadata-driven invariant checks (operator preserved / group-by present /
+# user-facing dimension not an unnecessary identifier / joins grounded) run on every
+# path's generated SQL (Tier-1 LLM branch, Tier-2, LangGraph). ENABLED records
+# findings to the trace for observability (advisory, no behavior change). ENFORCE
+# additionally lets a hard operator-loss finding drive the EXISTING Tier-2 repair/
+# retry loop — OFF by default until validated on live models (this hardware runs no
+# SLM), so the default deployment is advisory-only and cannot regress.
+SEMANTIC_VALIDATION_ENABLED = True
+SEMANTIC_VALIDATION_ENFORCE = False
 # Phase 2 unification — ONE JOIN ENGINE. When the LLM (LangGraph) path identifies a
 # MULTI-table query, build joins via the deterministic graph planner (plan_join_tree
 # + build_skeleton) instead of sql_builder's retrieval-provided join_path. The LLM

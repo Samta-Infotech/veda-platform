@@ -181,3 +181,39 @@ def test_uses_resolve_display_column_for_entity_identity():
     # its actual resolution logic ran, not a no-op.
     assert "reference_no" in out
     assert "internal_flag" not in out
+
+
+def test_high_importance_is_filler_not_flood(monkeypatch):
+    """2026-07-19: the static HIGH-importance signal only TOPS UP a thin
+    query-driven projection (to RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR) — it no
+    longer floods every SELECT with every HIGH column of the table."""
+    import config
+    from veda.routing import recommended_projection
+    # A wide table where MANY columns are HIGH but only two are query-relevant.
+    table = "payments"
+    allowed = ["amount", "status", "sig", "attempt", "sched", "due", "pdate", "ref", "name"]
+    sm = {"columns": {f"{table}.{c}": {"importance_class": "HIGH"} for c in allowed}}
+    class R:  # minimal RetrievalResult shape
+        def __init__(s, c, sc): s.col_id, s.column_name, s.final_score = f"{table}.{c}", c, sc
+    results = [R("amount", .9), R("name", .8)]
+    monkeypatch.setattr(config, "RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR", 4, raising=False)
+    out = recommended_projection(table, allowed, results, sm, "top payments by amount",
+                                 must_include=["amount"])
+    assert "amount" in out and "name" in out       # query-driven picks intact
+    assert len(out) <= 4                            # topped up to the floor, NOT all 9 HIGH cols
+
+
+def test_high_importance_still_tops_up_thin_projections(monkeypatch):
+    """When the query-driven signals produce almost nothing, HIGH columns still
+    fill in (the original audit-column fix's behaviour is preserved as fallback)."""
+    import config
+    from veda.routing import recommended_projection
+    table = "payments"
+    allowed = ["amount", "status", "audit_id"]
+    sm = {"columns": {f"{table}.amount": {"importance_class": "HIGH"},
+                      f"{table}.status": {"importance_class": "HIGH"},
+                      f"{table}.audit_id": {"importance_class": "LOW"}}}
+    monkeypatch.setattr(config, "RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR", 6, raising=False)
+    out = recommended_projection(table, allowed, [], sm, "payments overview")
+    assert "amount" in out and "status" in out      # HIGH filler fired (picks were empty)
+    assert "audit_id" not in out                     # LOW never enters via this signal

@@ -4,6 +4,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from typing import Iterator
 
 from chatbot.run import run_chat_turn
@@ -68,7 +69,16 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
     if vtype == "line":
         return _visualization_recommender._line(cols, rows, x_idx, y_idx)
     if vtype in ("bar", "pie"):
-        return _visualization_recommender._category_numeric(cols, rows, x_idx, y_idx)
+        # _category_numeric returns a LIST (it may offer pie + bar for the same data).
+        # This function's contract is ONE spec (the callers do `spec.to_dict()`), so
+        # return the spec matching the requested type — or the first available — never
+        # the raw list (a list has no .to_dict(), which crashed _build_visualizations
+        # on any bar/pie candidate/suggestion that reached this fallback). None when the
+        # data can't be charted (e.g. a single category).
+        specs = _visualization_recommender._category_numeric(cols, rows, x_idx, y_idx)
+        if not specs:
+            return None
+        return next((s for s in specs if s.type.value == vtype), specs[0])
     return None
 
 
@@ -148,6 +158,11 @@ class ConversationQueryService:
         session_id = str(chat.pk)
         kwargs = dict(tenant=self.tenant, source_id=self.source_id,
                       source_ids=self.source_ids, request_id=request_id)
+        # End-to-end wall clock for THIS turn — so latency_ms is ALWAYS reportable,
+        # even when the engine result carries none (a refusal/clarify that never
+        # reached _done(), or a path that returned no latency). Used as the fallback
+        # in _build_reply_events' usage event.
+        _turn_t0 = time.monotonic()
 
         if stream:
             response = yield from self._run_streamed(message, session_id, kwargs, chat)
@@ -168,6 +183,8 @@ class ConversationQueryService:
                             "message": response.get("reply_text") or "Inference tier unavailable."}}
             return
 
+        if isinstance(response, dict):
+            response["_turn_latency_ms"] = round((time.monotonic() - _turn_t0) * 1000, 2)
         yield from self._build_reply_events(response)
 
     def _run_streamed(self, message: str, session_id: str, kwargs: dict, chat: ChatSession):
@@ -282,7 +299,11 @@ class ConversationQueryService:
         # refusal path that never reached _done()).
         yield {"event": "usage", "data": {
             **(res0.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
-            "latency_ms": res0.get("latency_ms"),
+            # Prefer the engine's own end-to-end time; fall back to this turn's
+            # measured wall clock so latency_ms is NEVER null — even a refusal/
+            # clarify that never reached the engine's _done() still reports how long
+            # it took.
+            "latency_ms": res0.get("latency_ms") or response.get("_turn_latency_ms"),
         }}
         # Insight Engine (additive event type): only present when
         # INSIGHT_ENGINE_ENABLED produced these keys server-side.
