@@ -693,18 +693,29 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
 
 
 def _nl_answer(query: str, result: dict) -> str:
-    """One short natural-language sentence over the federated rows (best-effort; the rows
-    + SQL are the source of truth, so a failure here never blocks the answer)."""
+    """Grounded NL answer over the federated rows — reuses the MAIN summary path
+    (query/result_explainer.run_nl_answer) so the federated answer gets the SAME
+    guards the single-source summary has: use ONLY numbers present in the result
+    (numeric-grounding guard rejects invented figures), never calculate/estimate a
+    new value, one concise business answer, no raw row-list dumps.
+
+    The old bespoke prompt here had none of these — it just asked for "one sentence
+    using these rows" and pasted the raw rows in — so the SLM would free-form COMPUTE
+    (e.g. an unrequested 10% surcharge, amount×1.1) and DUMP the row list as the
+    answer. sm=None (no single cross-source semantic model) degrades gracefully to
+    name/dtype heuristics; a failure or timeout falls back to a safe count line, never
+    a hallucinated one."""
     rows = (result or {}).get("rows") or []
     cols = (result or {}).get("columns") or []
     if not rows:
         return "No matching rows were found across the sources."
     try:
-        from slm._call_slm import call_slm
-        preview = [dict(zip(cols, [str(v) for v in r.values()])) if isinstance(r, dict) else r
-                   for r in rows[:15]]
-        msg = (f"Question: {query}\nColumns: {cols}\nRows (up to 15): {preview}\n\n"
-               "Answer the question in ONE concise sentence using only these rows. No preamble.")
-        return call_slm(msg, purpose="federated_answer", temperature=0.0, num_predict=120).strip()
+        from query.result_explainer import run_nl_answer
+        row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
+        nl = run_nl_answer(query, list(cols), row_dicts, table="federated", semantic_model=None)
+        ans = (getattr(nl, "answer", None) or "").strip()
+        if ans:
+            return ans
     except Exception:
-        return f"{len(rows)} row(s) returned across sources: columns {', '.join(map(str, cols))}."
+        pass
+    return f"{len(rows)} row(s) returned across sources: columns {', '.join(map(str, cols))}."

@@ -53,9 +53,10 @@ def test_no_forced_insight_when_no_pattern(monkeypatch):
     stop after the direct answer instead of inventing an insight to fill 2-3
     sentences."""
     prompt = _capture_prompt(monkeypatch)                 # no patterns passed
-    assert "1-3 sentences" in prompt                      # not a hard 2-3
+    # brief mode (non-analytical shape): short, direct, no forced insight
+    assert "1-2 sentences" in prompt
     assert "do NOT invent an insight" in prompt
-    assert "stop after the direct answer" in prompt
+    assert "otherwise stop" in prompt
 
 
 def test_ranking_shape_guidance(monkeypatch):
@@ -84,5 +85,5 @@ def test_unknown_shape_adds_no_guidance_line(monkeypatch):
 def test_metrics_and_findings_in_prompt(monkeypatch):
     prompt = _capture_prompt(monkeypatch, patterns=["North leads by a wide margin"])
     assert "metrics" in prompt                            # #1 aggregates present
-    assert "Key findings already computed" in prompt      # patterns woven-in instruction
+    assert "Verified findings already computed" in prompt  # patterns woven-in instruction
     assert "North leads by a wide margin" in prompt

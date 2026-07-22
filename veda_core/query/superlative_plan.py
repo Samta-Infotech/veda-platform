@@ -58,6 +58,24 @@ def _human(table: str, sm=None) -> str:
         return tail.replace("_", " ")
 
 
+def _explicit_measure_operator(query: str):
+    """The aggregate operator a superlative EXPLICITLY names for its rank measure,
+    restricted to the NON-DIRECTIONAL operators (AVG / SUM) — or None. "which project
+    has the highest AVERAGE carpet area" ranks by AVG, not SUM. MIN/MAX are excluded
+    on purpose: their trigger words ('highest'/'lowest'/'largest') ARE the superlative
+    direction, so treating them as a per-group operator would silently reinterpret a
+    plain "highest <measure>" ranking. Generic SQL semantics (config.AGGREGATE_
+    OPERATORS), no schema vocabulary."""
+    from config import AGGREGATE_OPERATORS
+    ql = f" {query.lower()} "
+    for op in ("AVG", "SUM"):
+        for w in AGGREGATE_OPERATORS.get(op, []):
+            hit = (w in ql) if " " in w else bool(re.search(rf"\b{re.escape(w)}\b", ql))
+            if hit:
+                return op
+    return None
+
+
 def try_superlative_plan(query: str, sm=None):
     try:
         from veda.planning import superlative_mode
@@ -66,7 +84,10 @@ def try_superlative_plan(query: str, sm=None):
             return None
         return _try(query, sm, {"kind": "superlative",
                                 "direction": sup.get("superlative", "max"),
-                                "term": sup["term"]})
+                                "term": sup["term"],
+                                # PRESERVE an explicitly-named rank operator (AVG/SUM);
+                                # default SUM keeps every existing superlative unchanged.
+                                "op": _explicit_measure_operator(query) or "SUM"})
     except Exception:
         return None                      # failure-safe: fall through to full pipeline
 
@@ -78,9 +99,10 @@ def try_grouped_plan(query: str, sm=None):
     tail differs (full breakdown instead of LIMIT 1)."""
     try:
         from veda.planning import grouped_mode
-        if not grouped_mode(query):
+        _gm = grouped_mode(query)
+        if not _gm:
             return None
-        return _try(query, sm, {"kind": "grouped"})
+        return _try(query, sm, {"kind": "grouped", "op": _gm.get("op", "SUM")})
     except Exception:
         return None                      # failure-safe: fall through to full pipeline
 
@@ -88,6 +110,13 @@ def try_grouped_plan(query: str, sm=None):
 def _try(query: str, sm=None, mode=None):
     if not mode:
         return None
+
+    # Requested aggregate operator — PRESERVED from the query (generic SQL semantics,
+    # config.AGGREGATE_OPERATORS), never assumed. Both the grouped breakdown
+    # (grouped_mode → AVG/SUM/MIN/MAX) and the LIMIT-1 superlative rank
+    # (_explicit_measure_operator → AVG/SUM) carry their operator on mode["op"];
+    # default SUM keeps every prior plan byte-for-byte.
+    agg = (mode.get("op") or "SUM").upper()
 
     # ── negation/exclusion scope (BOTH shapes): "excluding paid entries" must
     # INVERT the paid filter — dropping it broadens the answer, applying it
@@ -192,35 +221,62 @@ def _try(query: str, sm=None, mode=None):
         query, sm, exclude_spans=dim_phrase | _shape_spans)
     why_ev = defaultdict(list, why_ev)
 
-    if not evidence:
-        # Dimension named but ZERO entity/value evidence anywhere ("which
-        # category appears most frequently in the records" — records of WHAT?):
-        # ask, grounded in the schema. Strictly better than falling through —
-        # the full pipeline's dim-word anchor trap ends in a wrong-table gate
-        # refusal after 30–60s (measured twice on this shape).
-        if dim_span and spans[dim_span].entities:
-            opts = [_human(t, sm) for t, _ in spans[dim_span].entities][:5]
-            return ("clarify",
-                    f"'{dim_span}' of which records? This data has: "
-                    f"{', '.join(opts)} — name the entity to count.")
-        return None
-    ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))
-    anchor, top = ranked[0]
-    second = ranked[1][1] if len(ranked) > 1 else 0.0
-    if top - second < ANCHOR_MARGIN:
-        # dim-ownership tie-break: entity families tie on shared name words
-        # (paymenttransaction / settlement / settlementlog all match 'payment');
-        # only candidates owning EVERY word of the asked dimension phrase
-        # ('transaction type' → transaction_type) stay in the running.
-        owners = [(t, s) for t, s in ranked
-                  if dim_phrase and all(
-                      any(cid.rpartition(".")[0] == t for cid in spans[w].dimensions)
-                      for w in dim_phrase)]
-        if owners and (len(owners) == 1
-                       or owners[0][1] - owners[1][1] >= ANCHOR_MARGIN):
-            anchor, top = owners[0]
-        else:
-            return None                              # ambiguous subject → full pipeline
+    # ── measure-aggregation anchor recovery: the typed-evidence scorer credits
+    # ENTITY and VALUE spans only (by design — a measure word must not mis-anchor).
+    # But a pure "<op> <measure> per <dim>" question has NO entity/value span for its
+    # own anchor: its only anchor signal is that ONE table owns BOTH the requested
+    # measure column AND the grouping dimension column ("carpet area" votes for the
+    # carpet-area-UNIT lookup entity, leaving the asset table that actually holds the
+    # measure with zero evidence). When exactly one table co-owns a matched measure
+    # and the dimension AND the evidence winner does NOT own the dimension (so the
+    # normal flow would mis-anchor or bail), adopt that co-owner. Schema-agnostic:
+    # column ownership comes from the semantic model (METRIC/MONETARY measures, the
+    # CATEGORY dimension — identifiers are already excluded from tr.dimensions),
+    # never from names. Only relaxes anchoring for this shape; every other query is
+    # unchanged.
+    _co_owner = None
+    if dim_span and not count_rank and mode.get("kind") in ("grouped", "superlative"):
+        _meas_tabs = {cid.rpartition(".")[0] for sp, tr in spans.items()
+                      for cid in tr.measures}
+        _dim_tabs = {cid.rpartition(".")[0] for cid in spans[dim_span].dimensions}
+        _co = _meas_tabs & _dim_tabs
+        _ev_top = max(evidence, key=evidence.get) if evidence else None
+        if len(_co) == 1 and (_ev_top is None or _ev_top not in _dim_tabs):
+            _co_owner = next(iter(_co))
+
+    if _co_owner:
+        anchor = _co_owner
+        why_ev[anchor].append("owns the requested measure + grouping dimension")
+    else:
+        if not evidence:
+            # Dimension named but ZERO entity/value evidence anywhere ("which
+            # category appears most frequently in the records" — records of WHAT?):
+            # ask, grounded in the schema. Strictly better than falling through —
+            # the full pipeline's dim-word anchor trap ends in a wrong-table gate
+            # refusal after 30–60s (measured twice on this shape).
+            if dim_span and spans[dim_span].entities:
+                opts = [_human(t, sm) for t, _ in spans[dim_span].entities][:5]
+                return ("clarify",
+                        f"'{dim_span}' of which records? This data has: "
+                        f"{', '.join(opts)} — name the entity to count.")
+            return None
+        ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))
+        anchor, top = ranked[0]
+        second = ranked[1][1] if len(ranked) > 1 else 0.0
+        if top - second < ANCHOR_MARGIN:
+            # dim-ownership tie-break: entity families tie on shared name words
+            # (paymenttransaction / settlement / settlementlog all match 'payment');
+            # only candidates owning EVERY word of the asked dimension phrase
+            # ('transaction type' → transaction_type) stay in the running.
+            owners = [(t, s) for t, s in ranked
+                      if dim_phrase and all(
+                          any(cid.rpartition(".")[0] == t for cid in spans[w].dimensions)
+                          for w in dim_phrase)]
+            if owners and (len(owners) == 1
+                           or owners[0][1] - owners[1][1] >= ANCHOR_MARGIN):
+                anchor, top = owners[0]
+            else:
+                return None                          # ambiguous subject → full pipeline
 
     cols_meta = sm.get("columns", {})
     anchor_cols = {c.split(".", 1)[1] for c in cols_meta if c.split(".", 1)[0] == anchor}
@@ -289,7 +345,7 @@ def _try(query: str, sm=None, mode=None):
                 # tied ("amount") gets asked which one — both clarify below.
                 cand = cand[:5]
             else:
-                _verb = "totalled" if mode["kind"] == "grouped" else "ranked"
+                _verb = (f"aggregated ({agg})" if mode["kind"] == "grouped" else "ranked")
                 return ("clarify",
                         f"which amount should be {_verb} — {', '.join(cand[:4])}?")
         measures = cand
@@ -423,28 +479,29 @@ def _try(query: str, sm=None, mode=None):
         # parameterizer lifts a bare `ORDER BY 2` into a bind value — Postgres
         # then sorts by the constant 2 (i.e. not at all), which under LIMIT 1
         # returns an arbitrary group.
-        tail, route = (f" GROUP BY a.{_q(dim_col)} ORDER BY SUM(a.{_q(measure)}) "
-                       f"DESC LIMIT 100"), "grouped.breakdown"
-        head = [f"grouped breakdown → SUM({', '.join(measures)}) per {dim_col}"]
+        tail, route = (f" GROUP BY a.{_q(dim_col)} ORDER BY {agg}(a.{_q(measure)}) "
+                       f"DESC LIMIT 100"), f"grouped.breakdown.{agg.lower()}"
+        head = [f"grouped breakdown → {agg}({', '.join(measures)}) per {dim_col}"]
     else:
         order = "DESC" if mode.get("direction") == "max" else "ASC"
-        tail = (f" GROUP BY a.{_q(dim_col)} ORDER BY SUM(a.{_q(measure)}) "
+        tail = (f" GROUP BY a.{_q(dim_col)} ORDER BY {agg}(a.{_q(measure)}) "
                 f"{order} LIMIT 1")
         route = f"superlative.group.{order.lower()}"
         head = [f"superlative '{mode['term']}' → {order} rank"]
 
     # grouped also projects the group size — "what categories remain and how
     # much does each contribute" asks for the groups AND their weight. With no
-    # user-named measure, EVERY declared measure is summed (see `measures`).
+    # user-named measure, EVERY declared measure is aggregated with the requested
+    # operator (see `measures`); the alias records which operator was applied.
     _cnt = ', COUNT(*) AS "row_count"' if mode["kind"] == "grouped" else ""
-    _sums = ", ".join(f"SUM(a.{_q(m)}) AS {_q('total_' + m)}" for m in measures)
-    sql = (f"SELECT a.{_q(dim_col)} AS {_q(dim_col)}, {_sums}{_cnt} "
+    _aggs = ", ".join(f"{agg}(a.{_q(m)}) AS {_q(agg.lower() + '_' + m)}" for m in measures)
+    sql = (f"SELECT a.{_q(dim_col)} AS {_q(dim_col)}, {_aggs}{_cnt} "
            f"FROM {_q(anchor)} a"
            + (f" WHERE {' AND '.join(where)}" if where else "")
            + tail)
 
     why = head + [f"anchor {anchor} (typed evidence: {'; '.join(why_ev[anchor][:3])})",
-                  f"group by {dim_col}, measure SUM({', '.join(measures)})"] + why
+                  f"group by {dim_col}, measure {agg}({', '.join(measures)})"] + why
     return FastPathResult(sql=sql, tables=ftables,
                           columns=list(dict.fromkeys(fcols)), primary=anchor,
                           route=route, why=why)

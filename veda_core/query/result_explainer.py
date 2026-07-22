@@ -27,6 +27,8 @@ from config import (
     NL_SUMMARY_MODEL,
     NL_SUMMARY_TIMEOUT_MS,
     NL_SUMMARY_MAX_TOKENS,
+    NL_SUMMARY_ANALYTICAL_MAX_TOKENS,
+    NL_SUMMARY_MAX_FINDINGS,
     NL_SUMMARY_NUMERIC_GUARD,
     INSIGHT_ENGINE_TIMEOUT_MS,
 )
@@ -158,6 +160,29 @@ def _collect_allowed_numbers(facts: dict, patterns: Optional[List[str]]) -> List
     return allowed
 
 
+_CURRENCY_SYMS = "$₹€£¥₩₽"
+
+
+def _strip_invented_currency(answer: str, facts: dict) -> str:
+    """Remove any currency symbol the SLM prefixed that ISN'T present in the data
+    (2026-07-17). The platform is multi-source/multi-tenant with currency itself a
+    data column (see apps/chat/table_rendering.py's same rule), so a guessed symbol
+    ($ on INR data, etc.) is actively misleading. Only strips a symbol absent from
+    the facts payload — if the data genuinely carries one, it's kept. Deterministic
+    backstop for the prompt's 'never introduce a currency not in the data' rule,
+    which a 7B model doesn't always obey."""
+    if not answer:
+        return answer
+    # ensure_ascii=False is REQUIRED: the default escapes non-ASCII (₹ → "₹"),
+    # which would make the "symbol present in data?" check fail for every non-$
+    # currency and wrongly strip a ₹/€/£/¥ the data genuinely carries.
+    facts_text = json.dumps(facts, default=str, ensure_ascii=False)
+    for sym in _CURRENCY_SYMS:
+        if sym not in facts_text:
+            answer = answer.replace(sym, "")
+    return answer
+
+
 def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[str]]) -> bool:
     """True when EVERY number the summary states is traceable to the precomputed
     facts/metrics/patterns (within ±2%, floor ±2) — or is a small count/position
@@ -262,6 +287,16 @@ def _numeric_aggregates(columns: List[str], rows: List[dict], max_cols: int = 6)
     anti-hallucination lever #1). It never computes numbers on its own → the
     prompt tells it to use only these. Rounded to 2 dp; empty when no numeric
     column. Constant cost — reads at most the first RESULT rows already in hand."""
+    # Phase-7 scalability + RC-4 consistency: scan at most ANALYSIS_MAX_ROWS — the
+    # SAME bound result_analyzer applies to the pattern sweep — so the headline mean
+    # here and any pattern's "vs average X" are always over one population, and neither
+    # does an unbounded O(rows) pass on a very large enterprise result.
+    try:
+        from config import ANALYSIS_MAX_ROWS as _ANALYSIS_MAX
+    except Exception:
+        _ANALYSIS_MAX = 50000
+    if len(rows) > _ANALYSIS_MAX:
+        rows = rows[:_ANALYSIS_MAX]
     metrics: dict = {}
     for c in list(columns)[:max_cols]:
         # Skip identifier columns by name — summing/averaging ids is meaningless
@@ -311,11 +346,19 @@ def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[s
             facts["note"] = f"showing {len(sample)} of {row_count} rows"
     if rank_column:
         facts["ranked_by"] = rank_column
-    # Exact aggregates over the FULL result (not just the sampled rows) so the SLM
-    # states real totals/extremes instead of summing the sample by eye.
+    # Aggregates over the result, bounded to ANALYSIS_MAX_ROWS (Phase-7 scalability).
+    # When the result is LARGER than that bound the metrics cover only the first N rows,
+    # so they are a PARTIAL-population statistic — flag it explicitly (metrics_partial /
+    # metrics_scanned) so the narrator does NOT present a partial SUM/COUNT as a
+    # full-population total. Under the bound (the common case) metrics are exact and no
+    # flag is set. row_count above is always the TRUE total.
+    from config import ANALYSIS_MAX_ROWS as _ANALYSIS_MAX
     _metrics = _numeric_aggregates(cols, rows)
     if _metrics:
         facts["metrics"] = _metrics
+        if row_count > _ANALYSIS_MAX:
+            facts["metrics_partial"] = True
+            facts["metrics_scanned"] = _ANALYSIS_MAX
     return facts
 
 
@@ -340,6 +383,37 @@ def _column_glossary(columns: List[str], table: Optional[str], semantic_model: O
     return ("\n\nColumn meanings:\n" + "\n".join(lines)) if lines else ""
 
 
+# ── Evidence-adaptive summary modes ─────────────────────────────────────────────
+# The summary is NOT one-size-fits-all: a scalar answer is one line; a grouped/ranked/
+# trend result with several VERIFIED findings earns a short analytical narrative.
+# Depth is driven by result SHAPE + how much verified evidence exists — never by
+# padding to a length target. Findings are precomputed deterministically
+# (result_analyzer); the SLM only narrates them.
+_ANALYTICAL_SHAPES = {"RANKING", "GROUPED", "DISTRIBUTION", "TREND", "PIVOT"}
+
+
+def _summary_mode(result_shape: Optional[str], row_count: int) -> str:
+    """'brief' | 'analytical'. Analytical only when the shape is genuinely analytical
+    AND there is more than one group/row to discuss — otherwise brief."""
+    if (result_shape in _ANALYTICAL_SHAPES) and row_count and row_count > 1:
+        return "analytical"
+    return "brief"
+
+
+def _analytical_context_block(ctx: Optional[dict]) -> str:
+    """Render the RESOLVED analytical context (decided UPSTREAM — operation, measure,
+    dimension, display, ranking, temporal, explicit-id) so the narrator speaks to the
+    user's real intent. Reused, never re-derived here. Empty when nothing supplied."""
+    if not ctx:
+        return ""
+    order = [("intent", "intent"), ("operation", "operation"), ("measure", "measure"),
+             ("dimension", "dimension"), ("display", "display field"),
+             ("ranking", "ranking"), ("temporal", "time range"),
+             ("explicit_identifier", "explicit id requested")]
+    bits = [f"{label}={ctx.get(k)}" for k, label in order if ctx.get(k)]
+    return ("\n\nResolved analytical context: " + "; ".join(bits)) if bits else ""
+
+
 def run_nl_answer(
     query:          str,
     columns:        List[str],
@@ -351,6 +425,7 @@ def run_nl_answer(
     rank_column:    Optional[str] = None,
     patterns:       Optional[List[str]] = None,
     result_shape:   Optional[str] = None,
+    analytical_context: Optional[dict] = None,
 ) -> NLAnswerResult:
     """
     Converts result rows into a natural-language prose answer using a small local
@@ -393,35 +468,71 @@ def run_nl_answer(
                 f"refer to that field's values, not any id column, when describing rank/order."
                 ) if rank_column else ""
 
-    # Deterministic findings (result_analyzer detected these — precomputed, not
-    # for the model to recompute or second-guess). Handed in so the SLM WEAVES
-    # them into the prose naturally, instead of the caller bolting on a separate
-    # "Analysis:" suffix afterwards. Top 2 only.
-    _pats = [str(p).strip().rstrip(".") for p in (patterns or []) if str(p).strip()][:2]
-    findings_line = ("\n\nKey findings already computed (weave these into the answer as "
-                     "insight, do not restate as a list): " + "; ".join(_pats)) if _pats else ""
+    # Evidence-adaptive depth: a scalar/detail answer stays brief; a genuinely
+    # analytical shape with multiple groups earns a short analytical narrative. Depth
+    # comes from VERIFIED evidence, never from padding.
+    _mode = _summary_mode(result_shape, row_count)
+    _max_findings = NL_SUMMARY_MAX_FINDINGS if _mode == "analytical" else 2
 
+    # Deterministic findings (result_analyzer detected these — precomputed, not for the
+    # model to recompute or second-guess). Handed in so the SLM NARRATES the decision-
+    # relevant ones. Analytical mode gets several; brief mode at most two.
+    _pats = [str(p).strip().rstrip(".") for p in (patterns or []) if str(p).strip()][:_max_findings]
+    findings_line = ("\n\nVerified findings already computed (narrate the decision-relevant "
+                     "ones as insight; do not restate as a bare list): "
+                     + "; ".join(_pats)) if _pats else ""
+
+    ctx_line = _analytical_context_block(analytical_context)
     shape_hint = _SHAPE_GUIDANCE.get(result_shape or "", "")
     shape_line = f"\n{shape_hint}" if shape_hint else ""
+    # When the metrics cover only the first N of a larger result, tell the narrator so
+    # a partial SUM/COUNT is described as a sample, never as the full-population total.
+    partial_line = ""
+    if facts.get("metrics_partial"):
+        partial_line = (
+            f"\nNOTE: the metrics summarize only the first {facts.get('metrics_scanned')} "
+            f"of {facts['row_count']} rows — describe any total/count/average from them as "
+            f"based on that sample, and do NOT state a partial sum or count as the "
+            f"full-result total.")
+
+    if _mode == "analytical":
+        role_line = (
+            "You are a business analyst turning VERIFIED analytics into clear business "
+            "language. Write a grounded analytical summary — about 3-5 concise sentences, "
+            "as many as the verified findings justify and no more (do not pad):\n"
+            "1. Directly answer the question first, leading with the most decision-relevant "
+            "verified result (not a mechanical first metric).\n"
+            "2. Then synthesize the VERIFIED findings above that matter — leaders/laggards, "
+            "comparisons and gaps, spread/concentration, trends, outliers — using only those "
+            "actually provided and relevant. Prioritize insight over listing every metric.\n"
+        )
+    else:
+        role_line = (
+            "You are a business analyst. Write a SHORT, direct answer (1-2 sentences):\n"
+            "1. Directly answer the question, leading with the single most important number.\n"
+            "2. Add a second sentence ONLY if a verified finding above is decision-relevant; "
+            "otherwise stop — do NOT invent an insight or pad the response.\n"
+        )
 
     prompt = (
         f"User question: {query}\n\n"
         f"Extracted data: {json.dumps(facts, default=str)}"
-        f"{glossary}{rank_line}{findings_line}{_STYLE_EXEMPLAR}\n\n"
-        f"You are a business analyst. Write a SHORT answer of 1-3 sentences (max ~55 "
-        f"words total):\n"
-        f"1. First sentence: directly answer the question, leading with the single most "
-        f"important number.\n"
-        f"2. ONLY IF there is a notable pattern or a finding listed above, add one short "
-        f"sentence on what it means. If there is no real pattern, stop after the direct "
-        f"answer — do NOT invent an insight or pad the response.{shape_line}\n"
-        f"Speak in business terms using the column meanings above (name the entity, not "
-        f"an id). Use the data's OWN currency/units/dates exactly as shown — never "
-        f"introduce a currency symbol or unit that isn't in the data. Do not repeat "
-        f"column names verbatim, do not explain SQL, no markdown, no bullet points.\n"
-        f"IMPORTANT: use ONLY numbers that appear above (the data, the metrics, and the "
-        f"findings — totals/averages/min/max are already computed for you). Never "
-        f"calculate, sum, or estimate a new figure of your own."
+        f"{glossary}{ctx_line}{rank_line}{findings_line}{partial_line}{_STYLE_EXEMPLAR}\n\n"
+        + role_line
+        + f"{shape_line}\n"
+        f"Speak in business terms using the column meanings above — name each entity by its "
+        f"display value, not an id, UNLESS the question explicitly asked for an id/code/key "
+        f"(then keep it). Use the data's OWN currency/units/dates exactly as shown — never "
+        f"introduce a currency symbol or unit that isn't in the data. Do not repeat column "
+        f"names verbatim, do not explain SQL, no markdown, no bullet points.\n"
+        f"IMPORTANT: use ONLY numbers that appear above (data, metrics, findings — "
+        f"totals/averages/min/max/rankings are already computed for you). Never calculate, "
+        f"sum, average, or estimate a new figure, percentage, difference, or growth rate of "
+        f"your own.\n"
+        f"State ONLY what the data and findings show. Do NOT infer causes, reasons, or "
+        f"business meaning that isn't given (never explain WHY a value is high/low/missing), "
+        f"and avoid generic filler ('strong performance', 'positive momentum', 'significant "
+        f"variation') unless a specific verified finding supports it."
     )
 
     _slm_timeout = NL_SUMMARY_TIMEOUT_MS / 1000.0 if timeout is None else timeout
@@ -432,9 +543,11 @@ def run_nl_answer(
             prompt,
             purpose="nl_answer",
             temperature=0.1,
-            # 2-3 business sentences need more room than the old one-liner budget;
-            # +50 covers the extra sentence + woven findings without unbounding it.
-            num_predict=NL_SUMMARY_MAX_TOKENS + 50,
+            # Mode-aware budget: an analytical narrative (3-5 sentences weaving several
+            # verified findings) needs more room; a brief answer keeps the tighter cap.
+            # Still bounded — this prevents essays, it does not license unbounded output.
+            num_predict=(NL_SUMMARY_ANALYTICAL_MAX_TOKENS if _mode == "analytical"
+                         else NL_SUMMARY_MAX_TOKENS + 50),
             endpoint="generate",
             timeout=_slm_timeout,
             model=NL_SUMMARY_MODEL,
@@ -448,6 +561,9 @@ def run_nl_answer(
             logger.warning("run_nl_answer: summary stated an ungrounded number — "
                            "falling back to deterministic answer. summary=%r", answer)
             raise ValueError("ungrounded number in SLM summary")
+        # Deterministic backstop: drop any currency symbol the model prefixed that
+        # the data doesn't actually carry (7B doesn't always obey the prompt rule).
+        answer = _strip_invented_currency(answer, facts)
         slm_used = True   # the SLM wove the findings into its prose — caller must NOT re-append
     except Exception as e:
         # Deterministic fallback: blend the findings in ourselves (naturally, not a

@@ -161,10 +161,25 @@ class VisualizationRecommender:
         def _kind(i: int) -> str:
             st = stats_by_name.get(cols[i])
             if st:
-                if st.get("role") == "text":
+                # The engine's SEMANTIC role is authoritative and OUTRANKS the
+                # structural kind — a CATEGORY dimension coded with numeric values
+                # (year, rating, postal code) must chart as the category axis, not be
+                # mistaken for a measure just because its values look numeric. Only
+                # fall back to the structural `kind` when no role was resolved (e.g.
+                # federated results with no semantic model). Naming/dtype heuristics
+                # never override stronger metadata (Phase-5 invariant).
+                role = st.get("role")
+                kind = st.get("kind")
+                if role == "text":
                     return "text"
-                if st.get("kind") in ("temporal", "numeric", "categorical"):
-                    return st["kind"]
+                if role == "date" or kind == "temporal":
+                    return "temporal"
+                if role == "dimension":
+                    return "categorical"
+                if role == "measure":
+                    return "numeric"
+                if kind in ("temporal", "numeric", "categorical"):
+                    return kind
             return self._infer_kind(cols[i], [row[i] for row in rows])
 
         def _ident(i: int) -> bool:
@@ -208,9 +223,43 @@ class VisualizationRecommender:
 
         if categorical_idx and numeric_idx:
             specs = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0])
+            # A RANKING (top/bottom-N) is NOT a part-of-whole: a pie of the top N
+            # misrepresents proportions (the N don't sum to the whole). When the engine
+            # classified the shape as RANKING, lead with the bar (its canonical chart,
+            # matching result_analyzer.CANONICAL_CHART_FOR_SHAPE) and drop the pie.
+            # Shape-driven, not name-driven; a GROUPED breakdown keeps pie+bar.
+            if (analytics or {}).get("result_shape") == "RANKING":
+                specs = [s for s in specs if s.type != ChartType.PIE] or specs
             confident = [s for s in specs if s.confidence >= _CONFIDENCE_THRESHOLD]
             if confident:
                 return confident
+
+        # RANKING rescue (2026-07-19): identifier-heavy schemas often leave a
+        # ranking with a real measure but NO chartable dimension — every label-ish
+        # column is an id/reference, and identifiers are (correctly) banned from
+        # every pool above, so "top N by amount" got no chart at all. In a RANKING,
+        # though, an id/reference IS the row's name — a bar leaderboard keyed by it
+        # is meaningful (unlike an id-pie/aggregation, which stays banned). Fires
+        # ONLY when the ENGINE itself classified the shape (result_analyzer's
+        # RANKING, never guessed here) and every structural rule above found
+        # nothing; picks a non-numeric label column, preferring non-identifiers.
+        if ((analytics or {}).get("result_shape") == "RANKING"
+                and numeric_idx and len(rows) > 1):
+            non_numeric = [i for i, k in enumerate(kinds) if k != "numeric"]
+            label_idx = next((i for i in non_numeric if not is_id[i]),
+                             next(iter(non_numeric), None))
+            if label_idx is not None:
+                y = numeric_idx[0]
+                spec = VisualizationSpec(
+                    type=ChartType.BAR,
+                    title=f"{_fmt_axis(cols[y])} by {_fmt_axis(cols[label_idx])}",
+                    x_axis_title=_fmt_axis(cols[label_idx]),
+                    y_axis_title=_fmt_axis(cols[y]),
+                    chart_data={"labels": [str(row[label_idx]) for row in rows],
+                                "values": [_to_number(row[y]) for row in rows]},
+                    confidence=0.65,   # above threshold, below a canonical pairing
+                )
+                return [spec]
 
         return []
 

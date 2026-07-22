@@ -15,9 +15,19 @@
 #
 # candidate_fields (not "candidate_columns"): VEDA's retrieval spans more than
 # relational columns (files, Delta Lake, etc. are on the roadmap), so this uses a
-# connector-agnostic name. Each entry is a plain dict {"table_name", "col_name",
-# "score"} — deliberately NOT a connector-specific RetrievalResult, so this module
-# has zero import coupling to any single retrieval backend.
+# connector-agnostic name. Each entry is a plain dict — deliberately NOT a
+# connector-specific RetrievalResult, so this module has zero import coupling to any
+# single retrieval backend. Backward-compatible schema (older consumers that read
+# only the first three keys keep working):
+#   {"table_name", "col_name", "score",          # score = final (post-rerank, +boost)
+#    "semantic_type",   # from the semantic model — lets Tier2 tell a resolved MEASURE
+#                       # (METRIC/MONETARY) from a DIMENSION (CATEGORY) from an
+#                       # IDENTIFIER, without re-reading metadata
+#    "rrf_score",       # RAW 5-signal RRF score BEFORE cross-encoder rerank
+#    "cross_encoder_score",  # reranked score, or None if this field wasn't reranked
+#    "reranked"}        # bool — was this candidate rescored by the cross-encoder
+# This preserves the retrieval PROVENANCE the audit found was flattened (RC-5): which
+# score is raw vs reranked, and — via rerank_query below — against WHAT text.
 #
 # Consumption status (kept honest here so it can't drift from what veda_hybrid.py's
 # reuse log claims): temporal_result and candidate_fields are ACTIVELY consumed by
@@ -37,6 +47,7 @@ class ExecutionState:
     query_understanding:  Dict[str, Any] = field(default_factory=dict)   # intent/existence/aggregation — reserved, not yet consumed
     primary_table:        Optional[str] = None           # reused indirectly (see module docstring)
     candidate_tables:     List[str] = field(default_factory=list)        # informational only — table_name is already in candidate_fields
-    candidate_fields:     List[Dict[str, Any]] = field(default_factory=list)  # [{table_name, col_name, score}] — reused
+    candidate_fields:     List[Dict[str, Any]] = field(default_factory=list)  # enriched provenance dicts (see module docstring) — reused
+    rerank_query:         Optional[str] = None            # the (enhanced) text the cross-encoder reranked against, or None if no rerank ran
     sql_planning:         Dict[str, Any] = field(default_factory=dict)   # action/anchor hints — reserved, not yet consumed
     refusal_reason:       Optional[str] = None            # reused (seeds the repair hint)

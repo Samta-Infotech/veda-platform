@@ -95,3 +95,41 @@ def test_guard_triggers_fallback_in_run_nl_answer(monkeypatch):
     assert res.slm_used is False                     # guard forced the fallback
     assert "9,99,999" not in res.answer              # hallucinated figure discarded
     assert "A is the largest payer" in res.answer    # deterministic blend used instead
+
+
+# ---------------------------------------------------------------------------
+# Currency-strip backstop + anti-inference prompt line (2026-07-17)
+# ---------------------------------------------------------------------------
+
+def test_strip_invented_currency_removes_symbol_absent_from_data():
+    from query.result_explainer import _strip_invented_currency
+    facts = {"row_count": 3, "metrics": {"amount": {"sum": 1991700}}}   # no currency symbol
+    out = _strip_invented_currency("Total is $1,991,700 across 3 payments.", facts)
+    assert "$" not in out and "1,991,700" in out
+
+
+def test_strip_keeps_currency_present_in_data():
+    from query.result_explainer import _strip_invented_currency
+    facts = {"sample_rows": [{"price": "$100"}]}   # data genuinely carries $
+    out = _strip_invented_currency("The item costs $100.", facts)
+    assert "$100" in out                                   # not stripped — it's in the data
+
+
+def test_anti_inference_line_in_prompt(monkeypatch):
+    import slm, query.result_explainer as re_mod
+    seen = {}
+    monkeypatch.setattr(slm, "call_slm", lambda p, **k: seen.setdefault("p", p) or "ok.")
+    monkeypatch.setattr(re_mod, "NL_SUMMARY_NUMERIC_GUARD", False, raising=False)
+    re_mod.run_nl_answer("q", ["a", "b"], [{"a": 1, "b": 2}])
+    assert "Do NOT infer causes" in seen["p"]
+    assert "never explain WHY a value is high/low/missing" in seen["p"]
+
+
+def test_strip_keeps_non_ascii_currency_present_in_data():
+    """Regression: json.dumps default escapes non-ASCII, which used to strip a
+    genuine ₹/€/£ from the data. ensure_ascii=False keeps the presence check honest."""
+    from query.result_explainer import _strip_invented_currency
+    assert _strip_invented_currency("Total is ₹500.", {"sample_rows": [{"amt": "₹500"}]}) == "Total is ₹500."
+    assert _strip_invented_currency("Sum is €90.", {"sample_rows": [{"v": "€90"}]}) == "Sum is €90."
+    # a wrong symbol the data does NOT carry is still stripped
+    assert "$" not in _strip_invented_currency("Largest is $500.", {"sample_rows": [{"amt": "₹500"}]})

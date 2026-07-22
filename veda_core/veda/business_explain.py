@@ -149,9 +149,23 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     out["entities"] = sorted({t.name for t in tree.find_all(exp.Table) if t.name})
     out["distinct"] = tree.find(exp.Distinct) is not None
 
+    # Aggregations, DEDUPED by (function, column). A ranked aggregate repeats its
+    # measure in both the SELECT list and the ORDER BY ("SELECT dim, AVG(m) ... ORDER
+    # BY AVG(m) DESC" — exactly what the deterministic grouped/superlative planner
+    # emits), so a raw find_all counts the SAME measure twice. That inflated the
+    # measure count and made detect_result_shape misread a single-measure RANKING/
+    # GROUPED result as a multi-measure PIVOT, suppressing its findings + chart. The
+    # aggregations list represents DISTINCT computed measures, so an aggregate is
+    # counted once regardless of how many clauses reference it; genuinely different
+    # aggregates (SUM(a), COUNT(b)) are still distinct entries → real PIVOTs survive.
+    _seen_aggs = set()
     for a in tree.find_all(exp.AggFunc):
         col = a.find(exp.Column)
-        out["aggregations"].append((a.key.upper(), col.name if col is not None else None))
+        key = (a.key.upper(), col.name if col is not None else None)
+        if key in _seen_aggs:
+            continue
+        _seen_aggs.add(key)
+        out["aggregations"].append(key)
 
     # SELECT-list aliases (e.g. `SUM(lease_amount) AS total`) — GROUP BY/ORDER BY
     # elsewhere in the query reference the alias, not the real column, so without
