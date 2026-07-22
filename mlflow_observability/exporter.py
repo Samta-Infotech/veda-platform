@@ -97,7 +97,49 @@ class MlflowSink:
                 mlflow.set_tags(spec.tags)
             for artifact_path, content in spec.artifacts.items():
                 mlflow.log_text(content, artifact_path)
+            if getattr(spec, "spans", None):
+                try:
+                    self._emit_spans(spec, run.info.run_id)
+                except Exception:
+                    logger.warning("span emit skipped for run %s (metrics/params/tags "
+                                   "still logged)", run.info.run_id, exc_info=True)
             return run.info.run_id
+
+    def _emit_spans(self, spec, run_id: str) -> None:
+        """Replay the pipeline-stage timings as an MLflow trace (span waterfall) so
+        the Traces UI shows retrieval → SQL-gen → validation → summary as a tree.
+        Uses the low-level tracing client with explicit ns timestamps (historical
+        replay); the trace's relative offsets/durations give the correct waterfall
+        shape — the absolute base time is arbitrary. Best-effort by contract: any
+        failure here is swallowed by the caller so run logging is never affected."""
+        import time as _time
+        mlflow = self._mlflow
+        client = mlflow.MlflowClient()
+        spans = spec.spans
+        base = _time.time_ns()
+        total_ms = max((s["start_offset_ms"] + s["duration_ms"]) for s in spans)
+        # correlate the trace back to its run + carry a few slice tags (custom
+        # veda.* only — never reserved mlflow.* keys).
+        tags = {k: v for k, v in (spec.tags or {}).items()
+                if k in ("veda.query_hash", "veda.route", "veda.status",
+                         "veda.outcome", "veda.git_sha")}
+        tags["veda.run_id"] = run_id
+        root = client.start_trace(name=(spec.run_name or "query")[:250],
+                                  span_type="AGENT", experiment_id=self.experiment_id,
+                                  tags=tags, start_time_ns=base)
+        rid = root.request_id
+        try:
+            for s in spans:
+                st = base + int(s["start_offset_ms"] * 1_000_000)
+                child = client.start_span(
+                    name=s["name"], request_id=rid, parent_id=root.span_id,
+                    span_type=s["span_type"], start_time_ns=st,
+                    attributes={"duration_ms": s["duration_ms"],
+                                "start_offset_ms": s["start_offset_ms"]})
+                client.end_span(rid, child.span_id,
+                                end_time_ns=st + int(s["duration_ms"] * 1_000_000))
+        finally:
+            client.end_trace(rid, end_time_ns=base + int(total_ms * 1_000_000))
 
 
 # ── export passes ─────────────────────────────────────────────────────────────

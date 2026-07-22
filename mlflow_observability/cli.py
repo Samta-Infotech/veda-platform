@@ -5,6 +5,8 @@ Commands
   watch      follow the trace log forever (production sidecar mode)
   ui         launch the MLflow UI against the configured backing store
   status     show config, checkpoint position and trace-log stats
+  evaluate   run a golden set through the engine, log aggregate accuracy/latency
+             to the eval experiment (regression tracking); CI gate via --min-pass-rate
   selftest   end-to-end smoke test into a throwaway store (no config needed)
   demo       seed sample query runs into the CONFIGURED store (UI walkthrough
              without running the engine); they are tagged veda.demo=true
@@ -220,6 +222,37 @@ def _cmd_demo(args) -> int:
     return 0
 
 
+def _cmd_evaluate(args) -> int:
+    """Run a golden set through the engine (via the inference tier), score
+    routing/answer correctness + latency + tokens, and log ONE aggregate run to the
+    eval experiment for trend/regression tracking. Exit 2 (CI gate) if pass_rate
+    falls below --min-pass-rate."""
+    from .evaluate import (load_golden, evaluate_golden, log_report,
+                           inference_run_query_fn)
+    s = load()
+    cases = load_golden(args.golden)
+    if not cases:
+        print(f"no golden cases loaded from {args.golden}")
+        return 1
+    inference_url = args.inference_url or os.environ.get("INFERENCE_URL", "http://inference:8001")
+    runner = inference_run_query_fn(inference_url, source_id=args.source_id,
+                                    tenant=args.tenant)
+    print(f"evaluating {len(cases)} golden cases → {inference_url} "
+          f"(source_id={args.source_id}, tenant={args.tenant})…")
+    report = evaluate_golden(cases, runner)
+    print(json.dumps(report.metrics, indent=2))
+    eval_exp = os.environ.get("VEDA_MLFLOW_EVAL_EXPERIMENT", "VEDA-Golden-Eval")
+    run_id = log_report(report, tracking_uri=s.tracking_uri, experiment=eval_exp,
+                        golden_file=args.golden, environment=s.environment,
+                        git_sha=os.environ.get("VEDA_GIT_SHA"))
+    print(f"logged eval run {run_id} to experiment {eval_exp!r}")
+    pass_rate = report.metrics.get("pass_rate", 0.0)
+    if pass_rate < args.min_pass_rate:
+        print(f"REGRESSION GATE: pass_rate {pass_rate} < --min-pass-rate {args.min_pass_rate}")
+        return 2
+    return 0
+
+
 def _cmd_selftest(args) -> int:
     """Write two synthetic trace records to a temp file, export them into a
     temp sqlite store, and verify both runs landed with metrics + artifacts."""
@@ -367,6 +400,16 @@ def main(argv=None) -> int:
 
     p = sub.add_parser("status", help="show config + checkpoint")
     p.set_defaults(fn=_cmd_status)
+
+    p = sub.add_parser("evaluate", help="run a golden set → log aggregate metrics (regression tracking)")
+    p.add_argument("--golden", required=True, help="path to golden JSONL (query + gold_tables)")
+    p.add_argument("--source-id", type=int, default=None, help="source scope for the engine")
+    p.add_argument("--tenant", default="default")
+    p.add_argument("--inference-url", default=None,
+                   help="default: $INFERENCE_URL or http://inference:8001")
+    p.add_argument("--min-pass-rate", type=float, default=0.0,
+                   help="CI gate: exit 2 if pass_rate falls below this (0-1)")
+    p.set_defaults(fn=_cmd_evaluate)
 
     p = sub.add_parser("selftest", help="end-to-end smoke test (throwaway store)")
     p.set_defaults(fn=_cmd_selftest)

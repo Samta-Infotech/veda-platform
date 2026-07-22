@@ -37,6 +37,7 @@ import threading
 import urllib.error
 import urllib.request
 from contextvars import ContextVar
+from time import perf_counter as _perf_counter
 from typing import Optional
 
 try:
@@ -368,14 +369,36 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
     Return contract is unchanged (plain str); token usage is recorded on the
     side into whatever collect_usage() scope is currently open, if any."""
     backend = get_backend()
-    with _slm_circuit_breaker():
-        content, usage = backend.call(
-            user_message, system=system, timeout=timeout, temperature=temperature,
-            num_predict=num_predict, num_ctx=num_ctx, seed=seed,
-            json_format=json_format, endpoint=endpoint, model=model)
+    _mdl = model or backend.model
+    # Centralized per-CALL SLM visibility: time the invocation and record it (on
+    # success AND failure) into the ambient query trace, so every SLM call — for
+    # any purpose, from any stage — shows up in ONE place under the query's
+    # trace_id with its duration and outcome. Best-effort + lazy import: this
+    # module stays import-light and accounting can never fail a call. The `purpose`
+    # label already carried here is exactly the "why was this call made" field.
+    _t0 = _perf_counter()
+    _ok = True
+    _err = None
+    try:
+        with _slm_circuit_breaker():
+            content, usage = backend.call(
+                user_message, system=system, timeout=timeout, temperature=temperature,
+                num_predict=num_predict, num_ctx=num_ctx, seed=seed,
+                json_format=json_format, endpoint=endpoint, model=model)
+    except Exception as exc:
+        _ok = False
+        _err = f"{type(exc).__name__}: {exc}"
+        raise
+    finally:
+        try:
+            from veda.explain import current_trace
+            current_trace().slm_call(
+                purpose, _mdl, (_perf_counter() - _t0) * 1000.0, _ok, _err)
+        except Exception:
+            pass
     logger.debug("call_slm purpose=%s backend=%s usage=%s scope_open=%s",
                 purpose, backend.name, usage, getattr(_usage_tls, "calls", None) is not None)
-    _record_usage(purpose, model or backend.model,
+    _record_usage(purpose, _mdl,
                   usage.get("prompt_tokens"), usage.get("completion_tokens"))
     return content
 

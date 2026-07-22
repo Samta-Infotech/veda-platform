@@ -440,6 +440,34 @@ class RetrievalEnginePhase3:
         logger.info(f"  Time: {elapsed*1000:.0f}ms")
         logger.info("="*70)
 
+        # TRACE (observability only): per-signal candidate counts + the RRF fusion
+        # result, recorded into the ambient query trace so a developer can see WHY a
+        # candidate ranked. Reads counts of lists already computed above — no rework,
+        # and a no-op NullTrace when tracing is off / unbound. Best-effort throughout.
+        try:
+            from veda.explain import current_trace as _ct_ret
+            _tr = _ct_ret()
+            if getattr(_tr, "enabled", False):
+                _sig_counts = {
+                    "embedding": len(signal1_semantic or []),
+                    "bm25_sparse": len(signal2_sparse or []),
+                    "subgraph": len(signal3_subgraph_signals or {}),
+                    "fk_path": len(signal4_fk_signals or {}),
+                    "value": len(signal5_value_signals or {}),
+                    "table_prior": len(table_prior or {}),
+                }
+                _tr.set("retrieval", signal_counts=_sig_counts,
+                        result_count=len(results), retrieval_ms=round(elapsed * 1000, 1))
+                _tr.set("rrf", input_signal_counts=_sig_counts,
+                        merged_candidate_count=len(fused or []),
+                        after_boost=len(boosted or []),
+                        after_cutoff=len(cutoff_results or []))
+                for _cid, _score in list(fused or [])[:8]:   # verbose-only heavy list
+                    _tr.cand("rrf", "top_candidates",
+                             {"col_id": _cid, "rrf_score": round(float(_score), 5)})
+        except Exception:
+            pass
+
         return results
 
     def _results_from_tuples(

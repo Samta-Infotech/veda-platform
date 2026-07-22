@@ -1,0 +1,12 @@
+{"id":"g1","query":"how many payment transactions are there","gold_tables":["accounts_paymenttransaction"]}
+{"id":"g2","query":"show top 10 payment transactions by amount","gold_tables":["accounts_paymenttransaction"]}
+{"id":"g3","query":"list all assets","gold_tables":["assets_asset"]}
+{"id":"g4","query":"how many advertisements are there","gold_tables":["advertisements_advertisement"]}
+{"id":"g5","query":"count general ledger transactions","gold_tables":["accounts_generalledger"]}
+{"id":"g6","query":"show user invoices","gold_tables":["accounts_userinvoice"]}
+{"id":"g7","query":"list amenities","gold_tables":["assets_amenity"]}
+{"id":"g8","query":"total amount in general ledger","gold_tables":["accounts_generalledger"]}
+{"id":"g9","query":"how many assets are there","gold_tables":["assets_asset"]}
+{"id":"g10","query":"show payment types","gold_tables":["accounts_paymenttype"]}
+{"id":"g11","query":"top 5 invoices by amount","gold_tables":["accounts_userinvoice"]}
+{"id":"g12","query":"count amenity categories","gold_tables":["assets_amenitycategory"]}

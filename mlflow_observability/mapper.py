@@ -121,6 +121,11 @@ class RunSpec:
     tags: Dict[str, str] = field(default_factory=dict)
     # artifact path -> text content
     artifacts: Dict[str, str] = field(default_factory=dict)
+    # MLflow Tracing waterfall — one span per pipeline stage, replayed from the
+    # trace's own section start-offsets + durations (see build_spans). The exporter
+    # emits these best-effort so the MLflow "Traces" UI shows retrieval → SQL-gen →
+    # validation → summary as a proper span tree, not just flat latency metrics.
+    spans: list = field(default_factory=list)
 
 
 def _san_key(key: str) -> str:
@@ -159,6 +164,28 @@ def line_fingerprint(raw_line: str) -> str:
     return hashlib.sha1(raw_line.strip().encode("utf-8", "replace")).hexdigest()
 
 
+# Coarse, GENERIC refusal taxonomy for slicing "why queries fail" in MLflow — keyed
+# off the pipeline status + refusal string the engine already emits. No schema/query
+# vocabulary; falls back to "other" so a new status never gets misfiled silently.
+def _refusal_category(status_l: str, refusal: Any) -> str:
+    r = (str(refusal) if refusal not in (None, "") else "").lower()
+    if "clarify" in status_l:
+        return "clarify_ambiguous"
+    if "no_table" in status_l:
+        return "no_table_matched"
+    if "ungrounded" in status_l or "ungrounded value" in r:
+        return "ungrounded_value"
+    if "qualifier" in status_l or "qualifier" in r or "dropped" in r:
+        return "dropped_qualifier"
+    if "ir_mismatch" in status_l or "ir_mismatch" in r:
+        return "ir_mismatch"
+    if "invalid" in status_l or "exec" in status_l or "exec" in r:
+        return "invalid_or_exec_error"
+    if "federated" in status_l:
+        return "federation_refused"
+    return "other"
+
+
 def _section_durations(sections: Dict[str, dict], total_ms: Optional[float]) -> Dict[str, float]:
     """Sections stamp `_ms` (elapsed at first touch). Duration of a stage is
     approximated as the gap to the next stage's first touch (last stage runs
@@ -174,6 +201,53 @@ def _section_durations(sections: Dict[str, dict], total_ms: Optional[float]) -> 
         elif total_ms is not None:
             out[name] = max(float(total_ms) - start, 0.0)
     return out
+
+
+# Pipeline stage → MLflow SpanType (semantic classification in the Traces UI).
+# Unknown stages fall back to UNKNOWN — a new section never breaks span building.
+_STAGE_SPAN_TYPE = {
+    "query_understanding": "PARSER",
+    "retrieval":           "RETRIEVER",
+    "graph_expansion":     "RETRIEVER",
+    "rerank":              "RERANKER",
+    "reranking":           "RERANKER",
+    "anchor_selection":    "CHAIN",
+    "schema_linking":      "CHAIN",
+    "join_planning":       "CHAIN",
+    "value_arbitration":   "CHAIN",
+    "sql_planning":        "LLM",
+    "validation":          "CHAIN",
+    "execution":           "CHAIN",
+    "nl_summary":          "LLM",
+    "output":              "CHAIN",
+}
+
+
+def build_spans(sections: Dict[str, dict], total_ms: Optional[float]) -> list:
+    """A flat waterfall of one span per pipeline stage, REPLAYED from the trace's
+    own section start-offsets (`_ms`) + derived durations — no live instrumentation,
+    so it works entirely off an already-recorded trace record. Each span carries a
+    relative start_offset_ms + duration_ms (the exporter turns these into absolute
+    ns timestamps at emit time); shape/ordering is what matters, not wall-clock.
+    Returns [] when there is no timing to replay (never raises)."""
+    if not sections or total_ms is None:
+        return []
+    durations = _section_durations(sections, total_ms)
+    spans = []
+    for name, body in sections.items():
+        if not isinstance(body, dict):
+            continue
+        offset = _num(body.get("_ms"))
+        if offset is None:
+            continue
+        spans.append({
+            "name": name,
+            "span_type": _STAGE_SPAN_TYPE.get(name, "UNKNOWN"),
+            "start_offset_ms": round(offset, 3),
+            "duration_ms": round(durations.get(name, 0.0), 3),
+        })
+    spans.sort(key=lambda s: s["start_offset_ms"])
+    return spans
 
 
 def map_record(record: Dict[str, Any], *, raw_line: str = "",
@@ -193,12 +267,52 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
     t["veda.query_hash"] = qhash
     t["veda.environment"] = environment
     t["veda.trace_source"] = "explain_trace.jsonl"
+    # The ONE request-scoped correlation id (veda/explain.py mints it, reusing the
+    # api-tier X-Request-Id when present). Fills the SPEC_GAPS "no request-scoped
+    # correlation id" gap → an MLflow run is now greppable by the same trace_id a
+    # developer sees in the logs / API response.
+    _trace_id = record.get("trace_id") or full.get("trace_id")
+    if _trace_id:
+        t["veda.trace_id"] = str(_trace_id)[:64]
     if raw_line:
         t["veda.line_fingerprint"] = line_fingerprint(raw_line)
     for tag_key in ("route", "status", "intent", "table", "action"):
         v = record.get(tag_key)
         if v not in (None, ""):
             t[f"veda.{tag_key}"] = str(v)[:250]
+
+    # ── provenance / attribution (reproducibility) ───────────────────────────
+    # Without these, a metric change can't be attributed to a code/model change.
+    # git_sha + exporter version come from the sidecar env (set at deploy); model
+    # names come from the trace itself (pipeline._done stamps them on the output /
+    # nl_summary sections). All best-effort — absent keys are simply not tagged.
+    import os as _os
+    _git = _os.environ.get("VEDA_GIT_SHA") or _os.environ.get("GIT_SHA") or _os.environ.get("SOURCE_COMMIT")
+    if _git:
+        t["veda.git_sha"] = str(_git)[:40]
+    _out = sections.get("output") or {}
+    _nls = sections.get("nl_summary") or {}
+    if _out.get("sql_model"):
+        t["veda.model.sql"] = str(_out["sql_model"])[:120]
+    if _nls.get("summary_model"):
+        t["veda.model.summary"] = str(_nls["summary_model"])[:120]
+    # engine-emitted provenance IF present in the trace (tenant/source/semantic
+    # hash) — sidecar tags them when the engine writes them, ignores otherwise.
+    for _rk, _tk in (("tenant", "veda.tenant"), ("source_id", "veda.source_id"),
+                     ("source_hash", "veda.semantic_source_hash"),
+                     ("cache_hit", "veda.cache_hit")):
+        _v = record.get(_rk) if record.get(_rk) is not None else (full.get(_rk))
+        if _v not in (None, ""):
+            t[_tk] = str(_v)[:120]
+
+    # ── outcome + refusal taxonomy (slice "why queries fail" over time) ───────
+    _status_l = (record.get("status") or "").lower()
+    if _status_l:
+        t["veda.outcome"] = ("answered" if _status_l == "answered"
+                             else "clarify" if "clarify" in _status_l
+                             else "refused")
+    if _status_l and _status_l != "answered":
+        t["veda.refusal_category"] = _refusal_category(_status_l, record.get("refusal"))
 
     # ── spec-named params ────────────────────────────────────────────────────
     if query:
@@ -404,5 +518,8 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
          "signal_scores_missing": missing_signals(signals_present),
          "spec_datapoints_not_yet_emitted_by_engine": gaps},
         indent=2)
+
+    # ── span waterfall for the MLflow Traces UI (best-effort; emitted by exporter) ─
+    spec.spans = build_spans(sections, total_ms)
 
     return spec

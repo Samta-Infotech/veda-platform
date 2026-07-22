@@ -27,13 +27,25 @@ from decimal import Decimal
 from typing import Any
 
 try:
-    from fastapi import APIRouter
+    from fastapi import APIRouter, Request
     from fastapi.responses import StreamingResponse
     from pydantic import BaseModel
 except ImportError:
     APIRouter = None
+    Request = None
     StreamingResponse = None
     BaseModel = object
+
+
+def _incoming_trace_id(request) -> "str | None":
+    """Reuse the api-tier correlation id (apps/core/middleware.RequestIdMiddleware
+    sets X-Request-Id, forwarded by apps/query/inference_client.py) as the ONE
+    query trace_id — §1 "don't introduce a redundant identifier". None → the engine
+    mints its own, so direct/CLI callers still get a trace_id."""
+    try:
+        return request.headers.get("x-request-id") or None
+    except Exception:
+        return None
 
 
 # Internal-only keys that must never reach an HTTP caller. "context" is
@@ -99,25 +111,28 @@ if APIRouter is not None:
         flags: dict | None = None
 
     @router.post("/run_hybrid_query")
-    async def run_hybrid_query_route(req: "HybridRequest"):
+    async def run_hybrid_query_route(req: "HybridRequest", request: Request):
         from inference.concurrency import run_in_threadpool_with_context
         from veda_core.veda_hybrid import run_hybrid_query
 
+        _tid = _incoming_trace_id(request)
         result = await run_in_threadpool_with_context(run_hybrid_query, req.query,
-                                                      verbose=_verbose())
+                                                      verbose=_verbose(), trace_id=_tid)
         payload = _serialize(result)
         # Surface a top-level status for callers that don't walk items (§19 item 1).
         items = payload.get("items") if isinstance(payload, dict) else None
         top_status = (
             items[0].get("status") if items and isinstance(items[0], dict) else "unknown"
         )
-        return {"status": top_status, "result": payload}
+        # trace_id surfaced top-level so a client can grep the full trace by it.
+        _trace_id = payload.get("trace_id") if isinstance(payload, dict) else None
+        return {"status": top_status, "trace_id": _trace_id, "result": payload}
 
     def _sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
     @router.post("/run_hybrid_query/stream")
-    async def run_hybrid_query_stream_route(req: "HybridRequest"):
+    async def run_hybrid_query_stream_route(req: "HybridRequest", request: Request):
         import asyncio
 
         from veda_core.context import try_current, with_context
@@ -126,6 +141,7 @@ if APIRouter is not None:
         loop = asyncio.get_event_loop()
         events: "asyncio.Queue[tuple[str, dict] | None]" = asyncio.Queue()
         parent_ctx = try_current()  # snapshot: the worker thread starts with no context (§4.1)
+        _tid = _incoming_trace_id(request)
 
         def on_event(phase: str, message: str, extra: dict):
             loop.call_soon_threadsafe(
@@ -134,14 +150,17 @@ if APIRouter is not None:
 
         def _run():
             try:
-                result = run_hybrid_query(req.query, verbose=_verbose(), on_event=on_event)
+                result = run_hybrid_query(req.query, verbose=_verbose(),
+                                          on_event=on_event, trace_id=_tid)
                 payload = _serialize(result)
                 items = payload.get("items") if isinstance(payload, dict) else None
                 top_status = (
                     items[0].get("status") if items and isinstance(items[0], dict) else "unknown"
                 )
+                _trace_id = payload.get("trace_id") if isinstance(payload, dict) else None
                 loop.call_soon_threadsafe(
-                    events.put_nowait, ("result", {"status": top_status, "result": payload})
+                    events.put_nowait, ("result", {"status": top_status,
+                                                   "trace_id": _trace_id, "result": payload})
                 )
             except Exception as exc:  # never leave the stream hanging on a crash
                 loop.call_soon_threadsafe(

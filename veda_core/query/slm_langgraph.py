@@ -181,6 +181,15 @@ def run_langgraph_pipeline(
             if errors:
                 print(f"[LangGraph] Errors: {errors}")
 
+        # TRACE: surface the LangGraph per-node timings into the ONE query trace's
+        # tier2 section (node_times is already computed by the graph — no rework).
+        try:
+            from veda.explain import current_trace as _ct_lg
+            _ct_lg().set("tier2", langgraph=True, node_times_ms=node_times,
+                         langgraph_wall_ms=dur, warning_count=len(warnings))
+        except Exception:
+            pass
+
         result = SLMResult(
             intent               = intent,
             complexity           = complexity,

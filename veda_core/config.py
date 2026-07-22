@@ -1421,11 +1421,18 @@ ANCHOR_CONFLICT_MULT = 3.0
 # single-table and join paths.
 ANCHOR_VET_ROUTER = True
 
-# ── Explainability Trace (veda/explain.py) ────────────────────────────────────
-# ENABLED: collect a structured per-query trace (decisions + confidences + why) —
-#   cheap (dict appends), attached to the result + persisted compact to the trace log.
-# VERBOSE: ALSO collect heavy candidate lists / rejected paths (debug only).
-# PERSIST: append the compact trace to logs/explain_trace.jsonl.
+# ── Query Trace / Explainability Trace (veda/explain.py) ──────────────────────
+# The ONE per-query trace. run_hybrid_query mints a trace_id (reusing the api tier's
+# X-Request-Id when present) and binds the ExplainTrace as the AMBIENT trace, so
+# EVERY stage — Tier-1, Tier-2, retrieval/RRF/rerank, the call_slm() choke-point,
+# execution, summary, visualization, explainability — records into it (no `tr`
+# threading), and finish() emits a one-glance `totals` summary (per-stage durations,
+# slm_call_count, row/col/chart counts). Search logs/explain_trace.jsonl by trace_id
+# to reconstruct the whole lifecycle; the MLflow sidecar tags runs with veda.trace_id.
+# ENABLED: collect the structured trace — cheap (dict appends over already-computed
+#   values; a no-op _NullTrace when off). VERBOSE: ALSO collect heavy candidate lists /
+#   rejected paths / per-call SQL & row samples (debug only — keep OFF in production so
+#   no large payloads / PII are captured). PERSIST: append compact records to the log.
 EXPLAIN_TRACE_ENABLED = True
 EXPLAIN_TRACE_VERBOSE = True
 EXPLAIN_TRACE_PERSIST = True
