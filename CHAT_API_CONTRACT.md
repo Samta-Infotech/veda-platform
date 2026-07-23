@@ -66,7 +66,7 @@ Send a user message, get the assistant's reply. Two modes controlled by
         "prompt_tokens": 1240,
         "completion_tokens": 312,
         "total_tokens": 1552,
-        "latency_ms": 2400
+        "latency_ms": 2680
       }
     },
     "insights": [],
@@ -75,12 +75,15 @@ Send a user message, get the assistant's reply. Two modes controlled by
 }
 ```
 
-`metadata.usage.latency_ms` is the total end-to-end query time in
-milliseconds (`ExplainTrace.total_ms` for Tier-1, an equivalent timer around
-the Tier-2 LLM-IR fallback path) — `null` if unavailable (e.g. a path that
-never reached the pipeline's `_done()`). It's not the HTTP round-trip time —
-see `TOKEN_USAGE_API_CONTRACT.md` for the distinction from `/api/v1/query`'s
-`latency_ms`, which is a different, Django-side timer.
+`metadata.usage.latency_ms` is the **total end-to-end response time** for the
+turn in milliseconds — the full server-side turn wall clock (engine + the
+chatbot supervisor graph + serialization/streaming overhead). It is **always
+present**, on a successful turn and on a failed/refused one alike, so it is
+never `null`. It is server-side turn time, **not** the browser HTTP round-trip
+— a client wanting true wall-clock still measures its own.
+
+See `TOKEN_USAGE_API_CONTRACT.md` for the distinction from `/api/v1/query`'s
+top-level `latency_ms`, which is a separate Django-side HTTP timer.
 
 `response[]` is an ordered array of content blocks — `type` is one of
 `"text"` / `"table"` / a chart type (`"line"`, `"bar"`, `"pie"`, ...) for
@@ -113,9 +116,12 @@ a single-table query with a high-confidence anchor). Computed by
 `veda/pipeline.py`'s `_done()` (Tier-1) and `veda_hybrid.py`'s
 `_tier2_finish()` (Tier-2, Insight-Engine-only).
 
-On an engine error mid-turn: `502` —
+On an engine error mid-turn: `502` — `message` is a safe user-displayable
+string (never raw exception text) and `data.code` is one of the error codes in
+the table below (`LLM_UNAVAILABLE` when the inference tier is down,
+`MODEL_ERROR` otherwise):
 ```json
-{"status_code": 502, "message": "Unable to generate response.", "data": {"chat_id": 42, "code": "MODEL_ERROR"}}
+{"status_code": 502, "message": "The AI assistant is temporarily unavailable. Please try again in a moment.", "data": {"chat_id": 42, "code": "LLM_UNAVAILABLE"}}
 ```
 
 ---
@@ -145,7 +151,7 @@ event: explainability
 data: {"version": "1.0", "understanding": {...}, "sql": {...}, "confidence": 0.87, "timeline": [...]}
 
 event: usage
-data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552, "latency_ms": 2400}
+data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552, "latency_ms": 2680}
 
 event: insights
 data: {"insights": [], "follow_up_questions": []}
@@ -160,14 +166,23 @@ data: {"chat_id": 42, "message_id": 501, "summary": "The 5 most recent asset acc
 | `content` | 1+ times | one per content block, same shape as `response[]` items above |
 | `visualization` | 0+ times | only when a chart is actually produced |
 | `explainability` | always, once | `res0.explain` or a neutral fallback object. **`confidence` lives here** — see §1a |
-| `usage` | always, once | see `TOKEN_USAGE_API_CONTRACT.md`. Token counts default to zero if no LLM call happened this turn; `latency_ms` is the total query time (may be `null`) |
+| `usage` | always, once | see `TOKEN_USAGE_API_CONTRACT.md`. Token counts default to zero if no LLM call happened this turn; `latency_ms` is the total end-to-end response time (always present, never `null`) |
 | `insights` | conditionally, once | only emitted if `insights`/`follow_up_questions` are non-empty server-side (Insight Engine ran) |
-| `error` | on failure, terminates stream | `{"code": "...", "message": "..."}` — no further events after this |
+| `error` | on failure, terminates stream | `{"code": "...", "message": "..."}` — no further events after this. See the error-code table below |
 | `completed` | always, last (success path) | signals the turn is fully persisted; carries `message_id` for later reference |
 
-On a mid-stream exception, the client gets `event: error` with
-`{"code": "STREAM_ERROR", "message": "<exception str>"}` and the connection
-closes — no `completed` event follows.
+**Error codes** — the `message` is always a safe, user-displayable string;
+raw exception text / tracebacks are never sent (logged server-side only):
+
+| `code` | Meaning | Suggested UI |
+| --- | --- | --- |
+| `LLM_UNAVAILABLE` | The inference/LLM tier is down or unreachable — a transient outage, **not** a problem with the user's question. Message: *"The AI assistant is temporarily unavailable. Please try again in a moment."* | Show the message and offer a **Retry**; do not ask the user to rephrase |
+| `MODEL_ERROR` | An unexpected fault while generating the answer. Message: *"Something went wrong while generating a response. Please try again."* | Show the message; retry is reasonable |
+| `STREAM_ERROR` | A mid-stream failure in the SSE generator itself. Same safe copy as `MODEL_ERROR`. The connection closes with no `completed` event | Show the message; retry |
+
+Note: previously an LLM outage surfaced the *clarify* fallback ("Could you
+clarify what you're asking about?"), which misleadingly implied the question
+was at fault. Outages now always return `LLM_UNAVAILABLE` with the copy above.
 
 The assistant's `ChatMessage` is saved with
 `metadata = {"thinking": ..., "explainability": ..., "usage": ...}` — same
@@ -222,7 +237,7 @@ Read a full conversation back (used to hydrate a chat window on load/reload).
               "prompt_tokens": 1240,
               "completion_tokens": 312,
               "total_tokens": 1552,
-              "latency_ms": 2400
+              "latency_ms": 2680
             }
           }
         },

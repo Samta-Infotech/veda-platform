@@ -749,7 +749,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # MULTI_TABLE / AGGREGATE, and for any existence query (with/without/how-many-have)
         # — negation like "without" isn't tagged MULTI_TABLE, so detect it directly.
         needs_join = intent in ("MULTI_TABLE", "AGGREGATE") or is_existence
+        # Observability (no behavior change): record whether the deterministic
+        # multi-table planner is even REACHED — needs_join gates try_multitable, so a
+        # SIMPLE intent means the planner is structurally skipped (planner-reachability
+        # signal for end-to-end tracing / diagnosis).
+        tr.set("join_planning", needs_join=needs_join, intent_for_join=intent,
+               try_multitable_invoked=bool(needs_join))
         mt = try_multitable(query, results, sm, all_cols, tf, primary=primary) if needs_join else {"action": "fallback"}
+        tr.set("join_planning", multitable_action=mt.get("action"))
 
         if mt["action"] == "clarify":
             fb = _feedback("clarify", msg=mt.get("msg"))

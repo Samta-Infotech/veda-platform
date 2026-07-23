@@ -17,7 +17,7 @@ from .serializers import (
     CreateConversationSerializer,
     LoginRequestSerializer,
 )
-from .services import ChatNotFound, ConversationQueryService
+from .services import ChatNotFound, ConversationQueryService, _MSG_MODEL_ERROR
 
 logger = logging.getLogger(__name__)
 
@@ -232,9 +232,12 @@ class ConversationQueryView(APIView):
                                    chat.pk, payload)
                     return
                 yield _sse_format(kind, payload)
-        except Exception as exc:  # never break the connection mid-stream
+        except Exception:  # never break the connection mid-stream
+            # Raw exception logged (with traceback) — NOT sent to the client; show
+            # the safe copy, same as the other error paths (services.py).
             logger.exception("conversation query streaming failed chat_id=%s", chat.pk)
-            yield _sse_format("error", {"code": "STREAM_ERROR", "message": str(exc)})
+            yield _sse_format("error",
+                              {"code": "STREAM_ERROR", "message": _MSG_MODEL_ERROR})
             return
 
         metadata = {"thinking": thinking_text, "explainability": explainability, "usage": usage}

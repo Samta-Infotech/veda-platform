@@ -22,6 +22,22 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CONVERSATION_TITLE = "New Chat"
 
+# User-facing error copy for the `error` SSE event / 502 body. Raw exception text
+# and tracebacks are NEVER sent to the client (they leak internals like connection
+# strings / import errors and read as gibberish to a user) — the detail is logged
+# server-side via logger.exception, and one of these safe messages is shown instead.
+# Two DISTINCT codes so the frontend can react differently:
+#   • LLM_UNAVAILABLE — the inference/LLM tier is unreachable or down. Transient:
+#     the UI should say the assistant is temporarily unavailable and offer a retry.
+#   • MODEL_ERROR — an unexpected fault while generating the answer (not a known
+#     outage). Also retryable from the user's side, but not a clean "service down".
+_CODE_LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
+_MSG_LLM_UNAVAILABLE = ("The AI assistant is temporarily unavailable. "
+                        "Please try again in a moment.")
+_CODE_MODEL_ERROR = "MODEL_ERROR"
+_MSG_MODEL_ERROR = ("Something went wrong while generating a response. "
+                    "Please try again.")
+
 _visualization_recommender = VisualizationRecommender()
 
 # Fixed-shape fallback when the engine has no "explain" for this turn (smalltalk,
@@ -171,16 +187,28 @@ class ConversationQueryService:
         else:
             try:
                 response = run_chat_turn(message, session_id, **kwargs)
-            except Exception as exc:
+            except Exception:
+                # Raw exception logged (with traceback) — NOT sent to the client.
                 logger.exception("conversation query pipeline failed chat_id=%s", chat.pk)
-                yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": str(exc)}}
+                yield {"event": "error",
+                       "data": {"code": _CODE_MODEL_ERROR, "message": _MSG_MODEL_ERROR}}
                 return
 
         if response.get("engine_unavailable"):
+            # The inference/LLM tier is down/unreachable (call_engine_node mapped an
+            # InferenceUnavailable or a mid-stream error to this flag) — a transient
+            # outage, surfaced with its own code so the UI can prompt a retry rather
+            # than a generic failure.
+            #
+            # Deliberately do NOT surface response["reply_text"] here: on the
+            # unavailable path chatbot/nodes.py sets it to the clarify fallback
+            # ("Could you clarify what you're asking about?"), which would MISLEAD
+            # the user into thinking their question was bad when in fact the AI
+            # service is down. Always show the outage copy.
             logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)
             yield {"event": "error",
-                   "data": {"code": "MODEL_ERROR",
-                            "message": response.get("reply_text") or "Inference tier unavailable."}}
+                   "data": {"code": _CODE_LLM_UNAVAILABLE,
+                            "message": _MSG_LLM_UNAVAILABLE}}
             return
 
         if isinstance(response, dict):
@@ -246,10 +274,15 @@ class ConversationQueryService:
         thread.join(timeout=5)   # already finished by the time "done" was enqueued; bounds worst case
 
         if error_message is not None:
-            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": error_message}}
+            # error_message is the raw str(exc) from the worker thread — already
+            # logged with its traceback in target()'s except. Show the safe copy.
+            yield {"event": "error",
+                   "data": {"code": _CODE_MODEL_ERROR, "message": _MSG_MODEL_ERROR}}
             return None
         if result is None:
-            yield {"event": "error", "data": {"code": "MODEL_ERROR", "message": "No result from chatbot pipeline."}}
+            logger.error("conversation query pipeline returned no result chat_id=%s", chat.pk)
+            yield {"event": "error",
+                   "data": {"code": _CODE_MODEL_ERROR, "message": _MSG_MODEL_ERROR}}
             return None
         return result
 
@@ -293,17 +326,18 @@ class ConversationQueryService:
         # via veda/pipeline.py's _done() / veda_hybrid.py's Tier-2 dispatch).
         # Always a 3-key dict — {0,0,0} for deterministic fast paths that never
         # call an SLM — so the UI never special-cases absence. No cost figure:
-        # self-hosted SLMs have no real per-token billing. latency_ms rides
-        # along on the same event (total end-to-end query time, tr.total_ms /
-        # veda_hybrid.py's Tier-2 timer) — None when unavailable (e.g. a
-        # refusal path that never reached _done()).
+        # self-hosted SLMs have no real per-token billing.
+        #
+        # latency_ms is the TOTAL end-to-end response time for this turn (engine +
+        # the chatbot supervisor graph + serialization/streaming overhead) — the
+        # turn wall clock measured from run_turn's _turn_t0. ALWAYS present, on
+        # success and on a failed/refused turn alike, so it is never null. (This is
+        # server-side turn time, NOT the browser HTTP round-trip — a client wanting
+        # true wall-clock still measures its own.) The engine-only/inference slice
+        # is intentionally NOT surfaced — the product only needs the total.
         yield {"event": "usage", "data": {
             **(res0.get("usage") or {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}),
-            # Prefer the engine's own end-to-end time; fall back to this turn's
-            # measured wall clock so latency_ms is NEVER null — even a refusal/
-            # clarify that never reached the engine's _done() still reports how long
-            # it took.
-            "latency_ms": res0.get("latency_ms") or response.get("_turn_latency_ms"),
+            "latency_ms": response.get("_turn_latency_ms"),
         }}
         # Insight Engine (additive event type): only present when
         # INSIGHT_ENGINE_ENABLED produced these keys server-side.

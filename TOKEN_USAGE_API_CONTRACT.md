@@ -11,7 +11,7 @@ type Usage = {
   prompt_tokens: number;
   completion_tokens: number;
   total_tokens: number;
-  latency_ms: number | null;   // chat endpoints only — see §1/§2
+  latency_ms: number | null;   // total end-to-end response time — chat endpoints only, see §1/§2
 };
 ```
 
@@ -45,10 +45,14 @@ generation itself was skipped:
 ```
 
 Clients should treat zero token counts as "no LLM was used for this turn,"
-not as an error or missing-data state. `latency_ms` (chat endpoints only,
-see below) can be `null` independently of the token counts — a refusal path
-that never reaches `_done()` has no latency figure to report even though its
-token counts are still a valid zero.
+not as an error or missing-data state.
+
+`latency_ms` (chat endpoints only) is the **total end-to-end response time**
+for the turn — the full server-side turn wall clock (engine + supervisor graph
++ serialization/streaming overhead). It is **always present** on both a
+successful and a failed/refused turn, so it is never `null`. It is the number a
+UI shows as "response time." (Server-side turn time, not the browser HTTP
+round-trip.)
 
 ---
 
@@ -84,17 +88,18 @@ token counts are still a valid zero.
         "prompt_tokens": 1240,
         "completion_tokens": 312,
         "total_tokens": 1552,
-        "latency_ms": 2400
+        "latency_ms": 2680
       }
     }
   }
 }
 ```
 
-`latency_ms` here is the total end-to-end query time (`ExplainTrace.total_ms`
-for Tier-1, an equivalent timer for Tier-2's LLM-IR fallback) — engine-side,
-**not** the HTTP round-trip. Compare with §3's `latency_ms`, which is a
-different (Django-side, HTTP-inclusive) timer on the raw query endpoint.
+`latency_ms` here is the total end-to-end response time for the turn (engine +
+the chatbot supervisor graph + serialization/streaming overhead) — server-side,
+**not** the HTTP round-trip. Compare with §3's top-level
+`latency_ms`, which is a different (Django-side, HTTP-inclusive) timer on the
+raw query endpoint.
 
 `explainability.confidence` — see `CHAT_API_CONTRACT.md` for the full
 confidence contract; the short version is: it's a real number for every
@@ -124,7 +129,7 @@ event: explainability
 data: {"version": "1.0", "understanding": {...}, "sql": {...}, "confidence": 0.87, "timeline": [...]}
 
 event: usage
-data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552, "latency_ms": 2400}
+data: {"prompt_tokens": 1240, "completion_tokens": 312, "total_tokens": 1552, "latency_ms": 2680}
 
 event: completed
 data: {"chat_id": 42, "message_id": 501, "summary": "The 5 most recent asset accounting entries are dated ...", "is_complete": true}
