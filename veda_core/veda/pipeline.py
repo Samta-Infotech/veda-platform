@@ -214,6 +214,20 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
+                # EXPLAINABILITY (compact) — never the full payload; just the shape.
+                try:
+                    if isinstance(explain, dict):
+                        _checks = explain.get("check_items") or []
+                        tr.set("explainability",
+                               datasets=explain.get("datasets"),
+                               operation_count=len(explain.get("operations") or []),
+                               filter_count=len(explain.get("filters")
+                                                or explain.get("filter_phrases") or []),
+                               validation_passed=(all(
+                                   str(c.get("status")).lower() in ("pass", "true", "ok")
+                                   for c in _checks) if _checks else None))
+                except Exception:
+                    pass
             elif kw.get("feedback"):
                 # Refusal path: same structured-explainability CONTRACT as a
                 # success, built from the feedback _feedback() already computed
@@ -588,6 +602,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     if _smax < RERANK_NOISE_FLOOR:
                         print(f"  [L2b] Primary rerank UNINFORMATIVE (max {_smax:.5f} < "
                               f"{RERANK_NOISE_FLOOR}) — keeping RRF order")
+                        tr.set("reranking", input_candidate_count=len(_head),
+                               reranker_skipped=True, skip_reason="noise_floor",
+                               score_max=round(_smax, 5), noise_floor=RERANK_NOISE_FLOOR)
                     else:
                         _rk_before = [r.col_id for r in results[:5]]   # pre-rerank order (trace)
                         _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
@@ -605,10 +622,29 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         results = [_r for _, _r in _ranked] + _tail
                         _rk_after = [r.col_id for r in results[:5]]   # post-rerank order (trace)
                         print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
+                        # RERANK observability — enough to diagnose noisy/compressed
+                        # reranker scores (score spread + top1/top2 gap). Uses the _sc
+                        # already predicted above; no re-scoring.
+                        try:
+                            _scores = sorted((float(s) for s in _sc), reverse=True)
+                            _n = len(_scores)
+                            tr.set("reranking",
+                                   input_candidate_count=len(_head),
+                                   output_candidate_count=len(results),
+                                   reranker_skipped=False,
+                                   score_min=round(_scores[-1], 5) if _n else None,
+                                   score_max=round(_scores[0], 5) if _n else None,
+                                   score_mean=round(sum(_scores) / _n, 5) if _n else None,
+                                   top1_top2_gap=round(_scores[0] - _scores[1], 5) if _n >= 2 else None)
+                            tr.cand("reranking", "top_before", _rk_before)
+                            tr.cand("reranking", "top_after", _rk_after)
+                        except Exception:
+                            pass
             except Exception as _rr_e:
                 print(f"  [L2b] primary rerank skipped: {type(_rr_e).__name__}: {str(_rr_e)[:100]}")
         elif PRIMARY_RERANK_ENABLED and results:
             print(f"  [L2b] Primary rerank SKIPPED (unambiguous RRF gap) → top: {results[0].col_id}")
+            tr.set("reranking", reranker_skipped=True, skip_reason="rrf_gap_unambiguous")
 
         _cand_tabs = []
         for r in results:
@@ -691,6 +727,13 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                      }})
         tr.set("schema_linking", selected_table=primary,
                router_primary=_router_primary, candidate_tables=_cand_tabs[:8])
+        # ENTITY SELECTION (Tier-1): the vetted primary + the candidate tables it was
+        # chosen from. Secondary entities (if any) enter via the join plan below and
+        # are recorded there. Reuses values already computed — no new ranking.
+        tr.set("entity_selection", primary_table=primary,
+               candidate_tables=_cand_tabs[:12],
+               candidate_field_count=len(es.candidate_fields),
+               selected_reason=("router" if primary == _router_primary else "grain_vet_override"))
         if primary:
             _tick("schema_linking", f"Using {primary} for this")
         print(f"  [L3] Routing       {len(results)} cols across {len(_cand_tabs)} tables "
@@ -706,7 +749,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # MULTI_TABLE / AGGREGATE, and for any existence query (with/without/how-many-have)
         # — negation like "without" isn't tagged MULTI_TABLE, so detect it directly.
         needs_join = intent in ("MULTI_TABLE", "AGGREGATE") or is_existence
+        # Observability (no behavior change): record whether the deterministic
+        # multi-table planner is even REACHED — needs_join gates try_multitable, so a
+        # SIMPLE intent means the planner is structurally skipped (planner-reachability
+        # signal for end-to-end tracing / diagnosis).
+        tr.set("join_planning", needs_join=needs_join, intent_for_join=intent,
+               try_multitable_invoked=bool(needs_join))
         mt = try_multitable(query, results, sm, all_cols, tf, primary=primary) if needs_join else {"action": "fallback"}
+        tr.set("join_planning", multitable_action=mt.get("action"))
 
         if mt["action"] == "clarify":
             fb = _feedback("clarify", msg=mt.get("msg"))
@@ -1439,6 +1489,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         RESULT_ANALYZER_MAX_ROWS = 200
     nl_answer_text = None
     _insight_extra = {}
+    _summary_engine = None            # which summariser produced the prose (trace)
     if NL_ANSWER_ENABLED and cols is not None:
         row_dicts = [dict(zip(cols, r)) for r in rows]
         # F6: don't block on the SLM prose call. Compute the safe fallback now;
@@ -1512,6 +1563,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 if getattr(insight, "answer", None):
                     nl_answer_text = insight.answer
                     _slm_wove_patterns = True   # its prompt already grounds on the patterns_block
+                    _summary_engine = "run_insight_engine"
                     print(f"\n  [L7b] Insight      {insight.answer}")
                 _insight_extra.update({          # update, not reassign — keeps "analytics"
                     "insights": insight.insights,
@@ -1548,6 +1600,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     # run_nl_answer wove the patterns only when the SLM actually ran;
                     # on its deterministic fallback it already blended them itself.
                     _slm_wove_patterns = True
+                    _summary_engine = "run_nl_answer"
                     print(f"\n  [L7b] Answer       {nl.answer}")
             except Exception as _nle:
                 print(f"  [L7b] Answer       (summarisation skipped: {type(_nle).__name__})")
@@ -1560,6 +1613,28 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if _pattern_details and not _slm_wove_patterns:
             from query.result_explainer import blend_patterns
             nl_answer_text = blend_patterns(nl_answer_text, _pattern_details)
+
+        # Record the shared post-execution stages (execution / result_analysis /
+        # summary / visualization) into the ONE query trace — reading only the _ictx
+        # and summary this run already computed. Explainability is recorded in _done()
+        # where the `explain` payload is built. Same helper Tier-2 uses → identical story.
+        try:
+            from veda.explain import record_result_stages
+            try:
+                from config import NL_SUMMARY_MODEL as _nl_model
+            except Exception:
+                _nl_model = None
+            record_result_stages(
+                engine=_summary_engine, cols=list(cols), row_count=len(rows),
+                truncated=(len(rows) >= 20), ictx=_ictx, answer=nl_answer_text,
+                summary_model=_nl_model, summary_ok=bool(_summary_engine),
+                visualization=_insight_extra.get("visualization"))
+            # PROJECTION funnel (Tier-1): the SQL SELECT columns actually produced,
+            # against what retrieval surfaced — reveals where extra columns entered.
+            tr.set("projection", sql_selected=list(cols)[:30],
+                   sql_selected_count=len(cols), retrieved_count=len(results))
+        except Exception:
+            pass
 
     is_temporal = bool(tf and (tf.start or tf.end))
     # Don't cache fast-path results — they're already instant and the fast path always

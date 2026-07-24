@@ -360,7 +360,45 @@ def _maybe_federated(query, verbose=False):
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
-def run_hybrid_query(query, verbose=False, on_event=None):
+def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
+    """Public front door. Owns the ONE query trace for the whole request.
+
+    Mints a trace_id (reusing the caller's request id when one is passed —
+    §1 "don't introduce a redundant identifier"), binds it as the AMBIENT trace
+    so every downstream stage — Tier-1, Tier-2, retrieval, the SLM choke-point,
+    summary, visualization — records into the SAME ExplainTrace without threading
+    a `tr` parameter through every signature, then finalizes + persists it exactly
+    once (Tier-1's own finish() becomes a checkpoint while this scope owns the
+    trace — see explain.ExplainTrace.finish). Observability only: the returned
+    MultiResult is byte-identical except for the added trace_id field."""
+    from veda.explain import new_trace, use_trace, current_trace
+    tr = new_trace(query, trace_id=trace_id)
+    with use_trace(tr):
+        _final_status = "error"
+        try:
+            result = _run_hybrid_query_inner(query, verbose=verbose, on_event=on_event)
+            try:  # a final status for the trace's one-glance summary
+                if getattr(result, "ok", False):
+                    _final_status = "answered"
+                elif getattr(result, "items", None):
+                    _final_status = result.items[0].status or "unknown"
+                else:
+                    _final_status = "unknown"
+            except Exception:
+                _final_status = "unknown"
+            try:
+                result.trace_id = getattr(tr, "trace_id", "") or None
+            except Exception:
+                pass
+            return result
+        finally:
+            try:
+                tr.finalize(_final_status)
+            except Exception:
+                pass
+
+
+def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     """Single entry point. Returns a MultiResult ALWAYS — a one-item MultiResult for a
     plain query, N items for a compound one. Callers branch on MultiResult, never on
     "is this compound", so everything downstream of here stays single-intent-dumb.
@@ -401,6 +439,14 @@ def run_hybrid_query(query, verbose=False, on_event=None):
                 _l0_calls = _l0_usage.calls()
             if getattr(_l0, "was_simplified", False):
                 print(f"  [L0] Simplified: {_l0.simplified_query!r} ({_l0.duration_ms}ms)")
+                try:  # record the rewrite so downstream knows what retrieval actually got
+                    from veda.explain import current_trace as _ct_l0
+                    _ct_l0().set("query_understanding",
+                                 original_query=query,
+                                 effective_query=_l0.simplified_query,
+                                 rewrite_reason="nl_simplifier")
+                except Exception:
+                    pass
                 query = _l0.simplified_query
         except Exception:
             pass  # fall back to the original query silently
@@ -602,11 +648,18 @@ def _fan_out(sub_queries, verbose=False, on_event=None):
     # fail-closed / read the wrong tenant (§4.1). Captured in the parent, set per child.
     from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
     _parent_ctx = _try_ctx()
+    # Same carry for the ambient query trace — worker threads start with an empty
+    # contextvars context, so without this each parallel sub-query's SLM calls
+    # (call_slm ledger) and stage records would fall on a NullTrace instead of the
+    # one query trace. bind_trace in the child re-attaches the parent's trace.
+    from veda.explain import current_trace as _cur_trace, bind_trace as _bind_trace
+    _parent_trace = _cur_trace()
 
     def _one(indexed_sq):
         i, sq = indexed_sq
         if _parent_ctx is not None:
             _set_ctx(_parent_ctx)
+        _bind_trace(_parent_trace)
         buffers[threading.get_ident()] = io.StringIO()
         item = _run_sub(sq, verbose=verbose, on_event=on_event, index=i, total=total)
         return item, buffers[threading.get_ident()].getvalue()
@@ -672,6 +725,28 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             elif TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
+                # TIER-1 → TIER-2 boundary snapshot: exactly what Tier-1 knew when it
+                # handed off (read from the ExecutionState it already built — no
+                # recompute). One of the most important trace events for debugging
+                # false multi-table planning / refusals.
+                try:
+                    from veda.explain import current_trace as _ct_snap
+                    _es_snap = res.get("context") if isinstance(res, dict) else None
+                    _tr_snap = _ct_snap()
+                    _cf_snap = getattr(_es_snap, "candidate_fields", None) or [] if _es_snap else []
+                    _tr_snap.set(
+                        "tier1",
+                        handoff="tier1_refusal",
+                        handoff_status=res.get("status") if isinstance(res, dict) else None,
+                        primary_table=getattr(_es_snap, "primary_table", None),
+                        candidate_tables=getattr(_es_snap, "candidate_tables", None),
+                        candidate_field_count=len(_cf_snap),
+                        rerank_query=getattr(_es_snap, "rerank_query", None),
+                        refusal_reason=getattr(_es_snap, "refusal_reason", None))
+                    for _c_snap in _cf_snap[:15]:      # verbose-only heavy list
+                        _tr_snap.cand("tier1", "candidate_fields", _c_snap)
+                except Exception:
+                    pass
                 from slm._call_slm import collect_usage, usage_totals
                 _t2_t0 = time.time()
                 _t2_calls = []
@@ -1002,6 +1077,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     # matching Tier-1's single-table `table` field as closely as this
     # multi-table-capable path allows.
     table = None
+    facts = None
     try:
         from veda.business_explain import extract_sql_facts
         facts = extract_sql_facts(sql or "")
@@ -1009,6 +1085,25 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     except Exception:
         pass
     result["table"] = table
+    # sql_generation — every Tier-2 answer funnels through here, so this one place
+    # records the final SQL shape for all Tier-2 return paths (envelope / shared
+    # planner / IR). Reads the AST facts already extracted above; no re-parse.
+    try:
+        from veda.explain import current_trace as _ct_sql
+        _trs = _ct_sql()
+        _f = facts or {}
+        _trs.set("sql_generation",
+                 source=source,
+                 tables_used=_f.get("entities"),
+                 filter_count=len(_f.get("filters") or []),
+                 aggregation_count=len(_f.get("aggregations") or []),
+                 group_by=_f.get("groupings"),
+                 order_by=_f.get("orderings"),
+                 limit=_f.get("limit"),
+                 distinct=_f.get("distinct"))
+        _trs.cand("sql_generation", "sql", (sql or "")[:2000])   # verbose-only
+    except Exception:
+        pass
 
     try:
         from config import (NL_ANSWER_ENABLED, NL_ANSWER_FAST_TIMEOUT_MS,
@@ -1022,6 +1117,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     visualization = None
     _ictx = None
     _confidence = None
+    _summary_engine = None            # which summariser produced the prose (trace)
     if NL_ANSWER_ENABLED and cols:
         row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
         # Deterministic analytics (ALWAYS, not flag-gated) — same single
@@ -1059,6 +1155,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                 if getattr(insight, "answer", None):
                     result["answer"] = insight.answer
                     got_real_answer = True
+                    _summary_engine = "run_insight_engine"
                 result["insights"] = insight.insights
                 result["follow_up_questions"] = insight.follow_up_questions
                 result["visualization"] = insight.visualization
@@ -1068,14 +1165,16 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                 print(f"  [Tier2] Insight Engine unavailable ({type(_ie).__name__}: {_ie}) "
                       f"— falling back to plain NL answer")
                 # Record the attempt even though it failed — call_slm() only records
-                # usage on a SUCCESSFUL backend.call() return, so an exception here
-                # means zero tokens get attributed to this attempt even if the SLM
-                # was actually contacted. Without this, usage.total_tokens == 0 is
-                # indistinguishable from "no LLM call was needed this turn." Tier-2
-                # has no ExplainTrace to record onto (unlike Tier-1's tr.set("nl_summary",
-                # ...)), so this lives under "_debug" — a key inference/routes/hybrid.py's
-                # _INTERNAL_ONLY_KEYS strips at every nesting depth, same guarantee as
-                # "trace"/"context", so it never reaches the client-facing response.
+                # token usage on a SUCCESSFUL backend.call() return, so an exception here
+                # means zero tokens get attributed to this attempt even if the SLM was
+                # actually contacted. Without this, usage.total_tokens == 0 is
+                # indistinguishable from "no LLM call was needed this turn." (The
+                # per-CALL SLM ledger in slm/_call_slm.py now DOES record this failed
+                # call — purpose/model/duration/ok=False — onto the ambient query trace;
+                # this _debug flag is the parallel token-accounting note.) It lives under
+                # "_debug" — a key inference/routes/hybrid.py's _INTERNAL_ONLY_KEYS strips
+                # at every nesting depth, same guarantee as "trace"/"context", so it never
+                # reaches the client-facing response.
                 result.setdefault("_debug", {})["insight_engine_failed"] = True
                 result["_debug"]["insight_engine_error"] = f"{type(_ie).__name__}: {str(_ie)[:200]}"
 
@@ -1099,6 +1198,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                 if getattr(nl, "answer", None):
                     result["answer"] = nl.answer
                     _slm_wove_patterns = True   # SLM prose wove them; fallback blended them itself
+                    _summary_engine = "run_nl_answer"
             except Exception as _nle:
                 print(f"  [Tier2] Answer (summarisation skipped: {type(_nle).__name__})")
 
@@ -1124,6 +1224,23 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     _det_intent = ((result.get("explain") or {}).get("understanding") or {}).get("summary")
     if _det_intent or business_intent:
         result["business_intent"] = _det_intent or business_intent
+    # Record the shared post-execution stages (execution / result_analysis / summary /
+    # visualization / explainability) into the ONE query trace so a Tier-2 answer tells
+    # the same structured story as a Tier-1 one — reading only what was already computed.
+    try:
+        from veda.explain import record_result_stages, current_trace
+        try:
+            from config import NL_SUMMARY_MODEL as _nl_model
+        except Exception:
+            _nl_model = None
+        current_trace().set("tier2", answered_via=source, row_count=len(rows or []))
+        record_result_stages(
+            engine=_summary_engine, cols=cols, row_count=len(rows or []),
+            truncated=(len(rows or []) >= 20), ictx=_ictx, answer=result.get("answer"),
+            summary_model=_nl_model, summary_ok=bool(_summary_engine),
+            visualization=visualization, explain_payload=result.get("explain"))
+    except Exception:
+        pass
     return result
 
 
@@ -1175,6 +1292,17 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                 print(f"  [Tier2] Tier1 completed. Reusing: {', '.join('✓ ' + r for r in _reused)}")
             print("  [Tier2] continuing execution...")
         sel = select_retrieval(query=query, intent="sql", verbose=verbose, seed_candidates=_seeds)
+        # Tier-2 INPUT snapshot — what Tier-2 starts from (already computed above).
+        try:
+            from veda.explain import current_trace as _ct_t2in
+            _ct_t2in().set(
+                "tier2",
+                available_column_count=len(getattr(sel, "columns", []) or []),
+                candidate_tables=list(getattr(sel, "tables", []) or [])[:12],
+                reused_tier1=execution_state is not None,
+                seed_field_count=len(_seeds or []))
+        except Exception:
+            pass
 
         # ── ENVELOPE PATH (D): one-call SLM → intent envelope → deterministic build_sql.
         # Single-table analytical shapes (count/measure/ratio/trend/compare/group/list) go
@@ -1247,6 +1375,18 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         except Exception as _pe:
             print(f"  [Tier2] recommended projection skipped: {type(_pe).__name__}: {str(_pe)[:120]}")
             _rec_proj_cols = None
+        # PROJECTION funnel (Tier-2 stage): the recommended SELECT-list handed to the
+        # SLM. Later compared against IR-selected + SQL SELECT to reveal where extra
+        # columns entered. Reuses the _rec_proj_cols already computed above.
+        try:
+            from veda.explain import current_trace as _ct_proj
+            _ct_proj().set(
+                "projection",
+                recommended_count=(len(_rec_proj_cols) if _rec_proj_cols else 0),
+                recommended=[getattr(r, "col_name", None) for r in (_rec_proj_cols or [])][:30],
+                source="tier2")
+        except Exception:
+            pass
 
         # ── IR PATH with bounded EXECUTION-FEEDBACK REPAIR loop ───────────────────────
         # The LLM emits IR (never SQL); on a firewall rejection or execution error we feed
@@ -1287,7 +1427,38 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             if getattr(l3, "error", None) or not getattr(l3, "ir_json", None):
                 print(f"  [Tier2] no usable IR from SLM "
                       f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
+                try:
+                    from veda.explain import current_trace as _ct_irfail
+                    _ct_irfail().set("tier2", attempt=_attempt,
+                                     ir_error=getattr(l3, "error", None) or "empty ir_json")
+                except Exception:
+                    pass
                 return None
+            # IR GENERATION — what the SLM actually produced (the intermediate rep the
+            # deterministic builder turns into SQL). Read straight off l3.ir_json.
+            try:
+                from veda.explain import current_trace as _ct_ir
+                _ir = l3.ir_json or {}
+                _ir_ents = _ir.get("entities", []) or []
+                _ir_sel_cols = [c for e in _ir_ents
+                                for c in (e.get("columns") or e.get("select") or [])]
+                _ct_ir().set(
+                    "tier2",
+                    attempt=_attempt,
+                    ir_intent=_ir.get("intent"),
+                    ir_entity_count=len(_ir_ents),
+                    ir_selected_column_count=len(_ir_sel_cols),
+                    ir_has_filters=bool(_ir.get("filter_tree") or _ir.get("filters")),
+                    ir_aggregation_count=len(_ir.get("aggregations") or []),
+                    ir_group_by=_ir.get("group_by"),
+                    ir_order_by=_ir.get("order_by"),
+                    ir_limit=_ir.get("limit"),
+                    ir_confidence=_ir.get("confidence"),
+                    repaired=bool(_repair_hint))
+                # projection funnel: IR-selected vs the recommended projection above
+                _ct_ir().set("projection", ir_selected_count=len(_ir_sel_cols))
+            except Exception:
+                pass
 
             # ── ONE JOIN ENGINE (Phase 2) ─────────────────────────────────────────
             # If the LLM identified MULTIPLE entities, build the joins with the
@@ -1343,6 +1514,13 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
             psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
             if err:
+                try:
+                    from veda.explain import current_trace as _ct_val
+                    _ct_val().check("tier2_firewall", False, str(err)[:200])
+                    if _attempt < _max_repairs:
+                        _ct_val().repair("firewall", f"attempt {_attempt}", "retry")
+                except Exception:
+                    pass
                 if _attempt < _max_repairs:
                     _repair_hint = _repair_hint_for(err); continue
                 print(f"  [Tier2] firewall rejected (kept safe): {err}")

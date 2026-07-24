@@ -58,6 +58,9 @@ services:
       VEDA_MLFLOW_EXPERIMENT: ${VEDA_MLFLOW_EXPERIMENT:-VEDA-Query-Observability}
       VEDA_MLFLOW_POLL_SECS: ${VEDA_MLFLOW_POLL_SECS:-5}
       VEDA_ENVIRONMENT: ${VEDA_ENVIRONMENT:-production}
+      # Provenance/attribution: stamped as veda.git_sha on every run so a metric
+      # change can be traced to a code version. Set by CI/deploy; empty → not tagged.
+      VEDA_GIT_SHA: ${VEDA_GIT_SHA:-}
     volumes:
       - ".:/app:ro"                 # read-only: sees the engine's trace log, can't touch code
       - mlflow_state:/state

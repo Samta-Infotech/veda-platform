@@ -42,6 +42,9 @@ class SubResult:
 @dataclass
 class MultiResult:
     items: List[SubResult] = field(default_factory=list)  # order preserved (query order)
+    trace_id: Optional[str] = None       # the ONE query-trace correlation id (observability);
+                                         # set by run_hybrid_query, surfaced to the API caller
+                                         # so a client can grep the full trace by this id
 
     @property
     def is_compound(self) -> bool:
