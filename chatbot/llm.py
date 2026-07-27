@@ -167,7 +167,7 @@ def _call_vllm(system: str, user: str, *, temperature: float, max_tokens: int, t
 
 
 def call_slm(system: str, user: str, *, temperature: float = 0.1,
-             max_tokens: int = 200, timeout: int = 20, model: str = SLM_MODEL_NAME,
+             max_tokens: int = 200, timeout: int = 45, model: str = SLM_MODEL_NAME,
              purpose: str = "chatbot") -> str | None:
     """One-shot chat completion routed to Ollama or vLLM per SLM_BACKEND.
     Returns None on any failure — callers must have a deterministic fallback
