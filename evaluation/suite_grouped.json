@@ -1,0 +1,295 @@
+{
+  "category": "grouped",
+  "generated_from": "localhost:15432/homzhub_prod (data-validated)",
+  "count": 20,
+  "queries": [
+    {
+      "id": "GROU-01",
+      "op": "count_by",
+      "query": "What is the distribution of properties by furnishing?",
+      "table": "assets_asset",
+      "columns": [
+        "furnishing"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-02",
+      "op": "measure_by",
+      "query": "What is the average carpet area of properties by furnishing?",
+      "table": "assets_asset",
+      "columns": [
+        "furnishing",
+        "carpet_area"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-03",
+      "op": "count_by",
+      "query": "What is the distribution of properties by facing?",
+      "table": "assets_asset",
+      "columns": [
+        "facing"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-04",
+      "op": "measure_by",
+      "query": "What is the average carpet area of properties by facing?",
+      "table": "assets_asset",
+      "columns": [
+        "facing",
+        "carpet_area"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-05",
+      "op": "count_by",
+      "query": "What is the distribution of projects by possession?",
+      "table": "assets_project",
+      "columns": [
+        "possession"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-06",
+      "op": "count_by",
+      "query": "What is the distribution of lease listings by furnishing?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "furnishing"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-07",
+      "op": "measure_by",
+      "query": "What is the average expected monthly rent of lease listings by furnishing?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "furnishing",
+        "expected_monthly_rent"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-08",
+      "op": "count_by",
+      "query": "What is the distribution of lease listings by status?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-09",
+      "op": "measure_by",
+      "query": "What is the average expected monthly rent of lease listings by status?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "status",
+        "expected_monthly_rent"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-10",
+      "op": "count_by",
+      "query": "What is the distribution of sale listings by status?",
+      "table": "assets_salelisting",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-11",
+      "op": "measure_by",
+      "query": "What is the average expected price of sale listings by status?",
+      "table": "assets_salelisting",
+      "columns": [
+        "status",
+        "expected_price"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-12",
+      "op": "count_by",
+      "query": "What is the distribution of lease transactions by status?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-13",
+      "op": "measure_by",
+      "query": "What is the average rent of lease transactions by status?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "status",
+        "rent"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-14",
+      "op": "count_by",
+      "query": "What is the distribution of payment transactions by other payment type?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "other_payment_type"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-15",
+      "op": "measure_by",
+      "query": "What is the average expected amount of payment transactions by other payment type?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "other_payment_type",
+        "expected_amount"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-16",
+      "op": "count_by",
+      "query": "What is the distribution of payment transactions by transaction type?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "transaction_type"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-17",
+      "op": "measure_by",
+      "query": "What is the average expected amount of payment transactions by transaction type?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "transaction_type",
+        "expected_amount"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "leader/laggard"
+      }
+    },
+    {
+      "id": "GROU-18",
+      "op": "count_by",
+      "query": "What is the distribution of listing visits by visit type?",
+      "table": "assets_listingvisit",
+      "columns": [
+        "visit_type"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-19",
+      "op": "count_by",
+      "query": "What is the distribution of listing visits by status?",
+      "table": "assets_listingvisit",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    },
+    {
+      "id": "GROU-20",
+      "op": "count_by",
+      "query": "What is the distribution of verification documents by status?",
+      "table": "assets_assetverificationdocument",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "bar",
+        "summary": "describes distribution"
+      }
+    }
+  ]
+}

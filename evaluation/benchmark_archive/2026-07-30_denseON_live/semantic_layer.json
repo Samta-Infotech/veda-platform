@@ -1,0 +1,5932 @@
+{
+ "n": 182,
+ "metrics": {
+  "entity": {
+   "acc": 0.401,
+   "n": 182
+  },
+  "measure": {
+   "acc": 1.0,
+   "n": 62
+  },
+  "dimension": {
+   "acc": 0.371,
+   "n": 62
+  },
+  "ranking": {
+   "acc": 1.0,
+   "n": 27
+  },
+  "temporal": {
+   "acc": 0.474,
+   "n": 19
+  }
+ },
+ "by_category_entity": {
+  "aggregate": {
+   "entity_acc": 0.312,
+   "n": 32
+  },
+  "filter": {
+   "entity_acc": 0.263,
+   "n": 19
+  },
+  "grouped": {
+   "entity_acc": 0.45,
+   "n": 20
+  },
+  "ranking": {
+   "entity_acc": 0.333,
+   "n": 12
+  },
+  "simple": {
+   "entity_acc": 0.38,
+   "n": 50
+  },
+  "temporal": {
+   "entity_acc": 0.222,
+   "n": 18
+  },
+  "analytical_multitable": {
+   "entity_acc": 0.71,
+   "n": 31
+  }
+ },
+ "per_query": [
+  {
+   "id": "AGGR-01",
+   "category": "aggregate",
+   "query": "What is the total carpet area across all properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-02",
+   "category": "aggregate",
+   "query": "What is the average carpet area of properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-03",
+   "category": "aggregate",
+   "query": "What is the total carpet area sqft across all properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-04",
+   "category": "aggregate",
+   "query": "What is the average carpet area sqft of properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-05",
+   "category": "aggregate",
+   "query": "What is the total expected monthly rent across all lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-06",
+   "category": "aggregate",
+   "query": "What is the average expected monthly rent of lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-07",
+   "category": "aggregate",
+   "query": "What is the total security deposit across all lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-08",
+   "category": "aggregate",
+   "query": "What is the average security deposit of lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-09",
+   "category": "aggregate",
+   "query": "What is the total annual rent increment percentage across all lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-10",
+   "category": "aggregate",
+   "query": "What is the average annual rent increment percentage of lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-11",
+   "category": "aggregate",
+   "query": "What is the total expected price across all sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-12",
+   "category": "aggregate",
+   "query": "What is the average expected price of sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-13",
+   "category": "aggregate",
+   "query": "What is the total expected booking amount across all sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-14",
+   "category": "aggregate",
+   "query": "What is the average expected booking amount of sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-15",
+   "category": "aggregate",
+   "query": "What is the total total views across all sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-16",
+   "category": "aggregate",
+   "query": "What is the average total views of sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-17",
+   "category": "aggregate",
+   "query": "What is the total rent across all lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-18",
+   "category": "aggregate",
+   "query": "What is the average rent of lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-19",
+   "category": "aggregate",
+   "query": "What is the total security deposit across all lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-20",
+   "category": "aggregate",
+   "query": "What is the average security deposit of lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-21",
+   "category": "aggregate",
+   "query": "What is the total annual rent increment percentage across all lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-22",
+   "category": "aggregate",
+   "query": "What is the average annual rent increment percentage of lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-23",
+   "category": "aggregate",
+   "query": "What is the total expected amount across all payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-24",
+   "category": "aggregate",
+   "query": "What is the average expected amount of payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-25",
+   "category": "aggregate",
+   "query": "What is the total paid amount across all payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-26",
+   "category": "aggregate",
+   "query": "What is the average paid amount of payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-27",
+   "category": "aggregate",
+   "query": "What is the total balance amount across all payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-28",
+   "category": "aggregate",
+   "query": "What is the average balance amount of payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-29",
+   "category": "aggregate",
+   "query": "What is the total unit price across all invoice items?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": "organization_units",
+    "concept_top2": [
+     [
+      "organization_units",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_userinvoice",
+     "assets_asset"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-30",
+   "category": "aggregate",
+   "query": "What is the average unit price of invoice items?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": "organization_units",
+    "concept_top2": [
+     [
+      "organization_units",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_userinvoice",
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "AGGR-31",
+   "category": "aggregate",
+   "query": "What is the total pos price across all invoice items?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "accounts_userinvoice"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "AGGR-32",
+   "category": "aggregate",
+   "query": "What is the average pos price of invoice items?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "accounts_userinvoice"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "FILT-01",
+   "category": "filter",
+   "query": "Show properties where is gated is true.",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true
+   }
+  },
+  {
+   "id": "FILT-02",
+   "category": "filter",
+   "query": "Show properties where power backup is true.",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true
+   }
+  },
+  {
+   "id": "FILT-03",
+   "category": "filter",
+   "query": "List properties with furnishing 'FULL'.",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true
+   }
+  },
+  {
+   "id": "FILT-04",
+   "category": "filter",
+   "query": "Show lease listings where maintenance included is true.",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-05",
+   "category": "filter",
+   "query": "Show lease listings where utility included is true.",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-06",
+   "category": "filter",
+   "query": "List lease listings with furnishing 'FULL'.",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-07",
+   "category": "filter",
+   "query": "Show sale listings where is searchable is true.",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-08",
+   "category": "filter",
+   "query": "List sale listings with status 'APPROVED'.",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-09",
+   "category": "filter",
+   "query": "Show lease transactions where maintenance included is true.",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-10",
+   "category": "filter",
+   "query": "Show lease transactions where utility included is true.",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-11",
+   "category": "filter",
+   "query": "List lease transactions with status 'VACATED'.",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-12",
+   "category": "filter",
+   "query": "Show payment transactions where is third party registered is true.",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true
+   }
+  },
+  {
+   "id": "FILT-13",
+   "category": "filter",
+   "query": "Show payment transactions where is scheduled is true.",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true
+   }
+  },
+  {
+   "id": "FILT-14",
+   "category": "filter",
+   "query": "Show lease tenants where is blacklisted is true.",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-15",
+   "category": "filter",
+   "query": "Show lease tenants where is invite accepted is true.",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-16",
+   "category": "filter",
+   "query": "List listing visits with visit type 'PROPERTY_VIEW'.",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-17",
+   "category": "filter",
+   "query": "Show invoice items where is convenience charge is true.",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "accounts_userinvoice"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-18",
+   "category": "filter",
+   "query": "Show verification documents where is expired is true.",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "FILT-19",
+   "category": "filter",
+   "query": "List verification documents with status 'NEW'.",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false
+   }
+  },
+  {
+   "id": "GROU-01",
+   "category": "grouped",
+   "query": "What is the distribution of properties by furnishing?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-02",
+   "category": "grouped",
+   "query": "What is the average carpet area of properties by furnishing?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-03",
+   "category": "grouped",
+   "query": "What is the distribution of properties by facing?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-04",
+   "category": "grouped",
+   "query": "What is the average carpet area of properties by facing?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-05",
+   "category": "grouped",
+   "query": "What is the distribution of projects by possession?",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-06",
+   "category": "grouped",
+   "query": "What is the distribution of lease listings by furnishing?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-07",
+   "category": "grouped",
+   "query": "What is the average expected monthly rent of lease listings by furnishing?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-08",
+   "category": "grouped",
+   "query": "What is the distribution of lease listings by status?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-09",
+   "category": "grouped",
+   "query": "What is the average expected monthly rent of lease listings by status?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-10",
+   "category": "grouped",
+   "query": "What is the distribution of sale listings by status?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-11",
+   "category": "grouped",
+   "query": "What is the average expected price of sale listings by status?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-12",
+   "category": "grouped",
+   "query": "What is the distribution of lease transactions by status?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-13",
+   "category": "grouped",
+   "query": "What is the average rent of lease transactions by status?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-14",
+   "category": "grouped",
+   "query": "What is the distribution of payment transactions by other payment type?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-15",
+   "category": "grouped",
+   "query": "What is the average expected amount of payment transactions by other payment type?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-16",
+   "category": "grouped",
+   "query": "What is the distribution of payment transactions by transaction type?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-17",
+   "category": "grouped",
+   "query": "What is the average expected amount of payment transactions by transaction type?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GROU-18",
+   "category": "grouped",
+   "query": "What is the distribution of listing visits by visit type?",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-19",
+   "category": "grouped",
+   "query": "What is the distribution of listing visits by status?",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GROU-20",
+   "category": "grouped",
+   "query": "What is the distribution of verification documents by status?",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "RANK-01",
+   "category": "ranking",
+   "query": "Which properties have the highest carpet area?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-02",
+   "category": "ranking",
+   "query": "Which properties have the highest carpet area sqft?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-03",
+   "category": "ranking",
+   "query": "Which lease listings have the highest expected monthly rent?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-04",
+   "category": "ranking",
+   "query": "Which lease listings have the highest security deposit?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-05",
+   "category": "ranking",
+   "query": "Which sale listings have the highest expected price?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-06",
+   "category": "ranking",
+   "query": "Which sale listings have the highest expected booking amount?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-07",
+   "category": "ranking",
+   "query": "Which lease transactions have the highest rent?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-08",
+   "category": "ranking",
+   "query": "Which lease transactions have the highest security deposit?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-09",
+   "category": "ranking",
+   "query": "Which payment transactions have the highest expected amount?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-10",
+   "category": "ranking",
+   "query": "Which payment transactions have the highest paid amount?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-11",
+   "category": "ranking",
+   "query": "Which invoice items have the highest unit price?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": "organization_units",
+    "concept_top2": [
+     [
+      "organization_units",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_userinvoice",
+     "assets_asset"
+    ],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "RANK-12",
+   "category": "ranking",
+   "query": "Which invoice items have the highest pos price?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "accounts_userinvoice"
+    ],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "SMPL-01",
+   "category": "simple",
+   "query": "How many properties are there?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-02",
+   "category": "simple",
+   "query": "How many projects do we have?",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-03",
+   "category": "simple",
+   "query": "How many lease listings exist?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-04",
+   "category": "simple",
+   "query": "How many sale listings are there?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-05",
+   "category": "simple",
+   "query": "How many registered users are there?",
+   "expected_tables": [
+    "users_user"
+   ],
+   "semantic": {
+    "concept_table": "users_user",
+    "concept_top2": [
+     [
+      "users_user",
+      1
+     ],
+     [
+      "users_markettrend",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-06",
+   "category": "simple",
+   "query": "How many payment transactions have been recorded?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-07",
+   "category": "simple",
+   "query": "How many lease units are there?",
+   "expected_tables": [
+    "assets_leaseunit"
+   ],
+   "semantic": {
+    "concept_table": "organization_units",
+    "concept_top2": [
+     [
+      "organization_units",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-08",
+   "category": "simple",
+   "query": "How many amenity groups exist?",
+   "expected_tables": [
+    "assets_amenitygroup"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-09",
+   "category": "simple",
+   "query": "How many verification documents are there?",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-10",
+   "category": "simple",
+   "query": "How many listing visits have taken place?",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-11",
+   "category": "simple",
+   "query": "List all amenities.",
+   "expected_tables": [
+    "assets_amenity"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      1
+     ],
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-12",
+   "category": "simple",
+   "query": "Show all asset types.",
+   "expected_tables": [
+    "assets_assettype"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-13",
+   "category": "simple",
+   "query": "List all amenity categories.",
+   "expected_tables": [
+    "assets_amenitycategory"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      1
+     ],
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-14",
+   "category": "simple",
+   "query": "What are the names of all projects?",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-15",
+   "category": "simple",
+   "query": "Show all society names.",
+   "expected_tables": [
+    "assets_society"
+   ],
+   "semantic": {
+    "concept_table": "assets_society",
+    "concept_top2": [
+     [
+      "assets_society",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-16",
+   "category": "simple",
+   "query": "List all payment types.",
+   "expected_tables": [
+    "accounts_paymenttype"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ],
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-17",
+   "category": "simple",
+   "query": "Show all tenant preferences.",
+   "expected_tables": [
+    "assets_tenantpreference"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-18",
+   "category": "simple",
+   "query": "List all space types.",
+   "expected_tables": [
+    "assets_spacetype"
+   ],
+   "semantic": {
+    "concept_table": "list_of_values_listofvalue",
+    "concept_top2": [
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-19",
+   "category": "simple",
+   "query": "What is the postal code of each property?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": false
+   }
+  },
+  {
+   "id": "SMPL-20",
+   "category": "simple",
+   "query": "Show the building name of each property.",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": false
+   }
+  },
+  {
+   "id": "SMPL-21",
+   "category": "simple",
+   "query": "What is the convenience fee for each payment type?",
+   "expected_tables": [
+    "accounts_paymenttype"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "dimension": false
+   }
+  },
+  {
+   "id": "SMPL-22",
+   "category": "simple",
+   "query": "Show the possession status of each project.",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": false
+   }
+  },
+  {
+   "id": "SMPL-23",
+   "category": "simple",
+   "query": "Which properties are gated?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-24",
+   "category": "simple",
+   "query": "Show properties that have power backup.",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-25",
+   "category": "simple",
+   "query": "Which assets are corner properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-26",
+   "category": "simple",
+   "query": "Show subleased assets.",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-27",
+   "category": "simple",
+   "query": "Which assets are owner verified?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-28",
+   "category": "simple",
+   "query": "Which lease tenants are blacklisted?",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-29",
+   "category": "simple",
+   "query": "Show verification documents that are expired.",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-30",
+   "category": "simple",
+   "query": "Which space types are marked primary?",
+   "expected_tables": [
+    "assets_spacetype"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-31",
+   "category": "simple",
+   "query": "Which asset spaces are shared?",
+   "expected_tables": [
+    "assets_assetspace"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-32",
+   "category": "simple",
+   "query": "Show verification documents with status verified.",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-33",
+   "category": "simple",
+   "query": "Show lease listings that are approved.",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-34",
+   "category": "simple",
+   "query": "Which sale listings are still available?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-35",
+   "category": "simple",
+   "query": "What is the average carpet area of properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-36",
+   "category": "simple",
+   "query": "What is the total paid amount across all payment transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": false
+   }
+  },
+  {
+   "id": "SMPL-37",
+   "category": "simple",
+   "query": "What is the average expected monthly rent on lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-38",
+   "category": "simple",
+   "query": "What is the average security deposit on lease listings?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-39",
+   "category": "simple",
+   "query": "What is the average rent recorded in lease transactions?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-40",
+   "category": "simple",
+   "query": "What is the average unit price of invoice items?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": "organization_units",
+    "concept_top2": [
+     [
+      "organization_units",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_userinvoice",
+     "assets_asset"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-41",
+   "category": "simple",
+   "query": "What is the average maintenance amount for assets?",
+   "expected_tables": [
+    "assets_assetadditionalinfo"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-42",
+   "category": "simple",
+   "query": "What is the average proposed price in sale negotiations?",
+   "expected_tables": [
+    "assets_salenegotiation"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-43",
+   "category": "simple",
+   "query": "What is the highest expected price among sale listings?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "SMPL-44",
+   "category": "simple",
+   "query": "What is the lowest carpet area among properties?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "MIN",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "asc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "SMPL-45",
+   "category": "simple",
+   "query": "What is the highest security deposit on any lease listing?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "SMPL-46",
+   "category": "simple",
+   "query": "How many sale negotiations are there?",
+   "expected_tables": [
+    "assets_salenegotiation"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-47",
+   "category": "simple",
+   "query": "How many asset spaces are recorded?",
+   "expected_tables": [
+    "assets_assetspace"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-48",
+   "category": "simple",
+   "query": "How many lease tenants are there?",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true
+   }
+  },
+  {
+   "id": "SMPL-49",
+   "category": "simple",
+   "query": "Show wishlisted lease leads.",
+   "expected_tables": [
+    "assets_leaselistinglead"
+   ],
+   "semantic": {
+    "concept_table": "leads_lead",
+    "concept_top2": [
+     [
+      "leads_lead",
+      1
+     ],
+     [
+      "leads_customsearch",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "SMPL-50",
+   "category": "simple",
+   "query": "How many amenities are available in total?",
+   "expected_tables": [
+    "assets_amenity"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true
+   }
+  },
+  {
+   "id": "TEMP-01",
+   "category": "temporal",
+   "query": "How many properties were there in the last 12 months by created at?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-02",
+   "category": "temporal",
+   "query": "What is the monthly trend of properties based on created at?",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "assets_asset"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-03",
+   "category": "temporal",
+   "query": "How many projects were there in the last 12 months by created at?",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-04",
+   "category": "temporal",
+   "query": "What is the monthly trend of projects based on created at?",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-05",
+   "category": "temporal",
+   "query": "How many lease listings were there in the last 12 months by available from date?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-06",
+   "category": "temporal",
+   "query": "What is the monthly trend of lease listings based on available from date?",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-07",
+   "category": "temporal",
+   "query": "How many sale listings were there in the last 12 months by available from date?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-08",
+   "category": "temporal",
+   "query": "What is the monthly trend of sale listings based on available from date?",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-09",
+   "category": "temporal",
+   "query": "How many lease transactions were there in the last 12 months by lease start date?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-10",
+   "category": "temporal",
+   "query": "What is the monthly trend of lease transactions based on lease start date?",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-11",
+   "category": "temporal",
+   "query": "How many lease tenants were there in the last 12 months by start date?",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-12",
+   "category": "temporal",
+   "query": "What is the monthly trend of lease tenants based on start date?",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-13",
+   "category": "temporal",
+   "query": "How many listing visits were there in the last 12 months by start date?",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-14",
+   "category": "temporal",
+   "query": "What is the monthly trend of listing visits based on start date?",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-15",
+   "category": "temporal",
+   "query": "How many invoice items were there in the last 12 months by created at?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "accounts_userinvoice"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-16",
+   "category": "temporal",
+   "query": "What is the monthly trend of invoice items based on created at?",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "accounts_userinvoice"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "TEMP-17",
+   "category": "temporal",
+   "query": "How many verification documents were there in the last 12 months by created at?",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": 12,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": true
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "dimension": true,
+    "temporal": true
+   }
+  },
+  {
+   "id": "TEMP-18",
+   "category": "temporal",
+   "query": "What is the monthly trend of verification documents based on created at?",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "temporal": false
+   }
+  },
+  {
+   "id": "GOLD-01",
+   "category": "analytical_multitable",
+   "query": "Which projects have the highest number of listed assets for lease vs sale?",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset",
+    "assets_leaselisting",
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": "number",
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-02",
+   "category": "analytical_multitable",
+   "query": "What is the distribution of assets per project and asset type?",
+   "expected_tables": [
+    "assets_asset",
+    "assets_project",
+    "assets_assettype"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GOLD-03",
+   "category": "analytical_multitable",
+   "query": "How many lease listings and sale listings exist for each project?",
+   "expected_tables": [
+    "assets_project",
+    "assets_leaselisting",
+    "assets_salelisting"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GOLD-04",
+   "category": "analytical_multitable",
+   "query": "Which project has the highest occupancy rate?",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset",
+    "assets_leasetransaction"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-05",
+   "category": "analytical_multitable",
+   "query": "What is the average carpet area of assets per project?",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": true,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GOLD-06",
+   "category": "analytical_multitable",
+   "query": "Which assets currently have active tenants and which are vacant?",
+   "expected_tables": [
+    "assets_asset",
+    "assets_leasetransaction",
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true
+   }
+  },
+  {
+   "id": "GOLD-07",
+   "category": "analytical_multitable",
+   "query": "What is the tenant distribution across different projects?",
+   "expected_tables": [
+    "assets_leasetenant",
+    "assets_project",
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GOLD-08",
+   "category": "analytical_multitable",
+   "query": "What is the average lease duration by asset type?",
+   "expected_tables": [
+    "assets_leasetransaction",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GOLD-09",
+   "category": "analytical_multitable",
+   "query": "Which projects have the highest number of tenants?",
+   "expected_tables": [
+    "assets_leasetenant",
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": "number",
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-10",
+   "category": "analytical_multitable",
+   "query": "How many lease transactions occurred per project?",
+   "expected_tables": [
+    "assets_leasetransaction",
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GOLD-11",
+   "category": "analytical_multitable",
+   "query": "Which amenities are most common across assets?",
+   "expected_tables": [
+    "assets_assetamenitygroup",
+    "assets_amenity"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": "common",
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-12",
+   "category": "analytical_multitable",
+   "query": "What is the distribution of amenities across projects?",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset",
+    "assets_assetamenitygroup"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      1
+     ],
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GOLD-13",
+   "category": "analytical_multitable",
+   "query": "Which projects provide the highest number of amenities?",
+   "expected_tables": [
+    "assets_project",
+    "assets_assetamenitygroup"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      1
+     ],
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": "number",
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": true,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-14",
+   "category": "analytical_multitable",
+   "query": "What percentage of assets have premium amenities?",
+   "expected_tables": [
+    "assets_asset",
+    "assets_amenity",
+    "assets_amenitycategory"
+   ],
+   "semantic": {
+    "concept_table": "assets_amenity",
+    "concept_top2": [
+     [
+      "assets_amenity",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "assets_amenity"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "GOLD-15",
+   "category": "analytical_multitable",
+   "query": "Which assets have the highest number of sale negotiations?",
+   "expected_tables": [
+    "assets_salenegotiation",
+    "assets_salelisting",
+    "assets_asset"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": "number",
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-16",
+   "category": "analytical_multitable",
+   "query": "What is the conversion rate from sale listing to sale transaction?",
+   "expected_tables": [
+    "assets_salelisting",
+    "assets_saletransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "GOLD-17",
+   "category": "analytical_multitable",
+   "query": "What is the average negotiation duration before a sale transaction?",
+   "expected_tables": [
+    "assets_salenegotiation",
+    "assets_saletransaction"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "GOLD-18",
+   "category": "analytical_multitable",
+   "query": "Which projects generate the highest sale value?",
+   "expected_tables": [
+    "assets_saletransaction",
+    "assets_asset",
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ],
+     [
+      "list_of_values_listofvalue",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-19",
+   "category": "analytical_multitable",
+   "query": "What is the total payment received per project?",
+   "expected_tables": [
+    "accounts_paymenttransaction",
+    "assets_asset",
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      1
+     ],
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": "SUM",
+    "grouped": true,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  },
+  {
+   "id": "GOLD-20",
+   "category": "analytical_multitable",
+   "query": "What is the monthly payment trend for lease transactions?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "temporal": false
+   }
+  },
+  {
+   "id": "GOLD-21",
+   "category": "analytical_multitable",
+   "query": "Which tenants contribute the highest rental revenue?",
+   "expected_tables": [
+    "accounts_paymenttransaction",
+    "assets_leasetransaction",
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": "SUM",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-22",
+   "category": "analytical_multitable",
+   "query": "What is the payment method distribution for lease payments?",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "semantic": {
+    "concept_table": "payments_razorpaylinkedaccount",
+    "concept_top2": [
+     [
+      "payments_razorpaylinkedaccount",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "accounts_paymenttransaction"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GOLD-23",
+   "category": "analytical_multitable",
+   "query": "What percentage of assets have completed verification documents?",
+   "expected_tables": [
+    "assets_asset",
+    "assets_assetverificationdocument"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null
+   }
+  },
+  {
+   "id": "GOLD-24",
+   "category": "analytical_multitable",
+   "query": "Which document types are most commonly submitted?",
+   "expected_tables": [
+    "assets_assetverificationdocument",
+    "assets_assetverificationdocumenttype"
+   ],
+   "semantic": {
+    "concept_table": null,
+    "concept_top2": [],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-25",
+   "category": "analytical_multitable",
+   "query": "Which projects have the highest number of verified assets?",
+   "expected_tables": [
+    "assets_assetverificationdocument",
+    "assets_asset",
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "COUNT",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": "number",
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": true,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-26",
+   "category": "analytical_multitable",
+   "query": "What is the conversion rate from listing leads to tenants?",
+   "expected_tables": [
+    "assets_leaselistinglead",
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": "leads_lead",
+    "concept_top2": [
+     [
+      "leads_lead",
+      1
+     ],
+     [
+      "leads_customsearch",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "GOLD-27",
+   "category": "analytical_multitable",
+   "query": "Which projects generate the most leads?",
+   "expected_tables": [
+    "assets_leaselistinglead",
+    "assets_leaselisting",
+    "assets_project"
+   ],
+   "semantic": {
+    "concept_table": "leads_lead",
+    "concept_top2": [
+     [
+      "leads_lead",
+      1
+     ],
+     [
+      "assets_project",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-28",
+   "category": "analytical_multitable",
+   "query": "What is the average time taken to convert a lead to a tenant?",
+   "expected_tables": [
+    "assets_leaselistinglead",
+    "assets_leasetenant"
+   ],
+   "semantic": {
+    "concept_table": "leads_lead",
+    "concept_top2": [
+     [
+      "leads_lead",
+      1
+     ],
+     [
+      "leads_customsearch",
+      1
+     ]
+    ],
+    "glossary_tables": [
+     "users_user"
+    ],
+    "agg_op": "AVG",
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": false,
+    "measure": null
+   }
+  },
+  {
+   "id": "GOLD-29",
+   "category": "analytical_multitable",
+   "query": "Which asset type generates the highest revenue?",
+   "expected_tables": [
+    "accounts_paymenttransaction",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "MAX",
+    "grouped": false,
+    "superlative": true,
+    "ratio": false,
+    "ranking": {
+     "ranked": true,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "ranking": true
+   }
+  },
+  {
+   "id": "GOLD-30",
+   "category": "analytical_multitable",
+   "query": "What is the distribution of asset types across projects?",
+   "expected_tables": [
+    "assets_asset",
+    "assets_project",
+    "assets_assettype"
+   ],
+   "semantic": {
+    "concept_table": "assets_project",
+    "concept_top2": [
+     [
+      "assets_project",
+      2
+     ],
+     [
+      "assets_asset",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": null,
+    "grouped": false,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "dimension": false
+   }
+  },
+  {
+   "id": "GOLD-31",
+   "category": "analytical_multitable",
+   "query": "What is the average lease value per asset type?",
+   "expected_tables": [
+    "assets_leasetransaction",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "semantic": {
+    "concept_table": "assets_asset",
+    "concept_top2": [
+     [
+      "assets_asset",
+      1
+     ],
+     [
+      "asset_assignment",
+      1
+     ]
+    ],
+    "glossary_tables": [],
+    "agg_op": "AVG",
+    "grouped": true,
+    "superlative": false,
+    "ratio": false,
+    "ranking": {
+     "ranked": false,
+     "top_n": null,
+     "subject": null,
+     "dir": "desc"
+    },
+    "temporal": false
+   },
+   "checks": {
+    "entity": true,
+    "measure": null,
+    "dimension": true
+   }
+  }
+ ]
+}

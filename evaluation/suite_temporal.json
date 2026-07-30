@@ -1,0 +1,259 @@
+{
+  "category": "temporal",
+  "generated_from": "localhost:15432/homzhub_prod (data-validated)",
+  "count": 18,
+  "queries": [
+    {
+      "id": "TEMP-01",
+      "op": "date_range",
+      "query": "How many properties were there in the last 12 months by created at?",
+      "table": "assets_asset",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-02",
+      "op": "trend",
+      "query": "What is the monthly trend of properties based on created at?",
+      "table": "assets_asset",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-03",
+      "op": "date_range",
+      "query": "How many projects were there in the last 12 months by created at?",
+      "table": "assets_project",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-04",
+      "op": "trend",
+      "query": "What is the monthly trend of projects based on created at?",
+      "table": "assets_project",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-05",
+      "op": "date_range",
+      "query": "How many lease listings were there in the last 12 months by available from date?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "available_from_date"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-06",
+      "op": "trend",
+      "query": "What is the monthly trend of lease listings based on available from date?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "available_from_date"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-07",
+      "op": "date_range",
+      "query": "How many sale listings were there in the last 12 months by available from date?",
+      "table": "assets_salelisting",
+      "columns": [
+        "available_from_date"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-08",
+      "op": "trend",
+      "query": "What is the monthly trend of sale listings based on available from date?",
+      "table": "assets_salelisting",
+      "columns": [
+        "available_from_date"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-09",
+      "op": "date_range",
+      "query": "How many lease transactions were there in the last 12 months by lease start date?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "lease_start_date"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-10",
+      "op": "trend",
+      "query": "What is the monthly trend of lease transactions based on lease start date?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "lease_start_date"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-11",
+      "op": "date_range",
+      "query": "How many lease tenants were there in the last 12 months by start date?",
+      "table": "assets_leasetenant",
+      "columns": [
+        "start_date"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-12",
+      "op": "trend",
+      "query": "What is the monthly trend of lease tenants based on start date?",
+      "table": "assets_leasetenant",
+      "columns": [
+        "start_date"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-13",
+      "op": "date_range",
+      "query": "How many listing visits were there in the last 12 months by start date?",
+      "table": "assets_listingvisit",
+      "columns": [
+        "start_date"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-14",
+      "op": "trend",
+      "query": "What is the monthly trend of listing visits based on start date?",
+      "table": "assets_listingvisit",
+      "columns": [
+        "start_date"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-15",
+      "op": "date_range",
+      "query": "How many invoice items were there in the last 12 months by created at?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-16",
+      "op": "trend",
+      "query": "What is the monthly trend of invoice items based on created at?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    },
+    {
+      "id": "TEMP-17",
+      "op": "date_range",
+      "query": "How many verification documents were there in the last 12 months by created at?",
+      "table": "assets_assetverificationdocument",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "rows",
+        "viz": "line",
+        "summary": "trend"
+      }
+    },
+    {
+      "id": "TEMP-18",
+      "op": "trend",
+      "query": "What is the monthly trend of verification documents based on created at?",
+      "table": "assets_assetverificationdocument",
+      "columns": [
+        "created_at"
+      ],
+      "expect": {
+        "table": "grouped rows",
+        "viz": "line",
+        "summary": "trend over time"
+      }
+    }
+  ]
+}

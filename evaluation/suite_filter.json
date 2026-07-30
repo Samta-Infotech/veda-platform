@@ -1,0 +1,273 @@
+{
+  "category": "filter",
+  "generated_from": "localhost:15432/homzhub_prod (data-validated)",
+  "count": 19,
+  "queries": [
+    {
+      "id": "FILT-01",
+      "op": "filter_bool",
+      "query": "Show properties where is gated is true.",
+      "table": "assets_asset",
+      "columns": [
+        "is_gated"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-02",
+      "op": "filter_bool",
+      "query": "Show properties where power backup is true.",
+      "table": "assets_asset",
+      "columns": [
+        "power_backup"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-03",
+      "op": "filter_value",
+      "query": "List properties with furnishing 'FULL'.",
+      "table": "assets_asset",
+      "columns": [
+        "furnishing"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-04",
+      "op": "filter_bool",
+      "query": "Show lease listings where maintenance included is true.",
+      "table": "assets_leaselisting",
+      "columns": [
+        "maintenance_included"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-05",
+      "op": "filter_bool",
+      "query": "Show lease listings where utility included is true.",
+      "table": "assets_leaselisting",
+      "columns": [
+        "utility_included"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-06",
+      "op": "filter_value",
+      "query": "List lease listings with furnishing 'FULL'.",
+      "table": "assets_leaselisting",
+      "columns": [
+        "furnishing"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-07",
+      "op": "filter_bool",
+      "query": "Show sale listings where is searchable is true.",
+      "table": "assets_salelisting",
+      "columns": [
+        "is_searchable"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-08",
+      "op": "filter_value",
+      "query": "List sale listings with status 'APPROVED'.",
+      "table": "assets_salelisting",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-09",
+      "op": "filter_bool",
+      "query": "Show lease transactions where maintenance included is true.",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "maintenance_included"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-10",
+      "op": "filter_bool",
+      "query": "Show lease transactions where utility included is true.",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "utility_included"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-11",
+      "op": "filter_value",
+      "query": "List lease transactions with status 'VACATED'.",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-12",
+      "op": "filter_bool",
+      "query": "Show payment transactions where is third party registered is true.",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "is_third_party_registered"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-13",
+      "op": "filter_bool",
+      "query": "Show payment transactions where is scheduled is true.",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "is_scheduled"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-14",
+      "op": "filter_bool",
+      "query": "Show lease tenants where is blacklisted is true.",
+      "table": "assets_leasetenant",
+      "columns": [
+        "is_blacklisted"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-15",
+      "op": "filter_bool",
+      "query": "Show lease tenants where is invite accepted is true.",
+      "table": "assets_leasetenant",
+      "columns": [
+        "is_invite_accepted"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-16",
+      "op": "filter_value",
+      "query": "List listing visits with visit type 'PROPERTY_VIEW'.",
+      "table": "assets_listingvisit",
+      "columns": [
+        "visit_type"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-17",
+      "op": "filter_bool",
+      "query": "Show invoice items where is convenience charge is true.",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "is_convenience_charge"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-18",
+      "op": "filter_bool",
+      "query": "Show verification documents where is expired is true.",
+      "table": "assets_assetverificationdocument",
+      "columns": [
+        "is_expired"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    },
+    {
+      "id": "FILT-19",
+      "op": "filter_value",
+      "query": "List verification documents with status 'NEW'.",
+      "table": "assets_assetverificationdocument",
+      "columns": [
+        "status"
+      ],
+      "expect": {
+        "table": "filtered rows",
+        "viz": "none_table",
+        "summary": "count"
+      }
+    }
+  ]
+}

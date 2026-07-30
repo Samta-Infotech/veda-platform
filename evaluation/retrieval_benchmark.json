@@ -1,0 +1,2398 @@
+{
+ "n": 182,
+ "queries": [
+  {
+   "id": "AGGR-01",
+   "query": "What is the total carpet area across all properties?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-02",
+   "query": "What is the average carpet area of properties?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-03",
+   "query": "What is the total carpet area sqft across all properties?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area_sqft"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-04",
+   "query": "What is the average carpet area sqft of properties?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area_sqft"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-05",
+   "query": "What is the total expected monthly rent across all lease listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.expected_monthly_rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-06",
+   "query": "What is the average expected monthly rent of lease listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.expected_monthly_rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-07",
+   "query": "What is the total security deposit across all lease listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-08",
+   "query": "What is the average security deposit of lease listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-09",
+   "query": "What is the total annual rent increment percentage across all lease listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.annual_rent_increment_percentage"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-10",
+   "query": "What is the average annual rent increment percentage of lease listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.annual_rent_increment_percentage"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-11",
+   "query": "What is the total expected price across all sale listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-12",
+   "query": "What is the average expected price of sale listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-13",
+   "query": "What is the total expected booking amount across all sale listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_booking_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-14",
+   "query": "What is the average expected booking amount of sale listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_booking_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-15",
+   "query": "What is the total total views across all sale listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.total_views"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-16",
+   "query": "What is the average total views of sale listings?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.total_views"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-17",
+   "query": "What is the total rent across all lease transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-18",
+   "query": "What is the average rent of lease transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-19",
+   "query": "What is the total security deposit across all lease transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-20",
+   "query": "What is the average security deposit of lease transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-21",
+   "query": "What is the total annual rent increment percentage across all lease transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.annual_rent_increment_percentage"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-22",
+   "query": "What is the average annual rent increment percentage of lease transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.annual_rent_increment_percentage"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-23",
+   "query": "What is the total expected amount across all payment transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.expected_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-24",
+   "query": "What is the average expected amount of payment transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.expected_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-25",
+   "query": "What is the total paid amount across all payment transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.paid_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-26",
+   "query": "What is the average paid amount of payment transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.paid_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-27",
+   "query": "What is the total balance amount across all payment transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.balance_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-28",
+   "query": "What is the average balance amount of payment transactions?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.balance_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-29",
+   "query": "What is the total unit price across all invoice items?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.unit_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-30",
+   "query": "What is the average unit price of invoice items?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.unit_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-31",
+   "query": "What is the total pos price across all invoice items?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.pos_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "AGGR-32",
+   "query": "What is the average pos price of invoice items?",
+   "category": "aggregate",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.pos_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-01",
+   "query": "Show properties where is gated is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.is_gated"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-02",
+   "query": "Show properties where power backup is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.power_backup"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-03",
+   "query": "List properties with furnishing 'FULL'.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.furnishing"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-04",
+   "query": "Show lease listings where maintenance included is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.maintenance_included"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-05",
+   "query": "Show lease listings where utility included is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.utility_included"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-06",
+   "query": "List lease listings with furnishing 'FULL'.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.furnishing"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-07",
+   "query": "Show sale listings where is searchable is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.is_searchable"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-08",
+   "query": "List sale listings with status 'APPROVED'.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-09",
+   "query": "Show lease transactions where maintenance included is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.maintenance_included"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-10",
+   "query": "Show lease transactions where utility included is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.utility_included"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-11",
+   "query": "List lease transactions with status 'VACATED'.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-12",
+   "query": "Show payment transactions where is third party registered is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.is_third_party_registered"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-13",
+   "query": "Show payment transactions where is scheduled is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.is_scheduled"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-14",
+   "query": "Show lease tenants where is blacklisted is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "expected_columns": [
+    "assets_leasetenant.is_blacklisted"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-15",
+   "query": "Show lease tenants where is invite accepted is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "expected_columns": [
+    "assets_leasetenant.is_invite_accepted"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-16",
+   "query": "List listing visits with visit type 'PROPERTY_VIEW'.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "expected_columns": [
+    "assets_listingvisit.visit_type"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-17",
+   "query": "Show invoice items where is convenience charge is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.is_convenience_charge"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-18",
+   "query": "Show verification documents where is expired is true.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.is_expired"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "FILT-19",
+   "query": "List verification documents with status 'NEW'.",
+   "category": "filter",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-01",
+   "query": "What is the distribution of properties by furnishing?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.furnishing"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-02",
+   "query": "What is the average carpet area of properties by furnishing?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.furnishing",
+    "assets_asset.carpet_area"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-03",
+   "query": "What is the distribution of properties by facing?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.facing"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-04",
+   "query": "What is the average carpet area of properties by facing?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.facing",
+    "assets_asset.carpet_area"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-05",
+   "query": "What is the distribution of projects by possession?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "expected_columns": [
+    "assets_project.possession"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-06",
+   "query": "What is the distribution of lease listings by furnishing?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.furnishing"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-07",
+   "query": "What is the average expected monthly rent of lease listings by furnishing?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.furnishing",
+    "assets_leaselisting.expected_monthly_rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-08",
+   "query": "What is the distribution of lease listings by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-09",
+   "query": "What is the average expected monthly rent of lease listings by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.status",
+    "assets_leaselisting.expected_monthly_rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-10",
+   "query": "What is the distribution of sale listings by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-11",
+   "query": "What is the average expected price of sale listings by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.status",
+    "assets_salelisting.expected_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-12",
+   "query": "What is the distribution of lease transactions by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-13",
+   "query": "What is the average rent of lease transactions by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.status",
+    "assets_leasetransaction.rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-14",
+   "query": "What is the distribution of payment transactions by other payment type?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.other_payment_type"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-15",
+   "query": "What is the average expected amount of payment transactions by other payment type?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.other_payment_type",
+    "accounts_paymenttransaction.expected_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-16",
+   "query": "What is the distribution of payment transactions by transaction type?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.transaction_type"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-17",
+   "query": "What is the average expected amount of payment transactions by transaction type?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.transaction_type",
+    "accounts_paymenttransaction.expected_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-18",
+   "query": "What is the distribution of listing visits by visit type?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "expected_columns": [
+    "assets_listingvisit.visit_type"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-19",
+   "query": "What is the distribution of listing visits by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "expected_columns": [
+    "assets_listingvisit.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GROU-20",
+   "query": "What is the distribution of verification documents by status?",
+   "category": "grouped",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-01",
+   "query": "Which properties have the highest carpet area?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-02",
+   "query": "Which properties have the highest carpet area sqft?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area_sqft"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-03",
+   "query": "Which lease listings have the highest expected monthly rent?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.expected_monthly_rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-04",
+   "query": "Which lease listings have the highest security deposit?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-05",
+   "query": "Which sale listings have the highest expected price?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-06",
+   "query": "Which sale listings have the highest expected booking amount?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_booking_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-07",
+   "query": "Which lease transactions have the highest rent?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-08",
+   "query": "Which lease transactions have the highest security deposit?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-09",
+   "query": "Which payment transactions have the highest expected amount?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.expected_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-10",
+   "query": "Which payment transactions have the highest paid amount?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.paid_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-11",
+   "query": "Which invoice items have the highest unit price?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.unit_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "RANK-12",
+   "query": "Which invoice items have the highest pos price?",
+   "category": "ranking",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.pos_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-01",
+   "query": "How many properties are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-02",
+   "query": "How many projects do we have?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "expected_columns": [
+    "assets_project.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-03",
+   "query": "How many lease listings exist?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-04",
+   "query": "How many sale listings are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-05",
+   "query": "How many registered users are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "users_user"
+   ],
+   "expected_columns": [
+    "users_user.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-06",
+   "query": "How many payment transactions have been recorded?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-07",
+   "query": "How many lease units are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaseunit"
+   ],
+   "expected_columns": [
+    "assets_leaseunit.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-08",
+   "query": "How many amenity groups exist?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_amenitygroup"
+   ],
+   "expected_columns": [
+    "assets_amenitygroup.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-09",
+   "query": "How many verification documents are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-10",
+   "query": "How many listing visits have taken place?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "expected_columns": [
+    "assets_listingvisit.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-11",
+   "query": "List all amenities.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_amenity"
+   ],
+   "expected_columns": [
+    "assets_amenity.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-12",
+   "query": "Show all asset types.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assettype"
+   ],
+   "expected_columns": [
+    "assets_assettype.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-13",
+   "query": "List all amenity categories.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_amenitycategory"
+   ],
+   "expected_columns": [
+    "assets_amenitycategory.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-14",
+   "query": "What are the names of all projects?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "expected_columns": [
+    "assets_project.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-15",
+   "query": "Show all society names.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_society"
+   ],
+   "expected_columns": [
+    "assets_society.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-16",
+   "query": "List all payment types.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "accounts_paymenttype"
+   ],
+   "expected_columns": [
+    "accounts_paymenttype.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-17",
+   "query": "Show all tenant preferences.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_tenantpreference"
+   ],
+   "expected_columns": [
+    "assets_tenantpreference.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-18",
+   "query": "List all space types.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_spacetype"
+   ],
+   "expected_columns": [
+    "assets_spacetype.name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-19",
+   "query": "What is the postal code of each property?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.postal_code"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-20",
+   "query": "Show the building name of each property.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.building_name"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-21",
+   "query": "What is the convenience fee for each payment type?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "accounts_paymenttype"
+   ],
+   "expected_columns": [
+    "accounts_paymenttype.name",
+    "accounts_paymenttype.convenience_fee"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-22",
+   "query": "Show the possession status of each project.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "expected_columns": [
+    "assets_project.name",
+    "assets_project.possession"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-23",
+   "query": "Which properties are gated?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.is_gated"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-24",
+   "query": "Show properties that have power backup.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.power_backup"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-25",
+   "query": "Which assets are corner properties?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.corner_property"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-26",
+   "query": "Show subleased assets.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.is_subleased"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-27",
+   "query": "Which assets are owner verified?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.is_owner_verified"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-28",
+   "query": "Which lease tenants are blacklisted?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "expected_columns": [
+    "assets_leasetenant.is_blacklisted"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-29",
+   "query": "Show verification documents that are expired.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.is_expired"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-30",
+   "query": "Which space types are marked primary?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_spacetype"
+   ],
+   "expected_columns": [
+    "assets_spacetype.is_primary"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-31",
+   "query": "Which asset spaces are shared?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assetspace"
+   ],
+   "expected_columns": [
+    "assets_assetspace.is_shared"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-32",
+   "query": "Show verification documents with status verified.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-33",
+   "query": "Show lease listings that are approved.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-34",
+   "query": "Which sale listings are still available?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.status"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-35",
+   "query": "What is the average carpet area of properties?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area_sqft"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-36",
+   "query": "What is the total paid amount across all payment transactions?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [
+    "accounts_paymenttransaction.paid_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-37",
+   "query": "What is the average expected monthly rent on lease listings?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.expected_monthly_rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-38",
+   "query": "What is the average security deposit on lease listings?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-39",
+   "query": "What is the average rent recorded in lease transactions?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.rent"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-40",
+   "query": "What is the average unit price of invoice items?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.unit_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-41",
+   "query": "What is the average maintenance amount for assets?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assetadditionalinfo"
+   ],
+   "expected_columns": [
+    "assets_assetadditionalinfo.maintenance_amount"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-42",
+   "query": "What is the average proposed price in sale negotiations?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_salenegotiation"
+   ],
+   "expected_columns": [
+    "assets_salenegotiation.proposed_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-43",
+   "query": "What is the highest expected price among sale listings?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.expected_price"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-44",
+   "query": "What is the lowest carpet area among properties?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.carpet_area_sqft"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-45",
+   "query": "What is the highest security deposit on any lease listing?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.security_deposit"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-46",
+   "query": "How many sale negotiations are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_salenegotiation"
+   ],
+   "expected_columns": [
+    "assets_salenegotiation.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-47",
+   "query": "How many asset spaces are recorded?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_assetspace"
+   ],
+   "expected_columns": [
+    "assets_assetspace.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-48",
+   "query": "How many lease tenants are there?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "expected_columns": [
+    "assets_leasetenant.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-49",
+   "query": "Show wishlisted lease leads.",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_leaselistinglead"
+   ],
+   "expected_columns": [
+    "assets_leaselistinglead.is_wishlisted"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "SMPL-50",
+   "query": "How many amenities are available in total?",
+   "category": "simple",
+   "difficulty": "easy",
+   "expected_tables": [
+    "assets_amenity"
+   ],
+   "expected_columns": [
+    "assets_amenity.id"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-01",
+   "query": "How many properties were there in the last 12 months by created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-02",
+   "query": "What is the monthly trend of properties based on created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_asset"
+   ],
+   "expected_columns": [
+    "assets_asset.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-03",
+   "query": "How many projects were there in the last 12 months by created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "expected_columns": [
+    "assets_project.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-04",
+   "query": "What is the monthly trend of projects based on created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_project"
+   ],
+   "expected_columns": [
+    "assets_project.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-05",
+   "query": "How many lease listings were there in the last 12 months by available from date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.available_from_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-06",
+   "query": "What is the monthly trend of lease listings based on available from date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leaselisting"
+   ],
+   "expected_columns": [
+    "assets_leaselisting.available_from_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-07",
+   "query": "How many sale listings were there in the last 12 months by available from date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.available_from_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-08",
+   "query": "What is the monthly trend of sale listings based on available from date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_salelisting"
+   ],
+   "expected_columns": [
+    "assets_salelisting.available_from_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-09",
+   "query": "How many lease transactions were there in the last 12 months by lease start date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.lease_start_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-10",
+   "query": "What is the monthly trend of lease transactions based on lease start date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [
+    "assets_leasetransaction.lease_start_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-11",
+   "query": "How many lease tenants were there in the last 12 months by start date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "expected_columns": [
+    "assets_leasetenant.start_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-12",
+   "query": "What is the monthly trend of lease tenants based on start date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetenant"
+   ],
+   "expected_columns": [
+    "assets_leasetenant.start_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-13",
+   "query": "How many listing visits were there in the last 12 months by start date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "expected_columns": [
+    "assets_listingvisit.start_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-14",
+   "query": "What is the monthly trend of listing visits based on start date?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_listingvisit"
+   ],
+   "expected_columns": [
+    "assets_listingvisit.start_date"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-15",
+   "query": "How many invoice items were there in the last 12 months by created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-16",
+   "query": "What is the monthly trend of invoice items based on created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "accounts_userinvoiceitem"
+   ],
+   "expected_columns": [
+    "accounts_userinvoiceitem.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-17",
+   "query": "How many verification documents were there in the last 12 months by created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "TEMP-18",
+   "query": "What is the monthly trend of verification documents based on created at?",
+   "category": "temporal",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [
+    "assets_assetverificationdocument.created_at"
+   ],
+   "source": "suite"
+  },
+  {
+   "id": "GOLD-01",
+   "query": "Which projects have the highest number of listed assets for lease vs sale?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset",
+    "assets_leaselisting",
+    "assets_salelisting"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-02",
+   "query": "What is the distribution of assets per project and asset type?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_asset",
+    "assets_project",
+    "assets_assettype"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-03",
+   "query": "How many lease listings and sale listings exist for each project?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_project",
+    "assets_leaselisting",
+    "assets_salelisting"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-04",
+   "query": "Which project has the highest occupancy rate?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset",
+    "assets_leasetransaction"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-05",
+   "query": "What is the average carpet area of assets per project?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-06",
+   "query": "Which assets currently have active tenants and which are vacant?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_asset",
+    "assets_leasetransaction",
+    "assets_leasetenant"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-07",
+   "query": "What is the tenant distribution across different projects?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetenant",
+    "assets_project",
+    "assets_asset"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-08",
+   "query": "What is the average lease duration by asset type?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetransaction",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-09",
+   "query": "Which projects have the highest number of tenants?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetenant",
+    "assets_project"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-10",
+   "query": "How many lease transactions occurred per project?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leasetransaction",
+    "assets_project"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-11",
+   "query": "Which amenities are most common across assets?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_assetamenitygroup",
+    "assets_amenity"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-12",
+   "query": "What is the distribution of amenities across projects?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_project",
+    "assets_asset",
+    "assets_assetamenitygroup"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-13",
+   "query": "Which projects provide the highest number of amenities?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_project",
+    "assets_assetamenitygroup"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-14",
+   "query": "What percentage of assets have premium amenities?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_asset",
+    "assets_amenity",
+    "assets_amenitycategory"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-15",
+   "query": "Which assets have the highest number of sale negotiations?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_salenegotiation",
+    "assets_salelisting",
+    "assets_asset"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-16",
+   "query": "What is the conversion rate from sale listing to sale transaction?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salelisting",
+    "assets_saletransaction"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-17",
+   "query": "What is the average negotiation duration before a sale transaction?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_salenegotiation",
+    "assets_saletransaction"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": false
+  },
+  {
+   "id": "GOLD-18",
+   "query": "Which projects generate the highest sale value?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_saletransaction",
+    "assets_asset",
+    "assets_project"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": false
+  },
+  {
+   "id": "GOLD-19",
+   "query": "What is the total payment received per project?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "accounts_paymenttransaction",
+    "assets_asset",
+    "assets_project"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-20",
+   "query": "What is the monthly payment trend for lease transactions?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-21",
+   "query": "Which tenants contribute the highest rental revenue?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "accounts_paymenttransaction",
+    "assets_leasetransaction",
+    "assets_leasetenant"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-22",
+   "query": "What is the payment method distribution for lease payments?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "accounts_paymenttransaction"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-23",
+   "query": "What percentage of assets have completed verification documents?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_asset",
+    "assets_assetverificationdocument"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-24",
+   "query": "Which document types are most commonly submitted?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_assetverificationdocument",
+    "assets_assetverificationdocumenttype"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-25",
+   "query": "Which projects have the highest number of verified assets?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_assetverificationdocument",
+    "assets_asset",
+    "assets_project"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": false
+  },
+  {
+   "id": "GOLD-26",
+   "query": "What is the conversion rate from listing leads to tenants?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselistinglead",
+    "assets_leasetenant"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-27",
+   "query": "Which projects generate the most leads?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leaselistinglead",
+    "assets_leaselisting",
+    "assets_project"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-28",
+   "query": "What is the average time taken to convert a lead to a tenant?",
+   "category": "analytical_multitable",
+   "difficulty": "medium",
+   "expected_tables": [
+    "assets_leaselistinglead",
+    "assets_leasetenant"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-29",
+   "query": "Which asset type generates the highest revenue?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "accounts_paymenttransaction",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-30",
+   "query": "What is the distribution of asset types across projects?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_asset",
+    "assets_project",
+    "assets_assettype"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  },
+  {
+   "id": "GOLD-31",
+   "query": "What is the average lease value per asset type?",
+   "category": "analytical_multitable",
+   "difficulty": "hard",
+   "expected_tables": [
+    "assets_leasetransaction",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "expected_columns": [],
+   "source": "gold",
+   "has_data": true
+  }
+ ]
+}

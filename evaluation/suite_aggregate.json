@@ -1,0 +1,455 @@
+{
+  "category": "aggregate",
+  "generated_from": "localhost:15432/homzhub_prod (data-validated)",
+  "count": 32,
+  "queries": [
+    {
+      "id": "AGGR-01",
+      "op": "sum",
+      "query": "What is the total carpet area across all properties?",
+      "table": "assets_asset",
+      "columns": [
+        "carpet_area"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-02",
+      "op": "avg",
+      "query": "What is the average carpet area of properties?",
+      "table": "assets_asset",
+      "columns": [
+        "carpet_area"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-03",
+      "op": "sum",
+      "query": "What is the total carpet area sqft across all properties?",
+      "table": "assets_asset",
+      "columns": [
+        "carpet_area_sqft"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-04",
+      "op": "avg",
+      "query": "What is the average carpet area sqft of properties?",
+      "table": "assets_asset",
+      "columns": [
+        "carpet_area_sqft"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-05",
+      "op": "sum",
+      "query": "What is the total expected monthly rent across all lease listings?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "expected_monthly_rent"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-06",
+      "op": "avg",
+      "query": "What is the average expected monthly rent of lease listings?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "expected_monthly_rent"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-07",
+      "op": "sum",
+      "query": "What is the total security deposit across all lease listings?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "security_deposit"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-08",
+      "op": "avg",
+      "query": "What is the average security deposit of lease listings?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "security_deposit"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-09",
+      "op": "sum",
+      "query": "What is the total annual rent increment percentage across all lease listings?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "annual_rent_increment_percentage"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-10",
+      "op": "avg",
+      "query": "What is the average annual rent increment percentage of lease listings?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "annual_rent_increment_percentage"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-11",
+      "op": "sum",
+      "query": "What is the total expected price across all sale listings?",
+      "table": "assets_salelisting",
+      "columns": [
+        "expected_price"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-12",
+      "op": "avg",
+      "query": "What is the average expected price of sale listings?",
+      "table": "assets_salelisting",
+      "columns": [
+        "expected_price"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-13",
+      "op": "sum",
+      "query": "What is the total expected booking amount across all sale listings?",
+      "table": "assets_salelisting",
+      "columns": [
+        "expected_booking_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-14",
+      "op": "avg",
+      "query": "What is the average expected booking amount of sale listings?",
+      "table": "assets_salelisting",
+      "columns": [
+        "expected_booking_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-15",
+      "op": "sum",
+      "query": "What is the total total views across all sale listings?",
+      "table": "assets_salelisting",
+      "columns": [
+        "total_views"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-16",
+      "op": "avg",
+      "query": "What is the average total views of sale listings?",
+      "table": "assets_salelisting",
+      "columns": [
+        "total_views"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-17",
+      "op": "sum",
+      "query": "What is the total rent across all lease transactions?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "rent"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-18",
+      "op": "avg",
+      "query": "What is the average rent of lease transactions?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "rent"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-19",
+      "op": "sum",
+      "query": "What is the total security deposit across all lease transactions?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "security_deposit"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-20",
+      "op": "avg",
+      "query": "What is the average security deposit of lease transactions?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "security_deposit"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-21",
+      "op": "sum",
+      "query": "What is the total annual rent increment percentage across all lease transactions?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "annual_rent_increment_percentage"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-22",
+      "op": "avg",
+      "query": "What is the average annual rent increment percentage of lease transactions?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "annual_rent_increment_percentage"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-23",
+      "op": "sum",
+      "query": "What is the total expected amount across all payment transactions?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "expected_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-24",
+      "op": "avg",
+      "query": "What is the average expected amount of payment transactions?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "expected_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-25",
+      "op": "sum",
+      "query": "What is the total paid amount across all payment transactions?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "paid_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-26",
+      "op": "avg",
+      "query": "What is the average paid amount of payment transactions?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "paid_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-27",
+      "op": "sum",
+      "query": "What is the total balance amount across all payment transactions?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "balance_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-28",
+      "op": "avg",
+      "query": "What is the average balance amount of payment transactions?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "balance_amount"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-29",
+      "op": "sum",
+      "query": "What is the total unit price across all invoice items?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "unit_price"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-30",
+      "op": "avg",
+      "query": "What is the average unit price of invoice items?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "unit_price"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    },
+    {
+      "id": "AGGR-31",
+      "op": "sum",
+      "query": "What is the total pos price across all invoice items?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "pos_price"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states total"
+      }
+    },
+    {
+      "id": "AGGR-32",
+      "op": "avg",
+      "query": "What is the average pos price of invoice items?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "pos_price"
+      ],
+      "expect": {
+        "table": "1x1 scalar",
+        "viz": "kpi_none",
+        "summary": "states average"
+      }
+    }
+  ]
+}

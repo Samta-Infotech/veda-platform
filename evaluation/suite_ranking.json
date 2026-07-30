@@ -1,0 +1,175 @@
+{
+  "category": "ranking",
+  "generated_from": "localhost:15432/homzhub_prod (data-validated)",
+  "count": 12,
+  "queries": [
+    {
+      "id": "RANK-01",
+      "op": "topn",
+      "query": "Which properties have the highest carpet area?",
+      "table": "assets_asset",
+      "columns": [
+        "carpet_area"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-02",
+      "op": "topn",
+      "query": "Which properties have the highest carpet area sqft?",
+      "table": "assets_asset",
+      "columns": [
+        "carpet_area_sqft"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-03",
+      "op": "topn",
+      "query": "Which lease listings have the highest expected monthly rent?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "expected_monthly_rent"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-04",
+      "op": "topn",
+      "query": "Which lease listings have the highest security deposit?",
+      "table": "assets_leaselisting",
+      "columns": [
+        "security_deposit"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-05",
+      "op": "topn",
+      "query": "Which sale listings have the highest expected price?",
+      "table": "assets_salelisting",
+      "columns": [
+        "expected_price"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-06",
+      "op": "topn",
+      "query": "Which sale listings have the highest expected booking amount?",
+      "table": "assets_salelisting",
+      "columns": [
+        "expected_booking_amount"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-07",
+      "op": "topn",
+      "query": "Which lease transactions have the highest rent?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "rent"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-08",
+      "op": "topn",
+      "query": "Which lease transactions have the highest security deposit?",
+      "table": "assets_leasetransaction",
+      "columns": [
+        "security_deposit"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-09",
+      "op": "topn",
+      "query": "Which payment transactions have the highest expected amount?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "expected_amount"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-10",
+      "op": "topn",
+      "query": "Which payment transactions have the highest paid amount?",
+      "table": "accounts_paymenttransaction",
+      "columns": [
+        "paid_amount"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-11",
+      "op": "topn",
+      "query": "Which invoice items have the highest unit price?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "unit_price"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    },
+    {
+      "id": "RANK-12",
+      "op": "topn",
+      "query": "Which invoice items have the highest pos price?",
+      "table": "accounts_userinvoiceitem",
+      "columns": [
+        "pos_price"
+      ],
+      "expect": {
+        "table": "ranked rows",
+        "viz": "bar",
+        "summary": "names the top"
+      }
+    }
+  ]
+}

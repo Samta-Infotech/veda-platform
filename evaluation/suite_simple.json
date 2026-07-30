@@ -1,0 +1,65 @@
+{
+  "category": "simple",
+  "description": "Single-table queries derived from the live homzhub schema. Each targets a real table/column with data, covering count / list / projection / filter / scalar-aggregate / min-max ops. Judging is component-wise (table + visualization + summary), not SQL-structural.",
+  "generated_from": "localhost:15432/homzhub_prod (populated tables only)",
+  "ops": ["count", "list", "projection", "filter_bool", "filter_value", "scalar_agg", "minmax"],
+  "queries": [
+    {"id": "SMPL-01", "op": "count", "query": "How many properties are there?", "table": "assets_asset", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-02", "op": "count", "query": "How many projects do we have?", "table": "assets_project", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-03", "op": "count", "query": "How many lease listings exist?", "table": "assets_leaselisting", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-04", "op": "count", "query": "How many sale listings are there?", "table": "assets_salelisting", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-05", "op": "count", "query": "How many registered users are there?", "table": "users_user", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-06", "op": "count", "query": "How many payment transactions have been recorded?", "table": "accounts_paymenttransaction", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-07", "op": "count", "query": "How many lease units are there?", "table": "assets_leaseunit", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-08", "op": "count", "query": "How many amenity groups exist?", "table": "assets_amenitygroup", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-09", "op": "count", "query": "How many verification documents are there?", "table": "assets_assetverificationdocument", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+    {"id": "SMPL-10", "op": "count", "query": "How many listing visits have taken place?", "table": "assets_listingvisit", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states the count"}},
+
+    {"id": "SMPL-11", "op": "list", "query": "List all amenities.", "table": "assets_amenity", "columns": ["name"], "expect": {"table": "1 col many rows", "viz": "none_list", "summary": "notes how many / examples"}},
+    {"id": "SMPL-12", "op": "list", "query": "Show all asset types.", "table": "assets_assettype", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "lists/counts types"}},
+    {"id": "SMPL-13", "op": "list", "query": "List all amenity categories.", "table": "assets_amenitycategory", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "lists categories"}},
+    {"id": "SMPL-14", "op": "list", "query": "What are the names of all projects?", "table": "assets_project", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "count/examples"}},
+    {"id": "SMPL-15", "op": "list", "query": "Show all society names.", "table": "assets_society", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "count/examples"}},
+    {"id": "SMPL-16", "op": "list", "query": "List all payment types.", "table": "accounts_paymenttype", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "lists payment types"}},
+    {"id": "SMPL-17", "op": "list", "query": "Show all tenant preferences.", "table": "assets_tenantpreference", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "lists preferences"}},
+    {"id": "SMPL-18", "op": "list", "query": "List all space types.", "table": "assets_spacetype", "columns": ["name"], "expect": {"table": "1 col rows", "viz": "none_list", "summary": "lists space types"}},
+
+    {"id": "SMPL-19", "op": "projection", "query": "What is the postal code of each property?", "table": "assets_asset", "columns": ["postal_code"], "expect": {"table": "id+postal_code rows", "viz": "none_table", "summary": "describes column"}},
+    {"id": "SMPL-20", "op": "projection", "query": "Show the building name of each property.", "table": "assets_asset", "columns": ["building_name"], "expect": {"table": "rows", "viz": "none_table", "summary": "describes"}},
+    {"id": "SMPL-21", "op": "projection", "query": "What is the convenience fee for each payment type?", "table": "accounts_paymenttype", "columns": ["name", "convenience_fee"], "expect": {"table": "name+fee rows", "viz": "bar_optional", "summary": "describes fees"}},
+    {"id": "SMPL-22", "op": "projection", "query": "Show the possession status of each project.", "table": "assets_project", "columns": ["name", "possession"], "expect": {"table": "rows", "viz": "none_table", "summary": "describes"}},
+
+    {"id": "SMPL-23", "op": "filter_bool", "query": "Which properties are gated?", "table": "assets_asset", "columns": ["is_gated"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count of gated"}},
+    {"id": "SMPL-24", "op": "filter_bool", "query": "Show properties that have power backup.", "table": "assets_asset", "columns": ["power_backup"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-25", "op": "filter_bool", "query": "Which assets are corner properties?", "table": "assets_asset", "columns": ["corner_property"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-26", "op": "filter_bool", "query": "Show subleased assets.", "table": "assets_asset", "columns": ["is_subleased"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-27", "op": "filter_bool", "query": "Which assets are owner verified?", "table": "assets_asset", "columns": ["is_owner_verified"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-28", "op": "filter_bool", "query": "Which lease tenants are blacklisted?", "table": "assets_leasetenant", "columns": ["is_blacklisted"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-29", "op": "filter_bool", "query": "Show verification documents that are expired.", "table": "assets_assetverificationdocument", "columns": ["is_expired"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-30", "op": "filter_bool", "query": "Which space types are marked primary?", "table": "assets_spacetype", "columns": ["is_primary"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-31", "op": "filter_bool", "query": "Which asset spaces are shared?", "table": "assets_assetspace", "columns": ["is_shared"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+
+    {"id": "SMPL-32", "op": "filter_value", "query": "Show verification documents with status verified.", "table": "assets_assetverificationdocument", "columns": ["status"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count verified"}},
+    {"id": "SMPL-33", "op": "filter_value", "query": "Show lease listings that are approved.", "table": "assets_leaselisting", "columns": ["status"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count approved"}},
+    {"id": "SMPL-34", "op": "filter_value", "query": "Which sale listings are still available?", "table": "assets_salelisting", "columns": ["status"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+
+    {"id": "SMPL-35", "op": "scalar_agg", "query": "What is the average carpet area of properties?", "table": "assets_asset", "columns": ["carpet_area_sqft"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+    {"id": "SMPL-36", "op": "scalar_agg", "query": "What is the total paid amount across all payment transactions?", "table": "accounts_paymenttransaction", "columns": ["paid_amount"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states total"}},
+    {"id": "SMPL-37", "op": "scalar_agg", "query": "What is the average expected monthly rent on lease listings?", "table": "assets_leaselisting", "columns": ["expected_monthly_rent"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+    {"id": "SMPL-38", "op": "scalar_agg", "query": "What is the average security deposit on lease listings?", "table": "assets_leaselisting", "columns": ["security_deposit"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+    {"id": "SMPL-39", "op": "scalar_agg", "query": "What is the average rent recorded in lease transactions?", "table": "assets_leasetransaction", "columns": ["rent"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+    {"id": "SMPL-40", "op": "scalar_agg", "query": "What is the average unit price of invoice items?", "table": "accounts_userinvoiceitem", "columns": ["unit_price"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+    {"id": "SMPL-41", "op": "scalar_agg", "query": "What is the average maintenance amount for assets?", "table": "assets_assetadditionalinfo", "columns": ["maintenance_amount"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+    {"id": "SMPL-42", "op": "scalar_agg", "query": "What is the average proposed price in sale negotiations?", "table": "assets_salenegotiation", "columns": ["proposed_price"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states avg"}},
+
+    {"id": "SMPL-43", "op": "minmax", "query": "What is the highest expected price among sale listings?", "table": "assets_salelisting", "columns": ["expected_price"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states max"}},
+    {"id": "SMPL-44", "op": "minmax", "query": "What is the lowest carpet area among properties?", "table": "assets_asset", "columns": ["carpet_area_sqft"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states min"}},
+    {"id": "SMPL-45", "op": "minmax", "query": "What is the highest security deposit on any lease listing?", "table": "assets_leaselisting", "columns": ["security_deposit"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states max"}},
+
+    {"id": "SMPL-46", "op": "count", "query": "How many sale negotiations are there?", "table": "assets_salenegotiation", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states count"}},
+    {"id": "SMPL-47", "op": "count", "query": "How many asset spaces are recorded?", "table": "assets_assetspace", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states count"}},
+    {"id": "SMPL-48", "op": "count", "query": "How many lease tenants are there?", "table": "assets_leasetenant", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states count"}},
+    {"id": "SMPL-49", "op": "filter_bool", "query": "Show wishlisted lease leads.", "table": "assets_leaselistinglead", "columns": ["is_wishlisted"], "expect": {"table": "filtered rows", "viz": "none_table", "summary": "count"}},
+    {"id": "SMPL-50", "op": "count", "query": "How many amenities are available in total?", "table": "assets_amenity", "columns": ["id"], "expect": {"table": "1x1 scalar", "viz": "kpi_none", "summary": "states count"}}
+  ]
+}
