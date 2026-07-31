@@ -796,6 +796,12 @@ RERANKER_ENABLED       = True
 # recalibrated to the reranker score scale — see Step 3 / warm-env eval.
 PRIMARY_RERANK_ENABLED = True
 RERANKER_MODEL         = "BAAI/bge-reranker-v2-m3"
+# Startup hard-check (default OFF → current graceful-degrade behavior). When True, a
+# reranker model that fails to load RAISES instead of silently degrading every query to
+# pure-RRF order — a deployment that requires reranker precision fails fast at first use
+# rather than serving invisibly-degraded results (this silent degrade invalidated the
+# first adversarial-audit runs until it was spotted in the logs).
+RERANKER_REQUIRED      = False
 RERANKER_DEVICE        = _RESOLVED_DEVICE
 RERANKER_BATCH_SIZE    = 64
 # perf (query <30s): cross-encoder cost is ~quadratic in sequence length. 512-token pairs
@@ -862,7 +868,11 @@ RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR = int(__import__("os").environ.get(
 # overspent (retrieval/grounding struggled — Tier-2 rarely rescues those), and give
 # Tier-2 a hard deadline enforced between SLM rounds. Measured 2026-07-12: without
 # these, ungroundable maintenance-vocabulary queries burned 240s+ per refusal.
-TIER2_SKIP_IF_HEAD_OVER_S = 60.0
+TIER2_SKIP_IF_HEAD_OVER_S = 120.0   # was 60.0 — but the Tier-2 HEAD is allowed
+# TIER2_TIME_BUDGET_S (120s); skipping at 60s cut off answerable complex analytical
+# queries (real Homzhub joins take 60-120s) BEFORE they used their own budget. Aligned
+# to the budget so the head runs its full allotment. (Latency tradeoff: worst-case slow
+# queries now wait up to 120s instead of refusing at 60s.)
 TIER2_TIME_BUDGET_S       = 120.0
 # Referent-strength thresholds for the strict gate (schema statistics, no word lists):
 # entity claims need this idf; column claims must map to at most this many columns —
@@ -1280,6 +1290,163 @@ AGGREGATE_OPERATORS = {
 # planning is pure latency today (measured 2026-07-11: q19/q22/q34/q37 pushed past
 # the 120s suite budget). superlative detection itself stays on (trace + intent print).
 SUPERLATIVE_JOIN_ROUTING = False
+# TYPED_MULTITABLE_ROUTE (diagnostic experiment, default OFF → byte-identical prod
+# behavior). The adversarial audit (VEDA_ADVERSARIAL_FAILURE_MAP.md) proved the
+# deterministic multi-table planner (try_multitable/build_from_entities/plan_joins) is
+# structurally UNREACHED: `intent` is hardcoded SIMPLE, so `needs_join` is False for
+# every grouped/aggregate/relational query and try_multitable is never invoked (reached
+# 2/48 multi-table queries). When ON, the ALREADY-COMPUTED grammar modes (aggregate /
+# grouped / ratio) and generic relational join-phrasing ("with their", "per", "for each")
+# also set needs_join, routing these into the EXISTING planner. No new planner, no intent
+# rewrite, no table-name heuristics. try_multitable falls back gracefully on a miss, so a
+# false positive degrades to today's behavior. Measure planner-reached + correct-join lift
+# on the saved adversarial subset before considering default-on.
+TYPED_MULTITABLE_ROUTE = True
+# ── Entity Resolution V1 (query/entity_resolver.py) — flag-gated experiment ────
+# Fuses existing name-coverage evidence into a confidence-gated canonical ANCHOR
+# (the domination logic select_targets already uses for secondaries, applied to the
+# anchor). Only status==RESOLVED changes behavior: a high-confidence single entity
+# PINS the primary (surviving vet_primary), and ≥2 distinct resolved entity tables
+# force needs_join into the existing build_from_entities planner. AMBIGUOUS/UNGROUNDED
+# → current pipeline UNCHANGED. Default OFF → byte-identical prod. No SLM, no GNN.
+ENTITY_RESOLUTION_V1 = True
+# ── JOIN_CONTENT_BRIDGES (Option C experiment, flag-gated, default OFF) ────────
+# The ER-V1 A/B proved multi-table queries now REACH the planner (2→41/48) but join
+# coverage stays 0 because plan_join_tree's necessity gate (join_planner._shortest_path)
+# refuses to route through non-junction CONTENT bridge tables (e.g. asset↔leasetransaction
+# via accounts_generalledger) — only pure junctions are auto-allowed. When ON,
+# build_from_entities pre-computes the shortest BUSINESS-FK path (audit edges already
+# priced out by weight) between the anchor and each target and adds those intermediate
+# tables to allowed_intermediates, so the planner may traverse exactly the bridges needed
+# to connect the requested entities — nothing arbitrary. Bounded by JOIN_MAX_HOPS/cost.
+JOIN_CONTENT_BRIDGES = True
+ER_COVERAGE_MIN = 0.5     # min name-coverage of the winning entity to call it RESOLVED
+ER_MARGIN_MIN = 0.4       # a same-count competitor within this coverage gap → AMBIGUOUS (fallback)
+ER_PIN_CONFIDENCE = 0.7   # min confidence to PIN the primary (bypass vet_primary); else influence only
+# ── ER_GROUNDED_REFUSAL (RC3 grounded clarification, flag-gated, default OFF) ──
+# When entity resolution finds two candidates genuinely tied for the SAME entity
+# slot (status == AMBIGUOUS: identical matched-token set within _AMB_EPS), ask the
+# user which entity they mean instead of coin-flipping into a confident wrong
+# answer. Scoped to AMBIGUOUS ONLY — UNGROUNDED is left to the existing
+# retrieval/vet_primary fallback (retrieval may still hold the right table), so
+# this cannot regress answerable single-table queries. Targets the "Ambiguous"
+# query class (measured 0% — answered when it should have clarified).
+ER_GROUNDED_REFUSAL = True
+# ── JOIN_SEMANTIC_BRIDGE (ownership/relationship bridge selector, flag-gated, OFF) ──
+# When two entities have MULTIPLE structurally-identical bridge tables (assets_asset↔
+# users_user can go via assets_assetuser OR assets_assetdocument OR assets_assetkey —
+# all 2-FK links), the FK-graph alone can't tell which is meant, and the planner picks
+# by insertion order → "properties with their owners" wrongly joins through the DOCUMENT
+# table (wrong entity + fan-out duplicates). When ON, _semantic_bridge_prefer() reads
+# the query's relationship word ("owner") and the candidate bridges' business_purpose
+# ('ownership …' vs 'documents …' vs 'asset keys …') and PREFERS the semantic match —
+# but ONLY on a unique winner (ties/no-match fall back unchanged, so it never guesses).
+# Verified deterministically on the semantic model (G01 → assets_assetuser).
+JOIN_SEMANTIC_BRIDGE = True
+# ── SINGLE_TABLE_DETERMINISTIC (SLM-free single-table SQL, flag-gated, OFF) ────
+# VEDA's single-table SQL is written by the SLM (generation.py::generate_sql →
+# call_slm), so even a trivial "show users" needs the model and the WHOLE pipeline
+# hard-fails when the SLM is unreachable. But that SELECT is fully determined by
+# pieces already computed deterministically upstream (recommended projection, the
+# canonical temporal column + resolved range, ranking, limit). When ON,
+# _deterministic_single_table_sql() assembles those into the SELECT WITHOUT the SLM
+# for the safe cases (projection + date-range + temporal rank), deferring to the SLM
+# only for measure/value ranking or categorical filters. Robustness (works during an
+# SLM outage) + latency/cost win for simple queries. Downstream value/qualifier gates
+# still validate, so a dropped filter is refused, never answered wrong.
+SINGLE_TABLE_DETERMINISTIC = True
+# ── AGG_CHAIN_EXCLUDE_AUDIT (aggregate-chain audit-edge fix, flag-gated, OFF) ──
+# _resolve_agg_chain (grain planner's pre-aggregation BFS) traverses edges by
+# cardinality only — it does NOT skip AUDIT edges (created_by_id/updated_by_id →
+# users), unlike the main join planner which treats them as terminal. Result: "top 5
+# properties by number of payment transactions" routes the COUNT through
+# users_usercoin → users_user → assets_asset.created_by_id (who CREATED the asset) —
+# a meaningless chain that still passes the cardinality gate and produces a
+# confidently-WRONG answer (structural scorer marks it "ok"). When ON, the BFS skips
+# audit edges → the nonsense path is blocked (query refuses/falls back instead of
+# fabricating). Verified on E04/I06/L04.
+AGG_CHAIN_EXCLUDE_AUDIT = True
+# ── GRAIN_RANKING_SUBJECT_ANCHOR (grain-inversion fix, flag-gated, OFF) ────────
+# "top N <SUBJECT> by <measure>" — the SUBJECT is the grain, but retrieval ranks the
+# measured entity highest and (with no per/by DIMENSION to override) the planner
+# anchors there: "top 5 PROPERTIES by number of payment transactions" inverts to
+# accounts_paymenttransaction, counting assets through a nonsense usercoin/audit chain.
+# When ON, the grain planner takes parse_ranking's SUBJECT ("properties"), resolves it
+# via name tokens + the entity glossary (assets_asset), and anchors there. Uses the
+# EXISTING ranking grammar — no new keywords. Verified on E04/E02/L04.
+GRAIN_RANKING_SUBJECT_ANCHOR = True
+# ── GRAIN_SUBJECT_DISAMBIGUATION (superlative clarify-vs-anchor, flag-gated, OFF) ──
+# "which <SUBJECT> has the highest/most <measure>" — when the SUBJECT word is itself a
+# real entity table, it IS the anchor to rank; the superlative planner should not stop
+# and ask "'<subject>' of which records? name the entity to count." When ON, before that
+# clarify fires, if EXACTLY ONE of the subject's candidate tables is an exact name-token
+# match ("project" -> assets_project, not assets_projectamenitygroup) it is adopted as the
+# anchor. Fires only on an unambiguous single match, so genuinely ambiguous subjects
+# ("which document type" across 5 document tables) still clarify — zero-hallucination
+# intact. Purely structural (name-token equality); no per-table rules.
+GRAIN_SUBJECT_DISAMBIGUATION = True
+# ── DENSE_ID_REMAP (fix: dense signal dead in fusion, flag-gated, OFF) ─────────
+# Signal 1 (dense BGE-M3) returns column_embeddings_v2.col_id = a UUID, but every other
+# signal + semantic_model use "table.column". So in RRF the dense entries never align
+# with any other signal (0/50 overlap, measured) → dense contributes NOTHING and every
+# final result carries semantic_score=0.0 (retrieval runs sparse-only). When ON,
+# SemanticSearchEngine.search remaps each dense UUID → "table.column" via the store's
+# own table_name/col_name, so dense aligns and actually reinforces fusion. Default OFF →
+# byte-identical (dense stays dead) until A/B-verified with the embedding hosts up.
+DENSE_ID_REMAP = True
+# ── FASTPATH_ENTITY_GLOSSARY (business-noun trend/analytical grounding, OFF) ───
+# The always-on registry entity matcher (registry.match_concepts) keys concepts on
+# COLLAPSED table-name tokens ('asset', 'leasetenant'), so the business nouns a user
+# actually types ("property", "lease listing", "invoice item") intersect NOTHING and
+# match_concepts returns [] → fast_path can't build a deterministic trend/count, the
+# query mis-routes to a wrong table, and the qualifier gate refuses. Measured: temporal
+# "monthly trend of X based on <col>" refused 8/8 (root cause traced to entity grounding,
+# NOT temporal logic). When ON, four ADDITIVE, coordinated behaviours fire — each a no-op
+# when OFF, so prod stays byte-identical:
+#   A) _single_entity, ONLY when match_concepts finds nothing, grounds the business noun
+#      via (i) exact/substring match of adjacent-token concatenations against the collapsed
+#      concept tokens ("lease"+"tenant"→'leasetenant'; "invoice"+"item"⊂'userinvoiceitem')
+#      and (ii) the curated alias glossary (veda_entity_aliases.json — the SAME data
+#      ENTITY_RESOLUTION_V1 uses) for semantic renames ("property"→assets_asset). Both are
+#      DATA-DRIVEN (no table names in code) and unambiguous-only (else refuse-over-guess).
+#   D) a trend phrase ("monthly trend of X", "X over time") counts as a count-over-time
+#      intent so the EXISTING trend branch is reached (it required a literal count word).
+#   C) the date column the user NAMES ("... based on <col>") is grounded against the table's
+#      real TEMPORAL columns and used as the trend axis when it differs from the pre-baked
+#      creation timestamp (else the trend would silently bucket the WRONG column).
+#   B) time-bucket words (monthly/weekly/…) join the qualifier-gate strip so a correct
+#      date_trunc trend is not false-refused for the literal word 'monthly'.
+# Default OFF → byte-identical until A/B-verified.
+FASTPATH_ENTITY_GLOSSARY = True
+# ── QUERY_UNDERSTANDING (enterprise understanding layer, flag-gated, OFF) ──────
+# Source-agnostic, zero-hallucination understanding stage (veda/understanding/).
+# LLM extracts a TYPED intent (concepts only, never columns); a DETERMINISTIC
+# grounding step maps each concept to a real, validated schema artifact and
+# REFUSES when it can't ground (the anti-hallucination firewall). Fixes the
+# upstream mis-understanding class (grain-inversion, missed-intent,
+# language-words-as-filters) that no downstream join/grain patch can. Default OFF
+# → pipeline byte-identical; graceful-degrades to the existing path on any SLM /
+# parse / grounding failure. See docs + veda/understanding/schema.py.
+QUERY_UNDERSTANDING_ENABLED = False
+QUERY_UNDERSTANDING_MIN_CONFIDENCE = 0.5   # below this, degrade to existing path (don't refuse)
+# ── ANALYTICAL_SQL_V2 (Phase 1: structured analytical SQL, flag-gated, OFF) ────
+# Benchmark showed SQL-gen DROPS aggregate intent (scalar/grouped queries came back as
+# raw-row lists). Phase 1 fix: a structured AnalyticalSpec (veda/analytical_spec.py)
+# that SQL-gen CONSUMES instead of re-inferring from language. Scope: SINGLE-ANCHOR
+# analytics (scalar COUNT/SUM/AVG/MIN/MAX, grouped GROUP BY). Multi-table analytical =
+# Phase 2. Deterministic; returns None → existing path (zero regression by construction).
+ANALYTICAL_SQL_V2 = False
+# NOTE (RC2 routing mis-pick, 2026-07-23): TWO small routing-layer fixes were tried and
+# both reverted (VEDA_ADVERSARIAL_FAILURE_MAP.md Part 4). v1 (broad FK-child penalty in
+# select_primary_table) regressed 20→18. v2 (structural name-prefix penalty + parent
+# injection) had zero regressions but ZERO lift — even on its target cases (A02/F03/E02 the
+# primary never changed) because vet_primary (ANCHOR_VET_ROUTER=True) re-scores off the
+# retrieval `results`, where the child/detail table has columns and an injected parent has
+# none, and OVERRIDES the pick back to the child. Conclusion: RC2 is NOT a single-function
+# re-rank — it needs vet_primary/score_anchors (entity-vs-detail awareness) AND the upstream
+# retrieval ranking (parent entities out-ranked by wide detail tables) + concept grounding
+# (property→asset, rent→leasetransaction are semantic, not structural). Deferred as a deeper
+# multi-point fix; do not re-attempt as a routing penalty alone.
 # Deterministic superlative-by-dimension planner (query/superlative_plan.py, QSR-
 # backed): grouped ranked aggregation straight from resolution artifacts, fast-path
 # style (no retrieval/LLM). Ambiguous dimension/measure → grounded clarify listing
@@ -1512,6 +1679,22 @@ JOIN_MAX_TARGETS   = 5    # sanity cap on requested entities per query (was hard
 # making any audit-edge chain unreachable. Hops is a secondary backstop.
 JOIN_MAX_HOPS      = 6
 JOIN_MAX_PATH_COST = 8
+# Edge-category grain preference (flag-gated, default OFF -> prod byte-identical).
+# Structural, NO table-name hardcoding. Each FK edge is categorised from graph shape:
+#   business  -- a first-class entity's FK to its parent/dimension (the ownership spine)
+#   junction  -- an FK from a CONNECTOR table (>=2 distinct non-audit outgoing FK targets):
+#                a link/association/attachment table whose purpose is joining other tables.
+# The failure this fixes: two business entities can be joined either down the real
+# ownership spine (asset -> leaseunit -> leaselisting) OR through an equal-cost connector
+# shortcut (asset -> assetdocument -> leaselisting). The connector answers at the wrong
+# grain (lease DOCUMENTS per project, not lease LISTINGS) and fans out. When ON, a hop
+# that uses a connector as a TWO-SIDED bridge -- entered via the connector's own FK AND
+# exited via another of the connector's own FKs -- costs extra, so the business spine wins
+# equal-cost ties (Phase 3 grain preference). A connector reached as an ENDPOINT, or as the
+# ONLY route, is unaffected (small penalty, never a hard block). Derived purely from FK
+# direction + audit type; no per-table rules.
+JOIN_EDGE_CATEGORY_PENALTY      = True
+JOIN_EDGE_CATEGORY_PENALTY_COST = 5
 # Grain planner: "X with their Y count" / "X with more than N Y" gets deterministic
 # pre-aggregation CTE SQL (aggregate each child by FK first, then join to the anchor
 # grain) — no LLM, no fan-out, converts the guard's refusals into correct answers.

@@ -80,10 +80,28 @@ def _encode_query(query):
 
 def _pg():
     import psycopg2
+    from psycopg2 import sql as _sql
     cfg = get_db_config()
-    return psycopg2.connect(host=cfg["host"], port=cfg["port"],
+    conn = psycopg2.connect(host=cfg["host"], port=cfg["port"],
                             dbname=cfg["database"], user=cfg["user"],
                             password=cfg["password"])
+    # Make the configured source schema authoritative for EVERY connection, exactly like
+    # veda.execution.execute_sql — secondary probes (value-grounding, existence checks)
+    # emit UNQUALIFIED table names, so without this they resolve against the role's default
+    # search_path (public) and raise "relation … does not exist" for a non-public source
+    # (e.g. homzhub). No-op when the source has no non-default schema → public sources stay
+    # byte-identical. Session-level SET persists after autocommit toggles back.
+    schema = cfg.get("schema")
+    if schema:
+        try:
+            conn.autocommit = True
+            with conn.cursor() as _cur:
+                _cur.execute(_sql.SQL("SET search_path TO {}, public").format(
+                    _sql.Identifier(schema)))
+            conn.autocommit = False
+        except Exception:
+            pass
+    return conn
 
 
 _ENGINES = {}   # scope -> engine, insertion-ordered → used as an LRU (see ENGINE_CACHE_MAX)

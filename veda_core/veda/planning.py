@@ -204,11 +204,17 @@ def ratio_mode(query):
 
 
 def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
-                        top_n=None, group_col=None, ranked=False, direction="desc"):
+                        top_n=None, group_col=None, ranked=False, direction="desc",
+                        measure_agg=None, measure_column=None, distinct=False):
     """Deterministic pre-aggregation: one CTE per child relation, each grouped by
     its FK to the anchor, then joined to the anchor grain. No LLM, and structurally
     fan-out-free — two child CTEs can never cross-multiply (the 'organizations with
     user count AND incident count' double-count bug is impossible by construction).
+
+    SINGLE-ANCHOR extension (measure_agg set, no child_specs): a bare aggregate on the
+    anchor's OWN data — scalar `AGG(col)`/`COUNT(*)`, or single-table `GROUP BY dim`.
+    This is the AQS (Analytical Query Specification) target — the SAME builder, not a
+    parallel one. Existing child-count callers (measure_agg=None) are byte-identical.
 
     child_specs: [(display_name, edge_or_chain)] — edge_or_chain is either the single
     anchor-touching graph edge (the child side is whichever side isn't the anchor), or
@@ -216,6 +222,26 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
     list from the anchor down to the actual child table. A polymorphic
     predicate is applied INSIDE the child's CTE. threshold turns LEFT JOIN + COALESCE
     into INNER JOIN + HAVING (the 'more than N' filter)."""
+    # ── SINGLE-ANCHOR aggregate (AQS): no child relation — aggregate the anchor's own
+    #    column / COUNT its rows, optionally grouped by an anchor dimension. Additive
+    #    early return; does not touch the child-CTE path below. Returns (sql, {anchor}).
+    if measure_agg is not None and not child_specs:
+        _a = measure_agg.upper()
+        if _a == "COUNT":
+            expr = (f'COUNT(DISTINCT "{measure_column}")' if (distinct and measure_column)
+                    else ('COUNT(DISTINCT "id")' if distinct else "COUNT(*)"))
+        else:
+            if not measure_column:
+                return None, set()
+            expr = f'{_a}("{measure_column}")'
+        alias = f"{measure_agg.lower()}_result"
+        if group_col:
+            _dir = "ASC" if direction == "asc" else "DESC"
+            _lim = f" LIMIT {int(top_n)}" if top_n else " LIMIT 100"
+            return (f'SELECT t0."{group_col}", {expr} AS {alias} FROM "{anchor}" t0 '
+                    f'GROUP BY t0."{group_col}" ORDER BY {alias} {_dir}{_lim}', {anchor})
+        return f'SELECT {expr} AS {alias} FROM "{anchor}" t0', {anchor}
+
     ctes, joins, selects, tables = [], [], [], {anchor}
     metrics = []
     if group_col:
@@ -316,6 +342,10 @@ def _resolve_agg_chain(anchor, tgt, graph, max_hops=6):
     here, not a query-named table). Returns an ordered hop list — each hop a dict of
     near/far table+column — or None if no such safe path exists within `max_hops`."""
     from collections import deque
+    try:
+        from config import AGG_CHAIN_EXCLUDE_AUDIT as _agg_skip_audit
+    except Exception:
+        _agg_skip_audit = False
     if anchor == tgt:
         return []
     by_table = {}
@@ -328,6 +358,14 @@ def _resolve_agg_chain(anchor, tgt, graph, max_hops=6):
         if depth >= max_hops:
             continue
         for e in by_table.get(cur, []):
+            # Audit edges (created_by_id/updated_by_id → users) are NOT business
+            # relationships — the main join planner treats them as terminal. This BFS
+            # must too, else it routes e.g. "assets per payment" through
+            # users_usercoin → users_user → assets_asset.created_by_id (who CREATED the
+            # asset), a semantically meaningless chain that still passes the cardinality
+            # gate. Flag-gated; when off, behavior is unchanged.
+            if _agg_skip_audit and e.get("relationship_type") == "audit":
+                continue
             if e["source_table"] == cur:
                 far_table, near_col, far_col = e["target_table"], e["source_column"], e["target_column"]
                 safe = e.get("cardinality") in ("1:N", "1:1")
@@ -441,6 +479,88 @@ def _junction_tables(graph, sm):
             junctions.add(t)
     _JUNCTION_CACHE = junctions
     return junctions
+
+
+# Query-language noise that must never count as a relationship word when matching
+# a bridge table's business semantics (schema-agnostic English glue, not schema terms).
+_REL_STOPWORDS = frozenset({
+    "show", "list", "with", "their", "there", "the", "and", "for", "each", "all",
+    "that", "have", "has", "are", "was", "were", "who", "whom", "whose", "which",
+    "from", "per", "them", "they", "get", "give", "find", "many", "much", "related",
+    "associated", "along", "together", "both", "between", "into", "over", "under",
+})
+
+
+_SEM_TEXT_CACHE = None
+
+
+def _table_semantic_text(sm):
+    """Per-table lowercased business_purpose (table-level intent), cached. Deliberately
+    EXCLUDES column business_roles/aliases — those add noise: a document/key table has a
+    column role mentioning 'owner', but its PURPOSE ('Stores documents related to
+    assets' / 'Tracks asset keys') does not. The table-level purpose is the clean,
+    discriminative signal (assets_assetuser → 'Records the ownership … of assets by
+    users'; assets_assetdocument → 'documents'; assets_assetkey → 'asset keys')."""
+    global _SEM_TEXT_CACHE
+    if _SEM_TEXT_CACHE is not None:
+        return _SEM_TEXT_CACHE
+    tabs = sm.get("tables", {}) if isinstance(sm.get("tables"), dict) else {}
+    text = {t: str(meta.get("business_purpose") or meta.get("description") or "").lower()
+            for t, meta in tabs.items()}
+    _SEM_TEXT_CACHE = text
+    return text
+
+
+def _semantic_bridge_prefer(query, sm, graph, anchor, targets):
+    """Query-aware bridge preference (the SEMANTIC selector). PAIRWISE: for each
+    (anchor, target) pair with MULTIPLE candidate bridge tables (tables that FK to
+    BOTH endpoints — assets_asset↔users_user has assetuser / assetdocument / assetkey),
+    pick the bridge whose business semantics best match the query's RELATIONSHIP word
+    (query content tokens MINUS the entity names themselves). 'owners' → 'owner' ⊂
+    assets_assetuser's 'ownership'/'Asset Owner' text (score 1) beats assetdocument /
+    assetkey (score 0) → assetuser preferred. This is exactly the signal FK-count alone
+    can't see. Only acts when there IS a semantic winner; ties / no-match → empty (falls
+    back to existing behavior, so no regression on queries this doesn't apply to)."""
+    from retrieval.query_enrichment import _singularize
+    entity_toks = set()
+    for e in [anchor, *(targets or [])]:
+        if e:
+            entity_toks |= _name_toks(e)
+    rel_toks = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower())
+                if len(w) > 3 and w not in _REL_STOPWORDS}
+    rel_toks -= entity_toks                       # keep only relationship words
+    if not rel_toks:
+        return set()
+    fk_targets = {}
+    direct = set()                                # non-audit neighbors of anchor (either dir)
+    for e in graph.get("edges", []):
+        if e.get("relationship_type") == "audit":
+            continue
+        s, t = e["source_table"], e["target_table"]
+        if s != t:
+            fk_targets.setdefault(s, set()).add(t)
+        if s == anchor:
+            direct.add(t)
+        elif t == anchor:
+            direct.add(s)
+    sem_text = _table_semantic_text(sm)
+    prefer = set()
+    for tgt in (targets or []):
+        if not tgt or tgt == anchor or tgt in direct:
+            continue                              # directly joinable → no bridge needed
+        # candidate bridges: THIN tables (≤4 FK targets — a real association table, not
+        # an entity hub like paymenttransaction/10-FK) that FK to BOTH anchor and target.
+        cands = [t for t, tg in fk_targets.items()
+                 if anchor in tg and tgt in tg and t not in (anchor, tgt) and len(tg) <= 4]
+        if len(cands) < 2:
+            continue                              # 0/1 bridge → nothing to disambiguate
+        scored = sorted(((sum(1 for r in rel_toks if r in sem_text.get(c, "")), c)
+                         for c in cands), reverse=True)
+        # act ONLY on a UNIQUE top scorer (>0) — ties/no-match fall back to existing
+        # behavior, so this never guesses when the semantics don't clearly disambiguate.
+        if scored[0][0] > 0 and (len(scored) == 1 or scored[0][0] > scored[1][0]):
+            prefer.add(scored[0][1])
+    return prefer
 
 
 def _match_measure_metric(query):
@@ -674,6 +794,39 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
                 if _entity_cands:
                     _entity_cands.sort(key=lambda x: (x[1], len(x[0])))
                     _group_anchor = _entity_cands[0][0]
+        # "top/bottom N <SUBJECT> by <measure>": the ranking SUBJECT is the grain, not
+        # the measured entity retrieval ranked highest ("top 5 PROPERTIES by number of
+        # payment transactions" → anchor assets_asset, COUNT payments — else it inverts
+        # to accounts_paymenttransaction). Uses parse_ranking's SUBJECT (existing ranking
+        # grammar — no new keywords) and resolves it via name tokens + the entity
+        # glossary. Flag-gated; None subject / unresolvable → unchanged.
+        if _group_anchor is None:
+            try:
+                from config import GRAIN_RANKING_SUBJECT_ANCHOR as _rsa
+            except Exception:
+                _rsa = False
+            if _rsa:
+                from query.ranking_parser import parse_ranking as _pr
+                _subj = (_pr(query).subject or "").strip()
+                if _subj:
+                    _stoks = [_singularize(w) for w in _subj.split() if len(w) > 2]
+                    _concat = "".join(_stoks)
+                    # among tables the subject names, pick the MOST EXACT (fewest name
+                    # tokens) — "users" → users_user {user}, not users_userrole {user,role}.
+                    _matches = [t for t in graph_tables
+                                if t not in junctions and _stoks
+                                and (set(_stoks) <= _name_toks(t) or _concat in _name_toks(t))]
+                    _cand = (min(_matches, key=lambda t: (len(_name_toks(t)), len(t)))
+                             if _matches else None)
+                    if _cand is None:             # glossary fallback (property→assets_asset)
+                        try:
+                            from query.entity_resolver import _entity_glossary
+                            _gl = _entity_glossary() or {}
+                            _cand = next((_gl[k] for k in (_concat, *_stoks) if k in _gl), None)
+                        except Exception:
+                            _cand = None
+                    if _cand in graph_tables and _cand not in junctions:
+                        _group_anchor = _cand
     if _group_anchor:
         anchor = _group_anchor
     elif primary and primary in graph_tables and primary not in junctions:
@@ -885,10 +1038,74 @@ def build_from_entities(query, sm, all_cols, tf, anchor, targets, results=None):
     if not graph.get("tables") or anchor not in set(graph.get("tables", [])):
         return {"action": "fallback"}
     junctions = _junction_tables(graph, sm)
+    # Grain-inversion fix (flag-gated): for "top N <SUBJECT> by <measure>", the ranking
+    # SUBJECT is the grain — but the ER resolver ranks the MEASURED entity highest by
+    # name-coverage, so the caller hands us an INVERTED anchor ("top 5 PROPERTIES by
+    # number of payments" → anchor=accounts_paymenttransaction, target=assets_asset).
+    # Re-seat the anchor on the subject entity when it's among the resolved tables.
+    # Uses parse_ranking's SUBJECT (existing ranking grammar) + name tokens / glossary.
+    try:
+        from config import GRAIN_RANKING_SUBJECT_ANCHOR as _rsa
+    except Exception:
+        _rsa = False
+    if _rsa and targets:
+        from query.ranking_parser import parse_ranking as _pr
+        _subj = (_pr(query).subject or "").strip()
+        if _subj:
+            _stoks = [_singularize(w) for w in _subj.split() if len(w) > 2]
+            _concat = "".join(_stoks)
+            _pool = [anchor, *targets]
+            _want = next((t for t in _pool if _stoks and
+                          (set(_stoks) <= _name_toks(t) or _concat in _name_toks(t))), None)
+            if _want is None:
+                try:
+                    from query.entity_resolver import _entity_glossary
+                    _gl = _entity_glossary() or {}
+                    _g = next((_gl[k] for k in (_concat, *_stoks) if k in _gl), None)
+                    _want = _g if _g in _pool else None
+                except Exception:
+                    _want = None
+            if _want and _want != anchor:
+                targets = [anchor] + [t for t in targets if t != _want]
+                anchor = _want
     qtoks = {_singularize(w) for w in _re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
     named_tables = {t for t in graph.get("tables", []) if _name_toks(t) & qtoks}
     tgts = [t for t in dict.fromkeys(targets) if t]
     allowed_intermediates = junctions | named_tables | {anchor} | set(tgts)
+    # Option C (flag-gated): allow the planner to traverse the CONTENT bridges that lie on
+    # the shortest business-FK path between the anchor and each target — otherwise the
+    # necessity gate refuses non-junction intermediates and the join can't be built even
+    # though a valid business path exists. Only the tables ON that shortest path are added,
+    # so no arbitrary tunnelling; audit edges are already priced out by _shortest_path.
+    try:
+        from config import JOIN_CONTENT_BRIDGES, JOIN_MAX_HOPS, JOIN_MAX_PATH_COST
+    except Exception:
+        JOIN_CONTENT_BRIDGES, JOIN_MAX_HOPS, JOIN_MAX_PATH_COST = False, 6, 8
+    if JOIN_CONTENT_BRIDGES and tgts:
+        try:
+            from query.join_planner import _adjacency, _shortest_path, _connector_tables
+            _adj = _adjacency(graph)
+            # Same structural edge-category penalty as plan_join_tree so the SEED path (which
+            # populates allowed_intermediates) walks the business spine, not a connector
+            # shortcut. Flag-gated, default OFF.
+            _cn, _pn = None, 0
+            try:
+                from config import (JOIN_EDGE_CATEGORY_PENALTY as _ecp,
+                                    JOIN_EDGE_CATEGORY_PENALTY_COST as _ecc)
+                if _ecp:
+                    _cn, _pn = _connector_tables(_adj), _ecc
+            except Exception:
+                _cn, _pn = None, 0
+            for _tgt in tgts:
+                _p = _shortest_path(_adj, anchor, _tgt, max_hops=JOIN_MAX_HOPS,
+                                    allowed=None, max_cost=JOIN_MAX_PATH_COST,
+                                    connectors=_cn, penalty=_pn)
+                for _e in (_p or []):
+                    allowed_intermediates.add(_e.get("source_table"))
+                    allowed_intermediates.add(_e.get("target_table"))
+            allowed_intermediates.discard(None)
+        except Exception:
+            pass
     return _plan_and_build(query, sm, all_cols, tf, graph=graph, junctions=junctions,
                            anchor=anchor, targets=tgts,
                            allowed_intermediates=allowed_intermediates, results=results)
@@ -908,9 +1125,19 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
     from config import JOIN_TREE_PLANNER_ENABLED as _tree_on
     if _tree_on:
         from query.join_planner import plan_join_tree
+        _strong = None
+        try:
+            from config import JOIN_SEMANTIC_BRIDGE as _sb
+            if _sb:
+                _strong = _semantic_bridge_prefer(query, sm, graph, anchor, targets) or None
+                if _strong:
+                    # a semantically-chosen bridge must be traversable, not just preferred
+                    allowed_intermediates = allowed_intermediates | _strong
+        except Exception:
+            _strong = None
         plan = plan_join_tree(anchor, targets, graph, query,
                               allowed_intermediates=allowed_intermediates | set(targets),
-                              junctions=junctions)
+                              junctions=junctions, prefer_strong=_strong)
     else:
         plan = plan_joins(anchor, targets, graph, query,
                           allowed_intermediates=allowed_intermediates | set(targets))

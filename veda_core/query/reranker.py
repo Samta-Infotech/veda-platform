@@ -90,6 +90,16 @@ def _load_local_crossencoder():
                      "— retrieval is now pure RRF (degraded) for EVERY query until fixed",
                      RERANKER_MODEL, type(e).__name__, e)
         warnings.warn(f"[Reranker] Could not load model '{RERANKER_MODEL}': {e}")
+        # Optional hard-check: fail fast instead of silently degrading (flag default OFF).
+        try:
+            from config import RERANKER_REQUIRED
+        except Exception:
+            RERANKER_REQUIRED = False
+        if RERANKER_REQUIRED:
+            raise RuntimeError(
+                f"RERANKER_REQUIRED=True but reranker model '{RERANKER_MODEL}' failed to "
+                f"load ({type(e).__name__}: {e}) — refusing to serve pure-RRF-degraded "
+                f"results. Install/cache the model or set RERANKER_REQUIRED=False.") from e
         return None
 
 

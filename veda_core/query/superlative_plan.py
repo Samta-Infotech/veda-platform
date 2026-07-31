@@ -42,6 +42,27 @@ def _words(query: str):
     return re.findall(r"[a-z0-9]+", query.lower())
 
 
+def _pick_unambiguous_subject(dim_span, entities, sm):
+    """GRAIN_SUBJECT_DISAMBIGUATION (flag-gated, default OFF). Return the single candidate
+    table whose distinctive name-tokens CONTAIN the subject word as an exact token
+    ("project" ⊆ {asset, project} → assets_project), or None when 0 / >1 match. On a lone
+    match the subject word names the entity outright, so it is the anchor and no clarify is
+    needed; otherwise the caller clarifies (genuinely ambiguous → zero-hallucination)."""
+    try:
+        from config import GRAIN_SUBJECT_DISAMBIGUATION
+        if not GRAIN_SUBJECT_DISAMBIGUATION:
+            return None
+        from retrieval.query_enrichment import _singularize
+        from veda.routing import _name_toks
+    except Exception:
+        return None
+    dt = {_singularize(w) for w in re.findall(r"[a-z]+", (dim_span or "").lower()) if len(w) > 2}
+    if not dt:
+        return None
+    hits = [t for t, _ in entities if dt <= {_singularize(x) for x in _name_toks(t)}]
+    return hits[0] if len(hits) == 1 else None
+
+
 def _human(table: str, sm=None) -> str:
     """'accounts_generalledgercategory' → 'general ledger category': drop the app
     prefix, segment fused words via the schema vocabulary (name_tokens). The user
@@ -255,28 +276,39 @@ def _try(query: str, sm=None, mode=None):
             # the full pipeline's dim-word anchor trap ends in a wrong-table gate
             # refusal after 30–60s (measured twice on this shape).
             if dim_span and spans[dim_span].entities:
-                opts = [_human(t, sm) for t, _ in spans[dim_span].entities][:5]
-                return ("clarify",
-                        f"'{dim_span}' of which records? This data has: "
-                        f"{', '.join(opts)} — name the entity to count.")
-            return None
-        ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))
-        anchor, top = ranked[0]
-        second = ranked[1][1] if len(ranked) > 1 else 0.0
-        if top - second < ANCHOR_MARGIN:
-            # dim-ownership tie-break: entity families tie on shared name words
-            # (paymenttransaction / settlement / settlementlog all match 'payment');
-            # only candidates owning EVERY word of the asked dimension phrase
-            # ('transaction type' → transaction_type) stay in the running.
-            owners = [(t, s) for t, s in ranked
-                      if dim_phrase and all(
-                          any(cid.rpartition(".")[0] == t for cid in spans[w].dimensions)
-                          for w in dim_phrase)]
-            if owners and (len(owners) == 1
-                           or owners[0][1] - owners[1][1] >= ANCHOR_MARGIN):
-                anchor, top = owners[0]
+                # Grain-subject disambiguation (flag-gated, default OFF): if the subject
+                # word is ONE unambiguous entity table ("which PROJECT …" → assets_project,
+                # not project_amenity_group) it is the anchor — don't clarify. Only an exact
+                # single name-token match qualifies, so ambiguous subjects still clarify.
+                _subj = _pick_unambiguous_subject(dim_span, spans[dim_span].entities, sm)
+                if _subj is not None:
+                    anchor = _subj
+                    why_ev[anchor].append("unambiguous subject entity (exact name-token match)")
+                else:
+                    opts = [_human(t, sm) for t, _ in spans[dim_span].entities][:5]
+                    return ("clarify",
+                            f"'{dim_span}' of which records? This data has: "
+                            f"{', '.join(opts)} — name the entity to count.")
             else:
-                return None                          # ambiguous subject → full pipeline
+                return None
+        else:
+            ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))
+            anchor, top = ranked[0]
+            second = ranked[1][1] if len(ranked) > 1 else 0.0
+            if top - second < ANCHOR_MARGIN:
+                # dim-ownership tie-break: entity families tie on shared name words
+                # (paymenttransaction / settlement / settlementlog all match 'payment');
+                # only candidates owning EVERY word of the asked dimension phrase
+                # ('transaction type' → transaction_type) stay in the running.
+                owners = [(t, s) for t, s in ranked
+                          if dim_phrase and all(
+                              any(cid.rpartition(".")[0] == t for cid in spans[w].dimensions)
+                              for w in dim_phrase)]
+                if owners and (len(owners) == 1
+                               or owners[0][1] - owners[1][1] >= ANCHOR_MARGIN):
+                    anchor, top = owners[0]
+                else:
+                    return None                      # ambiguous subject → full pipeline
 
     cols_meta = sm.get("columns", {})
     anchor_cols = {c.split(".", 1)[1] for c in cols_meta if c.split(".", 1)[0] == anchor}

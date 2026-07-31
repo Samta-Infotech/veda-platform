@@ -51,3 +51,10 @@ class ExecutionState:
     rerank_query:         Optional[str] = None            # the (enhanced) text the cross-encoder reranked against, or None if no rerank ran
     sql_planning:         Dict[str, Any] = field(default_factory=dict)   # action/anchor hints — reserved, not yet consumed
     refusal_reason:       Optional[str] = None            # reused (seeds the repair hint)
+    # Entity Resolution V1 (query/entity_resolver.py, flag-gated) — carried so Tier-2 can
+    # reuse the resolved canonical entities instead of re-resolving. Empty when the flag
+    # is off or resolution was not RESOLVED.
+    resolved_anchor:      Optional[str] = None
+    resolved_secondaries: List[str] = field(default_factory=list)
+    entity_resolution_status:     Optional[str] = None    # RESOLVED / AMBIGUOUS / UNGROUNDED
+    entity_resolution_confidence: float = 0.0
