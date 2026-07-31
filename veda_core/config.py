@@ -1006,9 +1006,13 @@ NL_ANSWER_FAST_TIMEOUT_MS = int(__import__("os").environ.get("NL_ANSWER_FAST_TIM
 NL_SUMMARY_MODEL       = __import__("os").environ.get("NL_SUMMARY_MODEL", "qwen2.5:7b-instruct")
 # 2500ms fit the 1.5B model; the 7B instruct model measures ~4-6s warm (same class
 # as INSIGHT_ENGINE_TIMEOUT_MS's 10000ms budget), so 2500ms would time out on nearly
-# every call and silently downgrade to the deterministic fallback. 10000ms gives the
-# 7B model real headroom incl. a cold load.
-NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "25000"))
+# every call and silently downgrade to the deterministic fallback. 25000ms wasn't
+# enough either once this call started sharing the Ollama host with SLM_MODEL_NAME's
+# coder model (planning/SQL calls run first, then this call needs the instruct model
+# swapped back in — a cold model-swap load, observed live 2026-07-27, can itself take
+# 15-20s+ before generation even starts). 45000ms gives real headroom for a swap +
+# cold load, not just warm inference.
+NL_SUMMARY_TIMEOUT_MS  = int(__import__("os").environ.get("NL_SUMMARY_TIMEOUT_MS", "45000"))
 # 80 was cutting the model off mid-sentence; 120 suited the old one-sentence prompt.
 # The 2-3 sentence business summary needs more — run_nl_answer adds +50 at call time,
 # and this base gives headroom for the woven-in findings.
@@ -1074,7 +1078,11 @@ RESULT_ANALYZER_MAX_ROWS   = int(__import__("os").environ.get("RESULT_ANALYZER_M
 # ordinary calls (observed live: "SLM unavailable/invalid (TimeoutError)").
 # 10000ms gives real margin over the measured warm ~4.6s + cold-load worst case;
 # the failure mode remains fail-safe (deterministic fallback answer) either way.
-INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "25000"))
+# 25000ms still wasn't enough once this call started sharing the Ollama host with
+# SLM_MODEL_NAME's coder model — a cold model-swap load (coder -> this call's
+# NL_SUMMARY_MODEL instruct model) can itself take 15-20s+ before generation even
+# starts (observed live 2026-07-27, same root cause as NL_SUMMARY_TIMEOUT_MS above).
+INSIGHT_ENGINE_TIMEOUT_MS  = int(__import__("os").environ.get("INSIGHT_ENGINE_TIMEOUT_MS", "45000"))
 # Deterministic chart-recommendation gate (veda/result_analyzer.chart_confidence,
 # query/result_explainer.validate_visualization): below this, no visualization is
 # returned at all — a table-only response is always safer than a low-confidence
