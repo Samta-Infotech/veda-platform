@@ -17,8 +17,18 @@
 # to the current pipeline UNCHANGED. No new SLM call, no GNN, no synonym dependency
 # (audit proved domain synonyms are column-level and mislead here). Deterministic.
 # =============================================================================
+import os
+import json
+import re
 from dataclasses import dataclass, field
 from typing import Optional, List, Dict, Any
+
+import config
+from retrieval.query_enrichment import _singularize
+from veda.routing import _name_toks
+from veda.runtime import get_graph
+from veda.planning import _junction_tables
+from query.target_selection import select_targets
 
 RESOLVED = "RESOLVED"
 AMBIGUOUS = "AMBIGUOUS"
@@ -35,18 +45,19 @@ class ResolvedEntities:
 
     @property
     def distinct_tables(self) -> int:
+        """Count of distinct resolved tables (anchor + secondaries, excluding None)."""
         return len({self.anchor, *self.secondaries} - {None})
 
 
 def _thresholds():
-    try:
-        from config import (ER_COVERAGE_MIN, ER_MARGIN_MIN, ER_PIN_CONFIDENCE)
-        return ER_COVERAGE_MIN, ER_MARGIN_MIN, ER_PIN_CONFIDENCE
-    except Exception:
-        return 0.5, 0.4, 0.7
+    """Return (coverage, margin, pin) confidence thresholds from config, with safe defaults."""
+    return (getattr(config, "ER_COVERAGE_MIN", 0.5),
+            getattr(config, "ER_MARGIN_MIN", 0.4),
+            getattr(config, "ER_PIN_CONFIDENCE", 0.7))
 
 
 def _table_type(sm, t):
+    """Return the semantic-model table_type for table `t` (empty string if absent)."""
     return ((sm.get("tables", {}) or {}).get(t, {}) or {}).get("table_type", "")
 
 
@@ -66,7 +77,6 @@ def _entity_glossary():
     property→assets_asset) — the completeness gap the probe proved metadata can't fill
     deterministically. Empty on any load failure (rule then no-ops)."""
     if _GLOSSARY["m"] is None:
-        import os, json
         g = {}
         # cwd/data (engine runs with cwd=veda_core) OR module-relative veda_core/data
         # (pytest / other cwds) — robust regardless of where the process started.
@@ -85,6 +95,7 @@ def _entity_glossary():
 
 
 def _score(count, coverage, table_type, retrieval):
+    """Blend matched-count + coverage (dominant) with type/retrieval tie-breaks into a score."""
     # matched-count + coverage (~0..4) dominate; type ordinal + retrieval are small
     # tie-breaks (they only decide among candidates that TIE on name coverage — e.g.
     # accounts_paymenttransaction vs reminders_reminderpaymenttransaction, where retrieval
@@ -108,7 +119,6 @@ def _retrieval_scores(results):
 def _score_named_tables(qtoks, sm, retr):
     """Score every table the query lexically NAMES: distinctive-name-token coverage blended
     with table type and retrieval score. Returns a list of candidate dicts (unsorted)."""
-    from veda.routing import _name_toks
     scored = []
     for t in (sm.get("tables", {}) or {}):
         toks = _name_toks(t, sm)
@@ -130,8 +140,6 @@ def _add_glossary_candidates(scored, query, qtoks, sm, retr):
     """Append UNNAMED business entities (owner→users_user, property→assets_asset) the query
     text doesn't lexically name, via the curated glossary — each phrase present adds its
     canonical table at coverage 1.0. The completeness fix. Mutates `scored` in place."""
-    import re
-    from retrieval.query_enrichment import _singularize
     _ql = f" {query.lower()} "
     tables = sm.get("tables", {}) or {}
     for _phrase, _tbl in _entity_glossary().items():
@@ -161,8 +169,6 @@ def _drop_junction_candidates(scored, sm):
     users_userpreference), so it is deliberately not applied; glossary + retrieval handle
     the common cases."""
     try:
-        from veda.runtime import get_graph
-        from veda.planning import _junction_tables
         _junc = _junction_tables(get_graph(), sm)
         _non_junc = [d for d in scored if d["table"] not in _junc]
         return _non_junc or scored
@@ -199,8 +205,6 @@ def resolve_entities(query, results, sm, all_cols):
     "properties" → nothing, since no table is literally named 'property' and synonyms
     are column-level) → caller falls back to existing routing, unchanged. Orchestrates
     the scoring/glossary/junction/classify/secondary helpers above."""
-    import re
-    from retrieval.query_enrichment import _singularize
     cov_min, margin_min, pin_conf = _thresholds()
     qtoks = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
     retr = _retrieval_scores(results)
@@ -255,17 +259,11 @@ def _resolve_secondaries(query, anchor, scored, sm, results, qtoks):
     query also names, given the resolved anchor. Junctions/bridges are the planner's
     job (never returned here). Best-effort — any failure yields no secondaries."""
     try:
-        from query.target_selection import select_targets
-        from veda.routing import _name_toks
-        from config import TARGET_SELECTION
-        from veda.runtime import get_graph
-        from veda.planning import _junction_tables
         graph = get_graph()
         junctions = _junction_tables(graph, sm) if graph else set()
         anchor_toks = _name_toks(anchor, sm)
         cols = (sm.get("columns", {}) or {})
         anchor_col_toks = set()
-        from retrieval.query_enrichment import _singularize
         for cid in cols:
             if cid.split(".", 1)[0] == anchor and "." in cid:
                 for w in cid.split(".", 1)[1].split("_"):
@@ -276,7 +274,7 @@ def _resolve_secondaries(query, anchor, scored, sm, results, qtoks):
         tr = select_targets(anchor, others, qtoks=qtoks, anchor_toks=anchor_toks,
                             anchor_col_toks=anchor_col_toks, retrieval=retr,
                             junctions=junctions, name_toks=lambda t: _name_toks(t, sm),
-                            cfg=TARGET_SELECTION)
+                            cfg=config.TARGET_SELECTION)
         # only confidently-requested, DISTINCT tables — ambiguity/uncertainty → no secondary
         if tr.ambiguous:
             return []

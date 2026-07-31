@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional, Tuple
 from veda.understanding.schema import (
     RawIntent, GroundedIntent, GroundedMeasure, GroundedFilter, Refusal,
 )
+from veda.routing import _name_toks as _routing_name_toks
+from query.entity_resolver import _entity_glossary
 
 # language connectives that are NEVER entities/filters (schema-agnostic)
 _STOP = frozenset({
@@ -50,22 +52,24 @@ def _singularize(w: str) -> str:
 
 
 def _name_toks(t: str, sm=None):
+    """Schema-aware name tokens for a table, via the shared routing tokenizer; falls back to
+    a naive underscore split (parts > 2 chars) if that path errors."""
     try:
-        from veda.routing import _name_toks as _nt
-        return _nt(t, sm)
+        return _routing_name_toks(t, sm)
     except Exception:
         return {p for p in t.split("_") if len(p) > 2}
 
 
 def _glossary() -> Dict[str, str]:
+    """The curated business-noun → table glossary (empty dict if unavailable/erroring)."""
     try:
-        from query.entity_resolver import _entity_glossary
         return _entity_glossary() or {}
     except Exception:
         return {}
 
 
 def _concept_tokens(concept: str) -> List[str]:
+    """Lowercase alpha tokens of a concept phrase, singularized and stop-word filtered."""
     return [_singularize(w) for w in re.findall(r"[a-z]+", (concept or "").lower())
             if len(w) > 2 and w not in _STOP]
 

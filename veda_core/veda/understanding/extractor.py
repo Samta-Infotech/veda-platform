@@ -50,6 +50,8 @@ _SYS = (
 
 
 def _repair_json(raw: str) -> Optional[dict]:
+    """Best-effort parse of LLM text into a dict: strip code fences, slice to the outermost
+    {...}, and json.loads it. Returns None on anything unparseable."""
     if not raw:
         return None
     s = raw.strip()
@@ -65,6 +67,7 @@ def _repair_json(raw: str) -> Optional[dict]:
 
 
 def _norm_list(v) -> List[str]:
+    """Coerce a value into a list of non-empty strings (wraps scalars, drops falsy items)."""
     if isinstance(v, list):
         return [str(x) for x in v if x]
     if v:

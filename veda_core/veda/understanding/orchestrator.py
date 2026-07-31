@@ -16,9 +16,12 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Union
 
+import config
 from veda.understanding.schema import RawIntent, GroundedIntent, Refusal
 from veda.understanding.extractor import extract
 from veda.understanding.grounding import ground
+from veda.planning import get_graph, _junction_tables
+from veda.explain import current_trace
 
 
 def _entity_catalog(sm) -> List[str]:
@@ -31,8 +34,8 @@ def _entity_catalog(sm) -> List[str]:
 
 
 def _trace(section: str, **kw) -> None:
+    """Best-effort write to the active explain trace; silently no-ops if unavailable."""
     try:
-        from veda.explain import current_trace
         current_trace().set(section, **kw)
     except Exception:
         pass
@@ -41,21 +44,18 @@ def _trace(section: str, **kw) -> None:
 def understand_query(query: str, sm, graph=None, junctions=None,
                      retrieval_scores: Optional[Dict[str, float]] = None
                      ) -> Optional[Union[GroundedIntent, Refusal]]:
+    """Flag-gated entry point: EXTRACT → GROUND → trace. Returns None (degrade to the
+    existing pipeline), a Refusal (firewall blocked a guess), or a GroundedIntent."""
     # ── flag gate (default OFF → prod byte-identical) ──────────────────────────
-    try:
-        from config import (QUERY_UNDERSTANDING_ENABLED as _on,
-                            QUERY_UNDERSTANDING_MIN_CONFIDENCE as _minc)
-    except Exception:
-        _on, _minc = False, 0.5
+    _on = getattr(config, "QUERY_UNDERSTANDING_ENABLED", False)
+    _minc = getattr(config, "QUERY_UNDERSTANDING_MIN_CONFIDENCE", 0.5)
     if not _on:
         return None
 
     try:
         if graph is None:
-            from veda.planning import get_graph
             graph = get_graph()
         if junctions is None:
-            from veda.planning import _junction_tables
             junctions = _junction_tables(graph, sm)
 
         raw = extract(query, _entity_catalog(sm))

@@ -44,6 +44,7 @@ class RawIntent:
     raw: Dict[str, Any] = field(default_factory=dict)   # verbatim LLM json, for trace
 
     def is_valid_shape(self) -> bool:
+        """True when the intent is a member of the closed INTENTS vocabulary."""
         return self.intent in INTENTS
 
 
@@ -78,6 +79,7 @@ class GroundedIntent:
 
     @property
     def tables(self) -> List[str]:
+        """All real tables in play: the anchor followed by the secondaries (drops None)."""
         return [t for t in ([self.anchor] + list(self.secondaries)) if t]
 
 
