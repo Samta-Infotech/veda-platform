@@ -105,26 +105,12 @@ def _retrieval_scores(results):
     return {t: (v / hi if hi else 0.0) for t, v in raw.items()}
 
 
-def resolve_entities(query, results, sm, all_cols):
-    """Deterministic canonical entity resolution. Returns ResolvedEntities.
-
-    Anchor = the table whose DISTINCTIVE name tokens are most fully covered by the
-    query (matched-count primary, coverage tie-break — the same evidence select_targets
-    uses), MASTER a hair's tie-break. UNGROUNDED when the query names no table (e.g.
-    "properties" → nothing, since no table is literally named 'property' and synonyms
-    are column-level) → caller falls back to existing routing, unchanged."""
-    import re
+def _score_named_tables(qtoks, sm, retr):
+    """Score every table the query lexically NAMES: distinctive-name-token coverage blended
+    with table type and retrieval score. Returns a list of candidate dicts (unsorted)."""
     from veda.routing import _name_toks
-    from retrieval.query_enrichment import _singularize
-    cov_min, margin_min, pin_conf = _thresholds()
-
-    qtoks = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
-    tables = list((sm.get("tables", {}) or {}).keys())
-    retr = _retrieval_scores(results)
-
-    # score every table the query lexically NAMES
     scored = []
-    for t in tables:
+    for t in (sm.get("tables", {}) or {}):
         toks = _name_toks(t, sm)
         if not toks:
             continue
@@ -137,50 +123,91 @@ def resolve_entities(query, results, sm, all_cols):
         scored.append({"table": t, "matched": sorted(matched), "coverage": round(coverage, 3),
                        "count": len(matched), "table_type": ttype, "master": ttype == "MASTER",
                        "retrieval": round(retr.get(t, 0.0), 3), "score": round(s, 4)})
+    return scored
 
-    # Curated glossary: resolve UNNAMED business entities (owner→users_user,
-    # property→assets_asset) the query text doesn't lexically name. Each glossary
-    # phrase present in the query adds its canonical table as a high-confidence
-    # candidate (coverage 1.0) — this is the completeness fix.
+
+def _add_glossary_candidates(scored, query, qtoks, sm, retr):
+    """Append UNNAMED business entities (owner→users_user, property→assets_asset) the query
+    text doesn't lexically name, via the curated glossary — each phrase present adds its
+    canonical table at coverage 1.0. The completeness fix. Mutates `scored` in place."""
+    import re
+    from retrieval.query_enrichment import _singularize
     _ql = f" {query.lower()} "
-    glossary_tables = set()
+    tables = sm.get("tables", {}) or {}
     for _phrase, _tbl in _entity_glossary().items():
-        if _tbl not in (sm.get("tables", {}) or {}):
+        if _tbl not in tables:
             continue
-        # single-word phrase → match on SINGULARIZED query tokens (so "owners"→"owner",
-        # "properties"→"property"); multi-word → substring on the raw query.
-        _pw_toks = _phrase.split()
-        if len(_pw_toks) == 1:
+        # single-word phrase → match on SINGULARIZED query tokens ("owners"→"owner");
+        # multi-word → whole-phrase word-boundary match on the raw query.
+        if len(_phrase.split()) == 1:
             _hit = _singularize(_phrase) in qtoks or _phrase in qtoks
         else:
             _hit = re.search(r"\b" + re.escape(_phrase) + r"\b", _ql) is not None
-        if _hit:
-            glossary_tables.add(_tbl)
-            if not any(d["table"] == _tbl for d in scored):
-                _pw = max(1, len([w for w in _phrase.split() if len(w) > 2]))
-                _tt = _table_type(sm, _tbl)
-                scored.append({"table": _tbl, "matched": [_phrase], "coverage": 1.0,
-                               "count": _pw, "table_type": _tt, "master": _tt == "MASTER",
-                               "retrieval": round(retr.get(_tbl, 0.0), 3),
-                               "score": round(_score(_pw, 1.0, _tt, retr.get(_tbl, 0.0)), 4),
-                               "glossary": True})
+        if _hit and not any(d["table"] == _tbl for d in scored):
+            _pw = max(1, len([w for w in _phrase.split() if len(w) > 2]))
+            _tt = _table_type(sm, _tbl)
+            scored.append({"table": _tbl, "matched": [_phrase], "coverage": 1.0,
+                           "count": _pw, "table_type": _tt, "master": _tt == "MASTER",
+                           "retrieval": round(retr.get(_tbl, 0.0), 3),
+                           "score": round(_score(_pw, 1.0, _tt, retr.get(_tbl, 0.0)), 4),
+                           "glossary": True})
 
-    # Drop VEDA-classified junction/bridge tables from anchor/secondary candidates (the
-    # planner introduces those; they're never the REQUESTED entity). Best-effort; keep a
-    # junction only if it is the sole candidate. NOTE: content-carrying link tables like
-    # assets_salelistinguser are NOT flagged by this heuristic and can still over-match on
-    # a concatenated name (the known D06/I07 limit) — a name-only rule to catch them also
-    # demotes legitimate compound entities (users_userpreference), so it is deliberately NOT
-    # applied; the glossary + retrieval tie-break handle the common cases.
+
+def _drop_junction_candidates(scored, sm):
+    """Drop VEDA-classified junction/bridge tables (planner-introduced, never the REQUESTED
+    entity) — but keep them when they are the sole candidates. Best-effort. NOTE: content-
+    carrying link tables (assets_salelistinguser) are NOT flagged by this heuristic (a
+    name-only rule to catch them would also demote legitimate compound entities like
+    users_userpreference), so it is deliberately not applied; glossary + retrieval handle
+    the common cases."""
     try:
         from veda.runtime import get_graph
         from veda.planning import _junction_tables
         _junc = _junction_tables(get_graph(), sm)
         _non_junc = [d for d in scored if d["table"] not in _junc]
-        if _non_junc:
-            scored = _non_junc
+        return _non_junc or scored
     except Exception:
-        pass
+        return scored
+
+
+def _pick_secondaries(scored, anchor, anchor_matched, cov_min):
+    """Secondaries = other resolved entities naming a DISTINCT concept (matched tokens NOT a
+    subset of the anchor's — a subset competes for the SAME slot). Among candidates sharing a
+    matched-token set, keep only the best (users_user beats users_useraddress on {user}), so
+    siblings don't flood the join. Glossary entities are always distinct secondaries."""
+    _best_by_set = {}
+    for d in scored:
+        if d["table"] == anchor:
+            continue
+        _mset = frozenset(d["matched"])
+        if not _mset or _mset.issubset(anchor_matched):
+            continue
+        if not (d.get("glossary") or d["coverage"] >= cov_min):
+            continue
+        if _mset not in _best_by_set or d["score"] > _best_by_set[_mset]["score"]:
+            _best_by_set[_mset] = d
+    return [d["table"] for d in
+            sorted(_best_by_set.values(), key=lambda x: x["score"], reverse=True)][:3]
+
+
+def resolve_entities(query, results, sm, all_cols):
+    """Deterministic canonical entity resolution. Returns ResolvedEntities.
+
+    Anchor = the table whose DISTINCTIVE name tokens are most fully covered by the
+    query (matched-count primary, coverage tie-break — the same evidence select_targets
+    uses), MASTER a hair's tie-break. UNGROUNDED when the query names no table (e.g.
+    "properties" → nothing, since no table is literally named 'property' and synonyms
+    are column-level) → caller falls back to existing routing, unchanged. Orchestrates
+    the scoring/glossary/junction/classify/secondary helpers above."""
+    import re
+    from retrieval.query_enrichment import _singularize
+    cov_min, margin_min, pin_conf = _thresholds()
+    qtoks = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
+    retr = _retrieval_scores(results)
+
+    scored = _score_named_tables(qtoks, sm, retr)
+    _add_glossary_candidates(scored, query, qtoks, sm, retr)
+    scored = _drop_junction_candidates(scored, sm)
 
     if not scored:
         return ResolvedEntities(status=UNGROUNDED,
@@ -199,39 +226,17 @@ def resolve_entities(query, results, sm, all_cols):
     ambiguous = bool(second and set(top["matched"]) == set(second["matched"])
                      and margin < _AMB_EPS)
 
-    status = UNGROUNDED
-    confidence = 0.0
+    status, confidence, anchor = UNGROUNDED, 0.0, None
+    secondaries: List[str] = []
     if not ambiguous and top["coverage"] >= cov_min:
         status = RESOLVED
         # confidence blends how completely the query named the entity + the lead over #2
         confidence = round(min(1.0, 0.6 * top["coverage"] + 0.4 * min(1.0, margin)), 3)
+        anchor = top["table"]
+        secondaries = _pick_secondaries(scored, anchor, set(top["matched"]), cov_min)
     elif ambiguous:
         status = AMBIGUOUS
         confidence = round(top["coverage"], 3)
-
-    anchor = top["table"] if status == RESOLVED else None
-    secondaries: List[str] = []
-    if status == RESOLVED:
-        # Secondaries = other resolved entities naming a DISTINCT concept (matched tokens
-        # NOT a subset of the anchor's — a subset competes for the SAME slot, e.g.
-        # paymenttransactionsettlement vs paymenttransaction). Domination: among candidates
-        # sharing the SAME matched-token set, keep only the best (users_user beats
-        # users_useraddress on {user}) so siblings don't flood the join. Retrieval-independent;
-        # glossary entities are always distinct secondaries (the completeness fix).
-        _anchor_matched = set(top["matched"])
-        _best_by_set = {}
-        for d in scored:
-            if d["table"] == anchor:
-                continue
-            _mset = frozenset(d["matched"])
-            if not _mset or _mset.issubset(_anchor_matched):
-                continue                              # same slot as the anchor, not a 2nd entity
-            if not (d.get("glossary") or d["coverage"] >= cov_min):
-                continue
-            if _mset not in _best_by_set or d["score"] > _best_by_set[_mset]["score"]:
-                _best_by_set[_mset] = d
-        secondaries = [d["table"] for d in
-                       sorted(_best_by_set.values(), key=lambda x: x["score"], reverse=True)][:3]
 
     ev = {
         "anchor_candidate": top["table"], "anchor_matched": top["matched"],

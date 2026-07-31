@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, List
 
+import config
 from semantic import registry as reg
 from query.intent import QueryIntent, Filter, validate_intent, build_sql
 
@@ -484,12 +485,12 @@ def _count_intent(query_l: str, qtoks: set) -> bool:
     return _has(query_l, _COUNT_TRIGGERS) or bool(_COUNT_WORDS & qtoks)
 
 
-def _fpg_on():
-    try:
-        from config import FASTPATH_ENTITY_GLOSSARY
-        return bool(FASTPATH_ENTITY_GLOSSARY)
-    except Exception:
-        return False
+def _fpg_on() -> bool:
+    """True when the FASTPATH_ENTITY_GLOSSARY feature flag is enabled. Read dynamically off
+    the config module (not value-bound at import) so runtime toggling — used by the eval/A-B
+    harnesses — is honoured; a missing flag is treated as OFF, so the feature is a no-op by
+    default."""
+    return bool(getattr(config, "FASTPATH_ENTITY_GLOSSARY", False))
 
 
 _TREND_ADVERBS = ("hourly", "daily", "weekly", "monthly", "quarterly", "yearly")
@@ -621,8 +622,8 @@ def _grounded_entity_fallback(query: str, qtoks: set):
     try:
         from query.entity_resolver import _entity_glossary
         gl = _entity_glossary() or {}
-    except Exception:
-        gl = {}
+    except (ImportError, OSError, ValueError):
+        gl = {}                      # glossary file absent/unreadable → skip this tier
     toks = {sing(t) for t in qtoks} | set(qtoks)
     tabs, seeds = set(), set()
     for noun, table in gl.items():

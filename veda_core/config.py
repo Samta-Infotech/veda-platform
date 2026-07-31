@@ -1339,7 +1339,7 @@ ER_PIN_CONFIDENCE = 0.7   # min confidence to PIN the primary (bypass vet_primar
 # retrieval/vet_primary fallback (retrieval may still hold the right table), so
 # this cannot regress answerable single-table queries. Targets the "Ambiguous"
 # query class (measured 0% — answered when it should have clarified).
-ER_GROUNDED_REFUSAL = True
+ER_GROUNDED_REFUSAL = False
 # ── JOIN_SEMANTIC_BRIDGE (ownership/relationship bridge selector, flag-gated, OFF) ──
 # When two entities have MULTIPLE structurally-identical bridge tables (assets_asset↔
 # users_user can go via assets_assetuser OR assets_assetdocument OR assets_assetkey —

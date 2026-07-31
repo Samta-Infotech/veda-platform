@@ -39,10 +39,13 @@ _AGG_WORDS = {  # measure phrase → aggregation kind
 
 
 def _singularize(w: str) -> str:
+    """Singular form of a token. Delegates to the shared enrichment singularizer; if that
+    module is unavailable, falls back to a naive trailing-'s' strip (only for words > 3
+    chars, so short tokens like 'is'/'as' are left intact)."""
     try:
         from retrieval.query_enrichment import _singularize as _s
         return _s(w)
-    except Exception:
+    except ImportError:
         return w[:-1] if len(w) > 3 and w.endswith("s") else w
 
 
