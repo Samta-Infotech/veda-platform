@@ -213,8 +213,28 @@ class SemanticSearchEngine:
         self.db_config = db_config
         self.searcher = SemanticSearcher(model_name, device)
         self.conn = None
+        self._uuid_map = None            # DENSE_ID_REMAP: col_id UUID → "table.column"
 
         self._connect_db()
+
+    def _uuid_to_colid(self):
+        """Cached map col_id(UUID) → "table_name.col_name" from the dense store, so dense
+        results can be expressed in the SAME id-space as every other signal (table.column).
+        Built once from column_embeddings_v2 (the store search() already queries)."""
+        if self._uuid_map is not None:
+            return self._uuid_map
+        m = {}
+        try:
+            cur = self.conn.cursor()
+            cur.execute(f"SELECT col_id, table_name, col_name FROM {BIENCODER_COL_TABLE}")
+            for cid, t, c in cur.fetchall():
+                if t and c:
+                    m[str(cid)] = f"{t}.{c}"
+            cur.close()
+        except Exception as e:
+            logger.warning(f"DENSE_ID_REMAP map build failed ({e}) — dense left as-is")
+        self._uuid_map = m
+        return m
 
     def _connect_db(self):
         """Connect to PostgreSQL."""
@@ -248,6 +268,17 @@ class SemanticSearchEngine:
 
         # Step 2: Search in pgvector
         results = self.searcher.retrieve_semantic(embedding, self.conn, k)
+
+        # Step 3 (DENSE_ID_REMAP, flag-gated): the store returns UUID col_ids, but fusion
+        # keys on "table.column"; without this dense never aligns in RRF (dead signal).
+        try:
+            from config import DENSE_ID_REMAP
+            if DENSE_ID_REMAP and results:
+                m = self._uuid_to_colid()
+                if m:
+                    results = [(m.get(str(cid), str(cid)), sc) for cid, sc in results]
+        except Exception:
+            pass
 
         return results
 

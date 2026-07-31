@@ -418,11 +418,29 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 from query.resolution import typed_anchor_evidence
                 _ev, _ = typed_anchor_evidence(query, sm)
                 if not any(_ev.get(t, 0.0) >= QSR_FP_EVIDENCE_FLOOR for t in fp.tables):
-                    print(f"  [FastPath] demoted: no typed evidence for "
-                          f"{sorted(fp.tables)[:3]} — full pipeline")
-                    tr.note("schema_linking",
-                            f"fast-path pick {sorted(fp.tables)[:3]} demoted (zero typed evidence)")
-                    fp = None
+                    # A pick deterministically GROUNDED from a business noun the retrieval-
+                    # based evidence probe can't see ("property"→assets_asset via the alias
+                    # glossary / collapsed-token concatenation) carries its OWN typed
+                    # evidence — the grounding itself. Don't demote it for the very blindness
+                    # it was built to fix. Flag-gated: when OFF the fallback returns None, so
+                    # this is a no-op and the guard is byte-identical.
+                    _grounded_ok = False
+                    try:
+                        from config import FASTPATH_ENTITY_GLOSSARY
+                        if FASTPATH_ENTITY_GLOSSARY:
+                            from query.fast_path import _grounded_entity_fallback
+                            from semantic import registry as _greg
+                            _ge = _grounded_entity_fallback(query, _greg.query_tokens(query))
+                            if _ge and _ge.get("resolves_to", {}).get("table") in fp.tables:
+                                _grounded_ok = True
+                    except Exception:
+                        _grounded_ok = False
+                    if not _grounded_ok:
+                        print(f"  [FastPath] demoted: no typed evidence for "
+                              f"{sorted(fp.tables)[:3]} — full pipeline")
+                        tr.note("schema_linking",
+                                f"fast-path pick {sorted(fp.tables)[:3]} demoted (zero typed evidence)")
+                        fp = None
         except Exception:
             pass
 
@@ -652,7 +670,136 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             if _t not in _cand_tabs:
                 _cand_tabs.append(_t)
         _router_primary = select_primary_table(results, query, sm, trace=tr)
-        primary = vet_primary(query, _router_primary, results, sm, trace=tr)
+        _er = None
+        _analytical_sql = None          # Phase 1 ANALYTICAL_SQL_V2 (set in understanding block)
+        _analytical_primary = None
+        # ── Query-Understanding layer (flag-gated, default OFF) — enterprise ─────
+        # LLM extracts typed intent → deterministic grounding validates to REAL tables
+        # → adapted into a ResolvedEntities so the EXISTING ER plumbing (primary-pin,
+        # _er_multi gate, build_from_entities) consumes it unchanged. Refusal → grounded
+        # clarify/refuse (never a guess). None → fall through to ER-V1/existing (degrade).
+        try:
+            from config import QUERY_UNDERSTANDING_ENABLED as _QU_ON
+        except Exception:
+            _QU_ON = False
+        if _QU_ON:
+            try:
+                from veda.understanding import (understand_query,
+                                                GroundedIntent as _GI, Refusal as _RF)
+                _rscore = {}
+                for _r in results:
+                    _t = _r.col_id.split(".")[0]
+                    _rscore[_t] = max(_rscore.get(_t, 0.0), getattr(_r, "final_score", 0.0))
+                _u = understand_query(query, sm, retrieval_scores=_rscore)
+                if isinstance(_u, _RF):
+                    _st = "clarify" if _u.reason == "ambiguous" else "refuse"
+                    fb = _feedback(_st, msg=_u.message)
+                    tr.set("understanding", decision=_st, reason=_u.reason,
+                           unresolved=_u.unresolved)
+                    log_route(_st, query, (time.time() - start) * 1000)
+                    return _done(0, _st, msg=_u.message, feedback=fb)
+                if isinstance(_u, _GI) and _u.anchor:
+                    from query.entity_resolver import ResolvedEntities
+                    _er = ResolvedEntities(
+                        anchor=_u.anchor, secondaries=list(_u.secondaries),
+                        confidence=max(_u.confidence or 0.0, 0.7), status="RESOLVED",
+                        evidence={"pin_eligible": True, "source": "understanding",
+                                  "intent": _u.intent})
+                    es.resolved_anchor = _u.anchor
+                    es.resolved_secondaries = list(_u.secondaries)
+                    es.entity_resolution_status = "RESOLVED"
+                    es.entity_resolution_confidence = _u.confidence
+                    tr.set("entity_resolution", source="understanding", anchor=_u.anchor,
+                           secondaries=_u.secondaries, intent=_u.intent,
+                           confidence=_u.confidence)
+                    # ── Phase 1: ANALYTICAL_SQL_V2 (flag-gated) ─────────────────
+                    # Single-anchor analytical query → deterministic structured SQL that
+                    # CONSUMES the spec (never re-infers the aggregation from language,
+                    # the cause of raw-row-list output). None → existing path unchanged.
+                    try:
+                        from config import ANALYTICAL_SQL_V2 as _asql_on
+                    except Exception:
+                        _asql_on = False
+                    if _asql_on:
+                        try:
+                            from veda.analytical_spec import derive_spec, emit_sql
+                            _aspec = derive_spec(_u, query, sm)
+                            _cand = emit_sql(_aspec, sm) if _aspec else None
+                            if _cand:
+                                _analytical_sql = _cand
+                                _analytical_primary = _u.anchor
+                                tr.set("analytical_sql_v2", used=True, anchor=_u.anchor,
+                                       aggregation=_aspec.aggregation,
+                                       shape=_aspec.output_shape, group_keys=_aspec.group_keys)
+                                print(f"  [AnalyticalV2] {_aspec.aggregation} "
+                                      f"{_aspec.output_shape} on {_u.anchor} — deterministic SQL")
+                        except Exception as _ae:
+                            print(f"  [AnalyticalV2] skipped: {type(_ae).__name__}")
+            except Exception as _ue:
+                print(f"  [QU] understanding skipped: {type(_ue).__name__}: {str(_ue)[:120]}")
+                _er = None
+        # ── Entity Resolution V1 (flag-gated, default OFF) ──────────────────────
+        # Fuse existing name-coverage evidence into a confidence-gated canonical anchor.
+        # RESOLVED + pin-eligible → PIN the primary (bypass vet_primary, the proven
+        # override point). AMBIGUOUS / UNGROUNDED / not pin-eligible → existing
+        # vet_primary path UNCHANGED (zero-risk fallback). Skipped when the understanding
+        # layer already produced a grounded anchor above.
+        try:
+            from config import ENTITY_RESOLUTION_V1 as _ER_ON
+        except Exception:
+            _ER_ON = False
+        if _ER_ON and _er is None:
+            try:
+                from query.entity_resolver import resolve_entities
+                _er = resolve_entities(query, results, sm, all_cols)
+                tr.set("entity_resolution", status=_er.status, anchor=_er.anchor,
+                       secondaries=_er.secondaries, confidence=_er.confidence,
+                       distinct_tables=_er.distinct_tables,
+                       anchor_coverage=_er.evidence.get("anchor_coverage"),
+                       margin=_er.evidence.get("margin"),
+                       pin_eligible=_er.evidence.get("pin_eligible"))
+                for _c in (_er.evidence.get("candidates") or []):
+                    tr.cand("entity_resolution", "candidates", _c)
+                es.resolved_anchor = _er.anchor
+                es.resolved_secondaries = list(_er.secondaries)
+                es.entity_resolution_status = _er.status
+                es.entity_resolution_confidence = _er.confidence
+            except Exception as _ere:
+                print(f"  [ER] entity resolution skipped: {type(_ere).__name__}: {str(_ere)[:120]}")
+                _er = None
+        # ── RC3: grounded clarification (flag-gated, default OFF) ───────────────
+        # AMBIGUOUS = two candidates tied for the SAME entity slot. Ask the user
+        # which one instead of coin-flipping into a confident wrong answer. Scoped
+        # to AMBIGUOUS only (UNGROUNDED keeps the retrieval fallback) so answerable
+        # single-table queries are never regressed.
+        if _er is not None and _er.status == "AMBIGUOUS":
+            try:
+                from config import ER_GROUNDED_REFUSAL as _ER_REFUSE
+            except Exception:
+                _ER_REFUSE = False
+            if _ER_REFUSE:
+                _cands = _er.evidence.get("candidates") or []
+                _opts = [c.get("master") or c.get("table") for c in _cands[:2]]
+                _opts = [o for o in _opts if o]
+                if _opts:
+                    _cmsg = ("This question is ambiguous — it could refer to "
+                             + " or ".join(repr(o) for o in _opts)
+                             + ". Please specify which one you mean.")
+                else:
+                    _cmsg = ("This question is ambiguous between multiple entities. "
+                             "Please specify which one you mean.")
+                fb = _feedback("clarify", msg=_cmsg)
+                tr.set("entity_resolution", grounded_clarify=True, clarify_options=_opts)
+                log_route("clarify", query, (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_cmsg, feedback=fb)
+        if (_er is not None and _er.status == "RESOLVED"
+                and _er.evidence.get("pin_eligible") and _er.anchor):
+            primary = _er.anchor
+            tr.set("entity_resolution", primary_before=_router_primary,
+                   primary_after=primary, vet_primary_bypassed=True)
+            print(f"  [ER] pinned primary {primary!r} (conf {_er.confidence}) — bypass vet_primary")
+        else:
+            primary = vet_primary(query, _router_primary, results, sm, trace=tr)
         if anchor_hint and anchor_hint in (sm.get("tables") or {}):
             # Qualifier-salvage retry: the first pass refused with a dropped qualifier
             # whose QSR referent lives in anchor_hint — retrieval/vetting never
@@ -749,13 +896,71 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # MULTI_TABLE / AGGREGATE, and for any existence query (with/without/how-many-have)
         # — negation like "without" isn't tagged MULTI_TABLE, so detect it directly.
         needs_join = intent in ("MULTI_TABLE", "AGGREGATE") or is_existence
-        # Observability (no behavior change): record whether the deterministic
-        # multi-table planner is even REACHED — needs_join gates try_multitable, so a
-        # SIMPLE intent means the planner is structurally skipped (planner-reachability
-        # signal for end-to-end tracing / diagnosis).
+        # TYPED_MULTITABLE_ROUTE (flag-gated, default OFF): the audit proved needs_join is
+        # False for every grouped/aggregate/relational query because `intent` is always
+        # SIMPLE, so the deterministic planner is never reached. When ON, route clearly-
+        # typed analytical queries into the EXISTING try_multitable planner using signals
+        # ALREADY computed above (grammar modes) + generic relational phrasing — no new
+        # planner, no intent rewrite, no table-name heuristics. try_multitable falls back
+        # gracefully, so a false positive degrades to prior behavior.
+        try:
+            from config import TYPED_MULTITABLE_ROUTE
+        except Exception:
+            TYPED_MULTITABLE_ROUTE = False
+        _typed_join = False
+        if TYPED_MULTITABLE_ROUTE and not needs_join:
+            _ql = f" {query.lower()} "
+            _join_phrase = any(p in _ql for p in (
+                " with their ", " with the ", " and their ", " of their ",
+                " for each ", " per "))
+            _typed_join = bool(_agg or _grp or _rat or _join_phrase)
+            if _typed_join:
+                needs_join = True
+        # Entity Resolution V1: ≥2 DISTINCT resolved entity tables is structural evidence
+        # that multi-table planning is required (independent of the SIMPLE-intent gate).
+        # NOT "concept count > 1" — two concepts on one table stay single-table.
+        _er_multi = bool(_er is not None and _er.status == "RESOLVED"
+                         and _er.distinct_tables >= 2 and _er.anchor)
+        if _er_multi:
+            needs_join = True
+        # Phase 1 ANALYTICAL_SQL_V2: a single-anchor analytical query has a deterministic
+        # SQL already built — force the single-table path (no join planner) so it flows
+        # straight to validation + execution with our structured SQL.
+        if _analytical_sql:
+            needs_join = False
+            _er_multi = False
+            if _analytical_primary:
+                primary = _analytical_primary
+        # Observability: record whether the deterministic multi-table planner is even
+        # REACHED — needs_join gates try_multitable (planner-reachability signal).
         tr.set("join_planning", needs_join=needs_join, intent_for_join=intent,
+               typed_multitable_route=_typed_join, entity_resolution_multi=_er_multi,
                try_multitable_invoked=bool(needs_join))
-        mt = try_multitable(query, results, sm, all_cols, tf, primary=primary) if needs_join else {"action": "fallback"}
+        if _er_multi:
+            # Entity-first path: drive the EXISTING join engine with the resolved
+            # canonical entities (anchor + distinct secondaries) — same build_from_entities
+            # contract the LangGraph/Tier-2 path already uses. No new planner.
+            # ANCHOR-AGNOSTIC: the planner is anchor-rooted, so which entity is the anchor
+            # decides whether the join builds ("landlords and their properties" refuses
+            # asset-rooted but builds user-rooted). Try each resolved entity as anchor and
+            # take the first that produces SQL — the same multi-anchor strategy that moved
+            # the isolated planner test from 31→40/48. Deterministic order (ER anchor first).
+            from veda.planning import build_from_entities
+            _ents = [_er.anchor] + [t for t in _er.secondaries if t != _er.anchor]
+            mt = {"action": "fallback"}
+            _tried = None
+            for _a in _ents:
+                _tg = [t for t in _ents if t != _a]
+                _cand = build_from_entities(query, sm, all_cols, tf, _a, _tg, results=results)
+                if isinstance(_cand, dict) and _cand.get("action") == "sql" and _cand.get("sql"):
+                    mt, _tried = _cand, _a
+                    break
+                if mt.get("action") == "fallback" and isinstance(_cand, dict):
+                    mt, _tried = _cand, _a          # keep best non-fallback (existence/aggregate)
+            tr.set("join_planning", entity_first=True, er_anchor=_er.anchor,
+                   er_targets=list(_er.secondaries), er_anchor_used=_tried)
+        else:
+            mt = try_multitable(query, results, sm, all_cols, tf, primary=primary) if needs_join else {"action": "fallback"}
         tr.set("join_planning", multitable_action=mt.get("action"))
 
         if mt["action"] == "clarify":
@@ -1197,10 +1402,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 t_sql = time.time()
                 _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
                                                     must_include=[_rank_sort_col] if _rank_sort_col else None)
-                sql = generate_sql(query, primary, allowed_columns, tf,
+                # Phase 1 ANALYTICAL_SQL_V2: use the deterministic structured analytical
+                # SQL (built from the grounded spec) instead of the LLM — it flows through
+                # the SAME validation + execution below. Falls back to the LLM otherwise.
+                sql = _analytical_sql or generate_sql(query, primary, allowed_columns, tf,
                                    col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
                                    recommended_projection=_proj_cols)
                 print(f"  [L5] SQL gen       {time.time()-t_sql:.1f}s"
+                      + ("  [AnalyticalV2 deterministic]" if _analytical_sql else "")
                       + (f"  (+{len(_gloss)} col defs)" if _gloss else "")
                       + (f"  (+{len(_term_map)} term→col)" if _term_map else ""))
 

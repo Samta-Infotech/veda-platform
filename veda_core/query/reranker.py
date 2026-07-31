@@ -11,12 +11,16 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import json
 import logging
+import re
+import urllib.request
 import warnings
 from typing import List, Optional
 
 logger = logging.getLogger(__name__)
 
+import config
 from config import (
     RERANKER_MODEL,
     RERANKER_DEVICE,
@@ -56,15 +60,14 @@ class _RemoteReranker:
     (scripts/metal_embed_server.py, device=mps). Any transport error falls back to the
     in-process CPU CrossEncoder, so it never fails a query."""
     def predict(self, pairs, batch_size: int = 64, **_kw):
-        import json as _json
-        import urllib.request as _u
+        """Score query<->candidate pairs on the remote Metal server; CPU-fallback on any error."""
         try:
-            body = _json.dumps({"pairs": [list(p) for p in pairs],
-                                "batch_size": int(batch_size)}).encode()
-            req = _u.Request(_METAL_URL.rstrip("/") + "/rerank", data=body,
-                             headers={"Content-Type": "application/json"}, method="POST")
-            with _u.urlopen(req, timeout=float(os.environ.get("METAL_EMBED_TIMEOUT", "60"))) as r:
-                return _json.loads(r.read())["scores"]
+            body = json.dumps({"pairs": [list(p) for p in pairs],
+                               "batch_size": int(batch_size)}).encode()
+            req = urllib.request.Request(_METAL_URL.rstrip("/") + "/rerank", data=body,
+                                         headers={"Content-Type": "application/json"}, method="POST")
+            with urllib.request.urlopen(req, timeout=float(os.environ.get("METAL_EMBED_TIMEOUT", "60"))) as r:
+                return json.loads(r.read())["scores"]
         except Exception as e:
             warnings.warn(f"[Reranker] metal rerank failed ({e}) — CPU fallback")
             local = _load_local_crossencoder()
@@ -74,6 +77,7 @@ class _RemoteReranker:
 
 
 def _load_local_crossencoder():
+    """Load the in-process CPU CrossEncoder, or None (fail-loud logged) if unavailable."""
     if not RERANKER_AVAILABLE:
         return None
     try:
@@ -90,10 +94,22 @@ def _load_local_crossencoder():
                      "— retrieval is now pure RRF (degraded) for EVERY query until fixed",
                      RERANKER_MODEL, type(e).__name__, e)
         warnings.warn(f"[Reranker] Could not load model '{RERANKER_MODEL}': {e}")
+        # Optional hard-check: fail fast instead of silently degrading (flag default OFF).
+        # Read dynamically off the config module so runtime toggling still works.
+        try:
+            _required = config.RERANKER_REQUIRED
+        except Exception:
+            _required = False
+        if _required:
+            raise RuntimeError(
+                f"RERANKER_REQUIRED=True but reranker model '{RERANKER_MODEL}' failed to "
+                f"load ({type(e).__name__}: {e}) — refusing to serve pure-RRF-degraded "
+                f"results. Install/cache the model or set RERANKER_REQUIRED=False.") from e
         return None
 
 
 def _get_reranker():
+    """Lazily build and cache the reranker (remote Metal facade if configured, else local CPU)."""
     global _RERANKER_INSTANCE
     if _RERANKER_INSTANCE is not None:
         return _RERANKER_INSTANCE
@@ -253,10 +269,9 @@ def _domain_synonyms() -> dict:
     so a synonym re-adds only its mapped columns, never a loose token match."""
     if _DOMAIN_SYN_CACHE["v"] is None:
         try:
-            import json as _json
             _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                               "data", "veda_domain_synonyms.json")
-            d = _json.load(open(_p))
+            d = json.load(open(_p))
             _DOMAIN_SYN_CACHE["v"] = {str(k).lower(): {str(c).lower() for c in (v or [])}
                                      for k, v in d.items()}
         except Exception:
@@ -273,7 +288,6 @@ def _query_named_columns(
     Used to re-add explicitly-requested columns that the score cutoff dropped.
     E.g. "incident number" → synonym "no" matches incident_no even if its score is low.
     """
-    import re as _re
     # GENERIC morphological abbreviations only (language-level, DB-agnostic: number↔no).
     # NO business/domain synonyms hardcoded here anymore — those come from the GENERATED
     # domain_synonyms (the one synonym source), applied PHRASE-level below.
@@ -287,7 +301,7 @@ def _query_named_columns(
         "names": {"name"}, "types": {"type"}, "dates": {"date", "datetime"},
     }
     ql = query.lower()
-    q_tokens = set(_re.findall(r"\w+", ql))
+    q_tokens = set(re.findall(r"\w+", ql))
     for t in list(q_tokens):
         q_tokens |= _ABBREV.get(t, set())
 

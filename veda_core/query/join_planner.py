@@ -63,6 +63,30 @@ def _adjacency(graph):
     return adj
 
 
+def _connector_tables(adj):
+    """Structural edge-category basis (NO table-name hardcoding). A table is a CONNECTOR
+    -- a link / association / attachment table -- when it carries FKs to >=2 DISTINCT
+    non-audit entities: its purpose is joining other tables, not being a subject itself
+    (assets_assetdocument -> asset, leaselisting, salelisting, attachment). A first-class
+    entity's own parent FK (leaselisting -> leaseunit; leaseunit -> asset) points at a
+    single parent, so entities are not connectors. Derived only from FK direction + the
+    edge's audit flag, so it holds for any schema."""
+    tgt = defaultdict(set)
+    for node, nbrs in adj.items():
+        for _nbr, e in nbrs:
+            if e.get("source_table") == node and e.get("relationship_type") != "audit":
+                tgt[node].add(e.get("target_table"))
+    return {t for t, s in tgt.items() if len(s) >= 2}
+
+
+def edge_category(edge, connectors):
+    """business | junction. An edge whose SOURCE is a connector table is a junction/content
+    edge (a link, not the ownership spine); everything else is business."""
+    if edge.get("relationship_type") == "audit":
+        return "audit"
+    return "junction" if edge.get("source_table") in (connectors or ()) else "business"
+
+
 _ANCHOR_CONNECTIVES = {"and", "or", "of", "to", "by"}
 
 
@@ -205,7 +229,7 @@ def _edge_tokens(edge):
 
 
 def _shortest_path(adj, src, dst, max_hops=3, allowed=None, max_cost=None, qtoks=None,
-                   prefer_tables=None):
+                   prefer_tables=None, prefer_strong=None, connectors=None, penalty=0):
     """Weighted Dijkstra over edge weights. Returns list of edges or None.
 
     allowed (optional): the only tables that may appear as INTERMEDIATE hops. The
@@ -254,6 +278,16 @@ def _shortest_path(adj, src, dst, max_hops=3, allowed=None, max_cost=None, qtoks
             if allowed is not None and nbr != dst and nbr not in allowed:
                 continue
             ncost = cost + edge.get("weight", 3)
+            # Grain preference (Phase 3, flag-gated): penalise a hop that uses `node` as a
+            # TWO-SIDED CONNECTOR bridge -- we ENTERED node via node's own FK (path[-1] is
+            # node's outgoing edge) AND now EXIT via another of node's own FKs (edge is
+            # node's outgoing edge). This is the connector shortcut (asset -> assetdocument
+            # -> leaselisting); the business ownership spine never has this shape, so it wins
+            # equal-cost ties. Small penalty -> never blocks a connector that is the only
+            # route, and endpoints are untouched.
+            if penalty and connectors and node in connectors and path \
+                    and path[-1].get("source_table") == node and edge.get("source_table") == node:
+                ncost += penalty
             if max_cost is not None and ncost > max_cost:
                 continue
             sem_gain = len(qtoks & _edge_tokens(edge)) if qtoks else 0
@@ -265,6 +299,13 @@ def _shortest_path(adj, src, dst, max_hops=3, allowed=None, max_cost=None, qtoks
             if prefer_tables and (edge["source_table"] in prefer_tables
                                   or edge["target_table"] in prefer_tables):
                 sem_gain += 1
+            # Strong preference: a semantically-selected bridge (assets_assetuser for
+            # "owners") must out-rank a merely attribute-poor junction the FK heuristic
+            # also flags for the SAME entity pair (assets_assetdocument). +2 dominates
+            # the +1 junction tie-break so the right relationship wins, not heap order.
+            if prefer_strong and (edge["source_table"] in prefer_strong
+                                  or edge["target_table"] in prefer_strong):
+                sem_gain += 2
             nsem = -neg_sem + sem_gain
             counter += 1
             heapq.heappush(pq, (ncost, -nsem, counter, nbr, path + [edge]))
@@ -394,7 +435,7 @@ def _table_tokens(table):
 
 
 def plan_join_tree(anchor, targets, graph, query="", allowed_intermediates=None,
-                   junctions=None):
+                   junctions=None, prefer_strong=None):
     """Steiner-style join planner: ONE minimal tree connecting anchor + ALL targets,
     instead of independent pairwise paths. Same contract as plan_joins (same return
     shape, same edge rules: audit-terminal, necessity via `allowed`, weights), plus:
@@ -414,6 +455,16 @@ def plan_join_tree(anchor, targets, graph, query="", allowed_intermediates=None,
         _MH, _MC = 6, 8
     adj   = _adjacency(graph)
     qtoks = _query_tokens(query)
+    # Flag-gated (default OFF): structural edge-category grain preference. Penalise using a
+    # connector table as a two-sided FK bridge so the business ownership spine wins ties.
+    _conn, _pen = None, 0
+    try:
+        from config import (JOIN_EDGE_CATEGORY_PENALTY as _ecp,
+                            JOIN_EDGE_CATEGORY_PENALTY_COST as _ecc)
+        if _ecp:
+            _conn, _pen = _connector_tables(adj), _ecc
+    except Exception:
+        _conn, _pen = None, 0
 
     terminals = [anchor] + [t for t in dict.fromkeys(targets) if t]
     allowed   = (set(allowed_intermediates) if allowed_intermediates else set()) | set(terminals)
@@ -494,7 +545,8 @@ def plan_join_tree(anchor, targets, graph, query="", allowed_intermediates=None,
         other_toks -= _table_tokens(tgt) | _table_tokens(anchor)
         qt_t = qtoks - other_toks
         p = _shortest_path(adj, anchor, tgt, max_hops=_MH, allowed=allowed,
-                           max_cost=_MC, qtoks=qt_t, prefer_tables=junctions)
+                           max_cost=_MC, qtoks=qt_t, prefer_tables=junctions,
+                           prefer_strong=prefer_strong, connectors=_conn, penalty=_pen)
         if p is None:
             unreachable.append(tgt)
         else:

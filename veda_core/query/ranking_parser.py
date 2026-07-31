@@ -55,6 +55,11 @@ class RankingSpec:
     ranked:    bool           # True if ANY ranking language was detected
     direction: str            # "desc" | "asc" — which end of the order
     basis:     Optional[str]  # "temporal" | "metric" | None — what to sort by
+    subject:   Optional[str] = None  # the noun the ranking is OVER ("top 5 PROPERTIES
+    #                                  by number of payments" → "properties"). This is the
+    #                                  GRAIN of a "top N X by <measure>" query; callers may
+    #                                  resolve it to a table so the grain doesn't invert to
+    #                                  the measured entity. None when no subject noun follows.
 
 
 def _to_int(tok: str) -> int:
@@ -76,7 +81,7 @@ def parse_ranking(query: str) -> RankingSpec:
     """
     ql = f" {query.lower()} "
     ranked = False
-    direction, basis, top_n = "desc", None, None
+    direction, basis, top_n, subject = "desc", None, None, None
 
     for phrase, d, b in _RANKING_WORDS:
         p = re.escape(phrase)
@@ -90,5 +95,16 @@ def parse_ranking(query: str) -> RankingSpec:
                  or re.search(rf"\b{_NUM_PATTERN}\s+(?:of\s+(?:the\s+)?)?{p}\b", ql))
             if m:
                 top_n = _to_int(m.group(1))
+        if subject is None and b == "metric":
+            # The noun the ranking is OVER: the first content word after the magnitude
+            # word (+ optional count / "of the"), stopping at a by/per/with/of/from
+            # boundary. Reuses the SAME ranking vocabulary — no new keywords. Empty when
+            # the ranking word is followed directly by a measure ("highest paid amount").
+            sm = re.search(rf"\b{p}\s+(?:{_NUM_PATTERN}\s+)?(?:of\s+(?:the\s+)?)?"
+                           rf"(?P<subj>[a-z]+(?:\s+[a-z]+){{0,2}}?)"
+                           rf"\s+(?:by|per|with|of|from|across|and)\b", ql)
+            if sm:
+                subject = sm.group("subj")
 
-    return RankingSpec(top_n=top_n, ranked=ranked, direction=direction, basis=basis)
+    return RankingSpec(top_n=top_n, ranked=ranked, direction=direction,
+                       basis=basis, subject=subject)

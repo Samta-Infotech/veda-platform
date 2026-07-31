@@ -20,6 +20,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Optional, List
 
+import config
 from semantic import registry as reg
 from query.intent import QueryIntent, Filter, validate_intent, build_sql
 
@@ -299,6 +300,98 @@ def _metric_entity_group(query, query_l, qtoks, table_a, agg_func, measure_col,
         why=why + [f"{agg_func}({measure_col}) per {b_table}" + (f" by {dim}" if dim else "")])
 
 
+def _ground_measure_col(table, meas_toks, cols):
+    """REUSABLE measure grounding: map a measure noun phrase ("expected price", "security
+    deposit") to the single MEASURE column of `table` whose name tokens the phrase names.
+    Data-driven (schema roles + name tokens), no column names in code. Requires EVERY phrase
+    token to appear in the column name (so "expected price" → expected_price, never a partial
+    "price" → any *_price); ties broken toward the shortest column (most exact). Returns the
+    column name or None. Shared by the superlative-list path and available to the aggregate /
+    LLM paths so measure resolution lives in ONE place, not per-intent."""
+    if not meas_toks:
+        return None
+    sing = reg._singularize
+    best, best_len = None, 1e9
+    for cid, c in cols.items():
+        if cid.split(".", 1)[0] != table:
+            continue
+        if (c.get("analytics_role") or "").upper() != "MEASURE":
+            continue
+        col = cid.split(".", 1)[1]
+        parts = {sing(p) for p in col.split("_") if len(p) > 2}
+        if meas_toks <= parts and len(col) < best_len:   # every measure word present
+            best, best_len = col, len(col)
+    return best
+
+
+_SUP_DESC = re.compile(r"\b(highest|most|largest|greatest|maximum|max|top|biggest|dearest)\b")
+_SUP_ASC = re.compile(r"\b(lowest|least|smallest|minimum|min|bottom|cheapest)\b")
+_SUP_MEAS_TAIL = re.compile(
+    r"\b(?:highest|lowest|most|least|largest|smallest|greatest|biggest|maximum|minimum|max|min"
+    r"|top(?:\s+\d+)?|bottom(?:\s+\d+)?)\s+(.+?)\s*[?.!]*\s*$")
+# Everything from the ranking VERB/ADJECTIVE onward is the measure clause, not the subject.
+# Stripping it leaves the SUBJECT entity phrase ("which properties …" ← "have the highest
+# carpet area"). "which"/"what" stay — they don't affect entity token matching.
+_RANK_CLAUSE = re.compile(
+    r"\b(?:that\s+)?(?:have|has|had|with|having|ranked|sorted|ordered)\b.*$"
+    r"|\b(?:highest|lowest|most|least|largest|smallest|greatest|biggest|maximum|minimum"
+    r"|max|min|top|bottom)\b.*$")
+
+
+def _superlative_measure_list(query, query_l, qtoks):
+    """SUPERLATIVE MEASURE LIST (flag-gated): "which <entity> ha(s|ve) the highest/lowest
+    <named measure>" → the top/bottom rows of the entity ORDERED BY that measure. Distinct
+    from _superlative_list (which keys off cheapest/most-expensive ADJECTIVES with no named
+    measure): here the user NAMES the measure ("expected price", "pos price"), so we ground it
+    to a MEASURE column via the shared resolver. Refuse-over-guess: entity or measure that
+    won't ground → None (fall through)."""
+    if not _fpg_on():
+        return None
+    if _SUP_DESC.search(query_l):
+        direction = "DESC"
+    elif _SUP_ASC.search(query_l):
+        direction = "ASC"
+    else:
+        return None
+    m = _SUP_MEAS_TAIL.search(query_l)
+    if not m:
+        return None
+    meas_toks = {reg._singularize(w) for w in re.findall(r"[a-z]+", m.group(1)) if len(w) > 2}
+    if not meas_toks:
+        return None
+    # SUBJECT-scope the entity: resolve it from the phrase BEFORE the ranking clause so the
+    # named MEASURE ("carpet area", "expected amount") can't bleed into entity resolution and
+    # mis-anchor ("properties … carpet area" → the carpet-area-UNIT table). Everything from
+    # the first ranking verb/adjective onward is the measure clause, not the subject.
+    _subj = _RANK_CLAUSE.sub("", query_l).strip()
+    _sq = reg.query_tokens(_subj) or qtoks
+    entity = _single_entity(_sq, _subj)
+    if entity is None:
+        return None
+    table = entity["resolves_to"]["table"]
+    cols = _sm().get("columns", {})
+    mcol = _ground_measure_col(table, meas_toks, cols)
+    if not mcol:
+        return None
+    # a display/name column so rows are legible; else just the measure
+    disp = next((cn for cn in ("name", "project_name", "title", "display_name", "label")
+                 if f"{table}.{cn}" in cols), None)
+    n = 100
+    mt = re.search(r"\b(?:top|first|highest|lowest)\s+(\d+)\b", query_l)
+    if mt:
+        n = int(mt.group(1))
+    sel, ref = [], [mcol]
+    if disp:
+        sel.append(f'a.{_q(disp)}'); ref.append(disp)
+    sel.append(f'a.{_q(mcol)}')
+    sql = (f'SELECT {", ".join(sel)} FROM {_q(table)} a '
+           f'WHERE a.{_q(mcol)} IS NOT NULL '
+           f'ORDER BY a.{_q(mcol)} {direction} LIMIT {n}')
+    return FastPathResult(sql=sql, tables={table}, columns=list(dict.fromkeys(ref)),
+                          primary=table, route=f"superlative.measure.{direction.lower()}",
+                          why=[f"top {table} by {mcol} ({direction})"])
+
+
 def _superlative_list(query, query_l, qtoks):
     """SUPERLATIVE LIST: "cheapest / most expensive <entity> [by/with <dim>]" — a sorted
     projection of an ENTITY by its price/measure, NOT an aggregate. The adjective fixes the
@@ -392,12 +485,207 @@ def _count_intent(query_l: str, qtoks: set) -> bool:
     return _has(query_l, _COUNT_TRIGGERS) or bool(_COUNT_WORDS & qtoks)
 
 
-def _single_entity(qtoks: set):
+def _fpg_on() -> bool:
+    """True when the FASTPATH_ENTITY_GLOSSARY feature flag is enabled. Read dynamically off
+    the config module (not value-bound at import) so runtime toggling — used by the eval/A-B
+    harnesses — is honoured; a missing flag is treated as OFF, so the feature is a no-op by
+    default."""
+    return bool(getattr(config, "FASTPATH_ENTITY_GLOSSARY", False))
+
+
+_TREND_ADVERBS = ("hourly", "daily", "weekly", "monthly", "quarterly", "yearly")
+
+
+def _trend_signal(query_l: str) -> bool:
+    """Flag-gated: does the query ASK for a time trend? "monthly trend of X", "X over
+    time", "X per month" — a count-over-time whose phrasing carries NO literal count word,
+    so _count_intent misses it and the (count-branch-hosted) trend logic is never reached."""
+    if not _fpg_on():
+        return False
+    if " trend " in query_l or " over time " in query_l:
+        return True
+    if any(w in query_l for w in _TREND_ADVERBS):
+        return True
+    return bool(re.search(r"\b(?:per|by|every)\s+(day|week|month|quarter|year)\b", query_l))
+
+
+_GROUP_WORDS = ("distribution", "breakdown", "broken down", "grouped by")
+
+
+_GROUP_PREPS = re.compile(r"\b(?:per|by|across|for each|grouped by|broken down by|group by)\b")
+
+
+def _subject_scope(query: str):
+    """For a grouped query ("distribution of <subject> per <dim>…"), the SUBJECT is the
+    phrase BEFORE the first grouping preposition; tokens after it are DIMENSIONS, not a
+    second entity. Returns (subject_qtoks, subject_text) so entity resolution isn't misled
+    into reading the group-by noun ('project' in "assets per project") as a competing
+    subject → a spurious join. None when there's no grouping preposition."""
+    m = _GROUP_PREPS.search(query.lower())
+    if not m:
+        return None
+    head = query[:m.start()]
+    toks = reg.query_tokens(head)
+    return (toks, head) if toks else None
+
+
+def _group_signal(query_l: str) -> bool:
+    """Flag-gated: does the query ask for a grouped COUNT ("distribution of X per Y",
+    "breakdown of X by Y")? Like trend, the phrasing carries NO literal count word, so
+    _count_intent misses it and the (count-branch-hosted) group_dim logic is never reached
+    → the query falls to Tier-2, which fabricates a spurious junction join. The existing
+    group_dim resolver already treats 'distribution'/'breakdown' as grouping triggers; this
+    only gets the query INTO that branch."""
+    if not _fpg_on():
+        return False
+    return any(w in query_l for w in _GROUP_WORDS)
+
+
+def _concat_exact_table(query: str):
+    """The single table whose COLLAPSED concept token an adjacent-word concatenation of the
+    query spells EXACTLY ("payment transaction" → 'paymenttransaction'), or None if zero or
+    ambiguous. The strongest, most-specific grounding signal — a full multi-word name match."""
+    concepts = reg._active()["concepts"]
+    sing = reg._singularize
+    words = [sing(w) for w in re.findall(r"[a-z]+", (query or "").lower())]
+    aug = set()
+    for i in range(len(words) - 1):
+        aug.add(words[i] + words[i + 1])
+        if i < len(words) - 2:
+            aug.add(words[i] + words[i + 1] + words[i + 2])
+    aug = {a for a in aug if len(a) >= 6}
+    exact = {t for t, c in concepts.items()
+             for ct in c.get("match_tokens", []) if ct in aug}
+    return next(iter(exact)) if len(exact) == 1 else None
+
+
+def _grounded_entity_fallback(query: str, qtoks: set):
+    """Flag-gated business-noun grounding — fires ONLY when match_concepts found nothing,
+    so it is purely additive (never overrides a registry match). Data-driven, no table
+    names in code, and UNAMBIGUOUS-ONLY (two candidate tables ⇒ return None ⇒ refuse-over-
+    guess). Tiers, most-specific first:
+      1. adjacent-token concatenation EXACT-equals a collapsed concept token
+         ("lease tenant"→'leasetenant' == assets_leasetenant's token);
+      2. concatenation is a SUBSTRING of exactly one concept token
+         ("invoice item"→'invoiceitem' ⊂ 'userinvoiceitem' == accounts_userinvoiceitem);
+      3. the curated alias glossary for semantic renames ("property"→assets_asset)."""
+    if not _fpg_on():
+        return None
+    concepts = reg._active()["concepts"]
+    sing = reg._singularize
+    words = [sing(w) for w in re.findall(r"[a-z]+", (query or "").lower())]
+    aug = set()
+    for i in range(len(words) - 1):
+        aug.add(words[i] + words[i + 1])
+        if i < len(words) - 2:
+            aug.add(words[i] + words[i + 1] + words[i + 2])
+    aug = {a for a in aug if len(a) >= 6}
+
+    def _ret(table, extra_seeds=()):
+        # Return a COPY of the registry concept (never mutate the shared object) whose
+        # match_tokens ALSO carry the query words that actually named this entity — the
+        # collapsed concept token ('leasetenant') doesn't cover the user's words ('lease',
+        # 'tenant'), so without this the downstream qualifier guard treats them as a dropped
+        # qualifier and refuses. Seeds = query words that are substrings of a collapsed
+        # token, plus any tier-specific (glossary) noun words.
+        c = concepts.get(table)
+        if not c or "default_metric" not in c:
+            return None
+        ctoks = c.get("match_tokens", [])
+        seeds = {w for w in words if len(w) > 2 and any(w in ct for ct in ctoks)}
+        seeds |= {sing(s) for s in extra_seeds if len(s) > 2}
+        return {**c, "match_tokens": sorted(set(ctoks) | seeds)}
+
+    if aug:
+        exact = {t for t, c in concepts.items()
+                 for ct in c.get("match_tokens", []) if ct in aug}
+        if len(exact) == 1:
+            return _ret(next(iter(exact)))
+        if len(exact) > 1:
+            return None
+        # SUFFIX before general substring: a Django table is app+model, so the business
+        # noun names the END of the collapsed token ("verification document" →
+        # 'verificationdocument' is the SUFFIX of 'assetverificationdocument', but NOT of
+        # 'assetverificationdocumenttype'). Suffix picks the base entity over its *type/
+        # *lead/*user satellites that merely contain the same substring.
+        suf = {t for t, c in concepts.items()
+               for ct in c.get("match_tokens", []) if len(ct) >= 6
+               for a in aug if ct.endswith(a)}
+        if len(suf) == 1:
+            return _ret(next(iter(suf)))
+        if not suf:
+            sub = {t for t, c in concepts.items()
+                   for ct in c.get("match_tokens", []) if len(ct) >= 6
+                   for a in aug if a in ct}
+            if len(sub) == 1:
+                return _ret(next(iter(sub)))
+    try:
+        from query.entity_resolver import _entity_glossary
+        gl = _entity_glossary() or {}
+    except (ImportError, OSError, ValueError):
+        gl = {}                      # glossary file absent/unreadable → skip this tier
+    toks = {sing(t) for t in qtoks} | set(qtoks)
+    tabs, seeds = set(), set()
+    for noun, table in gl.items():
+        parts = [sing(p) for p in noun.split()]
+        if all(p in toks for p in parts):
+            tabs.add(table)
+            seeds |= set(parts)
+    if len(tabs) == 1:
+        return _ret(next(iter(tabs)), extra_seeds=seeds)
+    return None
+
+
+def _named_time_col(query_l: str, table: str, default_tcol: str):
+    """Flag-gated: when the query NAMES a date column ("... based on available from date"),
+    ground it to a real TEMPORAL column of `table` and return it — but ONLY when that column
+    DIFFERS from the metric's default (else keep default). No confident grounding → keep
+    default (never invent a column). Prevents a trend from silently bucketing the wrong date
+    axis ("based on available from date" bucketed on created_at)."""
+    if not _fpg_on():
+        return default_tcol
+    m = re.search(r"\bbased on\s+([a-z][a-z ]*?)\s*[?.!]*\s*$", query_l)
+    if not m:
+        return default_tcol
+    phrase = {reg._singularize(w) for w in re.findall(r"[a-z]+", m.group(1)) if len(w) > 2}
+    if not phrase:
+        return default_tcol
+    cols = _sm().get("columns", {})
+    best, best_ov = None, 0
+    for cid, meta in cols.items():
+        if not cid.startswith(table + "."):
+            continue
+        if (meta.get("semantic_type") or "").upper() != "TEMPORAL":
+            continue
+        col = cid.split(".", 1)[1]
+        ov = len({reg._singularize(p) for p in col.split("_") if len(p) > 2} & phrase)
+        if ov > best_ov:
+            best, best_ov = col, ov
+    if best and best_ov >= 1 and best != default_tcol:
+        return best
+    return default_tcol
+
+
+def _single_entity(qtoks: set, query: str = ""):
     """Return the one dominant entity concept, or None when zero / ambiguous-multi.
     Two distinct strongly-matched entity tables ⇒ a join ⇒ fall through (None)."""
     hits = reg.match_concepts(qtoks)
     if not hits:
-        return None
+        return _grounded_entity_fallback(query, qtoks)
+    # Generic-token mis-anchor guard (flag-gated): match_concepts scores on shared TOKENS, so
+    # a query naming a specific entity by a MULTI-word phrase ("payment transaction") anchors
+    # on whatever table incidentally shares the generic head token ('payment' →
+    # payments_razorpaylinkedaccount) instead of the table whose COLLAPSED name the phrase
+    # spells exactly ('paymenttransaction' == accounts_paymenttransaction). An adjacent-token
+    # concatenation EXACT-matching a different table's full name is the stronger, specific
+    # signal — prefer it. Only exact-name concatenation qualifies (never substring), so this
+    # can't mis-fire on partial overlaps. Default OFF → byte-identical.
+    if _fpg_on():
+        _ce = _concat_exact_table(query)
+        if _ce and _ce != hits[0][0]["resolves_to"]["table"]:
+            _ge = _grounded_entity_fallback(query, qtoks)
+            if _ge and _ge["resolves_to"]["table"] == _ce:
+                return _ge
     # A runner-up counts as a SECOND entity (a join, fall through) only if it brings a
     # query token the top concept does not already cover. Otherwise it merely shares a
     # token with the top concept (e.g. "incident" is in both `incident` and
@@ -532,13 +820,18 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
     # ── 0. SUPERLATIVE LIST ("cheapest / most expensive <entity>") — a sorted projection
     # of the entity by its price/measure, ranked BEFORE the count/measure paths (a
     # superlative is not a count).
+    # named-measure ranking ("which X have the highest <measure>") first — more specific
+    # than the adjective-only superlative below (flag-gated; None when OFF).
+    _supm = _superlative_measure_list(query, query_l, qtoks)
+    if _supm is not None:
+        return _supm
     _sup = _superlative_list(query, query_l, qtoks)
     if _sup is not None:
         return _sup
 
     # ── 0a. RATIO: "percentage of incidents that are escalated" ──────────────
     if re.search(r"\b(percentage|percent|proportion|share)\b|%", query_l):
-        entity = _single_entity(qtoks)
+        entity = _single_entity(qtoks, query)
         if entity is not None:
             table = entity["resolves_to"]["table"]
             metric = reg.get_metric(entity["default_metric"])
@@ -557,7 +850,7 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                      r"(?:vs|versus|compared\s+(?:to|with)|against)\s+"
                      r"(?:the\s+)?(?:last|previous)\s+\1\b", query_l)
     if mcmp:
-        entity = _single_entity(qtoks)
+        entity = _single_entity(qtoks, query)
         if entity is not None:
             table = entity["resolves_to"]["table"]
             metric = reg.get_metric(entity["default_metric"])
@@ -585,8 +878,13 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     why=[f"this {unit} [{t0}..{nxt}) vs last {unit} [{p0}..{t0}) on {tcol}"]))
 
     # ── 1. COUNT metric (optionally grouped / filtered / time-bounded) ────────
-    if _count_intent(query_l, qtoks):
-        entity = _single_entity(qtoks)
+    if _count_intent(query_l, qtoks) or _trend_signal(query_l) or _group_signal(query_l):
+        _eq, _et = qtoks, query
+        if _fpg_on() and (_group_signal(query_l) or _has(query_l, (" per ", " across "))):
+            _sc = _subject_scope(query)
+            if _sc:
+                _eq, _et = _sc
+        entity = _single_entity(_eq, _et)
         if entity is not None:
             table = entity["resolves_to"]["table"]
             metric = reg.get_metric(entity["default_metric"])
@@ -707,9 +1005,23 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     consumed |= set(group_dim2["col_name"].split("_"))
                     for _lab in group_dim2.get("labels", []):
                         consumed |= set(re.findall(r"[a-z0-9]+", _lab.lower()))
+                if group_dim is not None and _fpg_on():
+                    # group OPERATION words name the answer shape ("distribution of X by Y"),
+                    # not a filter — consume them so the qualifier guard doesn't read them as
+                    # a dropped narrowing qualifier and refuse a correct GROUP BY.
+                    consumed |= {"distribution", "breakdown", "broken", "down",
+                                 "grouped", "group", "each"}
                 if bucket is not None:
                     consumed |= {bucket, "daily", "weekly", "monthly", "quarterly",
                                  "yearly", "trend", "over"}
+                    if _fpg_on():
+                        # the trend AXIS phrase ("... based on <date col>") names the time
+                        # column the trend buckets by — those tokens ARE accounted (they
+                        # become date_trunc(<col>)), never a dropped qualifier.
+                        _mb = re.search(r"\bbased on\s+(.+)$", query_l)
+                        if _mb:
+                            consumed |= set(re.findall(r"[a-z]+", _mb.group(1)))
+                        consumed |= {"based", "on"}
                 _residual = _unmodelled_residual(qtoks, consumed)
                 if _residual and not _residual_is_filler(_residual, table, query_l):
                     return None             # unhandled qualifier → full pipeline
@@ -762,6 +1074,7 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                         return _mtc
                 if bucket is not None:
                     tcol = metric["allowed_time_dimension"].split(".", 1)[1]
+                    tcol = _named_time_col(query_l, table, tcol)
                     return _finalize(query, QueryIntent(
                         query_type="trend", subject_table=table, metric_id=alias,
                         select_expr=select_expr, metric_alias=alias,
@@ -863,7 +1176,7 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
 
     # ── 3. Dimension list ("what are the incident statuses") ──────────────────
     if _has(query_l, _LIST_VERBS) and not _count_intent(query_l, qtoks) and not join_hint:
-        entity = _single_entity(qtoks)
+        entity = _single_entity(qtoks, query)
         if entity is not None:
             table = entity["resolves_to"]["table"]
             dim   = reg.match_dimension_in_table(table, qtoks, query_l)

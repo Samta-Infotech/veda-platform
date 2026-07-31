@@ -192,6 +192,26 @@ def _gate_strip():
               "he", "she", "him", "her", "his", "hers", "they", "them", "their", "theirs",
               "who", "whom", "whose", "can", "could", "would", "should", "please", "find",
               "show", "give", "tell", "get", "see", "want", "need", "pull", "provide"})
+    # Analytics-DESCRIPTION language — words that name the OPERATION/shape of the answer
+    # or are connectives, NOT data filter values and NOT entity nouns. These false-dropped
+    # real analytical queries at the qualifier gate ("conversion RATE", "value ACROSS
+    # projects", "LISTED assets", "PER project"). Deliberately excludes entity nouns
+    # (asset/user/…) and status VALUES (active/completed/premium) — those are real content.
+    s.update({"across", "rate", "listed", "per", "distribution", "trend", "percentage",
+              "duration", "conversion", "occupancy", "common", "generate", "generates",
+              "contribute", "contributes", "occurred", "taken", "submitted", "provides"})
+    # Time-bucket GRANULARITY words name the SHAPE of a trend (like "trend"/"distribution"
+    # above), never a data filter value. Without them a correct date_trunc trend
+    # false-refuses on the literal word 'monthly' (which appears nowhere in the SQL even
+    # when it buckets by month). Flag-gated with the deterministic trend grounding it
+    # accompanies (default OFF → strip is byte-identical).
+    try:
+        from config import FASTPATH_ENTITY_GLOSSARY as _fpg
+    except Exception:
+        _fpg = False
+    if _fpg:
+        s.update({"hourly", "daily", "weekly", "monthly", "quarterly", "yearly",
+                  "biweekly", "bimonthly"})
     return s
 
 

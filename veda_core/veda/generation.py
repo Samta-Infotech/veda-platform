@@ -98,10 +98,62 @@ def _recommended_projection_block(recommended, columns) -> str:
     return "Recommended Projection: " + ", ".join(recommended) + "\n"
 
 
+def _deterministic_single_table_sql(query, table, columns, temporal, time_col,
+                                    recommended_projection):
+    """Build a single-table SELECT WITHOUT the SLM, purely from pieces the pipeline has
+    ALREADY computed deterministically: the recommended projection, the canonical
+    temporal column + resolved date range, and the requested/temporal ranking + limit.
+
+    Scope (safe by construction): handles projection + date-range filter + temporal
+    ORDER BY + LIMIT. Returns None — deferring to the SLM — whenever the query needs
+    something this builder must NOT guess: a measure/value ranking (needs a sort column
+    we won't invent) or a categorical/text filter ("open", "completed"). In that case,
+    if the SLM is unavailable, the SELECT built by the SLM path is missing anyway; here
+    a None simply preserves the existing behavior. When it DOES build, the same
+    downstream gates (value-grounding, qualifier-completeness) still validate it, so a
+    query that secretly needed a dropped filter is refused, never answered wrong."""
+    _rank = parse_ranking(query)
+    # measure/value ranking needs a specific sort column — do not guess it here
+    if _rank.basis and _rank.basis != "temporal":
+        return None
+    # a WHERE filter the query names but this builder can't express deterministically
+    # (a categorical/text condition) must go to the SLM; detect the common markers.
+    if re.search(r"\b(where|with .+ (of|=|greater|less|more|above|below|over|under)|"
+                 r"open|closed|completed|active|cancelled|pending|published|failed|paid|"
+                 r"unpaid|verified|approved|rejected)\b", query.lower()):
+        return None
+    proj = [c for c in (recommended_projection or []) if c in columns]
+    if not proj:
+        proj = list(columns)[:8]
+    sql = f'SELECT {", ".join(chr(34) + c + chr(34) for c in proj)} FROM "{table}"'
+    if temporal and time_col and (getattr(temporal, "start", None) or getattr(temporal, "end", None)):
+        if temporal.start and temporal.end:
+            sql += f' WHERE "{time_col}" BETWEEN \'{temporal.start}\' AND \'{temporal.end}\''
+        elif temporal.start:
+            sql += f' WHERE "{time_col}" >= \'{temporal.start}\''
+        else:
+            sql += f' WHERE "{time_col}" <= \'{temporal.end}\''
+    if _rank.basis == "temporal" and time_col:
+        sql += f' ORDER BY "{time_col}" {"DESC" if _rank.direction == "desc" else "ASC"}'
+    return sql + f" LIMIT {_extract_requested_limit(query)}"
+
+
 def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=None,
                  time_col=None, recommended_projection=None):
-    """Ask Qwen for ONE read-only SELECT over the chosen table's real columns."""
+    """Ask Qwen for ONE read-only SELECT over the chosen table's real columns.
+    When SINGLE_TABLE_DETERMINISTIC is on, first try the SLM-free builder for the
+    safe cases (projection + date range + temporal rank); fall back to the SLM only
+    when the query needs something the builder won't guess."""
     import urllib.request
+    try:
+        from config import SINGLE_TABLE_DETERMINISTIC as _det_on
+    except Exception:
+        _det_on = False
+    if _det_on:
+        _det = _deterministic_single_table_sql(query, table, columns, temporal,
+                                               time_col, recommended_projection)
+        if _det is not None:
+            return _det
 
     date_line = ""
     if temporal and (temporal.start or temporal.end):
