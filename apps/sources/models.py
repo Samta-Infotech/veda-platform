@@ -7,6 +7,9 @@ never reads a half-built substrate (§5, §18 "ingestion partial failure").
 """
 from __future__ import annotations
 
+import json
+import os
+
 from django.db import models
 
 
@@ -90,8 +93,12 @@ class Source(models.Model):
         return f"{self.name} ({self.dialect})"
 
     def resolve_password(self) -> str:
-        """Resolve the source password: env-ref first (prod-safe), then inline (dev)."""
-        import os
+        """Resolve the source password: env-ref first (prod-safe), then inline (dev).
+
+        Returns an empty string when the referenced env var is unset — the caller
+        (the connector) surfaces the resulting auth failure. The value is NEVER
+        logged or included in ``__str__``/``repr``.
+        """
         if self.password_env:
             return os.environ.get(self.password_env, "")
         return self.password_inline or ""
@@ -109,7 +116,6 @@ class Source(models.Model):
 
         Also carries the client exclude_tables (JSON) + schema filter so the engine
         scanner honours THIS source's exclusions without any config-file registry (§3.1)."""
-        import json
         c = self.connection()
         env = {
             "VEDA_SOURCE_ID": str(self.pk),

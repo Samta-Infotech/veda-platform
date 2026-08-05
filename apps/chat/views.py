@@ -17,9 +17,27 @@ from .serializers import (
     CreateConversationSerializer,
     LoginRequestSerializer,
 )
-from .services import ChatNotFound, ConversationQueryService, _MSG_MODEL_ERROR
+from .services import (
+    ChatNotFound,
+    CODE_MODEL_ERROR,
+    CODE_STREAM_ERROR,
+    ConversationQueryService,
+    MSG_MODEL_ERROR,
+)
+from .turn_events import TurnEventAccumulator
+from apps.query.scope import resolve_query_scope
 
 logger = logging.getLogger(__name__)
+
+# Dev-only identity fallback: the username seeded by chat migration 0002. Used
+# only when the request carries no authenticated principal — see _resolve_user.
+DEV_FALLBACK_USERNAME = "admin"
+
+# Tenant used by the chat entry point until tenant-from-principal lands (§6.2),
+# matching apps.query.views.DEFAULT_TENANT.
+DEFAULT_TENANT = "default"
+
+_ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _resolve_user(request):
@@ -28,7 +46,7 @@ def _resolve_user(request):
     user = getattr(request, "user", None)
     if user is not None and user.is_authenticated:
         return user
-    return get_user_model().objects.filter(username="admin").first()
+    return get_user_model().objects.filter(username=DEV_FALLBACK_USERNAME).first()
 
 
 def _unauthenticated_response():
@@ -126,8 +144,7 @@ class ConversationQueryView(APIView):
         # ready registry, VEDA_DEFAULT_SOURCE_ID only as the last-resort fallback.
         # This keeps chat multi-source (federation-capable) and immune to a stale
         # default pointing at a source with no connection (e.g. an empty-host row).
-        from apps.query.views import QueryView
-        source_ids = QueryView._resolve_scope(request.data, tenant="default")
+        source_ids = resolve_query_scope(request.data, tenant=DEFAULT_TENANT)
         service = ConversationQueryService(
             user=user, source_id=source_ids[0], source_ids=source_ids)
         try:
@@ -148,50 +165,39 @@ class ConversationQueryView(APIView):
 
     def _json_response(self, service, chat, message, rid):
         logger.info("conversation query AI processing started chat_id=%s", chat.pk)
-        content_blocks, explainability, thinking_text, summary_text, error = [], None, "", "", None
-        usage = {}
-        insights = None
+        turn = TurnEventAccumulator()
+        error = None
         for evt in service.run_turn(chat, message, request_id=rid):
             kind, payload = evt["event"], evt["data"]
-            if kind == "thinking":
-                thinking_text = payload.get("message", "")
-            elif kind in ("content", "visualization"):
-                content_blocks.append(payload)  # one ordered response[] array (§history)
-                if payload.get("is_summary"):
-                    summary_text = payload.get("content", "")
-            elif kind == "explainability":
-                explainability = payload
-            elif kind == "usage":
-                usage = payload
-            elif kind == "insights":
-                insights = payload
-            elif kind == "error":
+            if kind == "error":
                 error = payload
+            else:
+                turn.consume(kind, payload)
         logger.info("conversation query AI processing completed chat_id=%s", chat.pk)
 
         if error is not None:
             return Response(
                 {"status_code": status.HTTP_502_BAD_GATEWAY,
                  "message": error.get("message", "Unable to generate response."),
-                 "data": {"chat_id": chat.pk, "code": error.get("code", "MODEL_ERROR")}},
+                 "data": {"chat_id": chat.pk, "code": error.get("code", CODE_MODEL_ERROR)}},
                 status=status.HTTP_502_BAD_GATEWAY,
             )
 
-        metadata = {"thinking": thinking_text, "explainability": explainability, "usage": usage}
-        assistant_msg = service.save_assistant_message(chat, content_blocks, metadata)
+        metadata = turn.metadata()
+        assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
 
         response_data = {
             "chat_id": chat.pk,
             "message_id": assistant_msg.pk,
-            "summary": summary_text,
-            "response": content_blocks,
+            "summary": turn.summary_text,
+            "response": turn.content_blocks,
             "metadata": metadata,
         }
-        if insights is not None:
-            response_data["insights"] = insights["insights"]
-            response_data["follow_up_questions"] = insights["follow_up_questions"]
+        if turn.insights is not None:
+            response_data["insights"] = turn.insights["insights"]
+            response_data["follow_up_questions"] = turn.insights["follow_up_questions"]
 
         return Response({
             "status_code": status.HTTP_200_OK,
@@ -211,42 +217,34 @@ class ConversationQueryView(APIView):
 
     def _sse_generator(self, service, chat, message, rid):
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
-        content_blocks, explainability, thinking_text, summary_text = [], None, "", ""
-        usage = {}
+        turn = TurnEventAccumulator()
         try:
             for evt in service.run_turn(chat, message, request_id=rid, stream=True):
                 kind, payload = evt["event"], evt["data"]
-                if kind == "thinking":
-                    thinking_text = payload.get("message", "")
-                elif kind in ("content", "visualization"):
-                    content_blocks.append(payload)  # one ordered response[] array (§history)
-                    if payload.get("is_summary"):
-                        summary_text = payload.get("content", "")
-                elif kind == "explainability":
-                    explainability = payload
-                elif kind == "usage":
-                    usage = payload
-                elif kind == "error":
+                if kind == "error":
+                    # Terminal: the turn produced no answer, so nothing is
+                    # persisted and no "completed" frame follows.
                     yield _sse_format("error", payload)
                     logger.warning("conversation query streaming error chat_id=%s: %s",
                                    chat.pk, payload)
                     return
+                turn.consume(kind, payload)
                 yield _sse_format(kind, payload)
         except Exception:  # never break the connection mid-stream
             # Raw exception logged (with traceback) — NOT sent to the client; show
             # the safe copy, same as the other error paths (services.py).
             logger.exception("conversation query streaming failed chat_id=%s", chat.pk)
             yield _sse_format("error",
-                              {"code": "STREAM_ERROR", "message": _MSG_MODEL_ERROR})
+                              {"code": CODE_STREAM_ERROR, "message": MSG_MODEL_ERROR})
             return
 
-        metadata = {"thinking": thinking_text, "explainability": explainability, "usage": usage}
-        assistant_msg = service.save_assistant_message(chat, content_blocks, metadata)
+        metadata = turn.metadata()
+        assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
         yield _sse_format("completed",
                           {"chat_id": chat.pk, "message_id": assistant_msg.pk,
-                           "summary": summary_text, "is_complete": True})
+                           "summary": turn.summary_text, "is_complete": True})
         logger.info("conversation query streaming completed chat_id=%s", chat.pk)
 
 
@@ -375,9 +373,9 @@ def _serialize_history_message(msg) -> dict:
             "metadata": {
                 "thinking": meta.get("thinking", ""),
                 "explainability": meta.get("explainability"),
-                "usage": meta.get("usage") or {
-                    "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0,
-                },
+                # dict() copy: the shared constant must never be handed out by
+                # reference into a mutable response payload.
+                "usage": meta.get("usage") or dict(_ZERO_USAGE),
             },
         }
     else:

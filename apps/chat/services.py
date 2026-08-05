@@ -16,7 +16,6 @@ from .table_rendering import (
 )
 from .thinking_messages import business_friendly_message
 from .visualization import VisualizationRecommender
-from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 logger = logging.getLogger(__name__)
 
@@ -31,12 +30,25 @@ DEFAULT_CONVERSATION_TITLE = "New Chat"
 #     the UI should say the assistant is temporarily unavailable and offer a retry.
 #   • MODEL_ERROR — an unexpected fault while generating the answer (not a known
 #     outage). Also retryable from the user's side, but not a clean "service down".
-_CODE_LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
-_MSG_LLM_UNAVAILABLE = ("The AI assistant is temporarily unavailable. "
-                        "Please try again in a moment.")
-_CODE_MODEL_ERROR = "MODEL_ERROR"
-_MSG_MODEL_ERROR = ("Something went wrong while generating a response. "
-                    "Please try again.")
+#
+# Public (no leading underscore): views.py renders the same copy on its own
+# stream-level failure path, so this is a deliberate cross-module contract rather
+# than a private detail being reached into.
+CODE_LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
+MSG_LLM_UNAVAILABLE = ("The AI assistant is temporarily unavailable. "
+                       "Please try again in a moment.")
+CODE_MODEL_ERROR = "MODEL_ERROR"
+MSG_MODEL_ERROR = ("Something went wrong while generating a response. "
+                   "Please try again.")
+# Error code for a fault raised while the SSE response is already streaming
+# (views.py) — distinct from MODEL_ERROR so the two are separable in the client
+# and in logs, even though they share the same user-facing copy.
+CODE_STREAM_ERROR = "STREAM_ERROR"
+
+# Bounds how long run_turn waits on the worker thread after it has signalled
+# completion. It has already finished by then (the "done" sentinel is enqueued in
+# the worker's `finally`), so this only caps a pathological worst case.
+_WORKER_JOIN_TIMEOUT_S = 5
 
 _visualization_recommender = VisualizationRecommender()
 
@@ -83,15 +95,15 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
         return None
     x_idx, y_idx = cols.index(x_name), cols.index(y_name)
     if vtype == "line":
-        return _visualization_recommender._line(cols, rows, x_idx, y_idx)
+        return _visualization_recommender.build_line_spec(cols, rows, x_idx, y_idx)
     if vtype in ("bar", "pie"):
-        # _category_numeric returns a LIST (it may offer pie + bar for the same data).
+        # build_category_specs returns a LIST (it may offer pie + bar for the same data).
         # This function's contract is ONE spec (the callers do `spec.to_dict()`), so
         # return the spec matching the requested type — or the first available — never
         # the raw list (a list has no .to_dict(), which crashed _build_visualizations
         # on any bar/pie candidate/suggestion that reached this fallback). None when the
         # data can't be charted (e.g. a single category).
-        specs = _visualization_recommender._category_numeric(cols, rows, x_idx, y_idx)
+        specs = _visualization_recommender.build_category_specs(cols, rows, x_idx, y_idx)
         if not specs:
             return None
         return next((s for s in specs if s.type.value == vtype), specs[0])
@@ -101,12 +113,13 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
 class ConversationQueryService:
     """One assistant turn: resolve chat -> run the chatbot supervisor -> persist."""
 
-    def __init__(self, user, source_id=None, tenant: str = "default", source_ids=None):
+    def __init__(self, user, source_id: int | None = None, tenant: str = "default",
+                 source_ids: list[int] | None = None):
         self.user = user
         self.source_id = source_id
         # Validated query SCOPE (P5) — ready source ids, primary first, resolved
-        # server-side by the view (QueryView._resolve_scope). Forwarded to inference
-        # so multi-source scopes retrieve/federate exactly like /api/v1/query.
+        # server-side by the view (apps.query.scope.resolve_query_scope). Forwarded to
+        # inference so multi-source scopes retrieve/federate exactly like /api/v1/query.
         self.source_ids = list(source_ids) if source_ids else ([source_id] if source_id else None)
         self.tenant = tenant
 
@@ -191,7 +204,7 @@ class ConversationQueryService:
                 # Raw exception logged (with traceback) — NOT sent to the client.
                 logger.exception("conversation query pipeline failed chat_id=%s", chat.pk)
                 yield {"event": "error",
-                       "data": {"code": _CODE_MODEL_ERROR, "message": _MSG_MODEL_ERROR}}
+                       "data": {"code": CODE_MODEL_ERROR, "message": MSG_MODEL_ERROR}}
                 return
 
         if response.get("engine_unavailable"):
@@ -207,8 +220,8 @@ class ConversationQueryService:
             # service is down. Always show the outage copy.
             logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)
             yield {"event": "error",
-                   "data": {"code": _CODE_LLM_UNAVAILABLE,
-                            "message": _MSG_LLM_UNAVAILABLE}}
+                   "data": {"code": CODE_LLM_UNAVAILABLE,
+                            "message": MSG_LLM_UNAVAILABLE}}
             return
 
         if isinstance(response, dict):
@@ -271,18 +284,18 @@ class ConversationQueryService:
                 error_message = payload
             else:
                 yield {"event": kind, "data": payload}
-        thread.join(timeout=5)   # already finished by the time "done" was enqueued; bounds worst case
+        thread.join(timeout=_WORKER_JOIN_TIMEOUT_S)   # already finished by the time "done" was enqueued
 
         if error_message is not None:
             # error_message is the raw str(exc) from the worker thread — already
             # logged with its traceback in target()'s except. Show the safe copy.
             yield {"event": "error",
-                   "data": {"code": _CODE_MODEL_ERROR, "message": _MSG_MODEL_ERROR}}
+                   "data": {"code": CODE_MODEL_ERROR, "message": MSG_MODEL_ERROR}}
             return None
         if result is None:
             logger.error("conversation query pipeline returned no result chat_id=%s", chat.pk)
             yield {"event": "error",
-                   "data": {"code": _CODE_MODEL_ERROR, "message": _MSG_MODEL_ERROR}}
+                   "data": {"code": CODE_MODEL_ERROR, "message": MSG_MODEL_ERROR}}
             return None
         return result
 
