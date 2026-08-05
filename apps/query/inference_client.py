@@ -9,11 +9,36 @@ Uses stdlib urllib to avoid adding a dependency to the thin api image (§1.3).
 from __future__ import annotations
 
 import json
+import logging
 import os
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Iterator
+
+logger = logging.getLogger(__name__)
+
+ENV_INFERENCE_URL = "INFERENCE_URL"
+ENV_INFERENCE_TIMEOUT_S = "INFERENCE_TIMEOUT_S"
+_DEFAULT_INFERENCE_URL = "http://inference:8001"
+_DEFAULT_TIMEOUT_S = "300"
+
+# Upstream error bodies are truncated before they reach an exception message:
+# enough to diagnose, bounded so a large HTML error page can't flood the logs.
+_ERROR_DETAIL_MAX_CHARS = 500
+
+# Header names forwarded to the inference tier (§6.2, §6.3).
+_HEADER_SOURCE_ID = "X-Veda-Source-Id"
+_HEADER_SOURCE_IDS = "X-Veda-Source-Ids"
+_HEADER_TENANT = "X-Veda-Tenant"
+_HEADER_REQUEST_ID = "X-Request-Id"
+
+_SSE_EVENT_PREFIX = "event:"
+_SSE_DATA_PREFIX = "data:"
+
+_PATH_RUN_HYBRID_QUERY = "/v1/run_hybrid_query"
+_PATH_RUN_HYBRID_QUERY_STREAM = "/v1/run_hybrid_query/stream"
+_PATH_RETRIEVE = "/v1/retrieve"
 
 
 @dataclass
@@ -30,8 +55,8 @@ class InferenceUnavailable(RuntimeError):
 class InferenceClient:
     def __init__(self, config: InferenceClientConfig | None = None):
         self.config = config or InferenceClientConfig(
-            base_url=os.environ.get("INFERENCE_URL", "http://inference:8001"),
-            timeout_s=float(os.environ.get("INFERENCE_TIMEOUT_S", "300")),
+            base_url=os.environ.get(ENV_INFERENCE_URL, _DEFAULT_INFERENCE_URL),
+            timeout_s=float(os.environ.get(ENV_INFERENCE_TIMEOUT_S, _DEFAULT_TIMEOUT_S)),
         )
 
     def _request(self, path: str, body: dict, source_id, tenant, request_id=None,
@@ -42,33 +67,49 @@ class InferenceClient:
         if accept:
             headers["Accept"] = accept
         if source_id is not None:
-            headers["X-Veda-Source-Id"] = str(source_id)
+            headers[_HEADER_SOURCE_ID] = str(source_id)
         if source_ids:
             # Server-validated scope SET (P5). Comma-separated, ownership already checked
             # in the view — the inference tier trusts these because they arrive from the
             # api tier, never from the end client (§6.2).
-            headers["X-Veda-Source-Ids"] = ",".join(str(s) for s in source_ids)
+            headers[_HEADER_SOURCE_IDS] = ",".join(str(s) for s in source_ids)
         if tenant is not None:
-            headers["X-Veda-Tenant"] = str(tenant)
+            headers[_HEADER_TENANT] = str(tenant)
         if request_id:
-            headers["X-Request-Id"] = str(request_id)  # trace across api→inference (§6.3)
+            headers[_HEADER_REQUEST_ID] = str(request_id)  # trace across api→inference (§6.3)
         return urllib.request.Request(url, data=data, headers=headers, method="POST")
 
-    def _post(self, path: str, body: dict, source_id, tenant, request_id=None, source_ids=None) -> dict:
-        req = self._request(path, body, source_id, tenant, request_id=request_id, source_ids=source_ids)
+    @staticmethod
+    def _open(request: urllib.request.Request, timeout_s: float):
+        """Open the request, mapping every transport-level failure to
+        ``InferenceUnavailable``.
+
+        Single place where urllib's two failure modes are translated — previously
+        this identical 6-line try/except was duplicated in ``_post`` and
+        ``stream_hybrid_query``, so a change to the error contract had to be made
+        twice (DRY).
+        """
         try:
-            with urllib.request.urlopen(req, timeout=self.config.timeout_s) as resp:
-                return json.loads(resp.read().decode("utf-8"))
+            return urllib.request.urlopen(request, timeout=timeout_s)
         except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
-            raise InferenceUnavailable(f"inference {exc.code} at {req.full_url}: {detail}") from exc
+            detail = exc.read().decode("utf-8", "replace")[:_ERROR_DETAIL_MAX_CHARS]
+            raise InferenceUnavailable(
+                f"inference {exc.code} at {request.full_url}: {detail}") from exc
         except urllib.error.URLError as exc:
-            raise InferenceUnavailable(f"inference unreachable at {req.full_url}: {exc}") from exc
+            raise InferenceUnavailable(
+                f"inference unreachable at {request.full_url}: {exc}") from exc
+
+    def _post(self, path: str, body: dict, source_id, tenant, request_id=None,
+              source_ids=None) -> dict:
+        request = self._request(path, body, source_id, tenant, request_id=request_id,
+                                source_ids=source_ids)
+        with self._open(request, self.config.timeout_s) as response:
+            return json.loads(response.read().decode("utf-8"))
 
     def run_hybrid_query(self, query: str, source_id=None, tenant=None, flags=None,
                          request_id=None, source_ids=None) -> dict:
         return self._post(
-            "/v1/run_hybrid_query",
+            _PATH_RUN_HYBRID_QUERY,
             {"query": query, "source_id": source_id, "tenant": tenant,
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, source_ids=source_ids,
@@ -80,40 +121,19 @@ class InferenceClient:
     ) -> Iterator[tuple[str, dict]]:
         """Yields (event, data) as the inference tier's SSE stream delivers them
         (progress events as the pipeline advances, then one final "result" event).
-        ``resp`` is read incrementally line-by-line — NOT buffered whole — so events
+        ``response`` is read incrementally line-by-line — NOT buffered whole — so events
         surface to the caller as soon as the inference tier flushes them (§ SSE)."""
-        req = self._request(
-            "/v1/run_hybrid_query/stream",
+        request = self._request(
+            _PATH_RUN_HYBRID_QUERY_STREAM,
             {"query": query, "source_id": source_id, "tenant": tenant,
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, accept="text/event-stream",
             source_ids=source_ids,
         )
+        response = self._open(request, self.config.timeout_s)
         try:
-            resp = urllib.request.urlopen(req, timeout=self.config.timeout_s)
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", "replace")[:500]
-            raise InferenceUnavailable(f"inference {exc.code} at {req.full_url}: {detail}") from exc
-        except urllib.error.URLError as exc:
-            raise InferenceUnavailable(f"inference unreachable at {req.full_url}: {exc}") from exc
-
-        try:
-            event, data_lines = None, []
             try:
-                for raw_line in resp:
-                    line = raw_line.decode("utf-8").rstrip("\n").rstrip("\r")
-                    if line.startswith("event:"):
-                        event = line[len("event:"):].strip()
-                    elif line.startswith("data:"):
-                        data_lines.append(line[len("data:"):].strip())
-                    elif line == "":  # blank line terminates one SSE frame
-                        if event is not None:
-                            try:
-                                data = json.loads("".join(data_lines)) if data_lines else {}
-                            except ValueError:
-                                data = {}
-                            yield event, data
-                        event, data_lines = None, []
+                yield from self._iter_sse_frames(response)
             except (urllib.error.URLError, ConnectionError, TimeoutError, OSError) as exc:
                 # A connection drop/timeout mid-stream (e.g. a slow pipeline run
                 # outliving a proxy/gateway timeout) must surface the same way an
@@ -121,14 +141,45 @@ class InferenceClient:
                 # engine_result (the caller's broad except would otherwise turn
                 # this into an untraceable "no result" instead of a clear outage).
                 raise InferenceUnavailable(
-                    f"inference stream dropped mid-response at {req.full_url}: {exc}"
+                    f"inference stream dropped mid-response at {request.full_url}: {exc}"
                 ) from exc
         finally:
-            resp.close()
+            response.close()
 
     def retrieve(self, query: str, source_id=None, tenant=None, top_k=None) -> dict:
         return self._post(
-            "/v1/retrieve",
+            _PATH_RETRIEVE,
             {"query": query, "source_id": source_id, "tenant": tenant, "top_k": top_k},
             source_id, tenant,
         )
+
+    @staticmethod
+    def _iter_sse_frames(response) -> Iterator[tuple[str, dict]]:
+        """Parse the raw byte lines of an SSE response into (event, data) frames.
+
+        A frame is terminated by a blank line; a frame whose data is absent or not
+        valid JSON yields ``{}`` rather than raising, so one malformed progress
+        event never aborts an otherwise healthy stream.
+        """
+        event: str | None = None
+        data_lines: list[str] = []
+        for raw_line in response:
+            line = raw_line.decode("utf-8").rstrip("\n").rstrip("\r")
+            if line.startswith(_SSE_EVENT_PREFIX):
+                event = line[len(_SSE_EVENT_PREFIX):].strip()
+            elif line.startswith(_SSE_DATA_PREFIX):
+                data_lines.append(line[len(_SSE_DATA_PREFIX):].strip())
+            elif line == "":  # blank line terminates one SSE frame
+                if event is not None:
+                    yield event, _parse_frame_data(data_lines)
+                event, data_lines = None, []
+
+
+def _parse_frame_data(data_lines: list[str]) -> dict:
+    if not data_lines:
+        return {}
+    try:
+        return json.loads("".join(data_lines))
+    except ValueError:
+        logger.warning("inference SSE frame carried non-JSON data; treating as empty")
+        return {}

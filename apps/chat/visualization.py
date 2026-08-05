@@ -317,6 +317,31 @@ class VisualizationRecommender:
         avg_len = sum(len(v) for v in str_values) / len(str_values)
         return avg_len > _TEXT_AVG_LEN_THRESHOLD
 
+    # --- public chart builders ------------------------------------------------
+    #
+    # recommend() decides WHICH columns to chart; these build the chart_data for an
+    # already-chosen (dimension, measure) pairing. They are public because
+    # services.py's _spec_from_suggestion reuses them to render the query tier's
+    # own validated column suggestion — the suggestion names the columns, this
+    # module still owns how the payload is built, so the two paths can never drift.
+    # (Previously services.py called the private `_line`/`_category_numeric`
+    # directly, reaching across the module's encapsulation boundary.)
+    #
+    # The underscore-prefixed names remain as aliases: they are the long-standing
+    # internal entry points and are exercised directly by the visualization tests.
+
+    def build_category_specs(self, cols: list, rows: list, cat_idx: int,
+                             val_idx: int) -> list[VisualizationSpec]:
+        """Chart(s) for a (category, measure) pairing — pie and/or bar. Returns a
+        LIST because a small category breakdown supports two equally valid
+        renderings of the same totals; empty when the data can't be charted (e.g.
+        a single category)."""
+        return self._category_numeric(cols, rows, cat_idx, val_idx)
+
+    def build_line_spec(self, cols: list, rows: list, x_idx: int, y_idx: int) -> VisualizationSpec:
+        """The line chart for an (x, measure) pairing. Always returns one spec."""
+        return self._line(cols, rows, x_idx, y_idx)
+
     # --- chart builders ------------------------------------------------------
 
     def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> list[VisualizationSpec]:
