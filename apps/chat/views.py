@@ -3,19 +3,19 @@ from __future__ import annotations
 import json
 import logging
 
-from django.contrib.auth import authenticate, get_user_model
+from django.contrib.auth import get_user_model
 from django.http import StreamingHttpResponse
 from rest_framework import status
 from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
 from rest_framework.views import APIView
+
+from apps.core import api
 
 from .models import MessageType
 from .serializers import (
     ConversationHistorySerializer,
     ConversationQuerySerializer,
     CreateConversationSerializer,
-    LoginRequestSerializer,
 )
 from .services import (
     ChatNotFound,
@@ -50,10 +50,7 @@ def _resolve_user(request):
 
 
 def _unauthenticated_response():
-    return Response(
-        {"status_code": status.HTTP_401_UNAUTHORIZED, "message": "Authentication required."},
-        status=status.HTTP_401_UNAUTHORIZED,
-    )
+    return api.error("Authentication required.", status.HTTP_401_UNAUTHORIZED)
 
 
 def _sse_format(event: str, data: dict) -> str:
@@ -61,58 +58,9 @@ def _sse_format(event: str, data: dict) -> str:
 
 
 def _iso_z(dt) -> str | None:
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
-
-
-def _authenticate_login(request, username: str, password: str) -> dict | None:
-    user = authenticate(request, username=username, password=password)
-    if user is None or not user.is_active:
-        return None
-    return {
-        "user_id": user.pk,
-        "username": user.username,
-        "display_name": user.first_name or user.username,
-    }
-
-
-class LoginView(APIView):
-    """POST /api/v1/auth/login {username, password} — dummy dev login."""
-
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        serializer = LoginRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            logger.warning("login rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        creds = serializer.validated_data
-        user = _authenticate_login(request, creds["username"], creds["password"])
-        if user is None:
-            logger.warning("login failed for username=%s", creds["username"])
-            return Response(
-                {"status_code": status.HTTP_401_UNAUTHORIZED,
-                 "message": "Invalid username or password."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
-        logger.info("login successful for username=%s", user["username"])
-        return Response(
-            {
-                "status_code": status.HTTP_200_OK,
-                "message": "Login successful.",
-                "data": {
-                    **user,
-                    "access_token": "dummy_access_token",
-                    "token_type": "Bearer",
-                },
-            },
-            status=status.HTTP_200_OK,
-        )
+    # Delegates so the platform has one timestamp format; kept as a local alias
+    # because it is used three times below and in _serialize_history_message.
+    return api.iso_z(dt)
 
 
 class ConversationQueryView(APIView):
@@ -127,11 +75,7 @@ class ConversationQueryView(APIView):
         serializer = ConversationQuerySerializer(data=request.data)
         if not serializer.is_valid():
             logger.warning("conversation query rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return api.invalid_payload(serializer.errors)
         data = serializer.validated_data
         logger.info("conversation query validated request_id=%s", rid)
 
@@ -151,10 +95,7 @@ class ConversationQueryView(APIView):
             chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
         except ChatNotFound:
             logger.warning("conversation query: chat_id=%s not found", data["chat_id"])
-            return Response(
-                {"status_code": status.HTTP_404_NOT_FOUND, "message": "Chat not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return api.error("Chat not found.", status.HTTP_404_NOT_FOUND)
         logger.info("conversation query chat loaded/created chat_id=%s request_id=%s", chat.pk, rid)
 
         service.save_user_message(chat, data["message"])
@@ -166,21 +107,23 @@ class ConversationQueryView(APIView):
     def _json_response(self, service, chat, message, rid):
         logger.info("conversation query AI processing started chat_id=%s", chat.pk)
         turn = TurnEventAccumulator()
-        error = None
+        # turn_error, not error: this holds the *engine's* error payload, which is a
+        # different thing from the HTTP error rendered below from it.
+        turn_error = None
         for evt in service.run_turn(chat, message, request_id=rid):
             kind, payload = evt["event"], evt["data"]
             if kind == "error":
-                error = payload
+                turn_error = payload
             else:
                 turn.consume(kind, payload)
         logger.info("conversation query AI processing completed chat_id=%s", chat.pk)
 
-        if error is not None:
-            return Response(
-                {"status_code": status.HTTP_502_BAD_GATEWAY,
-                 "message": error.get("message", "Unable to generate response."),
-                 "data": {"chat_id": chat.pk, "code": error.get("code", CODE_MODEL_ERROR)}},
-                status=status.HTTP_502_BAD_GATEWAY,
+        if turn_error is not None:
+            return api.error(
+                turn_error.get("message", "Unable to generate response."),
+                status.HTTP_502_BAD_GATEWAY,
+                data={"chat_id": chat.pk,
+                      "code": turn_error.get("code", CODE_MODEL_ERROR)},
             )
 
         metadata = turn.metadata()
@@ -199,11 +142,7 @@ class ConversationQueryView(APIView):
             response_data["insights"] = turn.insights["insights"]
             response_data["follow_up_questions"] = turn.insights["follow_up_questions"]
 
-        return Response({
-            "status_code": status.HTTP_200_OK,
-            "message": "Query processed successfully.",
-            "data": response_data,
-        }, status=status.HTTP_200_OK)
+        return api.success("Query processed successfully.", response_data)
 
     def _stream_response(self, service, chat, message, rid):
         response = StreamingHttpResponse(
@@ -259,11 +198,7 @@ class CreateConversationView(APIView):
         serializer = CreateConversationSerializer(data=request.data)
         if not serializer.is_valid():
             logger.warning("conversation creation rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return api.invalid_payload(serializer.errors)
 
         user = _resolve_user(request)
         if user is None:
@@ -273,16 +208,12 @@ class CreateConversationView(APIView):
         chat = service.create_conversation(serializer.validated_data["conversation_title"] or "")
         logger.info("conversation created chat_id=%s user_id=%s", chat.pk, user.pk)
 
-        return Response({
-            "status_code": status.HTTP_201_CREATED,
-            "message": "Conversation created successfully.",
-            "data": {
-                "chat_id": chat.pk,
-                "conversation_title": chat.name,
-                "created_at": _iso_z(chat.created_at),
-                "created_by": user.pk,
-            },
-        }, status=status.HTTP_201_CREATED)
+        return api.success("Conversation created successfully.", {
+            "chat_id": chat.pk,
+            "conversation_title": chat.name,
+            "created_at": _iso_z(chat.created_at),
+            "created_by": user.pk,
+        }, status_code=status.HTTP_201_CREATED)
 
 
 class ListConversationsView(APIView):
@@ -309,11 +240,7 @@ class ListConversationsView(APIView):
         ]
         logger.info("conversation list returned count=%s user_id=%s", len(conversations), user.pk)
 
-        return Response({
-            "status_code": status.HTTP_200_OK,
-            "message": "Conversations retrieved successfully.",
-            "data": {"conversations": conversations},
-        }, status=status.HTTP_200_OK)
+        return api.success("Conversations retrieved successfully.", {"conversations": conversations})
 
 
 class ConversationHistoryView(APIView):
@@ -327,11 +254,7 @@ class ConversationHistoryView(APIView):
         serializer = ConversationHistorySerializer(data=request.data)
         if not serializer.is_valid():
             logger.warning("conversation history rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return api.invalid_payload(serializer.errors)
 
         user = _resolve_user(request)
         if user is None:
@@ -343,22 +266,15 @@ class ConversationHistoryView(APIView):
             chat, messages = service.get_conversation_history(chat_id)
         except ChatNotFound:
             logger.warning("conversation history: chat_id=%s not found", chat_id)
-            return Response(
-                {"status_code": status.HTTP_404_NOT_FOUND, "message": "Conversation not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return api.error("Conversation not found.", status.HTTP_404_NOT_FOUND)
 
         logger.info("conversation history returned chat_id=%s message_count=%s", chat.pk, len(messages))
-        return Response({
-            "status_code": status.HTTP_200_OK,
-            "message": "Conversation retrieved successfully.",
-            "data": {
-                "chat_id": chat.pk,
-                "conversation_title": chat.name,
-                "created_at": _iso_z(chat.created_at),
-                "messages": [_serialize_history_message(m) for m in messages],
-            },
-        }, status=status.HTTP_200_OK)
+        return api.success("Conversation retrieved successfully.", {
+            "chat_id": chat.pk,
+            "conversation_title": chat.name,
+            "created_at": _iso_z(chat.created_at),
+            "messages": [_serialize_history_message(m) for m in messages],
+        })
 
 
 def _serialize_history_message(msg) -> dict:

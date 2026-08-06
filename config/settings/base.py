@@ -13,13 +13,19 @@ eviction) and `redis-cache` (Django cache + hot substrate indices +
 rehydrate pub/sub, allkeys-lru).
 """
 import os
+from datetime import timedelta
 from pathlib import Path
 
 from apps.core.settings_bridge import build_veda_settings
 
 BASE_DIR = Path(__file__).resolve().parent.parent.parent
 
-SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", "insecure-dev-key-do-not-use-in-prod")
+# Named (and not underscore-prefixed) so prod.py can import it and refuse to boot
+# on this value — it is also the JWT signing key, and a well-known signing key
+# means anyone can forge a token.
+INSECURE_DEV_SECRET_KEY = "insecure-dev-key-do-not-use-in-prod"
+
+SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY", INSECURE_DEV_SECRET_KEY)
 
 INSTALLED_APPS = [
     "django.contrib.admin",
@@ -30,6 +36,13 @@ INSTALLED_APPS = [
     "django.contrib.staticfiles",
     "rest_framework",
     "rest_framework.authtoken",  # token auth (§6.2)
+    # JWT refresh-token state: OutstandingToken + BlacklistedToken. Installed
+    # UNCONDITIONALLY (not behind VEDA_JWT_AUTH) so migrations are identical in
+    # every environment regardless of the flag — installing it changes no
+    # behaviour on its own; only the flag does. Its unique constraint on a
+    # blacklisted jti is what makes refresh-token rotation race-safe
+    # (apps/authentication/services.py).
+    "rest_framework_simplejwt.token_blacklist",
     "corsheaders",
     "apps.core",
     "apps.sources",
@@ -38,6 +51,10 @@ INSTALLED_APPS = [
     "apps.query",
     "apps.evaluation",
     "apps.chat",
+    # Identity: verification (authentication) vs administration + authorization
+    # (access_management) are separate bounded contexts on purpose.
+    "apps.authentication",
+    "apps.access_management",
 ]
 
 MIDDLEWARE = [
@@ -140,10 +157,40 @@ STATIC_URL = "/static/"  # leading slash → absolute URLs so {% static %} works
 STATIC_ROOT = BASE_DIR / "staticfiles"  # collectstatic target (api entrypoint); served by nginx
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
+# JWT authentication rollout flag (apps.authentication). Default OFF: with it off,
+# POST /api/v1/auth/login returns the same placeholder-token payload the pre-JWT
+# view returned and no JWT authentication class is installed, so every existing
+# endpoint behaves byte-identically. Switching it to "1" turns on real signed
+# tokens, rotation and revocation. The refresh/logout endpoints are routed either
+# way — with the flag off no real token is ever issued, so refresh has nothing
+# valid to rotate (401) and logout has nothing to revoke (idempotent 200).
+VEDA_JWT_AUTH = os.environ.get("VEDA_JWT_AUTH", "0") == "1"
+
+# Login lockout (apps.authentication.services). TWO counters, deliberately:
+#
+#   * VEDA_AUTH_LOGIN_MAX_FAILURES — per (account, client-IP). Trips a HARD refusal
+#     before any password hash is computed. Bounds one source hammering one account
+#     and cannot be used to lock a legitimate user out, because an attacker cannot
+#     make failures appear against the victim's IP.
+#   * VEDA_AUTH_LOGIN_ACCOUNT_MAX_FAILURES — account-wide across all IPs, so
+#     credential stuffing spread over many addresses is still visible and rate-
+#     limited. Deliberately SOFT: it turns a wrong guess into a 429 but NEVER
+#     refuses a correct password, so it cannot be weaponised into a denial of
+#     service against a real user. Set higher than the per-source threshold.
+VEDA_AUTH_LOGIN_MAX_FAILURES = int(os.environ.get("VEDA_AUTH_LOGIN_MAX_FAILURES", "10"))
+VEDA_AUTH_LOGIN_ACCOUNT_MAX_FAILURES = int(
+    os.environ.get("VEDA_AUTH_LOGIN_ACCOUNT_MAX_FAILURES", "50"))
+VEDA_AUTH_LOGIN_LOCKOUT_SECONDS = int(os.environ.get("VEDA_AUTH_LOGIN_LOCKOUT_SECONDS", "300"))
+
 REST_FRAMEWORK = {
     "DEFAULT_RENDERER_CLASSES": ["rest_framework.renderers.JSONRenderer"],
     # Token auth available; tenant is resolved from the authenticated principal (§6.2).
-    "DEFAULT_AUTHENTICATION_CLASSES": [
+    # JWTAuthentication is prepended only when VEDA_JWT_AUTH is on, so the flag-off
+    # path leaves this list exactly as it was. Token/Session auth stay in place
+    # either way — the admin site and any existing token client keep working.
+    "DEFAULT_AUTHENTICATION_CLASSES": (
+        ["rest_framework_simplejwt.authentication.JWTAuthentication"] if VEDA_JWT_AUTH else []
+    ) + [
         "rest_framework.authentication.TokenAuthentication",
         "rest_framework.authentication.SessionAuthentication",
     ],
@@ -152,7 +199,60 @@ REST_FRAMEWORK = {
         "rest_framework.throttling.AnonRateThrottle",
         "rest_framework.throttling.UserRateThrottle",
     ],
-    "DEFAULT_THROTTLE_RATES": {"anon": "60/min", "user": "240/min"},
+    # "login"/"token_refresh" are ScopedRateThrottle scopes used by the auth views,
+    # deliberately tighter than "anon": these are the only endpoints where an
+    # unauthenticated caller can guess a secret or replay a captured token.
+    "DEFAULT_THROTTLE_RATES": {
+        "anon": "60/min", "user": "240/min",
+        "login": "10/min", "token_refresh": "60/min",
+    },
+    # How many reverse proxies sit in front of the api, so DRF (and the login
+    # lockout, which reuses its BaseThrottle.get_ident) reads the real client IP
+    # from X-Forwarded-For instead of trusting the whole header.
+    #
+    # nginx.conf sends `X-Forwarded-For $proxy_add_x_forwarded_for`, appending the
+    # true peer as the LAST entry; with NUM_PROXIES=1 DRF takes exactly that entry,
+    # so a client that pre-seeds the header with fake addresses cannot mint itself
+    # fresh throttle/lockout quota. Left unset (the DRF default) the ENTIRE header
+    # is used as the identity, which is fully attacker-controlled.
+    #
+    # This MUST match the real proxy depth: too low reads a spoofed entry, too high
+    # reads the shared proxy address and groups unrelated clients together. It also
+    # means the api tier must never be exposed to clients directly, bypassing nginx.
+    "NUM_PROXIES": int(os.environ.get("VEDA_NUM_PROXIES", "1")),
+}
+
+# JWT parameters (rest_framework_simplejwt). Short access lifetime + rotating,
+# blacklist-on-rotation refresh tokens: a leaked access token is useful for
+# minutes, and a leaked refresh token can be spent exactly once before rotation
+# detection revokes the account's tokens (apps/authentication/services.py).
+#
+# SIGNING_KEY is Django's SECRET_KEY. base.py's dev default is a well-known
+# string, so a deployment that serves JWTs without setting DJANGO_SECRET_KEY would
+# be signing forgeable tokens — prod.py refuses to boot in that state.
+SIMPLE_JWT = {
+    "ACCESS_TOKEN_LIFETIME": timedelta(
+        minutes=int(os.environ.get("VEDA_JWT_ACCESS_MINUTES", "15"))),
+    "REFRESH_TOKEN_LIFETIME": timedelta(
+        days=int(os.environ.get("VEDA_JWT_REFRESH_DAYS", "7"))),
+    "ROTATE_REFRESH_TOKENS": True,
+    "BLACKLIST_AFTER_ROTATION": True,
+    "ALGORITHM": "HS256",
+    "SIGNING_KEY": SECRET_KEY,
+    "AUTH_HEADER_TYPES": ("Bearer",),
+    "USER_ID_FIELD": "id",
+    "USER_ID_CLAIM": "user_id",
+    # Bind every token to the password it was issued under (an md5 of the stored
+    # hash travels as a claim), so changing a password invalidates the tokens
+    # minted before it. Without this, a user who changes their password because
+    # they suspect compromise leaves the attacker a working refresh token for its
+    # full lifetime. simplejwt enforces this claim for ACCESS tokens only, inside
+    # JWTAuthentication.get_user — the refresh path checks it explicitly in
+    # apps/authentication/services.py::AuthService._password_unchanged.
+    "CHECK_REVOKE_TOKEN": True,
+    # No clock skew allowance: api and clients are not distributed peers here, and
+    # leeway only widens the window in which an expired token still works.
+    "LEEWAY": 0,
 }
 
 # Dev convenience: allow anonymous queries (tenant defaults). Set to "0" in prod to
