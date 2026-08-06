@@ -6,7 +6,9 @@ serializer module for why there is no write path.
 from __future__ import annotations
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..serializers import CatalogResourceDetailSerializer, CatalogResourceListSerializer
 from ..services import AccessManagementError, CatalogService
 from .base import AdminView, pagination_payload
@@ -42,7 +44,7 @@ class CatalogListView(AdminView):
 
     serializer_class = CatalogResourceListSerializer
     action = "catalog list"
-    required_permission = "permission.read"
+    required_permission = PermissionCode.PERMISSION_READ
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -51,7 +53,7 @@ class CatalogListView(AdminView):
 
         resources, total = CatalogService(request).list_resources(**data)
 
-        return api.success("Catalog resources retrieved successfully.", {
+        return api.success(MESSAGES["catalog"]["list"], {
             "resources": [public_fields(r) for r in resources],
             "pagination": pagination_payload(data["page"], data["page_size"], total),
         })
@@ -62,7 +64,7 @@ class CatalogDetailView(AdminView):
 
     serializer_class = CatalogResourceDetailSerializer
     action = "catalog detail"
-    required_permission = "permission.read"
+    required_permission = PermissionCode.PERMISSION_READ
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -74,5 +76,5 @@ class CatalogDetailView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("Catalog resource retrieved successfully.",
+        return api.success(MESSAGES["catalog"]["retrieved"],
                            public_fields(resource))

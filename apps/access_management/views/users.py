@@ -13,7 +13,9 @@ from __future__ import annotations
 from rest_framework import status
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..serializers import (
     UserCreateSerializer,
     UserDetailSerializer,
@@ -60,7 +62,7 @@ class UserCreateView(AdminView):
 
     serializer_class = UserCreateSerializer
     action = "user creation"
-    required_permission = "user.manage"
+    required_permission = PermissionCode.USER_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -72,7 +74,7 @@ class UserCreateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("User created successfully.", public_fields(user),
+        return api.success(MESSAGES["user"]["created"], public_fields(user),
                            status_code=status.HTTP_201_CREATED)
 
 
@@ -87,7 +89,7 @@ class UserDetailView(AdminView):
 
     serializer_class = UserDetailSerializer
     action = "user detail"
-    required_permission = "user.manage"
+    required_permission = PermissionCode.USER_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -99,7 +101,7 @@ class UserDetailView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("User retrieved successfully.", public_fields(user))
+        return api.success(MESSAGES["user"]["retrieved"], public_fields(user))
 
 
 class UserListView(AdminView):
@@ -112,7 +114,7 @@ class UserListView(AdminView):
 
     serializer_class = UserListSerializer
     action = "user list"
-    required_permission = "user.manage"
+    required_permission = PermissionCode.USER_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -122,7 +124,7 @@ class UserListView(AdminView):
         users, total = UserService(request).list_users(**data)
         page, page_size = data["page"], data["page_size"]
 
-        return api.success("Users retrieved successfully.", {
+        return api.success(MESSAGES["user"]["list"], {
             "users": [public_fields(user) for user in users],
             "pagination": pagination_payload(page, page_size, total),
         })
@@ -140,7 +142,7 @@ class UserUpdateView(AdminView):
 
     serializer_class = UserUpdateSerializer
     action = "user update"
-    required_permission = "user.manage"
+    required_permission = PermissionCode.USER_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -153,4 +155,4 @@ class UserUpdateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("User updated successfully.", public_fields(user))
+        return api.success(MESSAGES["user"]["updated"], public_fields(user))

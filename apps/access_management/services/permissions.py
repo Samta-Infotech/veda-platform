@@ -12,11 +12,12 @@ from __future__ import annotations
 
 from django.db.models import Q
 
+from apps.core.messages import MESSAGES
+
 from ..models import Permission
 from .base import NotFoundError, paginate
 
 CODE_PERMISSION_NOT_FOUND = "PERMISSION_NOT_FOUND"
-MSG_PERMISSION_NOT_FOUND = "No such permission."
 
 #: Exactly the columns ``views/permissions.py::public_fields`` renders, passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift.
@@ -29,7 +30,7 @@ class PermissionNotFound(NotFoundError):
     """No permission with that id. Inherits its 404 from ``NotFoundError``."""
 
     code = CODE_PERMISSION_NOT_FOUND
-    message = MSG_PERMISSION_NOT_FOUND
+    message = MESSAGES["permission"]["not_found"]
 
 
 class PermissionService:

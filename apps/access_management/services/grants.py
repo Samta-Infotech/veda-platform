@@ -33,6 +33,8 @@ from django.contrib.auth import get_user_model
 from django.db import transaction
 
 from .. import resource_path as rp
+from apps.core.messages import MESSAGES
+
 from ..models import CatalogResource, Effect, Permission, Role, RolePermission, UserRole
 from .base import ConflictError, paginate
 from .permissions import PermissionNotFound
@@ -42,11 +44,8 @@ from .users import UserNotFound
 logger = logging.getLogger(__name__)
 
 CODE_ROLE_INACTIVE = "ROLE_INACTIVE"
-MSG_ROLE_INACTIVE = "That role is retired and cannot be assigned."
 CODE_PERMISSION_INACTIVE = "PERMISSION_INACTIVE"
-MSG_PERMISSION_INACTIVE = "That permission is disabled and cannot be granted."
 CODE_INVALID_RESOURCE = "INVALID_RESOURCE_PATH"
-MSG_INVALID_RESOURCE = "That resource path is not valid."
 
 USER_ROLE_LIST_FIELDS = ("id", "user_id", "role_id", "granted_by_id",
                          "created_at", "updated_at")
@@ -63,14 +62,14 @@ class RoleInactive(ConflictError):
     """
 
     code = CODE_ROLE_INACTIVE
-    message = MSG_ROLE_INACTIVE
+    message = MESSAGES["grant"]["role_inactive"]
 
 
 class PermissionInactive(ConflictError):
     """Granting a disabled permission — same reasoning as ``RoleInactive``."""
 
     code = CODE_PERMISSION_INACTIVE
-    message = MSG_PERMISSION_INACTIVE
+    message = MESSAGES["grant"]["permission_inactive"]
 
 
 class InvalidResourcePath(ConflictError):
@@ -81,7 +80,7 @@ class InvalidResourcePath(ConflictError):
     """
 
     code = CODE_INVALID_RESOURCE
-    message = MSG_INVALID_RESOURCE
+    message = MESSAGES["grant"]["invalid_resource"]
 
 
 class _GrantServiceBase:

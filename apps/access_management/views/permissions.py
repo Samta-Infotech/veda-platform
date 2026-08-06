@@ -6,7 +6,9 @@ enforce a permission; see ``models/permissions.py`` for the full reasoning.
 from __future__ import annotations
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..serializers import PermissionDetailSerializer, PermissionListSerializer
 from ..services import AccessManagementError, PermissionService
 from .base import AdminView, pagination_payload
@@ -37,7 +39,7 @@ class PermissionListView(AdminView):
 
     serializer_class = PermissionListSerializer
     action = "permission list"
-    required_permission = "permission.read"
+    required_permission = PermissionCode.PERMISSION_READ
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -47,7 +49,7 @@ class PermissionListView(AdminView):
         permissions, total = PermissionService(request).list_permissions(**data)
         page, page_size = data["page"], data["page_size"]
 
-        return api.success("Permissions retrieved successfully.", {
+        return api.success(MESSAGES["permission"]["list"], {
             "permissions": [public_fields(p) for p in permissions],
             "pagination": pagination_payload(page, page_size, total),
         })
@@ -58,7 +60,7 @@ class PermissionDetailView(AdminView):
 
     serializer_class = PermissionDetailSerializer
     action = "permission detail"
-    required_permission = "permission.read"
+    required_permission = PermissionCode.PERMISSION_READ
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -70,4 +72,4 @@ class PermissionDetailView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("Permission retrieved successfully.", public_fields(permission))
+        return api.success(MESSAGES["permission"]["retrieved"], public_fields(permission))

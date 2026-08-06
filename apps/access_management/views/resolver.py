@@ -8,7 +8,9 @@ cannot do something.
 from __future__ import annotations
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..serializers import EffectivePermissionsSerializer
 from ..services import AccessManagementError, PermissionResolver, UserService
 from .base import AdminView
@@ -26,7 +28,7 @@ class EffectivePermissionsView(AdminView):
 
     serializer_class = EffectivePermissionsSerializer
     action = "effective permissions"
-    required_permission = "user.manage"
+    required_permission = PermissionCode.USER_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -62,4 +64,4 @@ class EffectivePermissionsView(AdminView):
                 "granted_on": list(effective.resources_for(code)),
             }
 
-        return api.success("Effective permissions resolved successfully.", payload)
+        return api.success(MESSAGES["resolver"]["resolved"], payload)

@@ -18,15 +18,15 @@ import logging
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 
+from apps.core.messages import MESSAGES
+
 from ..models import Role
 from .base import ConflictError, NotFoundError, paginate
 
 logger = logging.getLogger(__name__)
 
 CODE_ROLE_NAME_TAKEN = "ROLE_NAME_TAKEN"
-MSG_ROLE_NAME_TAKEN = "A role with that name already exists."
 CODE_ROLE_NOT_FOUND = "ROLE_NOT_FOUND"
-MSG_ROLE_NOT_FOUND = "No such role."
 
 #: Exactly the columns ``views/roles.py::public_fields`` renders. Passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift: adding a column
@@ -38,7 +38,7 @@ class RoleNotFound(NotFoundError):
     """No role with that id. Inherits its 404 from ``NotFoundError``."""
 
     code = CODE_ROLE_NOT_FOUND
-    message = MSG_ROLE_NOT_FOUND
+    message = MESSAGES["role"]["not_found"]
 
 
 class RoleNameTaken(ConflictError):
@@ -48,7 +48,7 @@ class RoleNameTaken(ConflictError):
     """
 
     code = CODE_ROLE_NAME_TAKEN
-    message = MSG_ROLE_NAME_TAKEN
+    message = MESSAGES["role"]["name_taken"]
 
 
 class RoleService:

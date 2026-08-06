@@ -21,6 +21,7 @@ from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
 from .serializers import LoginRequestSerializer, RefreshTokenRequestSerializer
 from .services import (
@@ -80,7 +81,7 @@ class LoginView(APIView):
         except AuthError as exc:
             return _error_response(exc)
 
-        return api.success("Login successful.", data)
+        return api.success(MESSAGES["auth"]["login_success"], data)
 
 
 class TokenRefreshView(APIView):
@@ -109,7 +110,7 @@ class TokenRefreshView(APIView):
         except AuthError as exc:
             return _error_response(exc)
 
-        return api.success("Token refreshed successfully.", data)
+        return api.success(MESSAGES["auth"]["token_refreshed"], data)
 
 
 class LogoutView(APIView):
@@ -137,4 +138,4 @@ class LogoutView(APIView):
         AuthService(request).logout(serializer.validated_data["refresh_token"])
 
         # No ``data``: there is nothing to report beyond the outcome.
-        return api.success("Logout successful.")
+        return api.success(MESSAGES["auth"]["logout_success"])

@@ -9,7 +9,9 @@ from __future__ import annotations
 from rest_framework import status
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..serializers import (
     RolePermissionGrantSerializer,
     RolePermissionListSerializer,
@@ -65,7 +67,7 @@ class UserRoleAssignView(AdminView):
 
     serializer_class = UserRoleAssignSerializer
     action = "role assignment"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -78,7 +80,7 @@ class UserRoleAssignView(AdminView):
             return self.failure(request, exc)
 
         return api.success(
-            "Role assigned successfully." if created else "Role was already assigned.",
+            MESSAGES["user_role"]["assigned"] if created else MESSAGES["user_role"]["already_assigned"],
             assignment_fields(assignment),
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -92,7 +94,7 @@ class UserRoleRevokeView(AdminView):
 
     serializer_class = UserRoleAssignSerializer
     action = "role revocation"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -100,8 +102,8 @@ class UserRoleRevokeView(AdminView):
             return failure
 
         removed = UserRoleService(request).revoke(**data)
-        return api.success("Role revoked successfully." if removed
-                           else "Role was not assigned.", {"removed": removed})
+        return api.success(MESSAGES["user_role"]["revoked"] if removed
+                           else MESSAGES["user_role"]["not_assigned"], {"removed": removed})
 
 
 class UserRoleListView(AdminView):
@@ -109,7 +111,7 @@ class UserRoleListView(AdminView):
 
     serializer_class = UserRoleListSerializer
     action = "role assignment list"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -117,7 +119,7 @@ class UserRoleListView(AdminView):
             return failure
 
         assignments, total = UserRoleService(request).list_assignments(**data)
-        return api.success("Role assignments retrieved successfully.", {
+        return api.success(MESSAGES["user_role"]["list"], {
             "assignments": [assignment_fields(a) for a in assignments],
             "pagination": pagination_payload(data["page"], data["page_size"], total),
         })
@@ -133,7 +135,7 @@ class RolePermissionGrantView(AdminView):
 
     serializer_class = RolePermissionGrantSerializer
     action = "permission grant"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -147,7 +149,7 @@ class RolePermissionGrantView(AdminView):
 
         known = RolePermissionService.known_resource_paths([grant.resource_path])
         return api.success(
-            "Permission granted successfully." if created else "Grant updated successfully.",
+            MESSAGES["role_permission"]["granted"] if created else MESSAGES["role_permission"]["updated"],
             grant_fields(grant, known),
             status_code=status.HTTP_201_CREATED if created else status.HTTP_200_OK)
 
@@ -162,7 +164,7 @@ class RolePermissionRevokeView(AdminView):
 
     serializer_class = RolePermissionRevokeSerializer
     action = "permission revocation"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -174,8 +176,8 @@ class RolePermissionRevokeView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("Permission revoked successfully." if removed
-                           else "Permission was not granted.", {"removed": removed})
+        return api.success(MESSAGES["role_permission"]["revoked"] if removed
+                           else MESSAGES["role_permission"]["not_granted"], {"removed": removed})
 
 
 class RolePermissionListView(AdminView):
@@ -184,7 +186,7 @@ class RolePermissionListView(AdminView):
 
     serializer_class = RolePermissionListSerializer
     action = "permission grant list"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -199,7 +201,7 @@ class RolePermissionListView(AdminView):
 
         # One query for the whole page — see grant_fields.
         known = service.known_resource_paths([g.resource_path for g in grants])
-        return api.success("Permission grants retrieved successfully.", {
+        return api.success(MESSAGES["role_permission"]["list"], {
             "grants": [grant_fields(g, known) for g in grants],
             "pagination": pagination_payload(data["page"], data["page_size"], total),
         })

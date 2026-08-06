@@ -9,6 +9,8 @@ from typing import Iterator
 
 from chatbot.run import run_chat_turn
 
+from apps.core.messages import MESSAGES
+
 from .models import ChatMessage, ChatSession, MessageType
 from .table_rendering import (
     project_display_columns as _project_display_columns,
@@ -35,11 +37,9 @@ DEFAULT_CONVERSATION_TITLE = "New Chat"
 # stream-level failure path, so this is a deliberate cross-module contract rather
 # than a private detail being reached into.
 CODE_LLM_UNAVAILABLE = "LLM_UNAVAILABLE"
-MSG_LLM_UNAVAILABLE = ("The AI assistant is temporarily unavailable. "
-                       "Please try again in a moment.")
+MSG_LLM_UNAVAILABLE = MESSAGES["chat"]["llm_unavailable"]
 CODE_MODEL_ERROR = "MODEL_ERROR"
-MSG_MODEL_ERROR = ("Something went wrong while generating a response. "
-                   "Please try again.")
+MSG_MODEL_ERROR = MESSAGES["chat"]["model_error"]
 # Error code for a fault raised while the SSE response is already streaming
 # (views.py) — distinct from MODEL_ERROR so the two are separable in the client
 # and in logs, even though they share the same user-facing copy.

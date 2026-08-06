@@ -13,7 +13,9 @@ from __future__ import annotations
 from rest_framework import status
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..serializers import (
     RoleCreateSerializer,
     RoleDetailSerializer,
@@ -51,7 +53,7 @@ class RoleCreateView(AdminView):
 
     serializer_class = RoleCreateSerializer
     action = "role creation"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -63,7 +65,7 @@ class RoleCreateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("Role created successfully.", public_fields(role),
+        return api.success(MESSAGES["role"]["created"], public_fields(role),
                            status_code=status.HTTP_201_CREATED)
 
 
@@ -76,7 +78,7 @@ class RoleDetailView(AdminView):
 
     serializer_class = RoleDetailSerializer
     action = "role detail"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -88,7 +90,7 @@ class RoleDetailView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("Role retrieved successfully.", public_fields(role))
+        return api.success(MESSAGES["role"]["retrieved"], public_fields(role))
 
 
 class RoleListView(AdminView):
@@ -100,7 +102,7 @@ class RoleListView(AdminView):
 
     serializer_class = RoleListSerializer
     action = "role list"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -110,7 +112,7 @@ class RoleListView(AdminView):
         roles, total = RoleService(request).list_roles(**data)
         page, page_size = data["page"], data["page_size"]
 
-        return api.success("Roles retrieved successfully.", {
+        return api.success(MESSAGES["role"]["list"], {
             "roles": [public_fields(role) for role in roles],
             "pagination": pagination_payload(page, page_size, total),
         })
@@ -128,7 +130,7 @@ class RoleUpdateView(AdminView):
 
     serializer_class = RoleUpdateSerializer
     action = "role update"
-    required_permission = "role.manage"
+    required_permission = PermissionCode.ROLE_MANAGE
 
     def post(self, request):
         data, failure = self.validate(request)
@@ -141,4 +143,4 @@ class RoleUpdateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success("Role updated successfully.", public_fields(role))
+        return api.success(MESSAGES["role"]["updated"], public_fields(role))

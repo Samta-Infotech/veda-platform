@@ -10,6 +10,7 @@ from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
 from .models import MessageType
 from .serializers import (
@@ -50,7 +51,7 @@ def _resolve_user(request):
 
 
 def _unauthenticated_response():
-    return api.error("Authentication required.", status.HTTP_401_UNAUTHORIZED)
+    return api.error(MESSAGES["chat"]["auth_required"], status.HTTP_401_UNAUTHORIZED)
 
 
 def _sse_format(event: str, data: dict) -> str:
@@ -95,7 +96,7 @@ class ConversationQueryView(APIView):
             chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
         except ChatNotFound:
             logger.warning("conversation query: chat_id=%s not found", data["chat_id"])
-            return api.error("Chat not found.", status.HTTP_404_NOT_FOUND)
+            return api.error(MESSAGES["chat"]["not_found"], status.HTTP_404_NOT_FOUND)
         logger.info("conversation query chat loaded/created chat_id=%s request_id=%s", chat.pk, rid)
 
         service.save_user_message(chat, data["message"])
@@ -142,7 +143,7 @@ class ConversationQueryView(APIView):
             response_data["insights"] = turn.insights["insights"]
             response_data["follow_up_questions"] = turn.insights["follow_up_questions"]
 
-        return api.success("Query processed successfully.", response_data)
+        return api.success(MESSAGES["conversation"]["query_processed"], response_data)
 
     def _stream_response(self, service, chat, message, rid):
         response = StreamingHttpResponse(
@@ -208,7 +209,7 @@ class CreateConversationView(APIView):
         chat = service.create_conversation(serializer.validated_data["conversation_title"] or "")
         logger.info("conversation created chat_id=%s user_id=%s", chat.pk, user.pk)
 
-        return api.success("Conversation created successfully.", {
+        return api.success(MESSAGES["conversation"]["created"], {
             "chat_id": chat.pk,
             "conversation_title": chat.name,
             "created_at": _iso_z(chat.created_at),
@@ -240,7 +241,7 @@ class ListConversationsView(APIView):
         ]
         logger.info("conversation list returned count=%s user_id=%s", len(conversations), user.pk)
 
-        return api.success("Conversations retrieved successfully.", {"conversations": conversations})
+        return api.success(MESSAGES["conversation"]["list"], {"conversations": conversations})
 
 
 class ConversationHistoryView(APIView):
@@ -266,10 +267,10 @@ class ConversationHistoryView(APIView):
             chat, messages = service.get_conversation_history(chat_id)
         except ChatNotFound:
             logger.warning("conversation history: chat_id=%s not found", chat_id)
-            return api.error("Conversation not found.", status.HTTP_404_NOT_FOUND)
+            return api.error(MESSAGES["conversation"]["not_found"], status.HTTP_404_NOT_FOUND)
 
         logger.info("conversation history returned chat_id=%s message_count=%s", chat.pk, len(messages))
-        return api.success("Conversation retrieved successfully.", {
+        return api.success(MESSAGES["conversation"]["retrieved"], {
             "chat_id": chat.pk,
             "conversation_title": chat.name,
             "created_at": _iso_z(chat.created_at),

@@ -21,7 +21,7 @@ What this module adds on top is the part the library does not give us safely:
      ``redis-cache`` via Django's cache API — no new table. See the lockout
      section below for why there are two counters and why only one of them blocks.
   2. **A uniform failure surface.** Unknown user, wrong password and inactive
-     account are one indistinguishable 401 (``MSG_INVALID_CREDENTIALS``), so the
+     account are one indistinguishable 401 (``MESSAGES["auth"]["invalid_credentials"]``), so the
      endpoint cannot be used to enumerate accounts.
   3. **Password-change revocation on the refresh path.** simplejwt enforces its
      ``CHECK_REVOKE_TOKEN`` claim only for access tokens (inside
@@ -51,6 +51,8 @@ from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, Ou
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.utils import get_md5_hash_password
 
+from apps.core.messages import MESSAGES
+
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
@@ -60,11 +62,8 @@ logger = logging.getLogger(__name__)
 # or anything about the token internals.
 # ---------------------------------------------------------------------------
 CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
-MSG_INVALID_CREDENTIALS = "Invalid username or password."
 CODE_ACCOUNT_LOCKED = "ACCOUNT_LOCKED"
-MSG_ACCOUNT_LOCKED = "Too many failed login attempts. Please try again later."
 CODE_INVALID_TOKEN = "INVALID_TOKEN"  # noqa: S105 — an error code, not a credential
-MSG_INVALID_TOKEN = "Invalid or expired token."
 
 # OAuth2 bearer-token scheme name returned to the client, matching the
 # ``AUTH_HEADER_TYPES`` simplejwt accepts on the way back in.
@@ -116,7 +115,7 @@ class InvalidCredentials(AuthError):
     one single error, so the response cannot distinguish the three."""
 
     code = CODE_INVALID_CREDENTIALS
-    message = MSG_INVALID_CREDENTIALS
+    message = MESSAGES["auth"]["invalid_credentials"]
 
 
 class AccountLocked(AuthError):
@@ -128,7 +127,7 @@ class AccountLocked(AuthError):
     """
 
     code = CODE_ACCOUNT_LOCKED
-    message = MSG_ACCOUNT_LOCKED
+    message = MESSAGES["auth"]["account_locked"]
 
 
 class InvalidRefreshToken(AuthError):
@@ -141,7 +140,7 @@ class InvalidRefreshToken(AuthError):
     """
 
     code = CODE_INVALID_TOKEN
-    message = MSG_INVALID_TOKEN
+    message = MESSAGES["auth"]["invalid_token"]
 
 
 class _RotatableRefreshToken(RefreshToken):

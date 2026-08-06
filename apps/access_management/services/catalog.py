@@ -41,13 +41,14 @@ from django.db.models import Q
 from django.utils import timezone
 
 from .. import resource_path
+from apps.core.messages import MESSAGES
+
 from ..models import CatalogResource
 from .base import NotFoundError, paginate
 
 logger = logging.getLogger(__name__)
 
 CODE_RESOURCE_NOT_FOUND = "RESOURCE_NOT_FOUND"
-MSG_RESOURCE_NOT_FOUND = "No such catalog resource."
 
 #: Exactly the columns ``views/catalog.py::public_fields`` renders.
 CATALOG_LIST_FIELDS = (
@@ -60,7 +61,7 @@ class ResourceNotFound(NotFoundError):
     """No catalog resource with that path. Inherits its 404 from ``NotFoundError``."""
 
     code = CODE_RESOURCE_NOT_FOUND
-    message = MSG_RESOURCE_NOT_FOUND
+    message = MESSAGES["catalog"]["not_found"]
 
 
 @dataclass

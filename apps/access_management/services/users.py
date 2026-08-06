@@ -24,18 +24,16 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 
+from apps.core.messages import MESSAGES
+
 from .base import ConflictError, NotFoundError, paginate
 
 logger = logging.getLogger(__name__)
 
 CODE_USERNAME_TAKEN = "USERNAME_TAKEN"
-MSG_USERNAME_TAKEN = "A user with that username already exists."
 CODE_EMAIL_TAKEN = "EMAIL_TAKEN"
-MSG_EMAIL_TAKEN = "A user with that email address already exists."
 CODE_USER_CONFLICT = "USER_CONFLICT"
-MSG_USER_CONFLICT = "A user with those details already exists."
 CODE_USER_NOT_FOUND = "USER_NOT_FOUND"
-MSG_USER_NOT_FOUND = "No such user."
 
 # Columns every user-facing projection needs. Applied via .only() so a list page
 # never drags the password hash and permission bitfields across the wire from the
@@ -51,7 +49,7 @@ class UserNotFound(NotFoundError):
     """No user with that id. Inherits its 404 from ``NotFoundError``."""
 
     code = CODE_USER_NOT_FOUND
-    message = MSG_USER_NOT_FOUND
+    message = MESSAGES["user"]["not_found"]
 
 
 class DuplicateUser(ConflictError):
@@ -63,17 +61,17 @@ class DuplicateUser(ConflictError):
     """
 
     code = CODE_USER_CONFLICT
-    message = MSG_USER_CONFLICT
+    message = MESSAGES["user"]["conflict"]
 
 
 class UsernameTaken(DuplicateUser):
     code = CODE_USERNAME_TAKEN
-    message = MSG_USERNAME_TAKEN
+    message = MESSAGES["user"]["username_taken"]
 
 
 class EmailTaken(DuplicateUser):
     code = CODE_EMAIL_TAKEN
-    message = MSG_EMAIL_TAKEN
+    message = MESSAGES["user"]["email_taken"]
 
 
 class UserService:
