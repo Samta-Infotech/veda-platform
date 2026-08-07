@@ -22,7 +22,8 @@ from ..serializers import (
     UserListSerializer,
     UserUpdateSerializer,
 )
-from ..services import AccessManagementError, UserService
+from ..models import UserProfile
+from ..services import AccessManagementError, UserRoleService, UserService
 from .base import AdminView, pagination_payload
 
 
@@ -124,20 +125,45 @@ class UserListView(AdminView):
         users, total = UserService(request).list_users(**data)
         page, page_size = data["page"], data["page_size"]
 
+        # Two more queries for the whole page — see UserRoleService.roles_for_users.
+        roles_by_user = UserRoleService.roles_for_users([user.pk for user in users])
+        profiles_by_user = {
+            profile.user_id: profile
+            for profile in UserProfile.objects.filter(user_id__in=[u.pk for u in users])
+        }
+
         return api.success(MESSAGES["user"]["list"], {
-            "users": [public_fields(user) for user in users],
+            "users": [
+                {
+                    **public_fields(user),
+                    "roles": roles_by_user.get(user.pk, []),
+                    "created_at": api.human_date(user.date_joined),
+                    # "" / None for a user created before migration 0008 backfilled
+                    # a profile row — not invented, genuinely never recorded.
+                    "updated_at": (api.human_date(profiles_by_user[user.pk].updated_at)
+                                  if user.pk in profiles_by_user else ""),
+                    "deleted_at": (api.human_date(profiles_by_user[user.pk].deleted_at)
+                                  if user.pk in profiles_by_user
+                                  and profiles_by_user[user.pk].deleted_at else None),
+                }
+                for user in users
+            ],
             "pagination": pagination_payload(page, page_size, total),
         })
 
 
 class UserUpdateView(AdminView):
-    """POST /api/v1/users/update {user_id, email?, first_name?, last_name?}.
+    """POST /api/v1/users/update {user_id, email?, first_name?, last_name?, is_active?}.
 
     Partial: only the fields present are written. ``username``, ``password`` and the
     privilege flags are deliberately not updatable here — see
     ``serializers.UserUpdateSerializer`` for why each belongs elsewhere.
+    ``is_active`` IS updatable here — deactivating a user is a profile edit, not a
+    separate action, and ``UserService.update_user`` carries the last-admin guard
+    and the token-revocation-on-deactivate step for it.
 
-    404 when the id does not exist, 409 when the new email belongs to someone else.
+    404 when the id does not exist, 409 when the new email belongs to someone else
+    or when ``is_active: false`` targets the platform's last active admin.
     """
 
     serializer_class = UserUpdateSerializer
@@ -152,6 +178,35 @@ class UserUpdateView(AdminView):
         user_id = data.pop("user_id")
         try:
             user = UserService(request).update_user(user_id, **data)
+        except AccessManagementError as exc:
+            return self.failure(request, exc)
+
+        return api.success(MESSAGES["user"]["updated"], public_fields(user))
+
+
+class UserDeleteView(AdminView):
+    """POST /api/v1/users/delete {user_id} -> 200.
+
+    A SOFT delete — a named convenience over ``UserService.update_user(user_id,
+    is_active=False)``, not a second code path. Same guard (refused for the
+    platform's last active admin), same token revocation, same idempotency: calling
+    it twice is still just "this account is inactive", not an error.
+
+    No row is ever removed — ``deleted_at`` (``UserProfile``) records when this
+    happened, ``is_active`` stays the one flag every access check keys off.
+    """
+
+    serializer_class = UserDetailSerializer
+    action = "user deletion"
+    required_permission = PermissionCode.USER_MANAGE
+
+    def post(self, request):
+        data, failure = self.validate(request)
+        if failure:
+            return failure
+
+        try:
+            user = UserService(request).update_user(data["user_id"], is_active=False)
         except AccessManagementError as exc:
             return self.failure(request, exc)
 

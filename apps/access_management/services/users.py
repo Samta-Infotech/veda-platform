@@ -23,9 +23,13 @@ import logging
 from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.core.messages import MESSAGES
+from apps.core.token_revocation import revoke_all_refresh_tokens
 
+from ..models import UserProfile
+from .admin_guard import LastAdminProtected, is_last_active_admin
 from .base import ConflictError, NotFoundError, paginate
 
 logger = logging.getLogger(__name__)
@@ -128,6 +132,7 @@ class UserService:
                     first_name=first_name,
                     last_name=last_name,
                 )
+                UserProfile.objects.create(user=user)
         except IntegrityError as exc:
             # The transaction is already rolled back here; classify and re-raise.
             conflict = self._classify_conflict(username, email)
@@ -175,7 +180,7 @@ class UserService:
                         only_fields=USER_LIST_FIELDS)
 
     def update_user(self, user_id: int, **fields):
-        """Apply profile changes to one user.
+        """Apply profile changes to one user — including, now, ``is_active``.
 
         Only the fields present in ``fields`` are written (``update_fields``), so a
         concurrent change to a column this request did not touch is not clobbered.
@@ -188,9 +193,20 @@ class UserService:
         it there, so the local test suite exercises this path but does NOT prove the
         lock. Production runs Postgres, where it holds.
 
+        ``is_active`` is one field among several here, not a separate endpoint —
+        deactivating a user is a profile edit like any other, and giving it its own
+        route would mean guarding "last admin" and "revoke tokens" in two places
+        instead of one. Both still apply: turning ``is_active`` off is refused for
+        the platform's last active admin (checked BEFORE anything is written, so a
+        refused request never partially applies), and blacklists every live refresh
+        token on success — same primitive ``AuthService.change_password`` uses, so a
+        deactivated account cannot mint a fresh access token even though the ones
+        already issued keep working until they expire (``JWTAuthentication.get_user``
+        refuses those directly, on every request).
+
         Args:
             user_id: Target user.
-            fields: Any of ``email``, ``first_name``, ``last_name``.
+            fields: Any of ``email``, ``first_name``, ``last_name``, ``is_active``.
 
         Returns:
             The saved ``User``.
@@ -198,19 +214,36 @@ class UserService:
         Raises:
             UserNotFound: no user with that id.
             EmailTaken: the new email belongs to someone else.
+            LastAdminProtected: ``is_active=False`` and this is the platform's only
+                active admin.
         """
         if not fields:  # the serializer rejects this; belt-and-braces for direct calls
             raise ValueError("update_user requires at least one field")
 
         user_model = get_user_model()
+        deactivating = False
+        activity_changed = False
         try:
             with transaction.atomic():
                 user = user_model.objects.select_for_update().filter(pk=user_id).first()
                 if user is None:
                     raise UserNotFound()
+                if "is_active" in fields and fields["is_active"] != user.is_active:
+                    activity_changed = True
+                    deactivating = fields["is_active"] is False
+                    if deactivating and is_last_active_admin(user):
+                        raise LastAdminProtected()
                 for name, value in fields.items():
                     setattr(user, name, value)
                 user.save(update_fields=list(fields))
+
+                if activity_changed:
+                    # get_or_create: a user created before migration 0008 has no
+                    # profile row yet — backfilled here rather than by a data
+                    # migration that would have to touch every historical user.
+                    profile, _ = UserProfile.objects.get_or_create(user=user)
+                    profile.deleted_at = timezone.now() if deactivating else None
+                    profile.save(update_fields=["deleted_at", "updated_at"])
         except IntegrityError as exc:
             # Only email carries a uniqueness rule among the updatable fields.
             conflict = self._classify_conflict(
@@ -220,6 +253,11 @@ class UserService:
                                  "error user_id=%s %s", user_id, self._log_context())
                 raise
             raise conflict from exc
+
+        if deactivating:
+            revoked = revoke_all_refresh_tokens(user_id)
+            logger.info("user deactivated via update user_id=%s tokens_revoked=%s %s",
+                        user_id, revoked, self._log_context())
 
         logger.info("user updated user_id=%s fields=%s %s",
                     user.pk, sorted(fields), self._log_context())

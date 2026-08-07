@@ -143,15 +143,19 @@ def test_off_leaves_a_grantless_staff_user_working(staff_client, url):
 
 @override_settings(VEDA_RBAC_MODE=MODE_OFF)
 def test_off_does_not_even_resolve(staff_client):
-    """The gate abstains before touching the database — no cost when disabled."""
-    from django.db import connection
-    from django.test.utils import CaptureQueriesContext
+    """The gate abstains before touching the database — no cost when disabled.
 
-    with CaptureQueriesContext(connection) as ctx:
+    Asserted by mocking the resolver directly, not by scanning the SQL log for
+    ``rolepermission`` — ``roles/list`` itself legitimately queries that table now
+    (``connected_sources`` in its response), which is unrelated to the gate and
+    would otherwise make this test fail for a reason it was never about.
+    """
+    from unittest import mock
+
+    with mock.patch("apps.access_management.gate.PermissionResolver") as resolver_cls:
         staff_client.post(ROLES_LIST, {}, content_type="application/json")
 
-    joined = " ".join(q["sql"] for q in ctx.captured_queries)
-    assert "rolepermission" not in joined.lower()
+    resolver_cls.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

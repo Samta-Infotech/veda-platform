@@ -16,18 +16,23 @@ from __future__ import annotations
 import logging
 
 from rest_framework import status
-from rest_framework.permissions import AllowAny
+from rest_framework.permissions import AllowAny, IsAuthenticated
 from rest_framework.throttling import ScopedRateThrottle
 from rest_framework.views import APIView
 
 from apps.core import api
 from apps.core.messages import MESSAGES
 
-from .serializers import LoginRequestSerializer, RefreshTokenRequestSerializer
+from .serializers import (
+    LoginRequestSerializer,
+    PasswordChangeRequestSerializer,
+    RefreshTokenRequestSerializer,
+)
 from .services import (
     AccountLocked,
     AuthError,
     AuthService,
+    CurrentPasswordIncorrect,
     InvalidCredentials,
     InvalidRefreshToken,
 )
@@ -139,3 +144,43 @@ class LogoutView(APIView):
 
         # No ``data``: there is nothing to report beyond the outcome.
         return api.success(MESSAGES["auth"]["logout_success"])
+
+
+class PasswordChangeView(APIView):
+    """POST /api/v1/auth/password/change {current_password, new_password}.
+
+    ``IsAuthenticated``, unlike every other view in this module — this is the one
+    auth endpoint that is NOT ``AllowAny``. Login/refresh/logout all exist to
+    establish or end a session for someone who is, by definition, not authenticated
+    yet (or no longer); changing a password requires already holding one.
+
+    Every live refresh token is revoked on success — see
+    ``AuthService.change_password`` — so the response only carries a message: this
+    endpoint's own access token is the caller's last valid one, kept alive by its
+    own short TTL, exactly like every other credential-rotating action here.
+
+    Throttled on its own scope, tighter than the general authenticated rate: this
+    is the one endpoint where a caller who already holds a valid access token can
+    still repeatedly guess a secret (``current_password``) — the same class of risk
+    ``login``'s own scope exists to bound for an anonymous caller.
+    """
+
+    permission_classes = [IsAuthenticated]
+    throttle_classes = [ScopedRateThrottle]
+    throttle_scope = "password_change"
+
+    def post(self, request):
+        serializer = PasswordChangeRequestSerializer(
+            data=request.data, context={"request": request})
+        if not serializer.is_valid():
+            logger.warning("password change rejected: invalid payload — %s", serializer.errors)
+            return api.invalid_payload(serializer.errors)
+
+        data = serializer.validated_data
+        try:
+            AuthService(request).change_password(
+                request.user, data["current_password"], data["new_password"])
+        except CurrentPasswordIncorrect as exc:
+            return _error_response(exc)
+
+        return api.success(MESSAGES["auth"]["password_changed"])

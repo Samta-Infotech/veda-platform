@@ -39,7 +39,7 @@ from django.contrib.auth import get_user_model  # noqa: E402
 from django.db import IntegrityError, transaction  # noqa: E402
 from django.test import Client, override_settings  # noqa: E402
 
-from apps.access_management.models import Role  # noqa: E402
+from apps.access_management.models import Permission, Role, RolePermission, UserRole  # noqa: E402
 from apps.access_management.services import (  # noqa: E402
     CODE_ROLE_NAME_TAKEN,
     CODE_ROLE_NOT_FOUND,
@@ -51,14 +51,21 @@ from apps.access_management.services import (  # noqa: E402
 CREATE_URL = "/api/v1/roles/create"
 DETAIL_URL = "/api/v1/roles/detail"
 LIST_URL = "/api/v1/roles/list"
+DROPDOWN_URL = "/api/v1/roles/dropdown"
 UPDATE_URL = "/api/v1/roles/update"
+DELETE_URL = "/api/v1/roles/delete"
 
 ADMIN_PASSWORD = "admin-correct-horse-staple"
 
 #: The one role representation every endpoint returns. Asserted as an exact set so a
 #: future field addition is a deliberate contract change, not an accidental leak.
 PUBLIC_FIELDS = {"role_id", "name", "description", "is_active",
-                 "created_at", "updated_at"}
+                 "created_at", "updated_at", "deleted_at"}
+
+#: Only ``roles/list`` carries these — an admin-table summary need (how many
+#: users, what kinds of source), not part of the shared create/detail/update
+#: representation. See RoleListView.
+LIST_EXTRA_FIELDS = {"role_name", "users_count", "connected_sources", "last_updated"}
 
 # Production hashers cost ~310ms per password by design; these tests only need an
 # admin to authenticate as. See tests/test_user_management.py for the full rationale.
@@ -141,8 +148,16 @@ def _list(client, **body):
     return client.post(LIST_URL, body, content_type="application/json")
 
 
+def _dropdown(client, **body):
+    return client.post(DROPDOWN_URL, body, content_type="application/json")
+
+
 def _update(client, **body):
     return client.post(UPDATE_URL, body, content_type="application/json")
+
+
+def _delete(client, **body):
+    return client.post(DELETE_URL, body, content_type="application/json")
 
 
 # ---------------------------------------------------------------------------
@@ -346,7 +361,7 @@ def test_list_returns_a_page_with_totals(admin_client, population):
 def test_list_uses_the_same_projection_as_create(admin_client, population):
     row = _list(admin_client, page_size=1).json()["data"]["roles"][0]
 
-    assert set(row) == PUBLIC_FIELDS
+    assert set(row) == PUBLIC_FIELDS | LIST_EXTRA_FIELDS
 
 
 def test_list_paginates_without_repeating_or_dropping_rows(admin_client, population):
@@ -432,6 +447,133 @@ def test_list_costs_two_queries_regardless_of_page_size(admin_client, population
     assert len(ctx.captured_queries) == 2
 
 
+def test_list_users_count_reflects_actual_assignments(admin_client):
+    role = Role.objects.create(name="Data Analyst")
+    for username in ("alice", "bob"):
+        user = get_user_model().objects.create_user(username=username, password=ADMIN_PASSWORD)
+        UserRole.objects.create(user=user, role=role)
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["users_count"] == 2
+
+
+def test_list_users_count_is_zero_for_an_unassigned_role(admin_client):
+    role = Role.objects.create(name="Data Analyst")
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["users_count"] == 0
+
+
+def test_list_connected_sources_reflects_grants(admin_client):
+    role = Role.objects.create(name="Data Analyst")
+    permission = Permission.objects.get(code="data.read")
+    RolePermission.objects.create(
+        role=role, permission=permission, resource_path="db:crm_postgres:employee")
+    RolePermission.objects.create(
+        role=role, permission=permission, resource_path="lake:events:raw")
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["connected_sources"] == ["Database", "Datalake"]
+
+
+def test_list_connected_sources_ignores_global_grants(admin_client):
+    """A grant with no resource path applies platform-wide — it names no source
+    kind, so guessing one would be a fabricated answer."""
+    role = Role.objects.create(name="Data Analyst")
+    RolePermission.objects.create(
+        role=role, permission=Permission.objects.get(code="user.manage"), resource_path="")
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["connected_sources"] == []
+
+
+def test_list_role_name_matches_name(admin_client, population):
+    row = _list(admin_client, page_size=1).json()["data"]["roles"][0]
+
+    assert row["role_name"] == row["name"]
+
+
+# ---------------------------------------------------------------------------
+# Dropdown
+# ---------------------------------------------------------------------------
+
+
+def test_dropdown_returns_every_active_role_unpaginated(admin_client, population):
+    response = _dropdown(admin_client)
+
+    assert response.status_code == 200
+    assert response.json()["message"] == "Roles retrieved successfully."
+    body = response.json()["data"]
+    assert "pagination" not in body
+    assert len(body["roles"]) == Role.objects.filter(is_active=True).count()
+
+
+def test_dropdown_excludes_retired_roles(admin_client, population):
+    body = _dropdown(admin_client).json()["data"]
+
+    returned_ids = {row["role_id"] for row in body["roles"]}
+    retired_ids = set(Role.objects.filter(is_active=False).values_list("id", flat=True))
+
+    assert returned_ids.isdisjoint(retired_ids)
+
+
+def test_dropdown_service_includes_a_newly_created_role():
+    """Not an exact-list assertion — migration 0007 seeds an active "Admin" role
+    into every migrated database, so "only what I just created" is never literally
+    true here (see tests/test_grants.py for the same adjustment)."""
+    role = Role.objects.create(name="Data Analyst", description="Reads dashboards.")
+
+    rows = RoleService().list_active_roles()
+
+    assert role.pk in [r.pk for r in rows]
+
+
+def test_dropdown_projection_via_api(admin_client):
+    Role.objects.create(name="Data Analyst", description="Reads dashboards.")
+
+    row = _dropdown(admin_client).json()["data"]["roles"][0]
+
+    assert set(row) == {"role_id", "name"}
+
+
+def test_dropdown_is_ordered_by_name(admin_client):
+    Role.objects.create(name="Zeta")
+    Role.objects.create(name="Alpha")
+    Role.objects.create(name="Mu")
+
+    names = [row["name"] for row in _dropdown(admin_client).json()["data"]["roles"]]
+
+    assert names == sorted(names)
+
+
+def test_dropdown_requires_staff():
+    response = Client().post(DROPDOWN_URL, {}, content_type="application/json")
+    assert response.status_code in (401, 403)
+
+
+def test_dropdown_rejects_unknown_fields(admin_client):
+    response = _dropdown(admin_client, page=1)
+    assert response.status_code == 400
+
+
+def test_dropdown_costs_one_query(admin_client, population):
+    from django.db import connection
+    from django.test.utils import CaptureQueriesContext
+
+    with CaptureQueriesContext(connection) as ctx:
+        RoleService().list_active_roles()
+
+    assert len(ctx.captured_queries) == 1
+
+
 # ---------------------------------------------------------------------------
 # Update
 # ---------------------------------------------------------------------------
@@ -472,7 +614,7 @@ def test_update_refreshes_updated_at(admin_client, role_id):
 
 
 def test_update_retires_a_role(admin_client, role_id):
-    """This is the delete: there is no delete endpoint."""
+    """This is the soft delete: ``roles/delete`` is a named convenience over this."""
     response = _update(admin_client, role_id=role_id, is_active=False)
 
     assert response.status_code == 200
@@ -485,6 +627,26 @@ def test_a_retired_role_can_be_reactivated(admin_client, role_id):
 
     assert _update(admin_client, role_id=role_id, is_active=True).status_code == 200
     assert Role.objects.get(pk=role_id).is_active is True
+
+
+def test_retiring_a_role_sets_deleted_at(admin_client, role_id):
+    response = _update(admin_client, role_id=role_id, is_active=False)
+
+    assert response.json()["data"]["deleted_at"] is not None
+    assert Role.objects.get(pk=role_id).deleted_at is not None
+
+
+def test_reactivating_a_role_clears_deleted_at(admin_client, role_id):
+    _update(admin_client, role_id=role_id, is_active=False)
+
+    response = _update(admin_client, role_id=role_id, is_active=True)
+
+    assert response.json()["data"]["deleted_at"] is None
+    assert Role.objects.get(pk=role_id).deleted_at is None
+
+
+def test_a_new_role_has_no_deleted_at(admin_client, role_id):
+    assert _detail(admin_client, role_id=role_id).json()["data"]["deleted_at"] is None
 
 
 def test_update_of_a_missing_role_is_404(admin_client):
@@ -655,17 +817,49 @@ def test_routes_are_wired():
     assert resolve(UPDATE_URL).func.view_class is RoleUpdateView
 
 
-def test_there_is_no_delete_endpoint():
-    """Retirement is ``update {is_active: false}``. A delete route would need a
-    "refuse if any user holds this role" guard that cannot exist until role
-    assignment does."""
-    from django.urls import Resolver404, resolve
+def test_delete_resolves_to_the_delete_view():
+    from django.urls import resolve
 
-    with pytest.raises(Resolver404):
-        resolve("/api/v1/roles/delete")
+    from apps.access_management.views import RoleDeleteView
+
+    assert resolve(DELETE_URL).func.view_class is RoleDeleteView
 
 
-@pytest.mark.parametrize("url", [CREATE_URL, DETAIL_URL, LIST_URL, UPDATE_URL])
+def test_delete_is_a_soft_delete(admin_client, role_id):
+    response = _delete(admin_client, role_id=role_id)
+
+    assert response.status_code == 200
+    role = Role.objects.get(pk=role_id)
+    assert role.is_active is False
+    # The row still exists — this is not Role.delete().
+    assert Role.objects.filter(pk=role_id).exists()
+
+
+def test_delete_is_idempotent(admin_client, role_id):
+    first = _delete(admin_client, role_id=role_id)
+    second = _delete(admin_client, role_id=role_id)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_delete_of_a_missing_role_is_404(admin_client):
+    response = _delete(admin_client, role_id=999_999)
+
+    assert response.status_code == 404
+    assert response.json()["code"] == CODE_ROLE_NOT_FOUND
+
+
+def test_delete_requires_staff(plain_user, role_id):
+    client = Client()
+    client.force_login(plain_user)
+
+    response = _delete(client, role_id=role_id)
+
+    assert response.status_code == 403
+
+
+@pytest.mark.parametrize("url", [CREATE_URL, DETAIL_URL, LIST_URL, UPDATE_URL, DELETE_URL])
 def test_endpoints_are_post_only(admin_client, url):
     assert admin_client.get(url).status_code == 405
     assert admin_client.put(url).status_code == 405

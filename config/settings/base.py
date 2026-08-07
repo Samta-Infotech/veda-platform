@@ -146,6 +146,11 @@ AUTH_PASSWORD_VALIDATORS = [
     {"NAME": "django.contrib.auth.password_validation.MinimumLengthValidator"},
     {"NAME": "django.contrib.auth.password_validation.CommonPasswordValidator"},
     {"NAME": "django.contrib.auth.password_validation.NumericPasswordValidator"},
+    # Composition (upper/lower/digit/special) the four stock validators above don't
+    # check. Thresholds are OPTIONS, not code — change the policy here, not in
+    # apps/authentication/password_validators.py.
+    {"NAME": "apps.authentication.password_validators.PasswordComplexityValidator",
+     "OPTIONS": {"min_uppercase": 1, "min_lowercase": 1, "min_digits": 1, "min_special": 1}},
 ]
 
 LANGUAGE_CODE = "en-us"
@@ -165,6 +170,17 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # way — with the flag off no real token is ever issued, so refresh has nothing
 # valid to rotate (401) and logout has nothing to revoke (idempotent 200).
 VEDA_JWT_AUTH = os.environ.get("VEDA_JWT_AUTH", "0") == "1"
+
+# Catalog auto-sync on ingestion success (apps.ingestion.tasks). Default OFF: with
+# it off, task_ingest_source behaves byte-identically to before this flag existed —
+# CatalogDiscoveryService is never called, and the catalog stays stale until an
+# operator runs `manage.py sync_catalog` by hand, exactly as today. Switching it to
+# "1" reconciles the just-ingested source's resources automatically, right after
+# `Source.ready` flips — closing the window where a freshly (re-)ingested table is
+# absent from the catalog, and therefore denied, until someone remembers to sync it.
+# A sync failure is logged and swallowed either way: the ingestion job that just
+# succeeded must never be turned into a failure by a catalog-projection problem.
+VEDA_AUTO_SYNC_CATALOG = os.environ.get("VEDA_AUTO_SYNC_CATALOG", "0") == "1"
 
 # Login lockout (apps.authentication.services). TWO counters, deliberately:
 #
@@ -205,6 +221,12 @@ REST_FRAMEWORK = {
     "DEFAULT_THROTTLE_RATES": {
         "anon": "60/min", "user": "240/min",
         "login": "10/min", "token_refresh": "60/min",
+        # password/change is the one AUTHENTICATED endpoint where a caller can
+        # guess a secret (``current_password``) repeatedly — a stolen access token
+        # is worth more if it can also brute-force its way to a full account
+        # takeover before it expires. Tighter than the general "user" rate for
+        # exactly that reason.
+        "password_change": "5/min",
     },
     # How many reverse proxies sit in front of the api, so DRF (and the login
     # lockout, which reuses its BaseThrottle.get_ident) reads the real client IP

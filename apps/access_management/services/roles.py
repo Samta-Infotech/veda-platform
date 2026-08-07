@@ -17,6 +17,7 @@ import logging
 
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from apps.core.messages import MESSAGES
 
@@ -31,7 +32,8 @@ CODE_ROLE_NOT_FOUND = "ROLE_NOT_FOUND"
 #: Exactly the columns ``views/roles.py::public_fields`` renders. Passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift: adding a column
 #: to the response without adding it here would cost a deferred-field query per row.
-ROLE_LIST_FIELDS = ("id", "name", "description", "is_active", "created_at", "updated_at")
+ROLE_LIST_FIELDS = ("id", "name", "description", "is_active", "created_at", "updated_at",
+                    "deleted_at")
 
 
 class RoleNotFound(NotFoundError):
@@ -115,6 +117,23 @@ class RoleService:
         return paginate(queryset, page=page, page_size=page_size, ordering=ordering,
                         only_fields=ROLE_LIST_FIELDS)
 
+    def list_active_roles(self) -> list[Role]:
+        """Every active role — id and name only. For a picker/dropdown, not the
+        admin table.
+
+        Deliberately UNPAGINATED, unlike ``list_roles``: a dropdown needs every
+        option in one response, and paging it would just move the "fetch every
+        page" work onto every frontend that renders one. Safe specifically because
+        roles are administrator-authored (see ``models/roles.py`` — "tens to
+        hundreds", never per-row user data), which is the same reasoning
+        ``list_roles`` itself gives for skipping an index on ``is_active``: a table
+        this small costs nothing to scan in full. This would NOT be a safe pattern
+        for ``users`` or ``catalog`` — both are populated by something other than an
+        administrator's own typing and have no such bound.
+        """
+        return list(Role.objects.filter(is_active=True).order_by("name")
+                    .only("id", "name"))
+
     def get_role(self, role_id: int) -> Role:
         """One role by id.
 
@@ -140,7 +159,11 @@ class RoleService:
         it there, so the local test suite exercises this path but does NOT prove the
         lock. Production runs Postgres, where it holds.
 
-        Setting ``is_active=False`` is how a role is retired; there is no delete.
+        Setting ``is_active=False`` is how a role is retired; there is no hard
+        delete. ``deleted_at`` is stamped in the same write when that happens
+        (cleared if ``is_active`` flips back) — a timestamp on the retirement
+        decision, not a second one; ``is_active`` alone still decides whether the
+        role grants anything.
 
         Args:
             role_id: Target role.
@@ -158,11 +181,15 @@ class RoleService:
                 role = Role.objects.select_for_update().filter(pk=role_id).first()
                 if role is None:
                     raise RoleNotFound()
+                touched = list(fields)
+                if "is_active" in fields and fields["is_active"] != role.is_active:
+                    role.deleted_at = None if fields["is_active"] else timezone.now()
+                    touched.append("deleted_at")
                 for name, value in fields.items():
                     setattr(role, name, value)
                 # updated_at is auto_now, so it must be named explicitly or the
                 # timestamp silently stops tracking edits.
-                role.save(update_fields=[*fields, "updated_at"])
+                role.save(update_fields=[*touched, "updated_at"])
         except IntegrityError as exc:
             conflict = self._classify_conflict(fields.get("name", ""), exclude_pk=role_id)
             if conflict is None:

@@ -79,6 +79,23 @@ def iso_z(value) -> str | None:
     return value.strftime("%Y-%m-%dT%H:%M:%SZ") if value else None
 
 
+def human_date(value) -> str:
+    """A datetime as ``"Jul 16, 2026"`` — a human-facing display date, or ``""``.
+
+    NOT a replacement for ``iso_z()``: that format is the machine-facing contract
+    every existing endpoint's timestamps already use (sortable, timezone-explicit,
+    parseable without a locale). This one is for a field a UI renders directly in a
+    table — a display string, never meant to be parsed back. Both live here so a
+    third format never gets invented ad hoc at a call site; a view picks the one
+    that matches what it's building.
+
+    Returns ``""`` rather than ``None`` for a missing value — an empty table cell
+    reads better than the literal text "None" in a UI that renders this directly
+    without a null-check.
+    """
+    return value.strftime("%b %d, %Y") if value else ""
+
+
 def invalid_payload(errors) -> Response:
     """The 400 for a malformed body, carrying DRF's own field-error mapping.
 

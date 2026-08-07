@@ -307,7 +307,7 @@ def test_grant_defaults_to_allow(admin_client, role, permission, resource):
     _post(admin_client, GRANT_URL, role_id=role.pk,
           permission_id=permission.pk, resource_path=resource)
 
-    assert RolePermission.objects.get().effect == Effect.ALLOW
+    assert RolePermission.objects.get(role=role).effect == Effect.ALLOW
 
 
 def test_regranting_the_opposite_effect_updates_rather_than_duplicates(
@@ -325,8 +325,8 @@ def test_regranting_the_opposite_effect_updates_rather_than_duplicates(
                      effect=Effect.DENY)
 
     assert response.status_code == 200          # updated, not created
-    assert RolePermission.objects.count() == 1
-    assert RolePermission.objects.get().effect == Effect.DENY
+    assert RolePermission.objects.filter(role=role).count() == 1
+    assert RolePermission.objects.get(role=role).effect == Effect.DENY
 
 
 def test_the_unique_key_excludes_effect(role, permission, resource):
@@ -360,7 +360,7 @@ def test_grant_canonicalises_the_resource_path(admin_client, role, permission, r
                      resource_path="DB:CRM_Postgres:Employee")
 
     assert response.json()["data"]["resource_path"] == "db:crm_postgres:employee"
-    assert RolePermission.objects.count() == 1
+    assert RolePermission.objects.filter(role=role).count() == 1
 
 
 def test_grant_rejects_a_malformed_resource_path(admin_client, role, permission):
@@ -423,7 +423,7 @@ def test_revoking_a_deny_does_not_create_an_allow(admin_client, role, permission
     _post(admin_client, GRANT_REVOKE_URL, role_id=role.pk,
           permission_id=permission.pk, resource_path=resource)
 
-    assert not RolePermission.objects.exists()
+    assert not RolePermission.objects.filter(role=role).exists()
 
 
 def test_deleting_a_role_removes_its_grants(role, permission, resource, member):
@@ -431,9 +431,11 @@ def test_deleting_a_role_removes_its_grants(role, permission, resource, member):
     RolePermission.objects.create(role=role, permission=permission,
                                   resource_path=resource)
 
+    role_pk = role.pk
     role.delete()
 
-    assert not RolePermission.objects.exists()
+    assert not RolePermission.objects.filter(role_id=role_pk).exists()
+
 
 
 def test_a_granted_permission_cannot_be_deleted(role, permission, resource):

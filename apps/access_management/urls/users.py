@@ -8,11 +8,18 @@ and path.
 """
 from django.urls import path
 
-from ..views import UserCreateView, UserDetailView, UserListView, UserUpdateView
+from ..views import (
+    UserCreateView,
+    UserDeleteView,
+    UserDetailView,
+    UserListView,
+    UserUpdateView,
+)
 
 urlpatterns = [
     path("users/create", UserCreateView.as_view(), name="user-create"),
     path("users/detail", UserDetailView.as_view(), name="user-detail"),
     path("users/list", UserListView.as_view(), name="user-list"),
     path("users/update", UserUpdateView.as_view(), name="user-update"),
+    path("users/delete", UserDeleteView.as_view(), name="user-delete"),
 ]

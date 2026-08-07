@@ -43,15 +43,16 @@ from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
 from django.core.cache import cache
 from django.db import transaction
-from django.utils import timezone
 from rest_framework.throttling import BaseThrottle
 from rest_framework_simplejwt.exceptions import TokenError
 from rest_framework_simplejwt.settings import api_settings as jwt_settings
-from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.utils import get_md5_hash_password
 
+from apps.access_management.models import Role, UserRole
+from apps.access_management.services.resolver import PermissionResolver
 from apps.core.messages import MESSAGES
+from apps.core.token_revocation import revoke_all_refresh_tokens
 
 logger = logging.getLogger(__name__)
 
@@ -143,6 +144,20 @@ class InvalidRefreshToken(AuthError):
     message = MESSAGES["auth"]["invalid_token"]
 
 
+class CurrentPasswordIncorrect(AuthError):
+    """The caller did not prove they know the password they are trying to change.
+
+    Distinct from ``InvalidCredentials`` on purpose: THIS caller is already
+    authenticated (``PasswordChangeView`` requires it) and already knows their own
+    username, so there is no enumeration signal to protect against here — telling
+    them specifically "that wasn't your current password" costs nothing a login
+    endpoint would ever have to worry about.
+    """
+
+    code = "CURRENT_PASSWORD_INCORRECT"
+    message = MESSAGES["auth"]["current_password_incorrect"]
+
+
 class _RotatableRefreshToken(RefreshToken):
     """A ``RefreshToken`` whose blacklist lookup is deferred to the rotation step.
 
@@ -196,7 +211,8 @@ class AuthService:
         Raises:
             AccountLocked: too many recent failures from this source for this
                 username, or an account-wide flood *and* a wrong password.
-            InvalidCredentials: unknown user, wrong password, or inactive account.
+            InvalidCredentials: unknown user, wrong password, inactive account, or a
+                correct password for an account that holds no role and is not staff.
         """
         source_key = self._failure_key(username, self._client_ident())
         account_key = self._failure_key(username)
@@ -234,10 +250,63 @@ class AuthService:
 
         self._clear_failures(source_key)
         self._clear_failures(account_key)
-        payload = {**self._identity(user), **self._issue_tokens(user)}
+
+        # An onboarded-but-unassigned account: credentials are correct, but there is
+        # nothing for the caller to do once inside. Reported as the SAME generic
+        # InvalidCredentials as a wrong password — a distinct error here would tell
+        # an attacker "these credentials are valid, this account just has no role
+        # yet", which is exactly the enumeration signal the generic 401 exists to
+        # deny. is_staff bypasses this: an admin account (bootstrap, or promoted
+        # directly in the database) must never be locked out of its own platform by
+        # a missing RBAC row, and last-admin protection already guarantees at least
+        # one is_staff account exists.
+        if not user.is_staff and not UserRole.objects.filter(user=user).exists():
+            logger.warning("auth login refused: no role assigned user_id=%s "
+                           "username=%s %s", user.pk, username, self._log_context())
+            raise InvalidCredentials()
+
+        payload = {**self._identity(user), **self._issue_tokens(user),
+                   **self._authorization_context(user)}
         logger.info("auth login succeeded user_id=%s username=%s jwt=%s %s",
                     user.pk, user.username, jwt_enabled(), self._log_context())
         return payload
+
+    def _authorization_context(self, user) -> dict:
+        """Roles and effective permissions, resolved once, in the login response.
+
+        Gated on ``jwt_enabled()``, same as ``_issue_tokens``: while the rollout
+        flag is off, the login response must stay byte-identical to the pre-JWT
+        contract (see ``test_login_with_flag_off_returns_the_legacy_payload``) —
+        adding fields here unconditionally would silently break that promise for
+        every existing client of the legacy payload.
+
+        NOT delayed to the first authorization check: a client that only ever reads
+        this response already knows what it may do, without a follow-up call to
+        ``/users/permissions/effective``.
+
+        Deliberately NOT in a JWT claim or the Django session — either would cache
+        an authorization decision outside the one place ``PermissionResolver`` reads
+        it from live. A permission revoked mid-session must take effect on the NEXT
+        request that checks it, not wait for a 15-minute access token to expire or a
+        session key to be re-read; embedding it in the token/session would silently
+        reintroduce exactly the staleness problem the resolver's per-request,
+        always-live design exists to avoid. Recomputed on refresh too would cost a
+        query on the platform's hottest endpoint for no requirement that asked for
+        it, so this runs at login only.
+
+        Only added here, not in ``_identity`` — ``_identity`` is shared with
+        ``refresh``, and refreshing happens far more often than logging in.
+        """
+        if not jwt_enabled():
+            return {}
+
+        effective = PermissionResolver(self._request).resolve(user)
+        role_names = list(Role.objects.filter(
+            user_assignments__user=user, is_active=True).values_list("name", flat=True))
+        return {
+            "roles": role_names,
+            "permission_codes": list(effective.permission_codes),
+        }
 
     # -- refresh ------------------------------------------------------------
 
@@ -339,6 +408,48 @@ class AuthService:
         logger.info("auth logout succeeded user_id=%s %s",
                     token.get(jwt_settings.USER_ID_CLAIM), self._log_context())
 
+    # -- password change -----------------------------------------------------
+
+    def change_password(self, user, current_password: str, new_password: str) -> None:
+        """Change ``user``'s password after verifying they know the current one.
+
+        Policy (composition, length, etc.) is already enforced by
+        ``PasswordChangeRequestSerializer`` via ``validate_password()`` before this
+        is ever called — this method's own job is the one thing a serializer cannot
+        do: confirm ``current_password`` is actually correct for THIS user.
+
+        Every live refresh token is revoked: a captured refresh token must stop
+        working the moment its owner changes their password on suspicion of
+        compromise. Access tokens need no separate step — they carry the
+        password-hash claim ``CHECK_REVOKE_TOKEN`` already checks on every request
+        (see ``SIMPLE_JWT`` in ``config/settings/base.py``), so they self-invalidate
+        without this method doing anything token-specific for them.
+
+        Args:
+            user: The authenticated caller (``request.user``) — never a user looked
+                up by id from the payload, so this can only ever change the caller's
+                own password.
+            current_password: Claimed current password. Checked via
+                ``user.check_password``, which is the same constant-time comparison
+                ``authenticate()`` uses.
+            new_password: Already policy-validated by the serializer.
+
+        Raises:
+            CurrentPasswordIncorrect: ``current_password`` does not match.
+        """
+        if not user.check_password(current_password):
+            logger.warning("password change refused: current password incorrect "
+                           "user_id=%s %s", user.pk, self._log_context())
+            raise CurrentPasswordIncorrect()
+
+        with transaction.atomic():
+            user.set_password(new_password)
+            user.save(update_fields=["password"])
+
+        revoked = revoke_all_refresh_tokens(user.pk)
+        logger.info("password changed user_id=%s tokens_revoked=%s %s",
+                    user.pk, revoked, self._log_context())
+
     def _parse_refresh_token(self, raw_refresh_token: str):
         """Decode and fully verify a refresh token (signature, ``exp``, ``jti``,
         ``token_type``) — everything except the blacklist, which the rotation step
@@ -379,21 +490,11 @@ class AuthService:
         parties must re-authenticate. simplejwt has no token-family concept to
         revoke a narrower set.
 
-        Already-expired tokens are skipped: they are refused by the ``exp`` check
-        anyway, so blacklisting them buys no security and would make this scale with
-        an account's entire history rather than its live sessions.
-
-        ``ignore_conflicts`` makes this safe to run concurrently (and idempotent
-        over already-blacklisted tokens). Returns the number of candidate rows
-        considered — not all of them are necessarily new insertions.
+        Delegates to ``apps.core.token_revocation`` — the same primitive
+        ``UserService.deactivate_user`` uses, so there is one revoke-everything
+        implementation rather than two call sites that could drift.
         """
-        if not user_id:
-            return 0
-        outstanding = list(OutstandingToken.objects.filter(
-            user_id=user_id, expires_at__gt=timezone.now()))
-        BlacklistedToken.objects.bulk_create(
-            [BlacklistedToken(token=row) for row in outstanding], ignore_conflicts=True)
-        return len(outstanding)
+        return revoke_all_refresh_tokens(user_id)
 
     @staticmethod
     def _password_unchanged(token, user) -> bool:

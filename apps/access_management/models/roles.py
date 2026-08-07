@@ -64,6 +64,13 @@ class Role(TimeStampedModel):
     #: history remains readable and future assignment rows keep a valid FK target.
     is_active = models.BooleanField(default=True)
 
+    #: Set when ``is_active`` flips to False, cleared when it flips back. A
+    #: timestamp ON that decision, not a second decision — ``is_active`` stays the
+    #: one flag the resolver and every grant check key off. Same pattern as
+    #: ``UserProfile.deleted_at``, but a plain column here rather than a related
+    #: table: unlike ``auth_user``, this app owns this model outright.
+    deleted_at = models.DateTimeField(null=True, blank=True)
+
     class Meta:
         constraints = [
             # Expression constraint rather than ``unique=True``: the rule is

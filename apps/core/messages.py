@@ -22,6 +22,11 @@ MESSAGES = {
         "invalid_credentials": "Invalid username or password.",
         "account_locked": "Too many failed login attempts. Please try again later.",
         "invalid_token": "Invalid or expired token.",
+        "password_changed": "Password changed successfully.",
+        "current_password_incorrect": "The current password is incorrect.",
+        "already_bootstrapped": (
+            "An administrator already exists; bootstrap can only run on an "
+            "empty user table."),
     },
     "user": {
         "created": "User created successfully.",
@@ -32,11 +37,15 @@ MESSAGES = {
         "email_taken": "A user with that email address already exists.",
         "conflict": "A user with those details already exists.",
         "not_found": "No such user.",
+        "last_admin_protected": (
+            "This is the last active administrator; the platform must always "
+            "have at least one."),
     },
     "role": {
         "created": "Role created successfully.",
         "retrieved": "Role retrieved successfully.",
         "list": "Roles retrieved successfully.",
+        "dropdown": "Roles retrieved successfully.",
         "updated": "Role updated successfully.",
         "name_taken": "A role with that name already exists.",
         "not_found": "No such role.",
@@ -69,6 +78,9 @@ MESSAGES = {
         "role_inactive": "That role is retired and cannot be assigned.",
         "permission_inactive": "That permission is disabled and cannot be granted.",
         "invalid_resource": "That resource path is not valid.",
+        "last_admin_role_protected": (
+            "This is the last active administrator; the Admin role cannot be "
+            "removed from them."),
     },
     "resolver": {
         "resolved": "Effective permissions resolved successfully.",

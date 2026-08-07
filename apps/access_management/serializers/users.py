@@ -150,7 +150,7 @@ class UserDetailSerializer(serializers.Serializer):
 
 
 class UserUpdateSerializer(serializers.Serializer):
-    """Body of ``POST /api/v1/users/update`` — profile fields only.
+    """Body of ``POST /api/v1/users/update`` — profile fields, including ``is_active``.
 
     ``user_id`` identifies the target (in the body, not a path segment — the
     platform's endpoints are all ``POST <resource>/<action>``).
@@ -160,7 +160,7 @@ class UserUpdateSerializer(serializers.Serializer):
     as a successful no-op, because a client that sent no changes almost certainly
     meant to send some.
 
-    Three deliberate exclusions, each belonging to a different concern:
+    Deliberate exclusions, each belonging to a different concern:
 
       * ``username`` — the login identifier. Renaming an identity is a distinct
         operation with its own audit and cache-invalidation questions, not a profile
@@ -168,9 +168,13 @@ class UserUpdateSerializer(serializers.Serializer):
       * ``password`` — password lifecycle lives in ``apps.authentication`` (and a
         change there revokes tokens; see AUTH_API_CONTRACT.md §3.1). Duplicating it
         here would create a second way to set a credential.
-      * ``is_active`` / ``is_staff`` / ``is_superuser`` — deactivation is its own
-        endpoint and privilege granting is role assignment. Submitting any of them
-        is an error, exactly as on create.
+      * ``is_staff`` / ``is_superuser`` — privilege granting is role assignment, a
+        different concern from "is this account allowed to sign in at all".
+        Submitting either is an error, exactly as on create.
+
+    ``is_active`` is NOT excluded, unlike the other flags: deactivating a user IS a
+    profile edit (see ``UserService.update_user`` for the last-admin guard and the
+    token revocation that come with turning it off).
     """
 
     user_id = serializers.IntegerField(min_value=1)
@@ -179,10 +183,11 @@ class UserUpdateSerializer(serializers.Serializer):
         max_length=_FIRST_NAME.max_length, required=False, allow_blank=True)
     last_name = serializers.CharField(
         max_length=_LAST_NAME.max_length, required=False, allow_blank=True)
+    is_active = serializers.BooleanField(required=False)
 
     #: Fields this endpoint may actually write — ``user_id`` selects the row, it is
     #: not a change. Used by the view to split the target from the changes.
-    UPDATABLE_FIELDS = ("email", "first_name", "last_name")
+    UPDATABLE_FIELDS = ("email", "first_name", "last_name", "is_active")
 
     def validate(self, attrs):
         self._reject_unknown_and_privileged()

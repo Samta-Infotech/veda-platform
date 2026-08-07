@@ -22,13 +22,16 @@ from .resolver import EffectivePermissionsView
 from .permissions import public_fields as permission_public_fields
 from .roles import (
     RoleCreateView,
+    RoleDeleteView,
     RoleDetailView,
+    RoleDropdownView,
     RoleListView,
     RoleUpdateView,
 )
 from .roles import public_fields as role_public_fields
 from .users import (
     UserCreateView,
+    UserDeleteView,
     UserDetailView,
     UserListView,
     UserUpdateView,
@@ -51,10 +54,13 @@ __all__ = [
     "grant_fields",
     "PermissionListView",
     "RoleCreateView",
+    "RoleDeleteView",
     "RoleDetailView",
+    "RoleDropdownView",
     "RoleListView",
     "RoleUpdateView",
     "UserCreateView",
+    "UserDeleteView",
     "UserDetailView",
     "UserListView",
     "UserUpdateView",

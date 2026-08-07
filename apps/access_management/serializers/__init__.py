@@ -22,6 +22,7 @@ from .roles import (
     READ_ONLY_FIELDS,
     RoleCreateSerializer,
     RoleDetailSerializer,
+    RoleDropdownSerializer,
     RoleListSerializer,
     RoleUpdateSerializer,
 )
@@ -52,6 +53,7 @@ __all__ = [
     "READ_ONLY_FIELDS",
     "RoleCreateSerializer",
     "RoleDetailSerializer",
+    "RoleDropdownSerializer",
     "RoleListSerializer",
     "RoleUpdateSerializer",
     "UserCreateSerializer",

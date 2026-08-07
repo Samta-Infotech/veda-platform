@@ -60,7 +60,9 @@ def pagination_payload(page: int, page_size: int, total: int) -> dict:
     """The ``pagination`` block every ``<resource>/list`` response carries.
 
     One definition so users and roles cannot answer the same question differently —
-    a client that learned to read one pager reads them all.
+    a client that learned to read one pager reads them all. snake_case, matching
+    every other key this platform's API returns — not the frontend's camelCase
+    sample, which does not match this backend's naming standard.
     """
     return {
         "page": page,

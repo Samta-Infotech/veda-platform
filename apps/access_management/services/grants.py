@@ -31,11 +31,13 @@ import logging
 
 from django.contrib.auth import get_user_model
 from django.db import transaction
+from django.db.models import Count
 
 from .. import resource_path as rp
 from apps.core.messages import MESSAGES
 
 from ..models import CatalogResource, Effect, Permission, Role, RolePermission, UserRole
+from .admin_guard import ADMIN_ROLE_NAME, LastAdminRoleProtected, is_last_active_admin
 from .base import ConflictError, paginate
 from .permissions import PermissionNotFound
 from .roles import RoleNotFound
@@ -171,9 +173,24 @@ class UserRoleService(_GrantServiceBase):
         Deliberately does NOT verify the user or role exists: the desired end state —
         "this user does not hold this role" — is already true for a target that does
         not exist, and raising 404 would make a revoke script fail on exactly the rows
-        it has nothing to do.
+        it has nothing to do. The one exception is the Admin role itself, guarded
+        below — that check has to run regardless of whether the ids resolve, because
+        the whole point is refusing a write, not reporting on the target's existence.
+
+        Raises:
+            LastAdminRoleProtected: ``role_id`` is the Admin role and ``user_id`` is
+                the platform's only active admin.
         """
-        deleted, _ = UserRole.objects.filter(user_id=user_id, role_id=role_id).delete()
+        with transaction.atomic():
+            # Only the Admin role needs the extra query and the row lock — every
+            # other role keeps the original zero-lookup fast path untouched.
+            if Role.objects.filter(pk=role_id, name__iexact=ADMIN_ROLE_NAME).exists():
+                user = (get_user_model().objects.select_for_update()
+                        .filter(pk=user_id).first())
+                if user is not None and is_last_active_admin(user):
+                    raise LastAdminRoleProtected()
+
+            deleted, _ = UserRole.objects.filter(user_id=user_id, role_id=role_id).delete()
         removed = bool(deleted)
         logger.info("role %s user_id=%s role_id=%s %s",
                     "revoked" if removed else "revoke no-op",
@@ -197,6 +214,20 @@ class UserRoleService(_GrantServiceBase):
 
         return paginate(queryset, page=page, page_size=page_size, ordering=ordering,
                         only_fields=USER_ROLE_LIST_FIELDS)
+
+    @staticmethod
+    def roles_for_users(user_ids) -> dict:
+        """``{user_id: [{"id": role_id, "name": role_name}, ...]}`` for a whole page
+        of users in ONE query — the same batched-lookup shape as
+        ``RolePermissionService.known_resource_paths``, so a users list costs no
+        N+1 to also show each row's roles."""
+        rows = (UserRole.objects
+                .filter(user_id__in=user_ids)
+                .values_list("user_id", "role_id", "role__name"))
+        by_user: dict = {}
+        for user_id, role_id, role_name in rows:
+            by_user.setdefault(user_id, []).append({"id": role_id, "name": role_name})
+        return by_user
 
 
 class RolePermissionService(_GrantServiceBase):
@@ -295,3 +326,49 @@ class RolePermissionService(_GrantServiceBase):
             return rp.validate(resource_path)
         except rp.InvalidResourcePath as exc:
             raise InvalidResourcePath() from exc
+
+
+#: Display label per resource-path kind (``resource_path.KIND_*``), for a role
+#: summary screen — "what kinds of source can this role reach at all". Not the
+#: kind constants themselves: those are an internal grammar, these are copy.
+SOURCE_KIND_LABELS = {
+    rp.KIND_DB: "Database",
+    rp.KIND_NOSQL: "NoSQL",
+    rp.KIND_FILES: "File System",
+    rp.KIND_LAKE: "Datalake",
+}
+
+
+def role_stats(role_ids) -> dict:
+    """``{role_id: {"users_count": int, "connected_sources": [str, ...]}}`` for a
+    whole page of roles in two queries, not one pair per row.
+
+    Spans both grant tables (``UserRole`` for membership, ``RolePermission`` for
+    reach) — a module function rather than a method on either service, since it
+    belongs to neither's domain alone.
+
+    A role's global grants (``resource_path=""``) contribute nothing to
+    ``connected_sources``: a permission that applies to the whole platform is not
+    "connected" to any particular kind of source, and guessing one would be a
+    fabricated answer no grant actually gave.
+    """
+    stats = {role_id: {"users_count": 0, "connected_sources": []} for role_id in role_ids}
+    if not role_ids:
+        return stats
+
+    counts = (UserRole.objects.filter(role_id__in=role_ids)
+             .values("role_id").annotate(count=Count("id")))
+    for row in counts:
+        stats[row["role_id"]]["users_count"] = row["count"]
+
+    kinds_by_role: dict = {}
+    paths = (RolePermission.objects.filter(role_id__in=role_ids)
+            .exclude(resource_path="").values_list("role_id", "resource_path"))
+    for role_id, path in paths:
+        kinds_by_role.setdefault(role_id, set()).add(rp.kind_of(path))
+
+    for role_id, kinds in kinds_by_role.items():
+        stats[role_id]["connected_sources"] = sorted(
+            SOURCE_KIND_LABELS.get(kind, kind) for kind in kinds)
+
+    return stats

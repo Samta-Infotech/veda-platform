@@ -6,10 +6,11 @@ the frontend.
 """
 from django.urls import path
 
-from .views import LoginView, LogoutView, TokenRefreshView
+from .views import LoginView, LogoutView, PasswordChangeView, TokenRefreshView
 
 urlpatterns = [
     path("auth/login", LoginView.as_view(), name="auth-login"),
     path("auth/refresh", TokenRefreshView.as_view(), name="auth-refresh"),
     path("auth/logout", LogoutView.as_view(), name="auth-logout"),
+    path("auth/password/change", PasswordChangeView.as_view(), name="auth-password-change"),
 ]

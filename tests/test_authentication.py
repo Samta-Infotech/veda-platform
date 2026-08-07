@@ -138,7 +138,7 @@ def _isolated(_database):
 @pytest.fixture
 def user():
     return get_user_model().objects.create_user(
-        username="alice", password=PASSWORD, first_name="Alice")
+        username="alice", password=PASSWORD, first_name="Alice", is_staff=True)
 
 
 @pytest.fixture
@@ -197,7 +197,7 @@ def test_login_issues_access_and_refresh_tokens(client, user):
 
 @override_settings(VEDA_JWT_AUTH=True)
 def test_login_display_name_falls_back_to_username(client):
-    get_user_model().objects.create_user(username="bob", password=PASSWORD)
+    get_user_model().objects.create_user(username="bob", password=PASSWORD, is_staff=True)
 
     data = _login(client, "bob", PASSWORD).json()["data"]
 
@@ -290,7 +290,8 @@ def test_login_rejects_wrong_password(client, user):
 
 @override_settings(VEDA_JWT_AUTH=True)
 def test_login_rejects_inactive_user(client):
-    inactive = get_user_model().objects.create_user(username="carol", password=PASSWORD)
+    inactive = get_user_model().objects.create_user(
+        username="carol", password=PASSWORD, is_staff=True)
     inactive.is_active = False
     inactive.save(update_fields=["is_active"])
 
@@ -309,7 +310,8 @@ def test_login_rejects_inactive_user(client):
 def test_login_does_not_leak_whether_an_account_exists(client, user):
     """Unknown username, wrong password and inactive account must be one
     indistinguishable response — otherwise login is an account oracle."""
-    inactive = get_user_model().objects.create_user(username="dave", password=PASSWORD)
+    inactive = get_user_model().objects.create_user(
+        username="dave", password=PASSWORD, is_staff=True)
     inactive.is_active = False
     inactive.save(update_fields=["is_active"])
 

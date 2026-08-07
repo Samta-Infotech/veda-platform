@@ -329,8 +329,10 @@ def test_revoking_the_assignment_removes_everything(member, read):
 def test_grants_from_several_roles_are_unioned(member, read, manage):
     analyst = _role_for(member, "Analyst")
     _grant(analyst, read, "db:crm")
-    admin = _role_for(member, "Admin")
-    _grant(admin, manage, "")
+    # Not named "Admin": migration 0007 seeds a real role by that name, and this
+    # fixture role is an unrelated, unseeded namesake it would collide with.
+    manager = _role_for(member, "Manager")
+    _grant(manager, manage, "")
 
     effective = _resolve(member)
 

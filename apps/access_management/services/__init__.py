@@ -9,7 +9,18 @@ Everything public is re-exported here, so callers import from the package
 which module a name lives in. Moving a class between modules therefore does not
 break its importers.
 """
+from .admin_guard import (
+    ADMIN_ROLE_NAME,
+    CODE_LAST_ADMIN_PROTECTED,
+    CODE_LAST_ADMIN_ROLE_PROTECTED,
+    LastAdminProtected,
+    LastAdminRoleProtected,
+    active_admins,
+    get_admin_role,
+    is_last_active_admin,
+)
 from .base import AccessManagementError, ConflictError, NotFoundError, paginate
+from .bootstrap import AdminBootstrapService, AlreadyBootstrapped
 from .catalog import (
     CATALOG_LIST_FIELDS,
     CODE_RESOURCE_NOT_FOUND,
@@ -27,6 +38,7 @@ from .grants import (
     RoleInactive,
     RolePermissionService,
     UserRoleService,
+    role_stats,
 )
 from .permissions import (
     CODE_PERMISSION_NOT_FOUND,
@@ -62,7 +74,17 @@ from .users import (
 )
 
 __all__ = [
+    "ADMIN_ROLE_NAME",
     "AccessManagementError",
+    "AdminBootstrapService",
+    "AlreadyBootstrapped",
+    "CODE_LAST_ADMIN_PROTECTED",
+    "CODE_LAST_ADMIN_ROLE_PROTECTED",
+    "LastAdminProtected",
+    "LastAdminRoleProtected",
+    "active_admins",
+    "get_admin_role",
+    "is_last_active_admin",
     "CATALOG_LIST_FIELDS",
     "CODE_INVALID_RESOURCE",
     "CODE_PERMISSION_INACTIVE",
@@ -104,4 +126,5 @@ __all__ = [
     "UserService",
     "UsernameTaken",
     "paginate",
+    "role_stats",
 ]

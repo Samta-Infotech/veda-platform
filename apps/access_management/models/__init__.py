@@ -11,6 +11,8 @@ what the re-export below provides.
 from .catalog import CatalogResource
 from .grants import Effect, RolePermission, UserRole
 from .permissions import Permission
+from .profile import UserProfile
 from .roles import Role
 
-__all__ = ["CatalogResource", "Effect", "Permission", "Role", "RolePermission", "UserRole"]
+__all__ = ["CatalogResource", "Effect", "Permission", "Role", "RolePermission",
+          "UserProfile", "UserRole"]

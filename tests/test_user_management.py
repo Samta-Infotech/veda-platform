@@ -39,6 +39,7 @@ from django.contrib.auth import get_user_model  # noqa: E402
 from django.db import IntegrityError, transaction  # noqa: E402
 from django.test import Client, override_settings  # noqa: E402
 
+from apps.access_management.models import Role, UserRole  # noqa: E402
 from apps.access_management.services import (  # noqa: E402
     CODE_EMAIL_TAKEN,
     CODE_USERNAME_TAKEN,
@@ -51,14 +52,23 @@ CREATE_URL = "/api/v1/users/create"
 DETAIL_URL = "/api/v1/users/detail"
 LIST_URL = "/api/v1/users/list"
 UPDATE_URL = "/api/v1/users/update"
+DELETE_URL = "/api/v1/users/delete"
 
 ADMIN_PASSWORD = "admin-correct-horse-staple"
-NEW_PASSWORD = "fresh-tapir-glacier-97"
+# Satisfies PasswordComplexityValidator (upper/lower/digit/special) as well as the
+# four Django stock validators — this goes through UserCreateSerializer, unlike
+# ADMIN_PASSWORD above which is set directly via create_user() and never validated.
+NEW_PASSWORD = "Fresh-Tapir-97!"
 
 # The one user representation every endpoint in this app returns. Asserted as an
 # exact set so a future field addition is a deliberate contract change, not a leak.
 PUBLIC_FIELDS = {"user_id", "username", "email", "display_name", "is_active",
                  "is_staff", "date_joined", "last_login"}
+
+#: Only ``users/list`` carries these — a per-row admin-table need (roles, and the
+#: display-date fields the frontend's table renders directly), not part of the
+#: shared create/detail/update representation. See UserListView.
+LIST_EXTRA_FIELDS = {"roles", "created_at", "updated_at", "deleted_at"}
 
 VALID_PAYLOAD = {
     "username": "jdoe",
@@ -570,11 +580,11 @@ def test_list_returns_a_page_with_totals(admin_client, population):
 
 
 def test_list_uses_the_same_projection_as_create(admin_client, population):
-    """One user representation across the API — a list row and a create response must
-    not disagree about what a user looks like."""
+    """One user representation across the API — a list row must carry every field
+    the shared representation has, plus its own admin-table extras."""
     row = _list(admin_client, page_size=1).json()["data"]["users"][0]
 
-    assert set(row) == PUBLIC_FIELDS
+    assert set(row) == PUBLIC_FIELDS | LIST_EXTRA_FIELDS
 
 
 def test_list_never_exposes_password_hashes(admin_client, population):
@@ -692,6 +702,75 @@ def test_list_costs_two_queries_regardless_of_page_size(admin_client, population
     assert len(ctx.captured_queries) == 2
 
 
+def test_list_roles_reflects_actual_assignments(admin_client):
+    created = _create(admin_client).json()["data"]
+    role_a = Role.objects.create(name="Data Analyst")
+    role_b = Role.objects.create(name="Reviewer")
+    UserRole.objects.create(user_id=created["user_id"], role=role_a)
+    UserRole.objects.create(user_id=created["user_id"], role=role_b)
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == created["user_id"])
+
+    assert {r["id"] for r in row["roles"]} == {role_a.pk, role_b.pk}
+    assert {r["name"] for r in row["roles"]} == {"Data Analyst", "Reviewer"}
+
+
+def test_list_roles_is_empty_for_an_unassigned_user(admin_client):
+    created = _create(admin_client).json()["data"]
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == created["user_id"])
+
+    assert row["roles"] == []
+
+
+def test_deactivating_a_user_sets_deleted_at(admin_client):
+    created = _create(admin_client).json()["data"]
+
+    _update(admin_client, user_id=created["user_id"], is_active=False)
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == created["user_id"])
+    assert row["deleted_at"] is not None
+
+
+def test_reactivating_a_user_clears_deleted_at(admin_client):
+    created = _create(admin_client).json()["data"]
+    _update(admin_client, user_id=created["user_id"], is_active=False)
+
+    _update(admin_client, user_id=created["user_id"], is_active=True)
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == created["user_id"])
+    assert row["deleted_at"] is None
+
+
+def test_a_new_user_has_no_deleted_at_and_a_real_updated_at(admin_client):
+    """create_user() creates the profile row in the same unit of work — no user
+    ever has to wait for its first deactivation before ``updated_at`` is real."""
+    created = _create(admin_client).json()["data"]
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == created["user_id"])
+
+    assert row["deleted_at"] is None
+    assert row["updated_at"] != ""
+
+
+def test_a_user_predating_the_profile_table_shows_placeholders(admin_client):
+    """Backfill is lazy, not a data migration — a user created directly (bypassing
+    UserService, as any pre-migration-0008 row effectively was) has no profile row
+    until something touches it, and the list must not error on that gap."""
+    user = get_user_model().objects.create_user(username="legacy", password=ADMIN_PASSWORD)
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == user.pk)
+
+    assert row["updated_at"] == ""
+    assert row["deleted_at"] is None
+
+
 def test_list_requires_staff(plain_user):
     anonymous = _list(Client())
     client = Client()
@@ -724,7 +803,9 @@ def test_detail_returns_one_user(admin_client):
 
 def test_detail_uses_the_same_projection_as_create_and_list(admin_client):
     """One user representation across the API — opening a row must not return a
-    different shape from the row that was clicked."""
+    different shape from the row that was clicked. ``list`` carries a few extra
+    admin-table fields on top (``LIST_EXTRA_FIELDS``) but must not disagree with
+    ``detail``/``create`` about any field the three share."""
     created = _create(admin_client).json()["data"]
 
     detail = _detail(admin_client, user_id=created["user_id"]).json()["data"]
@@ -732,7 +813,9 @@ def test_detail_uses_the_same_projection_as_create_and_list(admin_client):
                   if u["user_id"] == created["user_id"])
 
     assert set(detail) == PUBLIC_FIELDS
-    assert detail == created == listed
+    assert set(listed) == PUBLIC_FIELDS | LIST_EXTRA_FIELDS
+    assert detail == created
+    assert {k: v for k, v in listed.items() if k in PUBLIC_FIELDS} == detail
 
 
 def test_detail_never_exposes_the_password_hash(admin_client):
@@ -803,6 +886,10 @@ def test_detail_requires_staff(plain_user, admin_client):
 
 def _update(client, **body):
     return client.post(UPDATE_URL, body, content_type="application/json")
+
+
+def _delete(client, **body):
+    return client.post(DELETE_URL, body, content_type="application/json")
 
 
 @pytest.fixture
@@ -880,8 +967,13 @@ def test_update_can_resubmit_the_users_own_email(admin_client, target):
 
 
 def test_update_rejects_privileged_fields(admin_client, target):
-    """Privilege escalation via update, the same guard as on create."""
-    for field in ("is_staff", "is_superuser", "is_active"):
+    """Privilege escalation via update, the same guard as on create.
+
+    ``is_active`` is deliberately NOT in this list — see
+    ``tests/test_admin_bootstrap.py`` for its own (non-privileged) update coverage,
+    including the last-admin guard it carries.
+    """
+    for field in ("is_staff", "is_superuser"):
         response = _update(admin_client, user_id=target, **{field: True})
         assert response.status_code == 400, field
         assert field in response.json()["errors"]
@@ -1048,7 +1140,7 @@ def test_package_layout_re_exports_its_public_names():
     assert services.AccessManagementError is AccessManagementError
 
 
-@pytest.mark.parametrize("url", [CREATE_URL, DETAIL_URL, LIST_URL, UPDATE_URL])
+@pytest.mark.parametrize("url", [CREATE_URL, DETAIL_URL, LIST_URL, UPDATE_URL, DELETE_URL])
 def test_endpoints_are_post_only(admin_client, url):
     """The platform convention is POST <resource>/<action> (as apps/chat already
     does), so no other verb should be reachable on any of them."""
@@ -1056,3 +1148,56 @@ def test_endpoints_are_post_only(admin_client, url):
     assert admin_client.put(url).status_code == 405
     assert admin_client.patch(url).status_code == 405
     assert admin_client.delete(url).status_code == 405
+
+
+# ---------------------------------------------------------------------------
+# Delete — a named convenience over update {is_active: false}, not a new path
+# ---------------------------------------------------------------------------
+
+
+def test_delete_is_a_soft_delete(admin_client, target):
+    response = _delete(admin_client, user_id=target)
+
+    assert response.status_code == 200
+    user = get_user_model().objects.get(pk=target)
+    assert user.is_active is False
+    # The row still exists — this is not django.contrib.auth.models.User.delete().
+    assert get_user_model().objects.filter(pk=target).exists()
+
+
+def test_delete_sets_deleted_at(admin_client, target):
+    _delete(admin_client, user_id=target)
+
+    row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
+              if u["user_id"] == target)
+    assert row["deleted_at"] is not None
+
+
+def test_delete_is_idempotent(admin_client, target):
+    first = _delete(admin_client, user_id=target)
+    second = _delete(admin_client, user_id=target)
+
+    assert first.status_code == 200
+    assert second.status_code == 200
+
+
+def test_delete_the_last_admin_is_refused(admin_client, admin_user):
+    response = _delete(admin_client, user_id=admin_user.pk)
+
+    assert response.status_code == 409
+    admin_user.refresh_from_db()
+    assert admin_user.is_active is True
+
+
+def test_delete_of_a_nonexistent_user_is_404(admin_client):
+    response = _delete(admin_client, user_id=999_999)
+    assert response.status_code == 404
+
+
+def test_delete_requires_staff(plain_user):
+    client = Client()
+    client.force_login(plain_user)
+
+    response = _delete(client, user_id=plain_user.pk)
+
+    assert response.status_code == 403

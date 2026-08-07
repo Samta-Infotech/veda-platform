@@ -61,6 +61,16 @@ class RoleCreateSerializer(serializers.Serializer):
         return attrs
 
 
+class RoleDropdownSerializer(serializers.Serializer):
+    """Body of ``POST /api/v1/roles/dropdown`` — none. Declared (rather than
+    ``serializer_class = None``) only so ``AdminView.validate`` has something to
+    call; an unexpected key in the body is still a 400, not a silently-ignored one."""
+
+    def validate(self, attrs):
+        _reject_unknown_fields(self.initial_data, allowed=set(self.fields))
+        return attrs
+
+
 class RoleDetailSerializer(serializers.Serializer):
     """Body of ``POST /api/v1/roles/detail`` — which role to fetch.
 
