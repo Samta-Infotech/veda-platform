@@ -549,7 +549,7 @@ def test_service_requires_keyword_arguments():
 
 
 def _list(client, **body):
-    return client.post(LIST_URL, body, content_type="application/json")
+    return client.get(LIST_URL, body)
 
 
 @pytest.fixture
@@ -786,7 +786,7 @@ def test_list_requires_staff(plain_user):
 
 
 def _detail(client, **body):
-    return client.post(DETAIL_URL, body, content_type="application/json")
+    return client.get(DETAIL_URL, body)
 
 
 def test_detail_returns_one_user(admin_client):
@@ -1077,14 +1077,12 @@ def test_chat_endpoints_keep_their_documented_envelope(admin_client):
     Only the paths that need no LLM are exercised here — a 400 and a success — which
     is enough to prove the envelope shape is unchanged.
     """
-    bad = admin_client.post("/api/v1/conversations/history", {},
-                            content_type="application/json")
+    bad = admin_client.get("/api/v1/conversations/history", {})
     assert bad.status_code == 400
     assert bad.json() == {"status_code": 400, "message": "Invalid request data.",
                           "errors": {"chat_id": ["This field is required."]}}
 
-    listed = admin_client.post("/api/v1/conversations/list", {},
-                               content_type="application/json")
+    listed = admin_client.get("/api/v1/conversations/list")
     assert listed.status_code == 200
     assert listed.json() == {"status_code": 200,
                              "message": "Conversations retrieved successfully.",
@@ -1140,11 +1138,21 @@ def test_package_layout_re_exports_its_public_names():
     assert services.AccessManagementError is AccessManagementError
 
 
-@pytest.mark.parametrize("url", [CREATE_URL, DETAIL_URL, LIST_URL, UPDATE_URL, DELETE_URL])
-def test_endpoints_are_post_only(admin_client, url):
-    """The platform convention is POST <resource>/<action> (as apps/chat already
-    does), so no other verb should be reachable on any of them."""
+@pytest.mark.parametrize("url", [CREATE_URL, UPDATE_URL, DELETE_URL])
+def test_mutating_endpoints_reject_every_non_post_verb(admin_client, url):
+    """Mutating endpoints (create/update/delete) never gained a GET alias — GET
+    must never have a side effect, so these stay POST-only."""
     assert admin_client.get(url).status_code == 405
+    assert admin_client.put(url).status_code == 405
+    assert admin_client.patch(url).status_code == 405
+
+
+@pytest.mark.parametrize("url", [DETAIL_URL, LIST_URL])
+def test_read_only_endpoints_are_get_only(admin_client, url):
+    """detail/list are read-only and now GET-only (2026-08-09) —
+    cacheable/bookmarkable/safely-retryable, unlike POST."""
+    assert admin_client.get(url).status_code != 405
+    assert admin_client.post(url, {}, content_type="application/json").status_code == 405
     assert admin_client.put(url).status_code == 405
     assert admin_client.patch(url).status_code == 405
     assert admin_client.delete(url).status_code == 405

@@ -109,8 +109,15 @@ class AdminView(APIView):
     action = "request"
 
     def validate(self, request):
-        """``(validated_data, None)`` on success, ``(None, response)`` on failure."""
-        serializer = self.serializer_class(data=request.data)
+        """``(validated_data, None)`` on success, ``(None, response)`` on failure.
+
+        Read-only subclasses implement ``get`` (query params — no body on a GET
+        request, so parameters travel there instead); mutating subclasses
+        implement ``post`` (body) — this method serves both, reading whichever
+        the request actually is, so the validation logic isn't duplicated per verb.
+        """
+        params = request.query_params if request.method == "GET" else request.data
+        serializer = self.serializer_class(data=params)
         if not serializer.is_valid():
             # serializer.errors is safe to echo (it describes the caller's own
             # submission) but must never be logged wholesale — on a password-policy

@@ -148,6 +148,10 @@ def _post(client, url, **body):
     return client.post(url, body, content_type="application/json")
 
 
+def _get(client, url, **params):
+    return client.get(url, params)
+
+
 # ---------------------------------------------------------------------------
 # Role assignment
 # ---------------------------------------------------------------------------
@@ -277,9 +281,9 @@ def test_assignment_list_filters_both_ways(admin_client, member, role):
     UserRole.objects.create(user=other, role=role)
     UserRole.objects.create(user=member, role=other_role)
 
-    by_user = _post(admin_client, ASSIGN_LIST_URL, user_id=member.pk).json()["data"]
-    by_role = _post(admin_client, ASSIGN_LIST_URL, role_id=role.pk).json()["data"]
-    everything = _post(admin_client, ASSIGN_LIST_URL).json()["data"]
+    by_user = _get(admin_client, ASSIGN_LIST_URL, user_id=member.pk).json()["data"]
+    by_role = _get(admin_client, ASSIGN_LIST_URL, role_id=role.pk).json()["data"]
+    everything = _get(admin_client, ASSIGN_LIST_URL).json()["data"]
 
     assert by_user["pagination"]["total"] == 2
     assert by_role["pagination"]["total"] == 2
@@ -457,7 +461,7 @@ def test_grant_list_filters_and_reports_resource_existence(
     _post(admin_client, GRANT_URL, role_id=role.pk,
           permission_id=permission.pk, resource_path="db:ghost:table")
 
-    body = _post(admin_client, GRANT_LIST_URL, role_id=role.pk).json()["data"]
+    body = _get(admin_client, GRANT_LIST_URL, role_id=role.pk).json()["data"]
 
     assert body["pagination"]["total"] == 2
     by_path = {g["resource_path"]: g["resource_exists"] for g in body["grants"]}
@@ -515,9 +519,18 @@ def test_anonymous_and_non_staff_are_rejected(url, member):
     assert plain.post(url, {}, content_type="application/json").status_code == 403
 
 
-@pytest.mark.parametrize("url", ALL_URLS)
-def test_endpoints_are_post_only(admin_client, url):
+@pytest.mark.parametrize("url", [ASSIGN_URL, REVOKE_URL, GRANT_URL, GRANT_REVOKE_URL])
+def test_mutating_endpoints_reject_get_and_delete(admin_client, url):
     assert admin_client.get(url).status_code == 405
+    assert admin_client.delete(url).status_code == 405
+
+
+@pytest.mark.parametrize("url", [ASSIGN_LIST_URL, GRANT_LIST_URL])
+def test_read_only_endpoints_are_get_only(admin_client, url):
+    """Both list endpoints are read-only and now GET-only (2026-08-09) —
+    cacheable/bookmarkable/safely-retryable, unlike POST."""
+    assert admin_client.get(url).status_code != 405
+    assert admin_client.post(url, {}, content_type="application/json").status_code == 405
     assert admin_client.delete(url).status_code == 405
 
 

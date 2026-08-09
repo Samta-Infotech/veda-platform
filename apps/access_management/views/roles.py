@@ -67,12 +67,12 @@ class RoleCreateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["role"]["created"], public_fields(role),
+        return api.success(MESSAGES["role"]["created"],
                            status_code=status.HTTP_201_CREATED)
 
 
 class RoleDetailView(AdminView):
-    """POST /api/v1/roles/detail {role_id} -> one role.
+    """GET /api/v1/roles/detail?role_id= -> one role.
 
     Same projection as list. No permission or member counts: neither exists yet, and
     a placeholder would be a contract we would have to break.
@@ -82,7 +82,7 @@ class RoleDetailView(AdminView):
     action = "role detail"
     required_permission = PermissionCode.ROLE_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -96,7 +96,7 @@ class RoleDetailView(AdminView):
 
 
 class RoleListView(AdminView):
-    """POST /api/v1/roles/list {page?, page_size?, search?, is_active?, ordering?}.
+    """GET /api/v1/roles/list?page=&page_size=&search=&is_active=&ordering=
 
     Paginated like every list endpoint here. Roles are few, but a list endpoint whose
     response size depends on the table is a habit worth not forming.
@@ -106,7 +106,7 @@ class RoleListView(AdminView):
     action = "role list"
     required_permission = PermissionCode.ROLE_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -133,7 +133,7 @@ class RoleListView(AdminView):
 
 
 class RoleDropdownView(AdminView):
-    """POST /api/v1/roles/dropdown {} -> every active role, unpaginated.
+    """GET /api/v1/roles/dropdown -> every active role, unpaginated.
 
     For a picker/select control, not the admin table — ``roles/list`` stays the
     paginated, searchable, sortable view of the same data. Two endpoints because
@@ -145,7 +145,7 @@ class RoleDropdownView(AdminView):
     action = "role dropdown"
     required_permission = PermissionCode.ROLE_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -182,7 +182,7 @@ class RoleUpdateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["role"]["updated"], public_fields(role))
+        return api.success(MESSAGES["role"]["updated"])
 
 
 class RoleDeleteView(AdminView):
@@ -209,4 +209,4 @@ class RoleDeleteView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["role"]["updated"], public_fields(role))
+        return api.success(MESSAGES["role"]["deleted"])

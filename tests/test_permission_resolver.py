@@ -431,8 +431,7 @@ def test_endpoint_returns_the_effective_set(admin_client, member, read):
     role = _role_for(member)
     _grant(role, read, "db:crm")
 
-    response = admin_client.post(URL, {"user_id": member.pk},
-                                 content_type="application/json")
+    response = admin_client.get(URL, {"user_id": member.pk})
 
     assert response.status_code == 200
     data = response.json()["data"]
@@ -448,10 +447,9 @@ def test_endpoint_answers_a_specific_question(admin_client, member, read):
     role = _role_for(member)
     _grant(role, read, "db:crm")
 
-    response = admin_client.post(
+    response = admin_client.get(
         URL, {"user_id": member.pk, "permission_code": "data.read",
-              "resource_path": "db:crm:employee:salary"},
-        content_type="application/json")
+              "resource_path": "db:crm:employee:salary"})
 
     decision = response.json()["data"]["decision"]
     assert decision["allowed"] is True
@@ -463,10 +461,9 @@ def test_endpoint_reports_an_explicit_deny_distinctly(admin_client, member, read
     role = _role_for(member)
     _grant(role, read, "db:crm", Effect.DENY)
 
-    decision = admin_client.post(
+    decision = admin_client.get(
         URL, {"user_id": member.pk, "permission_code": "data.read",
-              "resource_path": "db:crm:employee"},
-        content_type="application/json").json()["data"]["decision"]
+              "resource_path": "db:crm:employee"}).json()["data"]["decision"]
 
     assert decision["allowed"] is False
     assert decision["explicitly_denied"] is True
@@ -474,8 +471,7 @@ def test_endpoint_reports_an_explicit_deny_distinctly(admin_client, member, read
 
 def test_endpoint_404s_for_an_unknown_user(admin_client):
     """"No permissions" and "no such user" are very different answers."""
-    response = admin_client.post(URL, {"user_id": 999_999},
-                                 content_type="application/json")
+    response = admin_client.get(URL, {"user_id": 999_999})
 
     assert response.status_code == 404
 
@@ -484,29 +480,26 @@ def test_endpoint_canonicalises_the_resource_path(admin_client, member, read):
     role = _role_for(member)
     _grant(role, read, "db:crm")
 
-    decision = admin_client.post(
+    decision = admin_client.get(
         URL, {"user_id": member.pk, "permission_code": "data.read",
-              "resource_path": "DB:CRM:Employee"},
-        content_type="application/json").json()["data"]["decision"]
+              "resource_path": "DB:CRM:Employee"}).json()["data"]["decision"]
 
     assert decision["allowed"] is True
 
 
 def test_endpoint_rejects_a_resource_without_a_permission(admin_client, member):
     """A resource alone is not a question the resolver can answer."""
-    response = admin_client.post(
-        URL, {"user_id": member.pk, "resource_path": "db:crm"},
-        content_type="application/json")
+    response = admin_client.get(
+        URL, {"user_id": member.pk, "resource_path": "db:crm"})
 
     assert response.status_code == 400
     assert "permission_code" in response.json()["errors"]
 
 
 def test_endpoint_rejects_a_malformed_resource_path(admin_client, member):
-    response = admin_client.post(
+    response = admin_client.get(
         URL, {"user_id": member.pk, "permission_code": "data.read",
-              "resource_path": "db::bad"},
-        content_type="application/json")
+              "resource_path": "db::bad"})
 
     assert response.status_code == 400
 
@@ -522,8 +515,12 @@ def test_endpoint_requires_staff(member):
                       content_type="application/json").status_code == 403
 
 
-def test_endpoint_is_post_only(admin_client):
-    assert admin_client.get(URL).status_code == 405
+def test_endpoint_is_get_only(admin_client):
+    """Read-only and now GET-only (2026-08-09) — its parameter (user_id)
+    travels as a query param instead of a body."""
+    assert admin_client.get(URL, {"user_id": 1}).status_code != 405
+    assert admin_client.post(URL, {"user_id": 1},
+                             content_type="application/json").status_code == 405
     assert admin_client.put(URL).status_code == 405
 
 

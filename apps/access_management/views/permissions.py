@@ -32,16 +32,17 @@ def public_fields(permission) -> dict:
 
 
 class PermissionListView(AdminView):
-    """POST /api/v1/permissions/list {page?, page_size?, search?, is_active?, ordering?}.
+    """GET /api/v1/permissions/list?page=&page_size=&search=&is_active=&ordering=
 
-    The catalogue a role screen renders to ask "what can I grant?".
+    The catalogue a role screen renders to ask "what can I grant?". Read-only,
+    so GET only — cacheable/bookmarkable/safely-retryable, unlike POST.
     """
 
     serializer_class = PermissionListSerializer
     action = "permission list"
     required_permission = PermissionCode.PERMISSION_READ
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -56,13 +57,13 @@ class PermissionListView(AdminView):
 
 
 class PermissionDetailView(AdminView):
-    """POST /api/v1/permissions/detail {permission_id} -> one permission."""
+    """GET /api/v1/permissions/detail?permission_id= -> one permission."""
 
     serializer_class = PermissionDetailSerializer
     action = "permission detail"
     required_permission = PermissionCode.PERMISSION_READ
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -73,3 +74,4 @@ class PermissionDetailView(AdminView):
             return self.failure(request, exc)
 
         return api.success(MESSAGES["permission"]["retrieved"], public_fields(permission))
+

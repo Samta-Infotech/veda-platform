@@ -171,6 +171,19 @@ DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 # valid to rotate (401) and logout has nothing to revoke (idempotent 200).
 VEDA_JWT_AUTH = os.environ.get("VEDA_JWT_AUTH", "0") == "1"
 
+# RBAC enforcement mode (apps.access_management.gate). Default OFF: with no value
+# set, apps.access_management.gate.rbac_mode() falls back to "off" regardless of
+# what this env var says, because that fallback triggers on an ABSENT Django
+# setting attribute, not on an absent env var — this line is what actually wires
+# the two together. Found missing entirely (2026-08-08) during live/manual
+# Postman testing: VEDA_RBAC_MODE was set to "enforce" in the environment, but
+# rbac_mode() reported "off" regardless, because there was no code anywhere that
+# copied the env var onto a Django setting — every unit/integration test in this
+# whole RBAC programme set the mode via Django's own override_settings(), which
+# bypasses this exact wiring gap, so none of them (or three rounds of code
+# review) caught that a real deployment's env var was silently a no-op.
+VEDA_RBAC_MODE = os.environ.get("VEDA_RBAC_MODE", "off")
+
 # Catalog auto-sync on ingestion success (apps.ingestion.tasks). Default OFF: with
 # it off, task_ingest_source behaves byte-identically to before this flag existed —
 # CatalogDiscoveryService is never called, and the catalog stays stale until an

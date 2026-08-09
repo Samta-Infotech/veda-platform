@@ -6,11 +6,28 @@ from veda.execution import execute_sql
 from veda.generation import generate_sql
 from veda.planning import existence_mode, try_multitable
 from veda.routing import recommended_projection, select_primary_table, vet_primary
+from veda.rbac_filter import filter_retrieval_results, narrow_allowed
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
+
+
+def _ambient_ctx():
+    """The ambient RequestContext, or None — both context module names (see
+    veda_hybrid._current_ctx / veda.execution._scope_source_ids for why: the engine
+    is imported both as bare `context` and as `veda_core.context`, which Python
+    loads as two separate module objects with separate thread-locals)."""
+    import importlib
+    for modname in ("veda_core.context", "context"):
+        try:
+            ctx = importlib.import_module(modname).try_current()
+            if ctx is not None:
+                return ctx
+        except Exception:
+            continue
+    return None
 
 
 def _resolve_temporal_column(table, sm):
@@ -559,6 +576,17 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 tr.set("graph_expansion", seeds=_seeds, synonyms=_syn, added=_added)
             except Exception as _ge:
                 print(f"  [L2g] graph expand skipped: {type(_ge).__name__}: {str(_ge)[:80]}")
+
+        # ── Gate 1 (User Story 3, Task 16) RBAC candidate filter. Applied to the
+        # per-request CANDIDATE LIST only — NEVER to `sm` before get_engine(sm)
+        # above, which would bake this request's permissions into the shared,
+        # per-scope-cached retrieval engine (see veda.rbac_filter's module
+        # docstring). A no-op when the ambient context carries no
+        # allowed_resources (RBAC off, staff, or a pre-Gate-1 caller).
+        _before_rbac = len(results) if results else 0
+        results = filter_retrieval_results(results, sm, _ambient_ctx())
+        if results is not None and len(results) != _before_rbac:
+            tr.set("rbac_filter", before=_before_rbac, after=len(results))
 
         # ── PRIMARY cross-encoder rerank (Step 2): the precision ranker now runs on the
         # PRIMARY path (not only Tier-2). Reorders candidates + updates final_score so anchor
@@ -1642,6 +1670,16 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                       f"{', '.join(sorted({f['code'] for f in _sv}))}")
         except Exception:
             logger.debug("semantic_validation (Tier-1) skipped", exc_info=True)
+
+    # Gate 1 (User Story 3, Task 16 follow-up) — the centralized final RBAC gate.
+    # Whatever path produced allowed_tables/allowed_columns (FastPath, verified-
+    # cache replay, single/multi-table planning, FK/entity expansion) is narrowed
+    # to what ctx.allowed_resources permits, right before validate_and_parameterize
+    # enforces it as a hard allowlist — see veda.rbac_filter's module docstring for
+    # why this ONE gate, not patching every discovery site. A no-op when the
+    # ambient context carries no allowed_resources.
+    allowed_tables, allowed_columns = narrow_allowed(
+        allowed_tables, allowed_columns, sm, _ambient_ctx())
 
     param_sql, params, err = validate_and_parameterize(sql, allowed_tables, allowed_columns,
                                                         join_constraints=join_constraints,

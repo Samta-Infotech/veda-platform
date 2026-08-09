@@ -40,6 +40,7 @@ MESSAGES = {
         "last_admin_protected": (
             "This is the last active administrator; the platform must always "
             "have at least one."),
+        "deleted": "User deleted successfully.",
     },
     "role": {
         "created": "Role created successfully.",
@@ -49,6 +50,7 @@ MESSAGES = {
         "updated": "Role updated successfully.",
         "name_taken": "A role with that name already exists.",
         "not_found": "No such role.",
+        "deleted": "Role deleted successfully.",
     },
     "permission": {
         "retrieved": "Permission retrieved successfully.",
@@ -95,6 +97,9 @@ MESSAGES = {
     "chat": {
         "not_found": "Chat not found.",
         "auth_required": "Authentication required.",
+        # Gate 1 (User Story 3, Task 17): generic on purpose — never names a
+        # resource, table, column, or any internal RBAC detail.
+        "access_denied": "You do not have permission to access this resource.",
         "llm_unavailable": ("The AI assistant is temporarily unavailable. "
                              "Please try again in a moment."),
         "model_error": "Something went wrong while generating a response. Please try again.",

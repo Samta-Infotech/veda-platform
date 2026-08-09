@@ -252,11 +252,11 @@ def admin_client():
 
 
 def _list(client, **body):
-    return client.post(LIST_URL, body, content_type="application/json")
+    return client.get(LIST_URL, body)
 
 
 def _detail(client, **body):
-    return client.post(DETAIL_URL, body, content_type="application/json")
+    return client.get(DETAIL_URL, body)
 
 
 # ---------------------------------------------------------------------------
@@ -671,8 +671,12 @@ def test_anonymous_and_non_staff_are_rejected(url, body):
 
 
 @pytest.mark.parametrize("url", [LIST_URL, DETAIL_URL])
-def test_endpoints_are_post_only(admin_client, url):
-    assert admin_client.get(url).status_code == 405
+def test_endpoints_are_get_only(admin_client, url):
+    """Both catalog endpoints are read-only and now GET-only (2026-08-09) —
+    cacheable/bookmarkable/safely-retryable, unlike POST. Neither ever gets a
+    body, so there is no reason to also accept POST/PUT/PATCH/DELETE."""
+    assert admin_client.get(url).status_code != 405
+    assert admin_client.post(url, {}, content_type="application/json").status_code == 405
     assert admin_client.put(url).status_code == 405
     assert admin_client.delete(url).status_code == 405
 

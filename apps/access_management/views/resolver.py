@@ -17,8 +17,7 @@ from .base import AdminView
 
 
 class EffectivePermissionsView(AdminView):
-    """POST /api/v1/users/permissions/effective
-    {user_id, permission_code?, resource_path?}.
+    """GET /api/v1/users/permissions/effective?user_id=&permission_code=&resource_path=
 
     Without ``permission_code``: the user's whole effective set.
     With it: the same, plus a ``decision`` block answering that exact question the way
@@ -30,7 +29,7 @@ class EffectivePermissionsView(AdminView):
     action = "effective permissions"
     required_permission = PermissionCode.USER_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure

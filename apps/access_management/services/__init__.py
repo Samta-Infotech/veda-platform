@@ -29,6 +29,14 @@ from .catalog import (
     DiscoveryReport,
     ResourceNotFound,
 )
+from .data_scope import (
+    UNRESOLVED,
+    SourceDataScope,
+    TableScope,
+    compute_data_scope,
+    resolve_effective_permissions,
+    serialize_data_scope,
+)
 from .grants import (
     CODE_INVALID_RESOURCE,
     CODE_PERMISSION_INACTIVE,
@@ -94,6 +102,12 @@ __all__ = [
     "CatalogDiscoveryService",
     "CatalogService",
     "DiscoveryReport",
+    "SourceDataScope",
+    "TableScope",
+    "UNRESOLVED",
+    "compute_data_scope",
+    "resolve_effective_permissions",
+    "serialize_data_scope",
     "ConflictError",
     "EffectivePermissions",
     "Grant",

@@ -75,12 +75,12 @@ class UserCreateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["user"]["created"], public_fields(user),
+        return api.success(MESSAGES["user"]["created"],
                            status_code=status.HTTP_201_CREATED)
 
 
 class UserDetailView(AdminView):
-    """POST /api/v1/users/detail {user_id} -> one user.
+    """GET /api/v1/users/detail?user_id= -> one user.
 
     Same projection as list, so an admin UI can open a row without reconciling two
     shapes. Deliberately no extra fields: the interesting additions (roles,
@@ -92,7 +92,7 @@ class UserDetailView(AdminView):
     action = "user detail"
     required_permission = PermissionCode.USER_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -106,7 +106,7 @@ class UserDetailView(AdminView):
 
 
 class UserListView(AdminView):
-    """POST /api/v1/users/list {page?, page_size?, search?, is_active?, ordering?}.
+    """GET /api/v1/users/list?page=&page_size=&search=&is_active=&ordering=
 
     Always paginated — an unbounded list endpoint is a production incident waiting for
     the user table to grow. ``page_size`` is capped by the serializer, and the
@@ -117,7 +117,7 @@ class UserListView(AdminView):
     action = "user list"
     required_permission = PermissionCode.USER_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -181,7 +181,7 @@ class UserUpdateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["user"]["updated"], public_fields(user))
+        return api.success(MESSAGES["user"]["updated"])
 
 
 class UserDeleteView(AdminView):
@@ -210,4 +210,4 @@ class UserDeleteView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["user"]["updated"], public_fields(user))
+        return api.success(MESSAGES["user"]["deleted"])

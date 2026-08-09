@@ -107,13 +107,13 @@ class UserRoleRevokeView(AdminView):
 
 
 class UserRoleListView(AdminView):
-    """POST /api/v1/users/roles/list {user_id?, role_id?, page?, page_size?}."""
+    """GET /api/v1/users/roles/list?user_id=&role_id=&page=&page_size="""
 
     serializer_class = UserRoleListSerializer
     action = "role assignment list"
     required_permission = PermissionCode.ROLE_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -181,14 +181,14 @@ class RolePermissionRevokeView(AdminView):
 
 
 class RolePermissionListView(AdminView):
-    """POST /api/v1/roles/permissions/list
-    {role_id?, permission_id?, resource_path?, page?, page_size?}."""
+    """GET /api/v1/roles/permissions/list?role_id=&permission_id=&resource_path=
+    &page=&page_size="""
 
     serializer_class = RolePermissionListSerializer
     action = "permission grant list"
     required_permission = PermissionCode.ROLE_MANAGE
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure

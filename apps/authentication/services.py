@@ -538,9 +538,9 @@ class AuthService:
         pre-JWT view's rule (first name, else username) so the contract the
         frontend already consumes is unchanged."""
         return {
-            "user_id": user.pk,
             "username": user.username,
             "display_name": user.first_name or user.username,
+            "email": user.email,
         }
 
     @staticmethod

@@ -114,7 +114,7 @@ class ConversationQueryService:
     """One assistant turn: resolve chat -> run the chatbot supervisor -> persist."""
 
     def __init__(self, user, source_id: int | None = None, tenant: str = "default",
-                 source_ids: list[int] | None = None):
+                 source_ids: list[int] | None = None, data_scope: dict | None = None):
         self.user = user
         self.source_id = source_id
         # Validated query SCOPE (P5) — ready source ids, primary first, resolved
@@ -122,6 +122,10 @@ class ConversationQueryService:
         # inference so multi-source scopes retrieve/federate exactly like /api/v1/query.
         self.source_ids = list(source_ids) if source_ids else ([source_id] if source_id else None)
         self.tenant = tenant
+        # Gate 1 (User Story 3, Task 15): the view's precomputed RBAC data scope
+        # (apps.access_management.services.serialize_data_scope), forwarded verbatim
+        # to the chatbot turn. None = no restriction, same as every existing caller.
+        self.data_scope = data_scope
 
     def create_conversation(self, title: str = "") -> ChatSession:
         name = (title or "").strip() or DEFAULT_CONVERSATION_TITLE
@@ -186,7 +190,8 @@ class ConversationQueryService:
         your message...") arrives moments later on its own."""
         session_id = str(chat.pk)
         kwargs = dict(tenant=self.tenant, source_id=self.source_id,
-                      source_ids=self.source_ids, request_id=request_id)
+                      source_ids=self.source_ids, request_id=request_id,
+                      data_scope=self.data_scope)
         # End-to-end wall clock for THIS turn — so latency_ms is ALWAYS reportable,
         # even when the engine result carries none (a refusal/clarify that never
         # reached _done(), or a path that returned no latency). Used as the fallback

@@ -22,6 +22,7 @@ def run_chat_turn(
     source_ids: Optional[list] = None,
     request_id: str = "",
     on_event: Optional[Callable[[str, str, dict], None]] = None,
+    data_scope: Optional[dict] = None,
 ) -> dict:
     """The ONE function a caller (apps/chat) invokes per user turn.
 
@@ -36,6 +37,14 @@ def run_chat_turn(
     the whole turn is done. `extra` is the inference tier's own per-phase
     structured fields (route's intent=, sub_query's index=/total=, ...),
     forwarded verbatim — {} when a phase carries none.
+
+    `data_scope` (Gate 1, User Story 3, Task 15) is the caller's precomputed RBAC
+    data-scope payload (apps.access_management.services.serialize_data_scope) — a
+    plain JSON-safe dict, never a Django object, since this package must stay
+    Django-free. Forwarded verbatim to call_engine_node, which is the only node
+    that reaches the inference tier. None (RBAC off, staff, or a caller that
+    predates Task 15) means no narrowing, identical to before this parameter
+    existed.
     """
     graph = get_graph()
     # Wraps the WHOLE turn (classify/smalltalk/followup nodes' own SLM calls —
@@ -54,6 +63,7 @@ def run_chat_turn(
                 "source_id": source_id,
                 "source_ids": list(source_ids) if source_ids else None,
                 "request_id": request_id,
+                "data_scope": data_scope,
             },
             config={"configurable": {"thread_id": session_id, "on_event": on_event}},
         )

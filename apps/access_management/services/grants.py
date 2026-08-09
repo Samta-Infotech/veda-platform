@@ -217,18 +217,19 @@ class UserRoleService(_GrantServiceBase):
 
     @staticmethod
     def roles_for_users(user_ids) -> dict:
-        """``{user_id: [{"id": role_id, "name": role_name}, ...]}`` for a whole page
-        of users in ONE query — the same batched-lookup shape as
-        ``RolePermissionService.known_resource_paths``, so a users list costs no
-        N+1 to also show each row's roles."""
-        rows = (UserRole.objects
-                .filter(user_id__in=user_ids)
-                .values_list("user_id", "role_id", "role__name"))
-        by_user: dict = {}
-        for user_id, role_id, role_name in rows:
-            by_user.setdefault(user_id, []).append({"id": role_id, "name": role_name})
-        return by_user
+        """{user_id: [role_name, ...]} for a whole page of users."""
+        rows = (
+            UserRole.objects
+            .filter(user_id__in=user_ids)
+            .values_list("user_id", "role__name")
+        )
 
+        by_user: dict = {}
+
+        for user_id, role_name in rows:
+            by_user.setdefault(user_id, []).append(role_name)
+
+        return by_user
 
 class RolePermissionService(_GrantServiceBase):
     """Grant and revoke permissions on resources."""

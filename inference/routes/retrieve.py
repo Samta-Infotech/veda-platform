@@ -45,9 +45,26 @@ if APIRouter is not None:
         from inference.concurrency import run_in_threadpool_with_context
 
         def _run():
-            from veda.runtime import get_engine
-            engine = get_engine()
+            from veda.rbac_filter import filter_retrieval_results
+            from veda.runtime import _load_scoped_sm, get_engine
+            sm = _load_scoped_sm()
+            engine = get_engine(sm)
             results = engine.retrieve(req.query, req.intent, req.top_k)
+            # Gate 1 (User Story 3) — this debug/tooling endpoint bypassed RBAC
+            # entirely (2026-08-08 audit finding): unlike run_hybrid_query, it
+            # never applied filter_retrieval_results to what it returns. Same
+            # ambient-context read as veda_hybrid.py._current_ctx, for the same
+            # dual-module-name reason.
+            ctx = None
+            import importlib
+            for modname in ("veda_core.context", "context"):
+                try:
+                    ctx = importlib.import_module(modname).try_current()
+                    if ctx is not None:
+                        break
+                except Exception:
+                    continue
+            results = filter_retrieval_results(results, sm, ctx)
             return _serialize_results(results)
 
         cols = await run_in_threadpool_with_context(_run)

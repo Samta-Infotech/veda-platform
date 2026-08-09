@@ -35,18 +35,18 @@ def public_fields(resource) -> dict:
 
 
 class CatalogListView(AdminView):
-    """POST /api/v1/catalog/list {page?, page_size?, search?, is_active?, ordering?,
-    parent_path?, kind?, source_id?}.
+    """GET /api/v1/catalog/list?page=&page_size=&search=&is_active=&ordering=
+    &parent_path=&kind=&source_id=
 
     The admin tree's data source: pass a node's ``path`` as ``parent_path`` to get
-    exactly its children.
+    exactly its children. Read-only, so GET only.
     """
 
     serializer_class = CatalogResourceListSerializer
     action = "catalog list"
     required_permission = PermissionCode.PERMISSION_READ
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure
@@ -60,13 +60,13 @@ class CatalogListView(AdminView):
 
 
 class CatalogDetailView(AdminView):
-    """POST /api/v1/catalog/detail {path} -> one resource."""
+    """GET /api/v1/catalog/detail?path= -> one resource."""
 
     serializer_class = CatalogResourceDetailSerializer
     action = "catalog detail"
     required_permission = PermissionCode.PERMISSION_READ
 
-    def post(self, request):
+    def get(self, request):
         data, failure = self.validate(request)
         if failure:
             return failure

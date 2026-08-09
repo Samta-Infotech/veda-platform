@@ -585,6 +585,7 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
             source_ids=state.get("source_ids"),
             tenant=state.get("tenant"),
             request_id=state.get("request_id"),
+            data_scope=state.get("data_scope"),
         ):
             if kind == "progress":
                 _extra = {k: v for k, v in data.items() if k not in ("phase", "message")}

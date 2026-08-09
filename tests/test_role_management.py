@@ -141,15 +141,15 @@ def _create(client, **body):
 
 
 def _detail(client, **body):
-    return client.post(DETAIL_URL, body, content_type="application/json")
+    return client.get(DETAIL_URL, body)
 
 
 def _list(client, **body):
-    return client.post(LIST_URL, body, content_type="application/json")
+    return client.get(LIST_URL, body)
 
 
 def _dropdown(client, **body):
-    return client.post(DROPDOWN_URL, body, content_type="application/json")
+    return client.get(DROPDOWN_URL, body)
 
 
 def _update(client, **body):
@@ -859,9 +859,19 @@ def test_delete_requires_staff(plain_user, role_id):
     assert response.status_code == 403
 
 
-@pytest.mark.parametrize("url", [CREATE_URL, DETAIL_URL, LIST_URL, UPDATE_URL, DELETE_URL])
-def test_endpoints_are_post_only(admin_client, url):
+@pytest.mark.parametrize("url", [CREATE_URL, UPDATE_URL, DELETE_URL])
+def test_mutating_endpoints_reject_every_non_post_verb(admin_client, url):
     assert admin_client.get(url).status_code == 405
+    assert admin_client.put(url).status_code == 405
+    assert admin_client.patch(url).status_code == 405
+    assert admin_client.delete(url).status_code == 405
+
+
+@pytest.mark.parametrize("url", [DETAIL_URL, LIST_URL])
+def test_read_only_endpoints_are_get_only(admin_client, url):
+    """detail/list are read-only and now GET-only (2026-08-09)."""
+    assert admin_client.get(url).status_code != 405
+    assert admin_client.post(url, {}, content_type="application/json").status_code == 405
     assert admin_client.put(url).status_code == 405
     assert admin_client.patch(url).status_code == 405
     assert admin_client.delete(url).status_code == 405

@@ -138,7 +138,7 @@ def test_mode_defaults_to_off():
 def test_off_leaves_a_grantless_staff_user_working(staff_client, url):
     """THE backward-compatibility test. Every existing deployment has staff accounts
     with zero RBAC grants; with the gate off they must be entirely unaffected."""
-    assert staff_client.post(url, {}, content_type="application/json").status_code == 200
+    assert staff_client.get(url).status_code == 200
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_OFF)
@@ -153,7 +153,7 @@ def test_off_does_not_even_resolve(staff_client):
     from unittest import mock
 
     with mock.patch("apps.access_management.gate.PermissionResolver") as resolver_cls:
-        staff_client.post(ROLES_LIST, {}, content_type="application/json")
+        staff_client.get(ROLES_LIST)
 
     resolver_cls.assert_not_called()
 
@@ -165,16 +165,14 @@ def test_off_does_not_even_resolve(staff_client):
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
 def test_enforce_denies_staff_without_the_permission(staff_client):
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 403
+    assert staff_client.get(ROLES_LIST).status_code == 403
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
 def test_enforce_allows_staff_with_the_permission(staff, staff_client):
     _grant(staff, "role.manage")
 
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 200
+    assert staff_client.get(ROLES_LIST).status_code == 200
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
@@ -187,14 +185,12 @@ def test_the_gate_never_grants_what_staff_alone_refused(staff):
     client = Client()
     client.force_login(member)
 
-    assert client.post(ROLES_LIST, {},
-                       content_type="application/json").status_code == 403
+    assert client.get(ROLES_LIST).status_code == 403
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
 def test_enforce_still_rejects_anonymous_callers(staff):
-    assert Client().post(ROLES_LIST, {},
-                         content_type="application/json").status_code == 401
+    assert Client().get(ROLES_LIST).status_code == 401
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
@@ -203,10 +199,8 @@ def test_permissions_are_per_endpoint_family(staff, staff_client):
     to anyone holding any permission would be worse than none."""
     _grant(staff, "user.manage")
 
-    assert staff_client.post(USERS_LIST, {},
-                             content_type="application/json").status_code == 200
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 403
+    assert staff_client.get(USERS_LIST).status_code == 200
+    assert staff_client.get(ROLES_LIST).status_code == 403
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
@@ -215,21 +209,18 @@ def test_a_deny_grant_refuses_even_with_an_allow(staff, staff_client):
     _grant(staff, "role.manage", role_name="Permissive")
     _grant(staff, "role.manage", effect=Effect.DENY, role_name="Restricted")
 
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 403
+    assert staff_client.get(ROLES_LIST).status_code == 403
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_ENFORCE)
 def test_retiring_the_role_revokes_access_immediately(staff, staff_client):
     role = _grant(staff, "role.manage")
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 200
+    assert staff_client.get(ROLES_LIST).status_code == 200
 
     role.is_active = False
     role.save(update_fields=["is_active", "updated_at"])
 
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 403
+    assert staff_client.get(ROLES_LIST).status_code == 403
 
 
 # ---------------------------------------------------------------------------
@@ -240,14 +231,13 @@ def test_retiring_the_role_revokes_access_immediately(staff, staff_client):
 @override_settings(VEDA_RBAC_MODE=MODE_SHADOW)
 def test_shadow_never_refuses(staff_client):
     """The whole point: find out what enforcement would break, without breaking it."""
-    assert staff_client.post(ROLES_LIST, {},
-                             content_type="application/json").status_code == 200
+    assert staff_client.get(ROLES_LIST).status_code == 200
 
 
 @override_settings(VEDA_RBAC_MODE=MODE_SHADOW)
 def test_shadow_logs_what_it_would_have_denied(staff_client, caplog):
     with caplog.at_level(logging.WARNING, logger="apps.access_management.gate"):
-        staff_client.post(ROLES_LIST, {}, content_type="application/json")
+        staff_client.get(ROLES_LIST)
 
     assert "WOULD DENY" in caplog.text
     assert "role.manage" in caplog.text
@@ -260,7 +250,7 @@ def test_shadow_is_silent_when_it_would_have_allowed(staff, staff_client, caplog
     _grant(staff, "role.manage")
 
     with caplog.at_level(logging.WARNING, logger="apps.access_management.gate"):
-        staff_client.post(ROLES_LIST, {}, content_type="application/json")
+        staff_client.get(ROLES_LIST)
 
     assert "WOULD DENY" not in caplog.text
 
@@ -280,8 +270,7 @@ def test_a_view_that_declares_no_permission_is_denied(staff_client, caplog):
 
     with mock.patch.object(RoleListView, "required_permission", None):
         with caplog.at_level(logging.ERROR, logger="apps.access_management.gate"):
-            response = staff_client.post(ROLES_LIST, {},
-                                         content_type="application/json")
+            response = staff_client.get(ROLES_LIST)
 
     assert response.status_code == 403
     assert "declares no required_permission" in caplog.text
@@ -293,7 +282,7 @@ def test_an_unrecognised_mode_falls_back_to_off(staff_client, caplog):
     deployment offline; treating it as `off` preserves the status quo and logs loudly.
     """
     with caplog.at_level(logging.ERROR, logger="apps.access_management.gate"):
-        response = staff_client.post(ROLES_LIST, {}, content_type="application/json")
+        response = staff_client.get(ROLES_LIST)
 
     assert rbac_mode() == MODE_OFF
     assert response.status_code == 200
@@ -315,7 +304,7 @@ def test_the_resolver_runs_at_most_once_per_request(staff, staff_client):
     _grant(staff, "role.manage")
 
     with CaptureQueriesContext(connection) as ctx:
-        staff_client.post(ROLES_LIST, {}, content_type="application/json")
+        staff_client.get(ROLES_LIST)
 
     resolutions = [q for q in ctx.captured_queries
                    if "rolepermission" in q["sql"].lower()

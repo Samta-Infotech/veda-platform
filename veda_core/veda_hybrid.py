@@ -138,6 +138,13 @@ def _load_semantic_model():
                 sm = json.load(f)
         entry = {"sm": sm, "cols": list(sm.get("columns", {}).keys())}
         _SM[cache_key] = entry
+    # NOTE (Gate 1, Task 16): this `sm` is the SAME object handed to
+    # `get_engine(sm)` inside `veda.pipeline.run_query` — filtering it here would
+    # bake whichever user's request misses the cache first into the shared,
+    # per-scope retrieval engine (`_ENGINES` in veda.runtime), permanently, for
+    # every other user in that scope. RBAC narrowing is applied downstream in
+    # `run_query` instead, to the retrieval CANDIDATES (`filter_retrieval_results`
+    # in `veda.rbac_filter`), never to this cached model. Stays byte-identical.
     return entry["sm"], entry["cols"]
 
 
@@ -1266,6 +1273,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         from query.sql_builder import run_sql_builder
         from veda.validation import validate_and_parameterize, value_grounding
         from veda.execution import execute_sql
+        from veda.rbac_filter import narrow_allowed
         from query.temporal_parser import run_temporal_parser
 
         if execution_state is not None and execution_state.temporal_result is not None:
@@ -1322,6 +1330,10 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                 if not ok_val:
                     print(f"  [Tier2] envelope value ungrounded {bad} — fallback to IR")
                 else:
+                    # Gate 1 (User Story 3): centralized final RBAC gate — see
+                    # veda.rbac_filter.narrow_allowed's docstring. No-op without a
+                    # forwarded data scope.
+                    _tbls, _cols = narrow_allowed(_tbls, _cols, sm, _current_ctx())
                     psql, params, err = validate_and_parameterize(_sql, _tbls, _cols)
                     if err:
                         print(f"  [Tier2] envelope firewall rejected ({err}) — fallback to IR")
@@ -1476,6 +1488,8 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                     a_tables = set(act.get("tables", []))
                     a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
                                                     if k.split(".", 1)[0] in a_tables]
+                    # Gate 1 (User Story 3): centralized final RBAC gate.
+                    a_tables, a_cols = narrow_allowed(a_tables, a_cols, sm, _current_ctx())
                     psql, params, err = validate_and_parameterize(act["sql"], a_tables, a_cols)
                     if err:
                         if _attempt < _max_repairs:
@@ -1511,6 +1525,9 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             allowed_tables = set(getattr(l4, "tables_used", []) or [])
             allowed_cols = [k.split(".", 1)[1] for k in all_cols
                             if k.split(".", 1)[0] in allowed_tables]
+            # Gate 1 (User Story 3): centralized final RBAC gate.
+            allowed_tables, allowed_cols = narrow_allowed(
+                allowed_tables, allowed_cols, sm, _current_ctx())
             # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
             psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
             if err:
@@ -1567,6 +1584,7 @@ def _run_nosql(query, source_ids, verbose=False, on_event=None):
     from config import get_source, SQL_DEFAULT_LIMIT
     from connectors.base import build_connector
     from query.nosql_builder import run_nosql_builder
+    from veda.rbac_filter import filter_nosql_collections
     for sid in (source_ids or []):
         try:
             src = get_source(sid)
@@ -1577,6 +1595,12 @@ def _run_nosql(query, source_ids, verbose=False, on_event=None):
                 continue
             collections = conn.get_nosql_schema()
             conn.disconnect()
+            # Gate 1 (User Story 3, 2026-08-08 audit finding): the relational
+            # path's narrow_allowed/filter_sm don't apply here — a NoSQL source's
+            # schema is connector-native (NoSQLCollection), not sm['tables']/
+            # ['columns']. filter_nosql_collections is its mirror: a no-op
+            # without a forwarded data scope.
+            collections = filter_nosql_collections(collections, int(sid), _current_ctx())
             _emit(on_event, "nosql_build", "Figuring out how to query your data")
             nb = run_nosql_builder(query=query, source_id=sid,
                                    engine=src.get("engine", "mongodb"),
