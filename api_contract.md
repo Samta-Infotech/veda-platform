@@ -88,10 +88,9 @@ The HTTP status is authoritative. Responses do not duplicate it as `status_code`
 
 ```json
 {
-  "data": {},
-  "meta": {
-    "request_id": "req_01J..."
-  }
+  "status_code": 200,
+  "message": "Human-readable success message.",
+  "data": {}
 }
 ```
 
@@ -99,18 +98,17 @@ The HTTP status is authoritative. Responses do not duplicate it as `status_code`
 
 ```json
 {
+  "status_code": 200,
+  "message": "Human-readable success message.",
   "data": {
-    "items": []
-  },
-  "meta": {
-    "request_id": "req_01J...",
+    "items": [],
     "pagination": {
       "page": 1,
       "page_size": 20,
-      "total_items": 0,
+      "total": 0,
       "total_pages": 0,
-      "has_next_page": false,
-      "has_previous_page": false
+      "has_next": false,
+      "has_previous": false
     }
   }
 }
@@ -130,11 +128,10 @@ search=<optional-search>
 
 ```json
 {
+  "status_code": 200,
+  "message": "Human-readable success message.",
   "data": {
-    "items": []
-  },
-  "meta": {
-    "request_id": "req_01J...",
+    "items": [],
     "pagination": {
       "page_size": 100,
       "next_cursor": null,
@@ -148,12 +145,10 @@ search=<optional-search>
 
 ```json
 {
-  "error": {
-    "code": "ERROR_CODE",
-    "message": "Human-readable message.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 401,
+  "message": "Human-readable message.",
+  "code": "ERROR_CODE",
+  "data": {}
 }
 ```
 
@@ -166,19 +161,12 @@ Validation errors may include field errors:
 
 ```json
 {
-  "error": {
-    "code": "VALIDATION_FAILED",
-    "message": "One or more fields are invalid.",
-    "details": {
-      "field_errors": [
-        {
-          "field": "email",
-          "code": "INVALID_EMAIL",
-          "message": "Enter a valid email address."
-        }
-      ]
-    },
-    "request_id": "req_01J..."
+  "status_code": 400,
+  "message": "Invalid request data.",
+  "errors": {
+    "email": [
+      "Enter a valid email address."
+    ]
   }
 }
 ```
@@ -250,6 +238,8 @@ Chatbot user response:
 
 ```json
 {
+  "status_code": 200,
+  "message": "Logged in successfully.",
   "data": {
     "access_token": "access-token",
     "refresh_token": "refresh-token",
@@ -265,9 +255,6 @@ Chatbot user response:
         "role_name": "Database Analyst"
       }
     }
-  },
-  "meta": {
-    "request_id": "req_01J..."
   }
 }
 ```
@@ -276,6 +263,8 @@ Admin response:
 
 ```json
 {
+  "status_code": 200,
+  "message": "Logged in successfully.",
   "data": {
     "access_token": "access-token",
     "refresh_token": "refresh-token",
@@ -288,9 +277,6 @@ Admin response:
       "status": "ACTIVE",
       "role": null
     }
-  },
-  "meta": {
-    "request_id": "req_01J..."
   }
 }
 ```
@@ -305,12 +291,9 @@ Invalid username or password returns the same generic response:
 
 ```json
 {
-  "error": {
-    "code": "INVALID_CREDENTIALS",
-    "message": "Invalid username or password.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 401,
+  "message": "Invalid username or password.",
+  "code": "INVALID_CREDENTIALS"
 }
 ```
 
@@ -324,12 +307,9 @@ Inactive account:
 
 ```json
 {
-  "error": {
-    "code": "ACCOUNT_INACTIVE",
-    "message": "Your account has been deactivated. Please contact your admin.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 403,
+  "message": "Your account has been deactivated. Please contact your admin.",
+  "code": "ACCOUNT_INACTIVE"
 }
 ```
 
@@ -341,12 +321,9 @@ Chatbot user without an assigned role:
 
 ```json
 {
-  "error": {
-    "code": "ROLE_NOT_ASSIGNED",
-    "message": "No role has been assigned to your account. Please contact your admin.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 403,
+  "message": "No role has been assigned to your account. Please contact your admin.",
+  "code": "ROLE_NOT_ASSIGNED"
 }
 ```
 
@@ -364,12 +341,11 @@ POST /v1/auth/refresh
 
 ```json
 {
+  "status_code": 200,
+  "message": "Token refreshed.",
   "data": {
     "access_token": "new-access-token",
     "token_type": "Bearer"
-  },
-  "meta": {
-    "request_id": "req_01J..."
   }
 }
 ```
@@ -602,13 +578,11 @@ If the V1 limit is reached:
 
 ```json
 {
-  "error": {
-    "code": "SOURCE_TYPE_LIMIT_REACHED",
-    "message": "Only one Database source can currently be connected.",
-    "details": {
-      "source_type": "DATABASE"
-    },
-    "request_id": "req_01J..."
+  "status_code": 409,
+  "message": "Only one Database source can currently be connected.",
+  "code": "SOURCE_TYPE_LIMIT_REACHED",
+  "data": {
+    "source_type": "DATABASE"
   }
 }
 ```
@@ -618,13 +592,25 @@ The frontend stores sources as an array even when only one item of each type exi
 ### 5.2 List sources
 
 ```http
-GET /v1/admin/data-sources?source_type=DATABASE&status=CONNECTED&page=1&page_size=20&search=finance
+POST /api/v1/data-sources/list
+```
+
+```json
+{
+  "source_type": "DATABASE",
+  "status": "CONNECTED",
+  "page": 1,
+  "page_size": 20,
+  "search": "finance"
+}
 ```
 
 `source_type`, `status`, and `search` are optional.
 
 ```json
 {
+  "status_code": 200,
+  "message": "Data sources retrieved successfully.",
   "data": {
     "items": [
       {
@@ -644,17 +630,14 @@ GET /v1/admin/data-sources?source_type=DATABASE&status=CONNECTED&page=1&page_siz
         "created_at": "2026-07-31T09:00:00Z",
         "updated_at": "2026-07-31T09:00:00Z"
       }
-    ]
-  },
-  "meta": {
-    "request_id": "req_01J...",
+    ],
     "pagination": {
       "page": 1,
       "page_size": 20,
-      "total_items": 1,
+      "total": 1,
       "total_pages": 1,
-      "has_next_page": false,
-      "has_previous_page": false
+      "has_next": false,
+      "has_previous": false
     }
   }
 }
@@ -672,7 +655,7 @@ An `ERROR` source remains listed. `status_message` contains only a safe message 
 ### 5.3 Connect Database
 
 ```http
-POST /v1/admin/data-sources
+POST /api/v1/data-sources/connect
 ```
 
 ```json
@@ -738,6 +721,8 @@ The backend validates the connection before reporting success. A failed initial 
 
 ```json
 {
+  "status_code": 201,
+  "message": "Source connected successfully.",
   "data": {
     "source_id": "source_db_01",
     "source_type": "DATABASE",
@@ -751,9 +736,6 @@ The backend validates the connection before reporting success. A failed initial 
       "username": "veda_reader"
     },
     "created_at": "2026-07-31T09:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
   }
 }
 ```
@@ -764,12 +746,9 @@ The backend validates the connection before reporting success. A failed initial 
 
 ```json
 {
-  "error": {
-    "code": "SOURCE_CONNECTION_FAILED",
-    "message": "The data source connection could not be established.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 422,
+  "message": "The data source connection could not be established.",
+  "code": "SOURCE_CONNECTION_FAILED"
 }
 ```
 
@@ -778,17 +757,35 @@ The backend validates the connection before reporting success. A failed initial 
 Root resources:
 
 ```http
-GET /v1/admin/data-sources/{source_id}/resources?page_size=100
+POST /api/v1/data-sources/resources
+```
+
+```json
+{
+  "source_id": "source_db_01",
+  "page_size": 100
+}
 ```
 
 Children of one resource:
 
 ```http
-GET /v1/admin/data-sources/{source_id}/resources?parent_id=schema_reporting&page_size=100&cursor=cursor_abc
+POST /api/v1/data-sources/resources
 ```
 
 ```json
 {
+  "source_id": "source_db_01",
+  "parent_id": "schema_reporting",
+  "page_size": 100,
+  "cursor": "cursor_abc"
+}
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Resources retrieved successfully.",
   "data": {
     "items": [
       {
@@ -798,10 +795,7 @@ GET /v1/admin/data-sources/{source_id}/resources?parent_id=schema_reporting&page
         "parent_id": "schema_reporting",
         "has_children": true
       }
-    ]
-  },
-  "meta": {
-    "request_id": "req_01J...",
+    ],
     "pagination": {
       "page_size": 100,
       "next_cursor": null,
@@ -821,25 +815,23 @@ If the source is unavailable:
 
 ```json
 {
-  "error": {
-    "code": "SOURCE_UNAVAILABLE",
-    "message": "The data source is currently unavailable.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 503,
+  "message": "The data source is currently unavailable.",
+  "code": "SOURCE_UNAVAILABLE"
 }
 ```
 
 ### 5.8 Edit a source
 
 ```http
-PATCH /v1/admin/data-sources/{source_id}
+POST /api/v1/data-sources/update
 ```
 
-`PATCH` uses merge semantics. Supplied fields change and omitted fields remain unchanged.
+`POST` to `/update` acts as a partial update. Supplied fields change and omitted fields remain unchanged.
 
 ```json
 {
+  "source_id": "source_db_01",
   "name": "Finance PostgreSQL Production",
   "config": {
     "host": "new-db.example.com",
@@ -946,111 +938,96 @@ The frontend shows the backend error. How the backend guarantees a safe dependen
 
 ## 6. Roles APIs
 
+All role endpoints require `IsAdminUser` + `RequiresPermission(ROLE_MANAGE)`.
+
 ### 6.1 List roles
 
 ```http
-GET /v1/admin/roles?page=1&page_size=20&search=analyst
+GET /api/v1/roles/list?page=1&page_size=25&search=analyst&is_active=true&ordering=name
 ```
+
+All query params are optional. `search` matches name or description (case-insensitive). `is_active` is tri-state: omitted = no filter, `true` = active only, `false` = inactive only. `ordering` accepts: `id`, `name`, `created_at`, `updated_at` (prefix with `-` for descending). Defaults: `page=1`, `page_size=25` (max 100), `ordering=name`.
 
 ```json
 {
+  "status_code": 200,
+  "message": "Roles retrieved successfully.",
   "data": {
-    "items": [
+    "roles": [
       {
         "role_id": 1,
+        "name": "Database Analyst",
         "role_name": "Database Analyst",
-        "users_count": 4,
-        "connected_sources": [
-          {
-            "source_id": "source_db_01",
-            "source_name": "Finance PostgreSQL",
-            "source_type": "DATABASE"
-          }
-        ],
+        "description": "Access to finance databases.",
+        "is_active": true,
         "created_at": "2026-07-31T09:00:00Z",
-        "updated_at": "2026-07-31T10:00:00Z"
+        "updated_at": "2026-07-31T10:00:00Z",
+        "deleted_at": null,
+        "users_count": 4,
+        "connected_sources": ["Database"],
+        "last_updated": "Jul 31, 2026"
       }
-    ]
-  },
-  "meta": {
-    "request_id": "req_01J...",
+    ],
     "pagination": {
       "page": 1,
-      "page_size": 20,
-      "total_items": 1,
+      "page_size": 25,
+      "total": 1,
       "total_pages": 1,
-      "has_next_page": false,
-      "has_previous_page": false
+      "has_next": false,
+      "has_previous": false
     }
   }
 }
 ```
 
-`connected_sources` is display information only, not an authorization policy.
+Each role in the list carries enriched fields from `role_stats()`:
+- `users_count`: number of users holding this role (from `UserRole`).
+- `connected_sources`: list of human-readable source kind labels (e.g. `"Database"`, `"File System"`, `"Datalake"`, `"NoSQL"`) derived from the resource paths in this role's permission grants. Global grants (empty `resource_path`) do not contribute.
+- `role_name`: duplicate of `name`, included for backward compatibility.
+- `last_updated`: human-formatted date string (e.g. `"Jul 31, 2026"`), not ISO-8601.
 
-### 6.2 Available roles for User selector
+### 6.2 Roles dropdown (for user assignment selector)
 
 ```http
-GET /v1/admin/roles/available?page=1&page_size=20&search=analyst
+GET /api/v1/roles/dropdown
 ```
+
+No query params. Returns every active role, **unpaginated** — safe because roles are administrator-authored (tens to hundreds).
 
 ```json
 {
+  "status_code": 200,
+  "message": "Roles retrieved successfully.",
   "data": {
-    "items": [
+    "roles": [
       {
         "role_id": 1,
-        "role_name": "Database Analyst"
+        "name": "Database Analyst"
       }
     ]
-  },
-  "meta": {
-    "request_id": "req_01J...",
-    "pagination": {
-      "page": 1,
-      "page_size": 20,
-      "total_items": 1,
-      "total_pages": 1,
-      "has_next_page": false,
-      "has_previous_page": false
-    }
   }
 }
 ```
 
-Deleted or otherwise unusable roles are not returned.
+Retired (`is_active=false`) roles are excluded.
 
-### 6.3 Create role and permissions
+### 6.3 Create role
 
 ```http
-POST /v1/admin/roles
+POST /api/v1/roles/create
 ```
 
 ```json
 {
-  "role_name": "Database Analyst",
-  "permissions": [
-    {
-      "source_id": "source_db_01",
-      "grants": [
-        {
-          "resource_id": "table_monthly_revenue",
-          "scope": "SELF_AND_DESCENDANTS"
-        }
-      ]
-    }
-  ]
+  "name": "Database Analyst",
+  "description": "Access to finance databases."
 }
 ```
 
-A role without data access is valid:
-
-```json
-{
-  "role_name": "New Analyst",
-  "permissions": []
-}
-```
+- `name` is required, max length from model, trimmed, must not be blank after trimming.
+- `description` is optional, defaults to `""`.
+- Unknown fields are rejected (400), not silently ignored.
+- Server-owned fields (`id`, `created_at`, `updated_at`) are rejected with `"This field is read-only."`.
 
 ```http
 201 Created
@@ -1058,234 +1035,210 @@ A role without data access is valid:
 
 ```json
 {
-  "data": {
-    "role_id": 3,
-    "role_name": "New Analyst",
-    "permissions_count": 0,
-    "users_count": 0,
-    "created_at": "2026-07-31T10:00:00Z",
-    "updated_at": "2026-07-31T10:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
-  }
+  "status_code": 201,
+  "message": "Role created successfully."
 }
 ```
 
-The backend validates all submitted sources, resources, scopes, and ownership before reporting success. Failure creates neither a role nor partial grants.
+No `data` in the response — the created role's id is not returned. Permissions are granted separately via `POST /api/v1/roles/permissions/grant`.
+
+**Errors:**
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| `400` | — | Malformed body, blank name, unknown field, read-only field. |
+| `409` | `ROLE_NAME_TAKEN` | A role with that name already exists (case-insensitive). |
 
 ### 6.4 Get role details
 
 ```http
-GET /v1/admin/roles/{role_id}
+GET /api/v1/roles/detail?role_id=1
 ```
 
 ```json
 {
+  "status_code": 200,
+  "message": "Role retrieved successfully.",
   "data": {
     "role_id": 1,
-    "role_name": "Database Analyst",
-    "permissions": [
-      {
-        "source_id": "source_db_01",
-        "source_name": "Finance PostgreSQL",
-        "source_status": "CONNECTED",
-        "grants": [
-          {
-            "resource_id": "table_monthly_revenue",
-            "resource_name": "monthly_revenue",
-            "scope": "SELF_AND_DESCENDANTS",
-            "status": "AVAILABLE"
-          },
-          {
-            "resource_id": "column_old_metric",
-            "resource_name": "old_metric",
-            "scope": "SELF",
-            "status": "UNAVAILABLE"
-          }
-        ]
-      }
-    ],
-    "users_count": 4,
+    "name": "Database Analyst",
+    "description": "Access to finance databases.",
+    "is_active": true,
     "created_at": "2026-07-31T09:00:00Z",
-    "updated_at": "2026-07-31T10:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
+    "updated_at": "2026-07-31T10:00:00Z",
+    "deleted_at": null
   }
 }
 ```
 
-The Edit UI preselects available grants and visibly lists unavailable grants. It does not silently discard or remap them.
+Same projection as create/list/update — the `public_fields()` shape. `deleted_at` is the timestamp when `is_active` was set to `false` (or `null` if still active).
 
-### 6.5 Replace role name and permissions
+Permissions are loaded separately via `GET /api/v1/roles/permissions/list?role_id=1`.
 
-```http
-PUT /v1/admin/roles/{role_id}
-```
-
-```json
-{
-  "role_name": "Senior Database Analyst",
-  "permissions": [
-    {
-      "source_id": "source_db_01",
-      "grants": [
-        {
-          "resource_id": "column_month",
-          "scope": "SELF"
-        },
-        {
-          "resource_id": "column_amount",
-          "scope": "SELF"
-        }
-      ]
-    }
-  ]
-}
-```
-
-This request replaces the complete name and permission set. Omitted grants are removed. `permissions: []` removes all data access while keeping the role.
-
-If any submitted source or resource is invalid, the prior role name and complete permission set remain unchanged.
-
-```json
-{
-  "data": {
-    "role_id": 1,
-    "role_name": "Senior Database Analyst",
-    "permissions_count": 2,
-    "updated_at": "2026-07-31T11:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
-  }
-}
-```
-
-### 6.6 Delete role
-
-```http
-DELETE /v1/admin/roles/{role_id}
-```
-
-If no user is assigned:
-
-```http
-204 No Content
-```
-
-The role then disappears from normal lists and can no longer grant access. Physical deletion versus internal archival is a backend decision.
-
-If users are assigned:
-
-```http
-409 Conflict
-```
-
-```json
-{
-  "error": {
-    "code": "ROLE_ASSIGNED",
-    "message": "Reassign the users before deleting this role.",
-    "details": {
-      "users_count": 4
-    },
-    "request_id": "req_01J..."
-  }
-}
-```
-
-### 6.7 Role validation
-
-- `role_name` is trimmed, 2–100 characters, and case-insensitively unique in the applicable context.
-- Every `source_id` must exist.
-- Every `resource_id` must belong to the submitted source.
-- `scope` must be `SELF` or `SELF_AND_DESCENDANTS` and be valid for the resource.
-- Duplicate or redundant overlapping grants are rejected.
+**Errors:**
 
 | HTTP | Code | Meaning |
 |---:|---|---|
+| `400` | — | `role_id` missing, not an integer, or < 1. |
+| `404` | `ROLE_NOT_FOUND` | No role with that id. |
+
+### 6.5 Update role
+
+```http
+POST /api/v1/roles/update
+```
+
+```json
+{
+  "role_id": 1,
+  "name": "Senior Database Analyst",
+  "description": "Updated description.",
+  "is_active": false
+}
+```
+
+**Partial update** — only the fields present (besides `role_id`) are written. At least one updatable field must be provided or the request is rejected.
+
+Updatable fields: `name`, `description`, `is_active`.
+
+Setting `is_active` to `false` is how a role is **retired**. When that happens, `deleted_at` is automatically stamped. If `is_active` flips back to `true`, `deleted_at` is cleared.
+
+The row is locked (`SELECT ... FOR UPDATE`) for the duration so concurrent writes cannot clobber each other.
+
+```json
+{
+  "status_code": 200,
+  "message": "Role updated successfully."
+}
+```
+
+No `data` in the response.
+
+**Errors:**
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| `400` | — | No updatable fields provided, unknown fields, read-only fields. |
+| `404` | `ROLE_NOT_FOUND` | No role with that id. |
+| `409` | `ROLE_NAME_TAKEN` | The new name belongs to a different role. |
+
+### 6.6 Delete role (soft)
+
+```http
+POST /api/v1/roles/delete
+```
+
+```json
+{
+  "role_id": 1
+}
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Role deleted successfully."
+}
+```
+
+A convenience wrapper — internally calls `RoleService.update_role(role_id, is_active=False)`. No row is ever removed. The role stays queryable but is no longer grantable.
+
+**Errors:** same as update — `ROLE_NOT_FOUND` (404).
+
+### 6.7 Role validation summary
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| `400` | — | Malformed body, blank name, unknown or read-only field. |
 | `404` | `ROLE_NOT_FOUND` | Role does not exist. |
-| `404` | `SOURCE_NOT_FOUND` | Source does not exist. |
-| `409` | `DUPLICATE_ROLE_NAME` | Role name already exists. |
-| `409` | `ROLE_ASSIGNED` | Assigned role cannot be deleted. |
-| `422` | `INVALID_PERMISSION_RESOURCE` | Resource is missing or belongs to another source. |
-| `422` | `INVALID_PERMISSION_SCOPE` | Scope is invalid for the resource. |
-| `422` | `REDUNDANT_PERMISSION_GRANT` | Payload contains overlapping grants. |
+| `409` | `ROLE_NAME_TAKEN` | Name already used (case-insensitive). |
 
 ---
 
 ## 7. Users APIs
 
+All user endpoints require `IsAdminUser` + `RequiresPermission(USER_MANAGE)`.
+
 ### 7.1 User rules
 
-- V1 assigns exactly one role to each user.
-- A role is required during creation and update.
-- Permissions are stored only on the role, never copied to the user record.
-- A user must be `ACTIVE` to use protected Chatbot APIs.
-- An `INACTIVE` user remains manageable in Admin but cannot log in or access protected Chatbot APIs.
-- Password changes/resets are outside these page endpoints and use a separate authentication flow.
+- Roles are assigned via the separate `/api/v1/users/roles/assign` endpoint, not during user creation.
+- Permissions live on roles, never on user records.
+- `is_active` controls login and Chatbot access. An inactive user remains manageable in Admin.
+- Password changes use `POST /api/v1/auth/password/change` (authenticated endpoint in `apps.authentication`).
+- The platform must always have at least one active admin — deactivating the last one is refused.
 
 ### 7.2 List users
 
 ```http
-GET /v1/admin/users?page=1&page_size=20&search=alice&status=ACTIVE
+GET /api/v1/users/list?page=1&page_size=25&search=alice&is_active=true&ordering=username
 ```
+
+All query params are optional. `search` matches username or email (case-insensitive). `is_active` is tri-state: omitted = no filter. `ordering` accepts: `id`, `username`, `email`, `date_joined`, `last_login` (prefix with `-` for descending). Defaults: `page=1`, `page_size=25` (max 100), `ordering=username`.
 
 ```json
 {
+  "status_code": 200,
+  "message": "Users retrieved successfully.",
   "data": {
-    "items": [
+    "users": [
       {
         "user_id": 101,
         "username": "alice",
         "email": "alice@example.com",
-        "role": {
-          "role_id": 1,
-          "role_name": "Database Analyst"
-        },
-        "status": "ACTIVE",
-        "created_at": "2026-07-31T10:00:00Z",
-        "updated_at": "2026-07-31T10:00:00Z"
+        "display_name": "Alice",
+        "is_active": true,
+        "is_staff": false,
+        "date_joined": "2026-07-31T10:00:00Z",
+        "last_login": "2026-08-01T08:00:00Z",
+        "roles": ["Database Analyst"],
+        "created_at": "Jul 31, 2026",
+        "updated_at": "Jul 31, 2026",
+        "deleted_at": null
       }
-    ]
-  },
-  "meta": {
-    "request_id": "req_01J...",
+    ],
     "pagination": {
       "page": 1,
-      "page_size": 20,
-      "total_items": 1,
+      "page_size": 25,
+      "total": 1,
       "total_pages": 1,
-      "has_next_page": false,
-      "has_previous_page": false
+      "has_next": false,
+      "has_previous": false
     }
   }
 }
 ```
 
-### 7.3 Create user with permanent password and role
+Each user in the list carries enriched fields:
+- `display_name`: `first_name` if set, otherwise `username`.
+- `is_staff`: whether the account has admin privileges (reported but never writable through these endpoints).
+- `roles`: list of role name strings assigned to this user (from `UserRole`). May be empty.
+- `created_at` / `updated_at`: human-formatted date strings (e.g. `"Jul 31, 2026"`), not ISO-8601. `updated_at` comes from `UserProfile`, may be `""` for users created before the profile migration.
+- `deleted_at`: human-formatted date from `UserProfile`, or `null` if the user was never soft-deleted.
+
+### 7.3 Create user
 
 ```http
-POST /v1/admin/users
+POST /api/v1/users/create
 ```
 
 ```json
 {
-  "email": "alice@example.com",
   "username": "alice",
+  "email": "alice@example.com",
   "password": "permanent-initial-password",
-  "role_id": 1
+  "first_name": "Alice",
+  "last_name": "Smith"
 }
 ```
 
-Observable behavior:
+- `username` is required, max length from model, validated with Django's `UnicodeUsernameValidator`.
+- `email` is required, validated as a proper email address.
+- `password` is required, write-only, validated against `AUTH_PASSWORD_VALIDATORS` (including `UserAttributeSimilarityValidator` against the submitted username/email).
+- `first_name` and `last_name` are optional, default to `""`.
+- Non-string values for any field (e.g. `{"username": 12345}`) are rejected.
+- Privileged fields (`is_staff`, `is_superuser`, `is_active`, `groups`, `user_permissions`, `last_login`, `date_joined`, `password_hash`, `id`, `pk`) are rejected with `"This field cannot be set through this endpoint."`.
 
-1. Backend validates user fields and the selected role.
-2. On success, the user and role assignment both exist.
-3. On failure, neither a partial user nor assignment is reported as created.
-4. The password is never returned.
+Roles are assigned separately via `POST /api/v1/users/roles/assign`.
 
 ```http
 201 Created
@@ -1293,149 +1246,139 @@ Observable behavior:
 
 ```json
 {
-  "data": {
-    "user_id": 101,
-    "email": "alice@example.com",
-    "username": "alice",
-    "role": {
-      "role_id": 1,
-      "role_name": "Database Analyst"
-    },
-    "status": "ACTIVE",
-    "created_at": "2026-07-31T10:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
-  }
+  "status_code": 201,
+  "message": "User created successfully."
 }
 ```
 
-The frontend:
+No `data` in the response. The password is never returned.
 
-- validates against the same password policy as the backend;
-- asks the Admin to confirm the password;
-- disables Create while saving; and
-- clears password fields after completion or modal closure.
+**Errors:**
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| `400` | — | Malformed body, non-string field, privileged field, password policy violation. |
+| `409` | `USERNAME_TAKEN` | A user with that username already exists. |
+| `409` | `EMAIL_TAKEN` | A user with that email already exists (case-insensitive). |
 
 ### 7.4 Get user details
 
 ```http
-GET /v1/admin/users/{user_id}
+GET /api/v1/users/detail?user_id=101
 ```
 
 ```json
 {
+  "status_code": 200,
+  "message": "User retrieved successfully.",
   "data": {
     "user_id": 101,
-    "email": "alice@example.com",
     "username": "alice",
-    "role": {
-      "role_id": 1,
-      "role_name": "Database Analyst"
-    },
-    "status": "ACTIVE",
-    "created_at": "2026-07-31T10:00:00Z",
-    "updated_at": "2026-07-31T10:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
+    "email": "alice@example.com",
+    "display_name": "Alice",
+    "is_active": true,
+    "is_staff": false,
+    "date_joined": "2026-07-31T10:00:00Z",
+    "last_login": "2026-08-01T08:00:00Z"
   }
 }
 ```
 
-The response never contains a password or password hash.
+Same projection as list — the `public_fields()` shape. The response never contains a password or password hash.
 
-### 7.5 Update user details and role
+Role assignments are loaded separately via `GET /api/v1/users/roles/list?user_id=101`.
 
-```http
-PUT /v1/admin/users/{user_id}
-```
-
-```json
-{
-  "email": "alice.new@example.com",
-  "username": "alice_new",
-  "role_id": 2
-}
-```
-
-The request replaces editable details and the assigned role. It does not change the password or status. If the selected role is invalid, the prior user details and role assignment remain unchanged.
-
-```json
-{
-  "data": {
-    "user_id": 101,
-    "email": "alice.new@example.com",
-    "username": "alice_new",
-    "role": {
-      "role_id": 2,
-      "role_name": "File Viewer"
-    },
-    "status": "ACTIVE",
-    "updated_at": "2026-07-31T11:00:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
-  }
-}
-```
-
-### 7.6 Activate or deactivate user
-
-```http
-PATCH /v1/admin/users/{user_id}/status
-```
-
-```json
-{
-  "status": "INACTIVE"
-}
-```
-
-```json
-{
-  "data": {
-    "user_id": 101,
-    "status": "INACTIVE",
-    "updated_at": "2026-07-31T11:30:00Z"
-  },
-  "meta": {
-    "request_id": "req_01J..."
-  }
-}
-```
-
-After success, the frontend reflects the returned status. The backend is responsible for rejecting subsequent protected requests from an inactive user.
-
-### 7.7 Delete user
-
-```http
-DELETE /v1/admin/users/{user_id}
-```
-
-```http
-204 No Content
-```
-
-After success, the user disappears from the normal users list and can no longer use the account. Physical deletion versus internal archival is a backend decision.
-
-### 7.8 User validation
-
-- Email is trimmed, lowercased, valid, and unique in the applicable context.
-- Username is trimmed, 2–50 characters, and case-insensitively unique.
-- Password follows the existing VEDA password policy.
-- `role_id` is required and must refer to a role available for assignment.
-- Status is `ACTIVE` or `INACTIVE`.
+**Errors:**
 
 | HTTP | Code | Meaning |
 |---:|---|---|
+| `400` | — | `user_id` missing, not an integer, or < 1. |
+| `404` | `USER_NOT_FOUND` | No user with that id. |
+
+### 7.5 Update user details
+
+```http
+POST /api/v1/users/update
+```
+
+```json
+{
+  "user_id": 101,
+  "email": "alice.new@example.com",
+  "first_name": "Alice New",
+  "last_name": "Smith",
+  "is_active": false
+}
+```
+
+**Partial update** — only the fields present (besides `user_id`) are written. At least one updatable field must be provided.
+
+Updatable fields: `email`, `first_name`, `last_name`, `is_active`.
+
+Deliberately excluded (and rejected if submitted):
+- `username` — renaming an identity is a separate concern.
+- `password` — password lifecycle lives in `apps.authentication`.
+- `is_staff` / `is_superuser` — privilege granting is role assignment.
+
+Setting `is_active` to `false`:
+- Stamps `deleted_at` on the user's `UserProfile`.
+- Revokes all live refresh tokens (the user cannot mint new access tokens).
+- Is refused if this is the platform's **last active admin** (409 `LAST_ADMIN_PROTECTED`).
+
+The row is locked (`SELECT ... FOR UPDATE`) for the duration.
+
+```json
+{
+  "status_code": 200,
+  "message": "User updated successfully."
+}
+```
+
+No `data` in the response.
+
+**Errors:**
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| `400` | — | No updatable fields, unknown fields, privileged fields. |
+| `404` | `USER_NOT_FOUND` | No user with that id. |
+| `409` | `EMAIL_TAKEN` | The new email belongs to someone else. |
+| `409` | `LAST_ADMIN_PROTECTED` | Cannot deactivate the platform's last active admin. |
+
+### 7.6 Delete user (soft)
+
+```http
+POST /api/v1/users/delete
+```
+
+```json
+{
+  "user_id": 101
+}
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "User deleted successfully."
+}
+```
+
+A convenience wrapper — internally calls `UserService.update_user(user_id, is_active=False)`. Same last-admin guard, same token revocation. Idempotent: calling it twice just means the account stays inactive.
+
+No row is ever removed. `deleted_at` on `UserProfile` records when this happened; `is_active` stays the one flag every access check keys off.
+
+**Errors:** same as update — `USER_NOT_FOUND` (404), `LAST_ADMIN_PROTECTED` (409).
+
+### 7.7 User validation summary
+
+| HTTP | Code | Meaning |
+|---:|---|---|
+| `400` | — | Malformed body, non-string fields, privileged fields, password policy violation. |
 | `404` | `USER_NOT_FOUND` | User does not exist. |
-| `404` | `ROLE_NOT_FOUND` | Selected role does not exist. |
-| `409` | `DUPLICATE_EMAIL` | Email is already used. |
-| `409` | `DUPLICATE_USERNAME` | Username is already used. |
-| `422` | `ROLE_REQUIRED` | A role was not supplied. |
-| `422` | `ROLE_NOT_ASSIGNABLE` | Role cannot be assigned. |
-| `422` | `INVALID_USER_STATUS` | Status is unsupported. |
+| `409` | `USERNAME_TAKEN` | Username already in use. |
+| `409` | `EMAIL_TAKEN` | Email already in use (case-insensitive). |
+| `409` | `LAST_ADMIN_PROTECTED` | Cannot deactivate the last active admin. |
 
 ---
 
