@@ -12,23 +12,22 @@ DEBUG = True
 ALLOWED_HOSTS = ["*"]
 
 # Django 4.0+ checks the request Origin against this list for unsafe methods (POST),
-# incl. the admin login. Requests arrive through nginx on :8080, so that origin must
-# be trusted explicitly (ALLOWED_HOSTS="*" does NOT cover CSRF origin checking).
-CSRF_TRUSTED_ORIGINS = [
+# incl. the admin login. Requests arrive through nginx on :8080 or dev server,
+# so those origins must be trusted explicitly.
+CSRF_TRUSTED_ORIGINS += [
     "http://localhost:8080",
     "http://127.0.0.1:8080",
-]
-
-CSRF_TRUSTED_ORIGINS = [
     "http://0.0.0.0:8000",
-    "http://127.0.0.1:8080",
-        # React/Vite frontend
+    # React/Vite frontend ports
     "http://localhost:4001",
-    "http://127.0.0.1:4001"
+    "http://127.0.0.1:4001",
 ]
-
-CORS_ALLOWED_ORIGINS = [
-    "http://localhost:4001"
+ 
+CORS_ALLOWED_ORIGINS += [
+    "http://localhost:4001",
+    "http://127.0.0.1:4001",
+    "http://localhost:8080",
+    "http://127.0.0.1:8080",
 ]
 
 if os.environ.get("VEDA_DB_HOST") is None and os.environ.get("PGBOUNCER_HOST") is None:
