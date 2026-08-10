@@ -5,11 +5,11 @@ from .views import (
     ConversationQueryView,
     CreateConversationView,
     ListConversationsView,
-    LoginView,
 )
 
+# auth/login moved to apps.authentication (same URL, real JWTs) — this app owns
+# conversations only.
 urlpatterns = [
-    path("auth/login", LoginView.as_view(), name="login"),
     path("conversations/query", ConversationQueryView.as_view(), name="conversation-query"),
     path("conversations/create", CreateConversationView.as_view(), name="conversation-create"),
     path("conversations/list", ListConversationsView.as_view(), name="conversation-list"),

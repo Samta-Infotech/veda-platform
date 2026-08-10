@@ -23,6 +23,8 @@ import logging
 import os
 import re
 import subprocess
+from django.utils import timezone
+from django.conf import settings
 
 try:
     from celery import shared_task
@@ -201,7 +203,6 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
     the inference image (ML deps) or via the one-off inference-image runner used in
     dev. Kept import-lazy so the module still loads in the thin image.
     """
-    from django.utils import timezone
 
     from apps.ingestion.models import IngestionJob, IngestionStage, JobStatus
     from apps.sources.models import Source, SourceStatus
@@ -255,6 +256,7 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
             Source.objects.filter(pk=source_id).update(
                 ready=True, status=SourceStatus.READY, last_ingested_at=timezone.now(),
             )
+            _sync_catalog_if_enabled(source_id)
         logger.info("ingestion job succeeded job_id=%s source_id=%s", job.pk, source_id)
         return {"job_id": job.pk, "ok": True, "source_id": result_source_id,
                 "warm": warm_counts}
@@ -270,6 +272,37 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
         job.save(update_fields=["status", "finished_at"])
 
 
+def _sync_catalog_if_enabled(source_id) -> None:
+    """Reconcile the RBAC catalog projection for one just-ingested source.
+
+    Flag-gated (``VEDA_AUTO_SYNC_CATALOG``, default OFF) — see the setting's own
+    comment in ``config/settings/base.py`` for why. Off, this function does not
+    even import Django's access_management models, so the flag-off path costs
+    nothing beyond the getattr.
+
+    Never allowed to fail the ingestion job that just succeeded: a broken catalog
+    projection is a real problem, but it is a DIFFERENT, already-recoverable one
+    (rerun ``manage.py sync_catalog``) — turning a successful ingestion into a
+    failed job over it would be a strictly worse outcome for an operator to debug.
+    """
+
+    if not getattr(settings, "VEDA_AUTO_SYNC_CATALOG", False):
+        return
+
+    from apps.access_management.services import CatalogDiscoveryService
+    from apps.sources.models import Source
+
+    try:
+        source = Source.objects.get(pk=source_id)
+        report = CatalogDiscoveryService().sync_source(source)
+        logger.info("catalog auto-sync succeeded source_id=%s %s",
+                   source_id, report.as_dict())
+    except Exception:
+        logger.exception("catalog auto-sync failed source_id=%s — ingestion job "
+                         "still succeeded; run `manage.py sync_catalog` to retry",
+                         source_id)
+
+
 def _guard_embedding_model_change(job, encoder_mode: str, force: bool) -> None:
     """Embedding-model guard (§7): refuse if the model id differs from the persisted
     one without an explicit force flag (re-ingestion required — a changed embedding
@@ -277,7 +310,6 @@ def _guard_embedding_model_change(job, encoder_mode: str, force: bool) -> None:
 
     Marks the job FAILED before raising so the row never lingers as RUNNING.
     """
-    from django.utils import timezone
 
     from apps.ingestion.models import JobStatus
 

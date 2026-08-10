@@ -32,6 +32,11 @@ _HEADER_SOURCE_ID = "X-Veda-Source-Id"
 _HEADER_SOURCE_IDS = "X-Veda-Source-Ids"
 _HEADER_TENANT = "X-Veda-Tenant"
 _HEADER_REQUEST_ID = "X-Request-Id"
+# Gate 1 (User Story 3, Task 15) — the precomputed RBAC data scope (see
+# apps.access_management.services.data_scope.serialize_data_scope). Omitted
+# entirely when the caller passes None ("no restriction"), never sent as an
+# empty object — absence is the "no restriction" signal on the inference side too.
+_HEADER_DATA_SCOPE = "X-Veda-Data-Scope"
 
 _SSE_EVENT_PREFIX = "event:"
 _SSE_DATA_PREFIX = "data:"
@@ -60,7 +65,8 @@ class InferenceClient:
         )
 
     def _request(self, path: str, body: dict, source_id, tenant, request_id=None,
-                 accept: str | None = None, source_ids=None) -> urllib.request.Request:
+                 accept: str | None = None, source_ids=None, data_scope=None
+                 ) -> urllib.request.Request:
         url = f"{self.config.base_url.rstrip('/')}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
@@ -77,6 +83,8 @@ class InferenceClient:
             headers[_HEADER_TENANT] = str(tenant)
         if request_id:
             headers[_HEADER_REQUEST_ID] = str(request_id)  # trace across api→inference (§6.3)
+        if data_scope is not None:
+            headers[_HEADER_DATA_SCOPE] = json.dumps(data_scope)
         return urllib.request.Request(url, data=data, headers=headers, method="POST")
 
     @staticmethod
@@ -100,24 +108,25 @@ class InferenceClient:
                 f"inference unreachable at {request.full_url}: {exc}") from exc
 
     def _post(self, path: str, body: dict, source_id, tenant, request_id=None,
-              source_ids=None) -> dict:
+              source_ids=None, data_scope=None) -> dict:
         request = self._request(path, body, source_id, tenant, request_id=request_id,
-                                source_ids=source_ids)
+                                source_ids=source_ids, data_scope=data_scope)
         with self._open(request, self.config.timeout_s) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def run_hybrid_query(self, query: str, source_id=None, tenant=None, flags=None,
-                         request_id=None, source_ids=None) -> dict:
+                         request_id=None, source_ids=None, data_scope=None) -> dict:
         return self._post(
             _PATH_RUN_HYBRID_QUERY,
             {"query": query, "source_id": source_id, "tenant": tenant,
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, source_ids=source_ids,
+            data_scope=data_scope,
         )
 
     def stream_hybrid_query(
         self, query: str, source_id=None, tenant=None, flags=None, request_id=None,
-        source_ids=None,
+        source_ids=None, data_scope=None,
     ) -> Iterator[tuple[str, dict]]:
         """Yields (event, data) as the inference tier's SSE stream delivers them
         (progress events as the pipeline advances, then one final "result" event).
@@ -128,7 +137,7 @@ class InferenceClient:
             {"query": query, "source_id": source_id, "tenant": tenant,
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, accept="text/event-stream",
-            source_ids=source_ids,
+            source_ids=source_ids, data_scope=data_scope,
         )
         response = self._open(request, self.config.timeout_s)
         try:

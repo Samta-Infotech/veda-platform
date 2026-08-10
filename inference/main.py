@@ -22,7 +22,11 @@ except ImportError:  # keep importable without FastAPI in this environment
     Request = object
     _HAVE_FASTAPI = False
 
-from veda_core.context import RequestContext, set_context
+import logging
+
+from veda_core.context import RequestContext, parse_allowed_resources, set_context
+
+logger = logging.getLogger(__name__)
 
 
 def _start_rehydrate_subscriber():
@@ -100,8 +104,23 @@ def create_app():
         if source_id is not None and tenant is not None:
             source_ids = tuple(int(s) for s in source_ids_hdr.split(",") if s.strip()) \
                 if source_ids_hdr else ()
+            # Gate 1 (User Story 3, Task 15) — the api tier's precomputed RBAC data
+            # scope, if any. Absent header = no restriction (§ RequestContext
+            # docstring); a header present but malformed fails CLOSED (empty tuple =
+            # "nothing addressable"), never silently falls through to "no
+            # restriction" — a bug in the sender must never widen access.
+            data_scope_hdr = request.headers.get("x-veda-data-scope")
+            allowed_resources = None
+            if data_scope_hdr:
+                try:
+                    allowed_resources = parse_allowed_resources(data_scope_hdr)
+                except Exception:
+                    logger.exception(
+                        "malformed X-Veda-Data-Scope header; failing closed to no access")
+                    allowed_resources = ()
             set_context(RequestContext(source_id=int(source_id), tenant=tenant,
-                                       source_ids=source_ids))
+                                       source_ids=source_ids,
+                                       allowed_resources=allowed_resources))
         return await call_next(request)
 
     from inference.routes import health, hybrid, retrieve

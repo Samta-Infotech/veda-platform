@@ -47,6 +47,11 @@ class ChatState(TypedDict, total=False):
                                        # forwarded alongside source_id so scoped chat turns
                                        # retrieve/federate exactly like /api/v1/query
     request_id: str                    # forwarded as X-Request-Id (tracing across api->inference)
+    data_scope: Optional[Dict[str, Any]]  # Gate 1 (User Story 3, Task 15) — the api tier's
+                                       # precomputed RBAC data-scope payload (a plain
+                                       # JSON-safe dict, see apps.access_management.services.
+                                       # serialize_data_scope), forwarded to call_engine_node
+                                       # as the X-Veda-Data-Scope header. None = no narrowing.
 
     # ── supervisor decision ─────────────────────────────────────────────────
     action: str                        # "smalltalk" | "answer" | "clarify" | "followup"

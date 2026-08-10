@@ -22,23 +22,6 @@ views never need ``.get()`` with a second fallback.
 from rest_framework import serializers
 
 
-class LoginRequestSerializer(serializers.Serializer):
-    """Credentials for ``POST /api/v1/auth/login``.
-
-    Both fields are mandatory and non-blank so an empty submission is rejected
-    here rather than reaching ``django.contrib.auth.authenticate`` — which treats
-    a blank password as a normal failed attempt and would waste a password-hash
-    comparison on it.
-
-    No ``max_length``/format constraint is imposed: the credential is checked
-    against the configured auth backend, and a stricter rule here would only
-    reveal which inputs are *shaped* like real usernames.
-    """
-
-    username = serializers.CharField(required=True, allow_blank=False)
-    password = serializers.CharField(required=True, allow_blank=False)
-
-
 class ConversationQuerySerializer(serializers.Serializer):
     """Body of ``POST /api/v1/conversations/query`` — one assistant turn.
 

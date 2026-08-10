@@ -3,19 +3,21 @@ from __future__ import annotations
 import json
 import logging
 
-from django.contrib.auth import authenticate, get_user_model
 from django.http import StreamingHttpResponse
 from rest_framework import status
 from rest_framework.permissions import AllowAny
-from rest_framework.response import Response
 from rest_framework.views import APIView
+from apps.access_management.services import (
+            compute_data_scope, resolve_effective_permissions, serialize_data_scope,
+        )
+from apps.core import api
+from apps.core.messages import MESSAGES
 
 from .models import MessageType
 from .serializers import (
     ConversationHistorySerializer,
     ConversationQuerySerializer,
     CreateConversationSerializer,
-    LoginRequestSerializer,
 )
 from .services import (
     ChatNotFound,
@@ -25,13 +27,9 @@ from .services import (
     MSG_MODEL_ERROR,
 )
 from .turn_events import TurnEventAccumulator
-from apps.query.scope import resolve_query_scope
+from apps.query.scope import permitted_source_ids, resolve_query_scope
 
 logger = logging.getLogger(__name__)
-
-# Dev-only identity fallback: the username seeded by chat migration 0002. Used
-# only when the request carries no authenticated principal — see _resolve_user.
-DEV_FALLBACK_USERNAME = "admin"
 
 # Tenant used by the chat entry point until tenant-from-principal lands (§6.2),
 # matching apps.query.views.DEFAULT_TENANT.
@@ -41,19 +39,30 @@ _ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 
 def _resolve_user(request):
-    """Real authenticated user if present; dev fallback to the seeded admin
-    user otherwise (mirrors QueryView._resolve_tenant's dev-default pattern)."""
+    """The authenticated principal, or None.
+
+    User Story 3 audit (2026-08-08) finding, fixed here: this used to fall back
+    to the seeded dummy ``admin`` user (chat migration 0002) whenever the request
+    carried no authenticated principal — meaning an UNAUTHENTICATED caller was
+    silently treated as a real, persistent identity rather than rejected. Every
+    caller of this function already checks ``if user is None: return
+    _unauthenticated_response()`` — that check simply never fired before this
+    fix. No dev convenience is lost: real auth (JWT/session/token) has existed
+    in this app for a while now: a caller with no credentials gets 401, exactly
+    like /api/v1/query's own AllowAny + real-request.user pattern.
+    """
     user = getattr(request, "user", None)
     if user is not None and user.is_authenticated:
         return user
-    return get_user_model().objects.filter(username=DEV_FALLBACK_USERNAME).first()
+    return None
 
 
 def _unauthenticated_response():
-    return Response(
-        {"status_code": status.HTTP_401_UNAUTHORIZED, "message": "Authentication required."},
-        status=status.HTTP_401_UNAUTHORIZED,
-    )
+    return api.error(MESSAGES["chat"]["auth_required"], status.HTTP_401_UNAUTHORIZED)
+
+
+def _forbidden_response():
+    return api.error(MESSAGES["chat"]["access_denied"], status.HTTP_403_FORBIDDEN)
 
 
 def _sse_format(event: str, data: dict) -> str:
@@ -61,58 +70,9 @@ def _sse_format(event: str, data: dict) -> str:
 
 
 def _iso_z(dt) -> str | None:
-    return dt.strftime("%Y-%m-%dT%H:%M:%SZ") if dt else None
-
-
-def _authenticate_login(request, username: str, password: str) -> dict | None:
-    user = authenticate(request, username=username, password=password)
-    if user is None or not user.is_active:
-        return None
-    return {
-        "user_id": user.pk,
-        "username": user.username,
-        "display_name": user.first_name or user.username,
-    }
-
-
-class LoginView(APIView):
-    """POST /api/v1/auth/login {username, password} — dummy dev login."""
-
-    permission_classes = [AllowAny]
-
-    def post(self, request):
-        serializer = LoginRequestSerializer(data=request.data)
-        if not serializer.is_valid():
-            logger.warning("login rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
-
-        creds = serializer.validated_data
-        user = _authenticate_login(request, creds["username"], creds["password"])
-        if user is None:
-            logger.warning("login failed for username=%s", creds["username"])
-            return Response(
-                {"status_code": status.HTTP_401_UNAUTHORIZED,
-                 "message": "Invalid username or password."},
-                status=status.HTTP_401_UNAUTHORIZED,
-            )
-
-        logger.info("login successful for username=%s", user["username"])
-        return Response(
-            {
-                "status_code": status.HTTP_200_OK,
-                "message": "Login successful.",
-                "data": {
-                    **user,
-                    "access_token": "dummy_access_token",
-                    "token_type": "Bearer",
-                },
-            },
-            status=status.HTTP_200_OK,
-        )
+    # Delegates so the platform has one timestamp format; kept as a local alias
+    # because it is used three times below and in _serialize_history_message.
+    return api.iso_z(dt)
 
 
 class ConversationQueryView(APIView):
@@ -127,11 +87,7 @@ class ConversationQueryView(APIView):
         serializer = ConversationQuerySerializer(data=request.data)
         if not serializer.is_valid():
             logger.warning("conversation query rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return api.invalid_payload(serializer.errors)
         data = serializer.validated_data
         logger.info("conversation query validated request_id=%s", rid)
 
@@ -139,22 +95,43 @@ class ConversationQueryView(APIView):
         if user is None:
             return _unauthenticated_response()
 
+        # Gate 1 (User Story 3, Task 17): resolve RBAC permissions ONCE per
+        # request — reused below by both the source-level check and the
+        # table/column payload. Lazy import: this module must stay importable
+        # without apps.access_management in INSTALLED_APPS for a caller that
+        # never touches RBAC at all.
+
+        effective = resolve_effective_permissions(user)
+
+        # Authenticated + RBAC active but permitted NOTHING -> fail closed with a
+        # generic 403 BEFORE any scope resolution or engine call, never a leaked
+        # resource/table/column name. `permitted is None` means "no narrowing at
+        # all" (RBAC off, or staff) — not this branch.
+        permitted = permitted_source_ids(user, effective)
+        if permitted is not None and not permitted:
+            logger.warning("conversation query denied: user_id=%s has no permitted sources",
+                           user.pk)
+            return _forbidden_response()
+
         # Resolve the query SCOPE server-side exactly like /api/v1/query (§6.2, P5):
         # all READY sources by default, an optional request pin intersected with the
         # ready registry, VEDA_DEFAULT_SOURCE_ID only as the last-resort fallback.
         # This keeps chat multi-source (federation-capable) and immune to a stale
         # default pointing at a source with no connection (e.g. an empty-host row).
-        source_ids = resolve_query_scope(request.data, tenant=DEFAULT_TENANT)
+        source_ids = resolve_query_scope(request.data, tenant=DEFAULT_TENANT, user=user,
+                                         effective=effective)
+        # Gate 1 (User Story 3, Task 15): same allow-payload as /api/v1/query,
+        # threaded through the chat turn to call_engine_node (chatbot/nodes.py) —
+        # None (RBAC off / staff) means no narrowing, exactly as before this change.
+        data_scope = serialize_data_scope(compute_data_scope(user, source_ids, effective=effective))
         service = ConversationQueryService(
-            user=user, source_id=source_ids[0], source_ids=source_ids)
+            user=user, source_id=source_ids[0], source_ids=source_ids,
+            data_scope=data_scope)
         try:
             chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
         except ChatNotFound:
             logger.warning("conversation query: chat_id=%s not found", data["chat_id"])
-            return Response(
-                {"status_code": status.HTTP_404_NOT_FOUND, "message": "Chat not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return api.error(MESSAGES["chat"]["not_found"], status.HTTP_404_NOT_FOUND)
         logger.info("conversation query chat loaded/created chat_id=%s request_id=%s", chat.pk, rid)
 
         service.save_user_message(chat, data["message"])
@@ -166,21 +143,23 @@ class ConversationQueryView(APIView):
     def _json_response(self, service, chat, message, rid):
         logger.info("conversation query AI processing started chat_id=%s", chat.pk)
         turn = TurnEventAccumulator()
-        error = None
+        # turn_error, not error: this holds the *engine's* error payload, which is a
+        # different thing from the HTTP error rendered below from it.
+        turn_error = None
         for evt in service.run_turn(chat, message, request_id=rid):
             kind, payload = evt["event"], evt["data"]
             if kind == "error":
-                error = payload
+                turn_error = payload
             else:
                 turn.consume(kind, payload)
         logger.info("conversation query AI processing completed chat_id=%s", chat.pk)
 
-        if error is not None:
-            return Response(
-                {"status_code": status.HTTP_502_BAD_GATEWAY,
-                 "message": error.get("message", "Unable to generate response."),
-                 "data": {"chat_id": chat.pk, "code": error.get("code", CODE_MODEL_ERROR)}},
-                status=status.HTTP_502_BAD_GATEWAY,
+        if turn_error is not None:
+            return api.error(
+                turn_error.get("message", "Unable to generate response."),
+                status.HTTP_502_BAD_GATEWAY,
+                data={"chat_id": chat.pk,
+                      "code": turn_error.get("code", CODE_MODEL_ERROR)},
             )
 
         metadata = turn.metadata()
@@ -199,11 +178,7 @@ class ConversationQueryView(APIView):
             response_data["insights"] = turn.insights["insights"]
             response_data["follow_up_questions"] = turn.insights["follow_up_questions"]
 
-        return Response({
-            "status_code": status.HTTP_200_OK,
-            "message": "Query processed successfully.",
-            "data": response_data,
-        }, status=status.HTTP_200_OK)
+        return api.success(MESSAGES["conversation"]["query_processed"], response_data)
 
     def _stream_response(self, service, chat, message, rid):
         response = StreamingHttpResponse(
@@ -216,6 +191,8 @@ class ConversationQueryView(APIView):
         return response
 
     def _sse_generator(self, service, chat, message, rid):
+        """ Generator for streaming SSE responses from the conversation query service."""
+        
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
         turn = TurnEventAccumulator()
         try:
@@ -254,16 +231,14 @@ class CreateConversationView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        """Create a new conversation (chat)."""
+
         logger.info("conversation creation requested")
 
         serializer = CreateConversationSerializer(data=request.data)
         if not serializer.is_valid():
             logger.warning("conversation creation rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return api.invalid_payload(serializer.errors)
 
         user = _resolve_user(request)
         if user is None:
@@ -273,24 +248,26 @@ class CreateConversationView(APIView):
         chat = service.create_conversation(serializer.validated_data["conversation_title"] or "")
         logger.info("conversation created chat_id=%s user_id=%s", chat.pk, user.pk)
 
-        return Response({
-            "status_code": status.HTTP_201_CREATED,
-            "message": "Conversation created successfully.",
-            "data": {
-                "chat_id": chat.pk,
-                "conversation_title": chat.name,
-                "created_at": _iso_z(chat.created_at),
-                "created_by": user.pk,
-            },
-        }, status=status.HTTP_201_CREATED)
+        return api.success(MESSAGES["conversation"]["created"], {
+            "chat_id": chat.pk,
+            "conversation_title": chat.name,
+            "created_at": _iso_z(chat.created_at),
+            "created_by": user.pk,
+        }, status_code=status.HTTP_201_CREATED)
 
 
 class ListConversationsView(APIView):
-    """POST /api/v1/conversations/list {} — owned, non-deleted conversations."""
+    """GET /api/v1/conversations/list — owned, non-deleted conversations.
+
+    Read-only, no params needed — GET only, cacheable/bookmarkable/
+    safely-retryable, unlike POST.
+    """
 
     permission_classes = [AllowAny]
 
-    def post(self, request):
+    def get(self, request):
+        """Get a list of conversations."""
+
         logger.info("conversation list requested")
 
         user = _resolve_user(request)
@@ -309,29 +286,24 @@ class ListConversationsView(APIView):
         ]
         logger.info("conversation list returned count=%s user_id=%s", len(conversations), user.pk)
 
-        return Response({
-            "status_code": status.HTTP_200_OK,
-            "message": "Conversations retrieved successfully.",
-            "data": {"conversations": conversations},
-        }, status=status.HTTP_200_OK)
+        return api.success(MESSAGES["conversation"]["list"], {"conversations": conversations})
 
 
 class ConversationHistoryView(APIView):
-    """POST /api/v1/conversations/history {chat_id}."""
+    """GET /api/v1/conversations/history?chat_id=
+
+    Read-only, so GET only — its parameter travels as a query param.
+    """
 
     permission_classes = [AllowAny]
 
-    def post(self, request):
+    def get(self, request):
         logger.info("conversation history requested")
 
-        serializer = ConversationHistorySerializer(data=request.data)
+        serializer = ConversationHistorySerializer(data=request.query_params)
         if not serializer.is_valid():
             logger.warning("conversation history rejected: invalid payload — %s", serializer.errors)
-            return Response(
-                {"status_code": status.HTTP_400_BAD_REQUEST, "message": "Invalid request data.",
-                 "errors": serializer.errors},
-                status=status.HTTP_400_BAD_REQUEST,
-            )
+            return api.invalid_payload(serializer.errors)
 
         user = _resolve_user(request)
         if user is None:
@@ -343,25 +315,19 @@ class ConversationHistoryView(APIView):
             chat, messages = service.get_conversation_history(chat_id)
         except ChatNotFound:
             logger.warning("conversation history: chat_id=%s not found", chat_id)
-            return Response(
-                {"status_code": status.HTTP_404_NOT_FOUND, "message": "Conversation not found."},
-                status=status.HTTP_404_NOT_FOUND,
-            )
+            return api.error(MESSAGES["conversation"]["not_found"], status.HTTP_404_NOT_FOUND)
 
         logger.info("conversation history returned chat_id=%s message_count=%s", chat.pk, len(messages))
-        return Response({
-            "status_code": status.HTTP_200_OK,
-            "message": "Conversation retrieved successfully.",
-            "data": {
-                "chat_id": chat.pk,
-                "conversation_title": chat.name,
-                "created_at": _iso_z(chat.created_at),
-                "messages": [_serialize_history_message(m) for m in messages],
-            },
-        }, status=status.HTTP_200_OK)
+        return api.success(MESSAGES["conversation"]["retrieved"], {
+            "chat_id": chat.pk,
+            "conversation_title": chat.name,
+            "created_at": _iso_z(chat.created_at),
+            "messages": [_serialize_history_message(m) for m in messages],
+        })
 
 
 def _serialize_history_message(msg) -> dict:
+    """Serialize a Message model instance for the conversation history API response."""
     if msg.type == MessageType.ASSISTANT:
         try:
             response = json.loads(msg.content)

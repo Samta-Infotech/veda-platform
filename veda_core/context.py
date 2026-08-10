@@ -14,6 +14,7 @@ No Django import here — this module is imported by both veda_core (library)
 and the Django tiers, and must stay import-light.
 """
 
+import json
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, field
 
@@ -28,10 +29,21 @@ class RequestContext:
     served query traverses. It defaults to ``(source_id,)`` so every existing
     single-source construction (all of ingestion) behaves byte-identically — the
     set is only wider when the query tier explicitly passes a validated subset.
-    Frozen + a tuple field so the context stays hashable (engine-cache key)."""
+    Frozen + a tuple field so the context stays hashable (engine-cache key).
+
+    ``allowed_resources`` (Gate 1, User Story 3, Task 15) is the RBAC data-scope
+    payload the api tier computed and forwarded across the HTTP boundary (see
+    ``apps.access_management.services.data_scope`` and ``parse_allowed_resources``
+    below) — ``None`` (the default) means "no restriction", so every existing
+    caller that never sets it (ingestion, evaluation, CLI tooling, the dev
+    fallback in this module's own middleware reader) behaves byte-identically.
+    Deliberately a plain nested-tuple structure, not the Django-side dataclasses
+    that build it — this module carries no Django import (see the module
+    docstring) and must not gain one just to describe this field's shape."""
     source_id: int
     tenant: str
     source_ids: tuple = ()
+    allowed_resources: tuple | None = None
 
     def __post_init__(self):
         # Normalize the set: default to the primary, dedupe preserving order, and
@@ -61,6 +73,45 @@ def try_current() -> "RequestContext | None":
     carry the PARENT context into worker threads (which start with an empty
     contextvars context): capture in the parent, `set_context` in each child."""
     return _ctx.get()
+
+
+def parse_allowed_resources(raw: "str | None") -> "tuple | None":
+    """The ``X-Veda-Data-Scope`` header value into ``RequestContext.allowed_resources``.
+
+    ``raw`` is ``None``/empty when the header is absent — which is exactly "no
+    restriction" (RBAC off, staff bypass, or a pre-Gate-1 caller that never sends
+    the header at all), so this returns ``None`` for that case rather than an
+    empty structure; the two must stay indistinguishable-in-effect on the read
+    side (see ``apps.access_management.services.data_scope.serialize_data_scope``,
+    which is this function's producer and documents the same contract from the
+    other end).
+
+    Returns a hashable nested-tuple mirror of the wire dict —
+    ``((source_id, (open, ((table_name, (col, ...) | None), ...))), ...)`` —
+    rather than the parsed dict/list JSON produces directly, so a
+    ``RequestContext`` carrying it stays hashable end to end (this module's own
+    "frozen + tuple fields" invariant, see the class docstring).
+
+    Malformed input (a header a future caller sends incorrectly) fails closed —
+    treated as "restrict to nothing addressable", NOT as "no restriction" — by
+    letting the ``json.JSONDecodeError``/``AttributeError`` propagate: the
+    middleware calling this is the right place to decide whether "reject the
+    request" or "log and continue with no context" is safer, not this pure
+    parser silently guessing.
+    """
+    if not raw:
+        return None
+    data = json.loads(raw)
+    return tuple(
+        (int(source_id), (
+            bool(entry.get("open", False)),
+            tuple(
+                (name, tuple(cols) if cols is not None else None)
+                for name, cols in (entry.get("tables") or {}).items()
+            ),
+        ))
+        for source_id, entry in data.items()
+    )
 
 
 def with_context(ctx, fn):

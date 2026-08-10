@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 import time
-
+from apps.access_management.services import (
+            compute_data_scope, resolve_effective_permissions, serialize_data_scope,
+    )
 try:
     from rest_framework.views import APIView
     from rest_framework.response import Response
@@ -27,7 +29,7 @@ except ImportError:  # keep importable without DRF
 
 from .inference_client import InferenceClient, InferenceUnavailable
 from .models import QueryLog
-from .scope import resolve_query_scope
+from .scope import permitted_source_ids, resolve_query_scope
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +43,13 @@ _ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
 _STATUS_UNKNOWN = "unknown"
 _STATUS_EXEC_ERROR = "exec_error"
+_STATUS_FORBIDDEN = "forbidden"
+
+# Gate 1 (User Story 3, Task 17): generic on purpose — never names a resource,
+# table, column, or any internal RBAC detail (the brief's own explicit
+# requirement). Same copy regardless of WHY nothing was permitted, so the
+# response itself carries no signal an attacker could use to enumerate scope.
+_FORBIDDEN_MESSAGE = "You do not have permission to access this resource."
 
 
 class QueryView(APIView):
@@ -56,19 +65,47 @@ class QueryView(APIView):
 
         # Server-side tenant resolution (§6.2). Prod: derive from request.user; dev default.
         tenant = self._resolve_tenant(request, data)
+        user = getattr(request, "user", None)
+
+        # Gate 1 (User Story 3, Task 17): resolve RBAC permissions ONCE per request
+        # — reused below by both the source-level check and the table/column
+        # payload, never re-resolved layer by layer. Lazy import: this module must
+        # stay importable without apps.access_management in INSTALLED_APPS for a
+        # caller that never touches RBAC at all (e.g. this app's own minimal-app
+        # test harness).
+
+        effective = resolve_effective_permissions(user)
+
+        # Authenticated + RBAC active but permitted NOTHING -> fail closed with a
+        # generic 403 BEFORE any scope resolution or inference call, never a
+        # leaked resource/table/column name. `permitted is None` means "no
+        # narrowing at all" (RBAC off, or staff) — not this branch.
+        permitted = permitted_source_ids(user, effective)
+        if permitted is not None and not permitted:
+            logger.warning("query denied: user_id=%s has no permitted sources",
+                           getattr(user, "pk", None))
+            return Response({"status": _STATUS_FORBIDDEN, "error": _FORBIDDEN_MESSAGE},
+                            status=403)
+
         # Resolve the query SCOPE server-side (P5 / cross-source): a source SET, always
         # validated against the ready-source registry — an optional request subset is
         # intersected with ownership, never trusted verbatim (§6.2). `source_id` is the
         # primary (first) member, kept for the single-source execution/audit path.
-        source_ids = resolve_query_scope(data, tenant)
+        source_ids = resolve_query_scope(data, tenant, user=user, effective=effective)
         source_id = source_ids[0]
+        # Gate 1 (User Story 3, Task 15): the table/column allow-payload for the
+        # now-resolved scope, forwarded across the HTTP boundary alongside it —
+        # None (RBAC off / staff) means the inference tier applies no narrowing,
+        # exactly as before this change.
+        data_scope = serialize_data_scope(compute_data_scope(user, source_ids, effective=effective))
 
         request_id = getattr(request, "request_id", "")
         started = time.time()
         client = InferenceClient()
         try:
             payload = client.run_hybrid_query(query, source_id=source_id, tenant=tenant,
-                                              source_ids=source_ids, request_id=request_id)
+                                              source_ids=source_ids, request_id=request_id,
+                                              data_scope=data_scope)
         except InferenceUnavailable as exc:
             latency = int((time.time() - started) * 1000)
             logger.warning("inference unavailable request_id=%s tenant=%s source_id=%s: %s",
