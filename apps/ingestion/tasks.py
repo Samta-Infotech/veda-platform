@@ -23,6 +23,8 @@ import logging
 import os
 import re
 import subprocess
+from django.utils import timezone
+from django.conf import settings
 
 try:
     from celery import shared_task
@@ -201,7 +203,6 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
     the inference image (ML deps) or via the one-off inference-image runner used in
     dev. Kept import-lazy so the module still loads in the thin image.
     """
-    from django.utils import timezone
 
     from apps.ingestion.models import IngestionJob, IngestionStage, JobStatus
     from apps.sources.models import Source, SourceStatus
@@ -284,7 +285,6 @@ def _sync_catalog_if_enabled(source_id) -> None:
     (rerun ``manage.py sync_catalog``) — turning a successful ingestion into a
     failed job over it would be a strictly worse outcome for an operator to debug.
     """
-    from django.conf import settings
 
     if not getattr(settings, "VEDA_AUTO_SYNC_CATALOG", False):
         return
@@ -310,7 +310,6 @@ def _guard_embedding_model_change(job, encoder_mode: str, force: bool) -> None:
 
     Marks the job FAILED before raising so the row never lingers as RUNNING.
     """
-    from django.utils import timezone
 
     from apps.ingestion.models import JobStatus
 

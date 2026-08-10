@@ -12,7 +12,9 @@ from __future__ import annotations
 
 import logging
 import time
-
+from apps.access_management.services import (
+            compute_data_scope, resolve_effective_permissions, serialize_data_scope,
+    )
 try:
     from rest_framework.views import APIView
     from rest_framework.response import Response
@@ -71,9 +73,7 @@ class QueryView(APIView):
         # stay importable without apps.access_management in INSTALLED_APPS for a
         # caller that never touches RBAC at all (e.g. this app's own minimal-app
         # test harness).
-        from apps.access_management.services import (
-            compute_data_scope, resolve_effective_permissions, serialize_data_scope,
-        )
+
         effective = resolve_effective_permissions(user)
 
         # Authenticated + RBAC active but permitted NOTHING -> fail closed with a

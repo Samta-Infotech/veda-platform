@@ -7,7 +7,9 @@ from django.http import StreamingHttpResponse
 from rest_framework import status
 from rest_framework.permissions import AllowAny
 from rest_framework.views import APIView
-
+from apps.access_management.services import (
+            compute_data_scope, resolve_effective_permissions, serialize_data_scope,
+        )
 from apps.core import api
 from apps.core.messages import MESSAGES
 
@@ -98,9 +100,7 @@ class ConversationQueryView(APIView):
         # table/column payload. Lazy import: this module must stay importable
         # without apps.access_management in INSTALLED_APPS for a caller that
         # never touches RBAC at all.
-        from apps.access_management.services import (
-            compute_data_scope, resolve_effective_permissions, serialize_data_scope,
-        )
+
         effective = resolve_effective_permissions(user)
 
         # Authenticated + RBAC active but permitted NOTHING -> fail closed with a
@@ -191,6 +191,8 @@ class ConversationQueryView(APIView):
         return response
 
     def _sse_generator(self, service, chat, message, rid):
+        """ Generator for streaming SSE responses from the conversation query service."""
+        
         logger.info("conversation query streaming started chat_id=%s", chat.pk)
         turn = TurnEventAccumulator()
         try:
@@ -229,6 +231,8 @@ class CreateConversationView(APIView):
     permission_classes = [AllowAny]
 
     def post(self, request):
+        """Create a new conversation (chat)."""
+
         logger.info("conversation creation requested")
 
         serializer = CreateConversationSerializer(data=request.data)
@@ -262,6 +266,8 @@ class ListConversationsView(APIView):
     permission_classes = [AllowAny]
 
     def get(self, request):
+        """Get a list of conversations."""
+
         logger.info("conversation list requested")
 
         user = _resolve_user(request)
@@ -321,6 +327,7 @@ class ConversationHistoryView(APIView):
 
 
 def _serialize_history_message(msg) -> dict:
+    """Serialize a Message model instance for the conversation history API response."""
     if msg.type == MessageType.ASSISTANT:
         try:
             response = json.loads(msg.content)

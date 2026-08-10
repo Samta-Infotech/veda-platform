@@ -12,29 +12,18 @@ view class and called its private ``_resolve_scope`` staticmethod across an app
 boundary; both now depend on this one public function instead. Behaviour is
 unchanged — ``QueryView._resolve_scope`` remains as a thin delegating alias.
 
-RBAC (User Story 3, "Gate 1") — added later, additive:
-    ``user`` is now an optional third input. When given and ``VEDA_RBAC_MODE`` is
-    not ``off``, the "ready" set is further intersected with the sources that
-    user's effective ``data.read`` grants actually reach — see
-    ``permitted_source_ids``. Staff bypass this narrowing entirely (same
-    ``is_staff``-is-the-real-admin-flag precedent already used for the login
-    role-check and the last-admin guard elsewhere in this RBAC programme) — this
-    is the "Admin Bypass" the story's test list asks for, not a special case
-    invented here. Mode ``off`` (default) or no ``user`` given: behaviour is
-    byte-identical to before this change.
-
-RESOLVE ONCE PER REQUEST (Task 17):
-    ``effective`` is an already-resolved ``EffectivePermissions`` (see
-    ``apps.access_management.services.resolve_effective_permissions``), or the
-    default sentinel ``UNRESOLVED``, which resolves it internally — unchanged
-    behaviour for any caller that only ever passed ``user``. A view that also
-    needs ``compute_data_scope`` (Task 14) should resolve once and pass the SAME
-    ``effective`` to both, rather than each paying for its own resolver query.
 """
 from __future__ import annotations
 
 import logging
 import os
+from django.db.models import Q
+from apps.access_management.codes import PermissionCode
+from apps.access_management.models import Effect
+from apps.access_management.resource_path import InvalidResourcePath, source_of
+from apps.sources.models import Source
+from apps.access_management.services import resolve_effective_permissions
+
 
 logger = logging.getLogger(__name__)
 
@@ -153,18 +142,12 @@ def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
     if effective is _UNRESOLVED:
         if user is None:
             return None  # fast path: no import at all when there's nothing to check
-        from apps.access_management.services import resolve_effective_permissions
 
         effective = resolve_effective_permissions(user)
     if effective is None:
         return None
 
-    from django.db.models import Q
 
-    from apps.access_management.codes import PermissionCode
-    from apps.access_management.models import Effect
-    from apps.access_management.resource_path import InvalidResourcePath, source_of
-    from apps.sources.models import Source
 
     source_names = set()
     for grant in effective.grants:
@@ -195,7 +178,6 @@ def _ready_source_ids() -> list[int]:
     down) degrades to "unknown ownership" rather than failing the request — the
     caller then trusts an explicit pin, exactly as before."""
     try:
-        from apps.sources.models import Source
 
         return list(Source.objects.filter(ready=True).order_by("id").values_list("id", flat=True))
     except Exception:  # noqa: BLE001 — registry unreadable must not fail the query
