@@ -1091,16 +1091,15 @@ No query params. Returns every active role, **unpaginated** — safe because rol
 {
   "status_code": 200,
   "message": "Roles retrieved successfully.",
-  "data": {
-    "roles": [
-      {
-        "role_id": 1,
-        "name": "Database Analyst"
-      }
-    ]
-  }
+  "data": [
+    {
+      "label": "Database Analyst",
+      "value": 1
+    }
+  ]
 }
 ```
+
 
 Retired (`is_active=false`) roles are excluded.
 
@@ -1116,11 +1115,12 @@ POST /api/v1/roles/create
   "description": "Access to finance databases.",
   "permission_ids": [1, 2, 8],
   "resource_grants": [
-    { "resource_path": "postgres.homzhub_prod", "effect": "ALLOW" },
-    { "resource_path": "postgres.homzhub_prod.payroll", "effect": "DENY" }
+    { "resource_path": "db:postgres.homzhub_prod", "effect": "ALLOW" },
+    { "resource_path": "db:postgres.homzhub_prod:payroll", "effect": "DENY" }
   ]
 }
 ```
+
 
 - `name` is required, max length from model, trimmed, must not be blank after trimming.
 - `description` is optional, defaults to `""`.
@@ -1162,35 +1162,15 @@ GET /api/v1/roles/detail?role_id=1
     "name": "Database Analyst",
     "description": "Access to finance databases.",
     "is_active": true,
-    "permission_ids": [1, 2, 8],
-    "permissions": [
-      {
-        "permission_id": 1,
-        "code": "query.execute",
-        "name": "Execute Queries",
-        "description": "Allows submitting conversational analytics queries."
-      },
-      {
-        "permission_id": 2,
-        "code": "data.read",
-        "name": "Read Data",
-        "description": "Allows reading catalog data sources and metadata."
-      },
-      {
-        "permission_id": 8,
-        "code": "permission.read",
-        "name": "Read Permissions",
-        "description": "Allows viewing permission catalogs and grants."
-      }
-    ],
     "created_at": "2026-07-31T09:00:00Z",
     "updated_at": "2026-07-31T10:00:00Z",
-    "deleted_at": null
+    "deleted_at": null,
+    "permission_ids": [1, 2, 8]
   }
 }
 ```
 
-Returns role metadata along with `permission_ids` (the list of global system capability IDs currently assigned) and `permissions` (the full list of assigned capability objects for UI dropdown pre-selection).
+Returns role metadata along with `permission_ids` — the list of global system capability IDs currently assigned (empty list if none). Live-verified `2026-08-11`: the response carries only `permission_ids`, not a nested `permissions` object array — the frontend resolves each id's label/code via `GET /api/v1/permissions/dropdown`.
 
 
 **Errors:**
@@ -1214,10 +1194,11 @@ POST /api/v1/roles/update
   "is_active": true,
   "permission_ids": [1, 2, 3, 8],
   "resource_grants": [
-    { "resource_path": "postgres.homzhub_prod", "effect": "ALLOW" }
+    { "resource_path": "db:postgres.homzhub_prod", "effect": "ALLOW" }
   ]
 }
 ```
+
 
 **Partial update** — only the fields present (besides `role_id`) are written. At least one updatable field must be provided or the request is rejected.
 
@@ -1949,7 +1930,7 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 ```json
 {
   "status_code": 200,
-  "message": "catalog list retrieved successfully",
+  "message": "Catalog resources retrieved successfully.",
   "data": {
     "role_id": null,
     "parent_path": "",
@@ -1984,7 +1965,7 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 ```json
 {
   "status_code": 200,
-  "message": "catalog list retrieved successfully",
+  "message": "Catalog resources retrieved successfully.",
   "data": {
     "role_id": 1,
     "parent_path": "",
@@ -2023,7 +2004,7 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 ```json
 {
   "status_code": 200,
-  "message": "catalog list retrieved successfully",
+  "message": "Catalog resources retrieved successfully.",
   "data": {
     "role_id": 1,
     "parent_path": "postgres.homzhub_prod",
@@ -2060,7 +2041,7 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 ```json
 {
   "status_code": 200,
-  "message": "catalog list retrieved successfully",
+  "message": "Catalog resources retrieved successfully.",
   "data": {
     "role_id": 1,
     "parent_path": "",
@@ -2088,7 +2069,7 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 ```json
 {
   "status_code": 200,
-  "message": "catalog list retrieved successfully",
+  "message": "Catalog resources retrieved successfully.",
   "data": {
     "role_id": 1,
     "parent_path": "",
@@ -2110,6 +2091,105 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 }
 ```
 
+### 12.1 Fixed since the previous revision of this doc (`2026-08-11`)
+
+`CatalogService.get_tree` was refactored and three real bugs were fixed, all live-verified:
+
+- **Category filter was a no-op in the default grouped view.** `GET /catalog/tree?category=database` used to still return non-empty `datalake`/`file_system` arrays — `category` only took effect on the lazy-load branch. Now filters all three modes identically; the Mode 4 example above (empty `datalake`/`file_system`) reflects current behavior.
+- **Descendant-grant inheritance never resolved past the exact granted path.** A grant on a parent (e.g. `db:homzhub` → `ALLOW`) is supposed to cover every table beneath it (§3.2, SELF_AND_DESCENDANTS), but the ancestor walk split paths on `.` while this codebase's paths are `:`-delimited (`db:homzhub:accounts_generalledger`) — so it never found the parent grant and every descendant showed `is_allowed: false`. Now uses `resource_path.prefixes()`, the same helper the runtime resolver (`services/resolver.py`) already uses for this exact question, so tree display and actual query-time enforcement agree.
+- **`name` was the full path, not the leaf segment.** Same `.`-vs-`:` mistake — `display_name = path.split(".")[-1]` never found a `.`, so `name` always equaled the entire `path` (e.g. `"db:homzhub:accounts_generalledger"` instead of `"accounts_generalledger"`). Fixed via `resource_path.segments(path)[-1]`.
+- **Search only ever matched root-level resources, even in the default grouped view.** `search=<a nested table's name>` used to return empty because the default branch always restricted to `parent_path=""` before applying the search filter. Now: a bare `GET /catalog/tree` (no `search`) still shows roots only — it does not eagerly scan every level on a plain page load — but as soon as `search` is given, it searches every level and returns matches grouped by kind, wherever they live in the tree, matching the Mode 5 example above.
+
+Regression tests: `tests/test_catalog_resources.py` (`test_a_grant_on_a_root_covers_its_descendants`, `test_a_closer_grant_overrides_a_further_ancestor`, `test_category_filters_the_default_view_to_one_tab`, `test_name_is_the_leaf_segment_not_the_full_path`, plus 11 more covering lazy-load, search, and the global-grant/unknown-role edge cases).
+
+### 12.2 Query parameter reference
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `role_id` | integer | No | Non-existent id silently resolves to `is_allowed: false` everywhere — no 404, no distinction from a real role with zero grants. |
+| `category` | string | No | Must be one of `database`, `datalake`, `file_system` — anything else is a 400. Only takes effect when `parent_path` is also present (§12.1). |
+| `parent_path` | string | No | A non-existent path returns `200` with an empty `resources` array, not `404` — treated like an empty folder. |
+| `search` | string | No | Case-insensitive substring on `path`. Only matches root-level nodes in the default (no `parent_path`) view (§12.1). |
+
+### 12.3 Additional payload/response examples (live-verified `2026-08-11`)
+
+**Lazy-load one level with a category filter** (the one place `category` is honored):
+
+```http
+GET /api/v1/catalog/tree?parent_path=db:homzhub&category=database
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": null,
+    "parent_path": "db:homzhub",
+    "category": "database",
+    "resources": [
+      {
+        "path": "db:homzhub:accounts_generalledger",
+        "name": "db:homzhub:accounts_generalledger",
+        "kind": "db",
+        "parent_path": "db:homzhub",
+        "source_id": 2,
+        "has_children": true
+      }
+    ]
+  }
+}
+```
+
+**`role_id` is not an integer:**
+
+```http
+GET /api/v1/catalog/tree?role_id=abc
+```
+
+```json
+{
+  "status_code": 400,
+  "message": "Invalid request data.",
+  "errors": { "role_id": ["A valid integer is required."] }
+}
+```
+
+**`category` outside the accepted set:**
+
+```http
+GET /api/v1/catalog/tree?category=bogus
+```
+
+```json
+{
+  "status_code": 400,
+  "message": "Invalid request data.",
+  "errors": { "category": ["Category must be one of: database, datalake, file_system."] }
+}
+```
+
+**`parent_path` that does not exist** — `200`, not `404`:
+
+```http
+GET /api/v1/catalog/tree?parent_path=db:doesnotexist
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": { "role_id": null, "parent_path": "db:doesnotexist", "category": null, "resources": [] }
+}
+```
+
+**Unauthenticated caller** — `401`, but note the body is DRF's default shape, not the unified envelope (`status_code`/`message`), same as every other admin endpoint in this codebase:
+
+```json
+{ "detail": "Authentication credentials were not provided." }
+```
+
+A Postman folder with all of the above as runnable requests is in `VEDA_Postman_Collection.json` → **"04 - Catalog Tree API (various payloads, live-verified 2026-08-11)"**.
 
 ---
 
@@ -2127,60 +2207,21 @@ Returns an unpaginated list of all active global system capability verbs for ren
 {
   "status_code": 200,
   "message": "Permissions retrieved successfully.",
-  "data": {
-    "permissions": [
-      {
-        "permission_id": 1,
-        "code": "query.execute",
-        "name": "Execute Queries",
-        "description": "Allows submitting conversational analytics queries."
-      },
-      {
-        "permission_id": 2,
-        "code": "data.read",
-        "name": "Read Data",
-        "description": "Allows reading catalog data sources and metadata."
-      },
-      {
-        "permission_id": 3,
-        "code": "source.manage",
-        "name": "Manage Sources",
-        "description": "Allows registering and editing data sources."
-      },
-      {
-        "permission_id": 4,
-        "code": "ingestion.run",
-        "name": "Run Ingestion",
-        "description": "Allows triggering ingestion pipelines."
-      },
-      {
-        "permission_id": 5,
-        "code": "evaluation.run",
-        "name": "Run Evaluation",
-        "description": "Allows running benchmark evaluations."
-      },
-      {
-        "permission_id": 6,
-        "code": "user.manage",
-        "name": "Manage Users",
-        "description": "Allows creating, updating, and deactivating users."
-      },
-      {
-        "permission_id": 7,
-        "code": "role.manage",
-        "name": "Manage Roles",
-        "description": "Allows creating, updating, and assigning roles."
-      },
-      {
-        "permission_id": 8,
-        "code": "permission.read",
-        "name": "Read Permissions",
-        "description": "Allows viewing permission catalogs and grants."
-      }
-    ]
-  }
+  "data": [
+    { "label": "query.execute", "value": 1 },
+    { "label": "data.read", "value": 2 },
+    { "label": "source.manage", "value": 3 },
+    { "label": "ingestion.run", "value": 4 },
+    { "label": "evaluation.run", "value": 5 },
+    { "label": "user.manage", "value": 6 },
+    { "label": "role.manage", "value": 7 },
+    { "label": "permission.read", "value": 8 }
+  ]
 }
 ```
+
+
+
 
 
 - Denied-access audit logging and Admin audit-log APIs.
