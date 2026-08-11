@@ -45,6 +45,8 @@ def public_fields(user) -> dict:
         "user_id": user.pk,
         "username": user.username,
         "email": user.email,
+        "first_name": user.first_name,
+        "last_name": user.last_name,
         "display_name": user.first_name or user.username,
         "is_active": user.is_active,
         "is_staff": user.is_staff,

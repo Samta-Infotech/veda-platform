@@ -40,9 +40,9 @@ def public_fields(role) -> dict:
         "name": role.name,
         "description": role.description,
         "is_active": role.is_active,
-        "created_at": api.iso_z(role.created_at),
-        "updated_at": api.iso_z(role.updated_at),
-        "deleted_at": api.iso_z(role.deleted_at),
+        "created_at": api.human_date(role.created_at),
+        "updated_at": api.human_date(role.updated_at),
+        "deleted_at": api.human_date(role.deleted_at),
     }
 
 
