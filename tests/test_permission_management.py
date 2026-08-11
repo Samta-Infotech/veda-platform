@@ -410,3 +410,27 @@ def test_permission_reuses_the_shared_timestamp_base():
     from apps.core.models import TimeStampedModel
 
     assert issubclass(Permission, TimeStampedModel)
+
+
+# ---------------------------------------------------------------------------
+# User Role Assignment Integration
+# ---------------------------------------------------------------------------
+
+
+def test_user_creation_and_update_with_role_ids():
+    from apps.access_management.models import Role, UserRole
+    from apps.access_management.services import UserService
+
+    role1 = Role.objects.create(name="Role 1")
+    role2 = Role.objects.create(name="Role 2")
+
+    service = UserService()
+    user = service.create_user(
+        username="roleuser", email="roleuser@example.com", password="Password123!",
+        role_ids=[role1.id]
+    )
+
+    assert set(UserRole.objects.filter(user=user).values_list("role_id", flat=True)) == {role1.id}
+
+    service.update_user(user.pk, role_ids=[role1.id, role2.id])
+    assert set(UserRole.objects.filter(user=user).values_list("role_id", flat=True)) == {role1.id, role2.id}

@@ -24,13 +24,19 @@ from django.contrib.auth import get_user_model
 from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
+from ..models import Role, UserRole
 
 from apps.core.messages import MESSAGES
 from apps.core.token_revocation import revoke_all_refresh_tokens
 
 from ..models import UserProfile
-from .admin_guard import LastAdminProtected, is_last_active_admin
-from .base import ConflictError, NotFoundError, paginate
+from .admin_guard import (
+    ADMIN_ROLE_NAME,
+    LastAdminProtected,
+    LastAdminRoleProtected,
+    is_last_active_admin,
+)
+from .base import AccessManagementError, ConflictError, NotFoundError, paginate
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +44,7 @@ CODE_USERNAME_TAKEN = "USERNAME_TAKEN"
 CODE_EMAIL_TAKEN = "EMAIL_TAKEN"
 CODE_USER_CONFLICT = "USER_CONFLICT"
 CODE_USER_NOT_FOUND = "USER_NOT_FOUND"
+CODE_INVALID_ROLE = "INVALID_ROLE"
 
 # Columns every user-facing projection needs. Applied via .only() so a list page
 # never drags the password hash and permission bitfields across the wire from the
@@ -54,6 +61,13 @@ class UserNotFound(NotFoundError):
 
     code = CODE_USER_NOT_FOUND
     message = MESSAGES["user"]["not_found"]
+
+
+class InvalidRole(AccessManagementError):
+    """One or more specified role IDs do not exist or are inactive."""
+
+    code = CODE_INVALID_ROLE
+    message = MESSAGES["role"]["invalid_role"]
 
 
 class DuplicateUser(ConflictError):
@@ -89,41 +103,15 @@ class UserService:
         self._request = request
 
     def create_user(self, *, username: str, email: str, password: str,
-                    first_name: str = "", last_name: str = ""):
+                    first_name: str = "", last_name: str = "",
+                    role_ids: list[int] | None = None):
         """Create one active, unprivileged user.
 
         Keyword-only by design: these are five same-typed strings, and a positional
         call that transposed ``username`` and ``email`` would be accepted silently.
-
-        Uniqueness is enforced by the database, not by a preceding SELECT. The
-        obvious implementation — "does this username exist? no? then insert" — is a
-        check-then-insert race: two concurrent requests both find nothing and both
-        proceed. Letting the INSERT fail and translating the error is the only
-        version that cannot create a duplicate, and it costs one query fewer on the
-        happy path.
-
-        Args:
-            username: Validated, unique-by-constraint. Stored as submitted.
-            email: Validated address. Unique case-insensitively among non-blank
-                values, via the index added in migration 0001.
-            password: Plaintext, already policy-checked. Hashed by ``create_user``
-                and never logged.
-            first_name: Optional.
-            last_name: Optional.
-
-        Returns:
-            The saved ``User``.
-
-        Raises:
-            UsernameTaken / EmailTaken: the corresponding value is in use.
-            DuplicateUser: a uniqueness violation we could not attribute to a
-                specific field (never guessed at).
         """
         user_model = get_user_model()
         try:
-            # One statement, but wrapped so that any future work added to user
-            # creation (role assignment is the next phase) joins the same unit —
-            # a user must never be left half-created.
             with transaction.atomic():
                 user = user_model.objects.create_user(
                     username=username,
@@ -133,6 +121,10 @@ class UserService:
                     last_name=last_name,
                 )
                 UserProfile.objects.create(user=user)
+                if role_ids is not None:
+                    self._sync_roles(user, role_ids)
+        except ValueError as exc:
+            raise InvalidRole() from exc
         except IntegrityError as exc:
             # The transaction is already rolled back here; classify and re-raise.
             conflict = self._classify_conflict(username, email)
@@ -180,44 +172,9 @@ class UserService:
                         only_fields=USER_LIST_FIELDS)
 
     def update_user(self, user_id: int, **fields):
-        """Apply profile changes to one user — including, now, ``is_active``.
-
-        Only the fields present in ``fields`` are written (``update_fields``), so a
-        concurrent change to a column this request did not touch is not clobbered.
-
-        The row is locked for the duration: read-modify-write on an unlocked row loses
-        one of two concurrent updates. Cheap here — one row, one short transaction.
-
-        Caveat worth knowing: ``select_for_update`` is a **Postgres-only** guarantee.
-        SQLite reports ``has_select_for_update = False`` and Django silently ignores
-        it there, so the local test suite exercises this path but does NOT prove the
-        lock. Production runs Postgres, where it holds.
-
-        ``is_active`` is one field among several here, not a separate endpoint —
-        deactivating a user is a profile edit like any other, and giving it its own
-        route would mean guarding "last admin" and "revoke tokens" in two places
-        instead of one. Both still apply: turning ``is_active`` off is refused for
-        the platform's last active admin (checked BEFORE anything is written, so a
-        refused request never partially applies), and blacklists every live refresh
-        token on success — same primitive ``AuthService.change_password`` uses, so a
-        deactivated account cannot mint a fresh access token even though the ones
-        already issued keep working until they expire (``JWTAuthentication.get_user``
-        refuses those directly, on every request).
-
-        Args:
-            user_id: Target user.
-            fields: Any of ``email``, ``first_name``, ``last_name``, ``is_active``.
-
-        Returns:
-            The saved ``User``.
-
-        Raises:
-            UserNotFound: no user with that id.
-            EmailTaken: the new email belongs to someone else.
-            LastAdminProtected: ``is_active=False`` and this is the platform's only
-                active admin.
-        """
-        if not fields:  # the serializer rejects this; belt-and-braces for direct calls
+        """Apply profile changes to one user — including, now, ``is_active`` and ``role_ids``."""
+        role_ids = fields.pop("role_ids", None)
+        if not fields and role_ids is None:  # the serializer rejects this; belt-and-braces for direct calls
             raise ValueError("update_user requires at least one field")
 
         user_model = get_user_model()
@@ -233,17 +190,20 @@ class UserService:
                     deactivating = fields["is_active"] is False
                     if deactivating and is_last_active_admin(user):
                         raise LastAdminProtected()
-                for name, value in fields.items():
-                    setattr(user, name, value)
-                user.save(update_fields=list(fields))
+                if fields:
+                    for name, value in fields.items():
+                        setattr(user, name, value)
+                    user.save(update_fields=list(fields))
 
                 if activity_changed:
-                    # get_or_create: a user created before migration 0008 has no
-                    # profile row yet — backfilled here rather than by a data
-                    # migration that would have to touch every historical user.
                     profile, _ = UserProfile.objects.get_or_create(user=user)
                     profile.deleted_at = timezone.now() if deactivating else None
                     profile.save(update_fields=["deleted_at", "updated_at"])
+
+                if role_ids is not None:
+                    self._sync_roles(user, role_ids)
+        except ValueError as exc:
+            raise InvalidRole() from exc
         except IntegrityError as exc:
             # Only email carries a uniqueness rule among the updatable fields.
             conflict = self._classify_conflict(
@@ -273,6 +233,38 @@ class UserService:
         if user is None:
             raise UserNotFound()
         return user
+
+    @staticmethod
+    def _sync_roles(user, role_ids: list[int]) -> None:
+        """Full desired-state replacement of ``user``'s role assignments.
+
+        Raises:
+            ValueError: a ``role_ids`` entry names no active role — translated to
+                the client-safe ``InvalidRole`` by the caller.
+            LastAdminRoleProtected: ``user`` is the platform's last active admin
+                and the new set drops the Admin role. Without this, a plain
+                ``role_ids: []`` (or any list omitting it) on the last admin would
+                silently strip their only RBAC role — the same outcome
+                ``UserRoleService.revoke()`` already refuses one role at a time,
+                which this full-replace path bypassed entirely before this check
+                existed.
+        """
+
+        deduped_ids = list(dict.fromkeys(role_ids))
+        valid_roles = {r.id: r for r in Role.objects.filter(id__in=deduped_ids, is_active=True)}
+        unknown = [rid for rid in deduped_ids if rid not in valid_roles]
+        if unknown:
+            raise ValueError(f"unknown or inactive role_ids: {unknown}")
+
+        if is_last_active_admin(user):
+            admin_role = Role.objects.filter(name__iexact=ADMIN_ROLE_NAME).first()
+            if admin_role is not None and admin_role.pk not in deduped_ids:
+                raise LastAdminRoleProtected()
+
+        UserRole.objects.filter(user=user).delete()
+        to_create = [UserRole(user=user, role=valid_roles[rid]) for rid in deduped_ids]
+        if to_create:
+            UserRole.objects.bulk_create(to_create)
 
     @staticmethod
     def _classify_conflict(username: str, email: str,

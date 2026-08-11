@@ -11,6 +11,7 @@ way and a future RBAC permission check has one place to land.
 from __future__ import annotations
 
 from rest_framework import status
+from ..models import UserRole
 
 from apps.core import api
 from apps.core.messages import MESSAGES
@@ -102,7 +103,11 @@ class UserDetailView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["user"]["retrieved"], public_fields(user))
+        role_ids = list(UserRole.objects.filter(user=user).values_list("role_id", flat=True))
+        return api.success(MESSAGES["user"]["retrieved"], {
+            **public_fields(user),
+            "role_ids": role_ids,
+        })
 
 
 class UserListView(AdminView):

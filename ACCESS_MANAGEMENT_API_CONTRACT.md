@@ -4,15 +4,28 @@ Endpoints served by `apps/access_management`: identity **administration** and
 authorization (RBAC). Sibling document to `AUTH_API_CONTRACT.md`, which owns identity
 **verification** (login/refresh/logout) — obtain your token there, use it here.
 
-**Living document.** §10 lists the RBAC endpoints that do not exist yet. Each one
-moves out of §10 into a real section in the same change that implements it.
+**Living document.** §12 lists the RBAC endpoints that do not exist yet. Each one
+moves out of §12 into a real section in the same change that implements it.
 
 | | |
 |---|---|
 | **Base** | `/api/v1/` |
-| **Implemented now** | **users**: `create` · `detail` · `list` · `update`<br>**roles**: `create` · `detail` · `list` · `update`<br>**permissions**: `list` · `detail` *(read-only)* |
-| **Not built yet** | everything in §10 — role assignment, permission grants, the resolver |
-| **Status** | code + local-test verified (219 tests). Not yet run against the live stack or by a frontend. |
+| **Implemented now** | **users**: `create` · `detail` · `list` · `update`<br>**roles**: `create` · `detail` · `list` · `update`<br>**permissions**: `list` · `detail` *(read-only)*<br>**catalog**: `list` · `detail` *(read-only)*<br>**grants**: `users/roles/{assign,revoke,list}` · `roles/permissions/{grant,revoke,list}` |
+| **Not built yet** | everything in §12 — the resolver and the gates, permission grants, the resolver |
+| **Status** | code + local-test verified (410 tests). Not yet run against the live stack or by a frontend. |
+
+---
+
+> ## ⚠️ Nothing here is enforced yet
+>
+> The full RBAC graph can be built through these endpoints — users hold roles, roles
+> grant permissions on resources. **No request in VEDA is authorized differently as a
+> result.** There is no resolver (nothing traverses the graph) and no gate (nothing
+> acts on it); `/api/v1/query` is as open as it was before any of this existed.
+>
+> Build admin screens against these endpoints. Do **not** build a user-facing
+> experience that implies a permission is being honoured — it is not, yet.
+
 
 ---
 
@@ -88,7 +101,7 @@ Authorization: Bearer <access_token>
 |---|---|---|---|
 | `username` | string | yes | ≤150 chars; letters, digits and `@ . + - _` only (Django's `UnicodeUsernameValidator` — the same rule the database column uses). Unique. |
 | `email` | string | yes | Valid address, ≤254 chars. Unique, **case-insensitively**. |
-| `password` | string | yes | Must pass the project's four configured validators — see §7. Whitespace is **not** trimmed. |
+| `password` | string | yes | Must pass the project's four configured validators — see §9. Whitespace is **not** trimmed. |
 | `first_name` | string | no | ≤150 chars, defaults to `""` |
 | `last_name` | string | no | ≤150 chars, defaults to `""` |
 
@@ -96,7 +109,7 @@ Authorization: Bearer <access_token>
 error — not silently ignored.** `is_staff`, `is_superuser`, `is_active`, `groups`,
 `user_permissions`, `last_login`, `date_joined`, `id`, `pk` all return 400. A caller
 must never believe it created an administrator when it did not. Every user created
-here is active and unprivileged; granting anything more is role assignment (§10).
+here is active and unprivileged; granting anything more is role assignment (§8).
 
 Numbers and booleans are rejected where a string is expected — `{"username": 12345}`
 is a 400, not a user named `"12345"`.
@@ -265,8 +278,8 @@ success: a client that sent no changes almost certainly meant to send some.
 |---|---|
 | `username` | Renaming an identity is its own operation (audit, cache invalidation), not a profile edit |
 | `password` | Password lifecycle lives in `apps/authentication` — and a change there revokes existing tokens (`AUTH_API_CONTRACT.md` §3.1). A second way to set a credential would be a second thing to get wrong |
-| `is_active` | Deactivation/reactivation is its own endpoint (§10) |
-| `is_staff`, `is_superuser`, `groups`, `user_permissions` | Privilege granting is role assignment (§10) |
+| `is_active` | Deactivation/reactivation is its own endpoint (§12) |
+| `is_staff`, `is_superuser`, `groups`, `user_permissions` | Privilege granting is role assignment (§8) |
 
 Any unrecognised key is also a 400 rather than being ignored, so a client cannot
 believe a change took effect when it did not.
@@ -471,7 +484,206 @@ Both endpoints are staff-only (**401** anonymous, **403** non-staff) and POST-on
 
 ---
 
-## 7. Password policy
+## 7. Catalog resources — read-only
+
+The addressable inventory grants point at. Rows are produced by **discovery**
+(`manage.py sync_catalog`) from VEDA's real catalog — never authored through the API.
+
+### 7.1 Resource paths
+
+Full specification: `docs/adr/0001-rbac-resource-path.md`.
+
+```
+<kind>:<source>[:<segment>]*
+
+db:crm_postgres                     the whole source
+db:crm_postgres:employee            one table
+db:crm_postgres:employee:salary     one column
+files:contracts_s3:msa_2024.pdf     one document
+```
+
+- `kind` ∈ `db` · `nosql` · `files` · `lake` — derived from the source's dialect.
+- `source` is the **source name** (unique), not a dialect. There is **no schema
+  segment**: a VEDA source already *is* one schema.
+- Paths are lowercased and canonicalised on write. `DB:CRM` and `db:crm` are one path.
+- Segment charset `[a-z0-9_.-]`. A name containing `:` is unaddressable and is
+  reported by discovery rather than silently skipped.
+
+**Prefix inheritance** works on whole segments, never string prefixes:
+
+```
+db:crm_postgres            covers  db:crm_postgres:employee:salary
+db:crm_postgres            does NOT cover  db:crm_postgres_replica     ← different source
+```
+
+### 7.2 The resource object
+
+```ts
+interface CatalogResource {
+  path: string;
+  kind: "db" | "nosql" | "files" | "lake";
+  parent_path: string;          // "" for a source-level resource
+  source_id: number;
+  substrate_id: string | null;  // the underlying table/column id, if any
+  is_active: boolean;           // false = discovery no longer finds it upstream
+  created_at: string;
+  updated_at: string;
+}
+```
+
+### 7.3 `POST /api/v1/catalog/list`
+
+```json
+{ "page": 1, "page_size": 25, "parent_path": "db:crm_postgres", "kind": "db",
+  "source_id": 3, "search": "employee", "is_active": true, "ordering": "path" }
+```
+
+`parent_path` is **tri-state** and is the tree-navigation control:
+
+| `parent_path` | Returns |
+|---|---|
+| omitted | every resource |
+| `""` | the source-level roots |
+| a path | exactly that node's children |
+
+A lazy admin tree loads one level per call. `ordering`: `id`, `path`, `kind`.
+
+**200** → `{ ..., "data": { "resources": CatalogResource[], "pagination": Pagination } }`
+
+### 7.4 `POST /api/v1/catalog/detail`
+
+```json
+{ "path": "db:crm_postgres:employee" }
+```
+
+**200** → `{ ..., "data": CatalogResource }` · **404** `RESOURCE_NOT_FOUND`.
+
+A path that is not even expressible returns **404**, not 400 — an unaddressable string
+names nothing, and shaping it as a validation error would let a caller probe which
+paths are well-formed.
+
+### 7.5 Staleness is a real state
+
+Discovery is not yet triggered by ingestion (`manage.py sync_catalog` is the current
+surface). Between "a source finished re-ingesting" and "discovery ran", its resources
+are absent from the catalog. A vanished resource is marked `is_active: false`, **never
+deleted** — deleting would silently drop the grants pointing at it.
+
+---
+
+## 8. Grants — who holds what, and what it allows
+
+Two edges complete the RBAC graph:
+
+```
+User ──users/roles/assign──> Role ──roles/permissions/grant──> Permission
+                                            └──> resource_path
+```
+
+### 8.1 Both operations are idempotent
+
+`assign` and `grant` describe a **desired state**, not an event. Repeating them is
+success, so "make sure alice is an analyst" is safe to run twice:
+
+| Outcome | Status |
+|---|---|
+| edge created | **201** |
+| edge already existed | **200** |
+
+`revoke` is always **200**, even for an edge that never existed — the desired end
+state ("does not hold it") is already true. `data.removed` says which happened.
+
+This differs from `users/create` and `roles/create`, which **409** on a duplicate:
+creating implies newness, granting implies membership.
+
+### 8.2 `POST /api/v1/users/roles/{assign,revoke}`
+
+```json
+{ "user_id": 7, "role_id": 3 }
+```
+
+**Assign** → `{ "user_id", "role_id", "granted_by", "created_at" }`
+
+| HTTP | `code` | When |
+|---|---|---|
+| 404 | `USER_NOT_FOUND` / `ROLE_NOT_FOUND` | unknown target *(assign only)* |
+| 409 | `ROLE_INACTIVE` | the role is retired — assigning it would confer authority that is switched off |
+
+An **inactive user** *can* be assigned a role: pre-provisioning is legitimate, and the
+assignment grants nothing until the account is active.
+
+`revoke` deliberately does **not** 404 on unknown targets, so a revoke script does not
+fail on exactly the rows it has nothing to do.
+
+### 8.3 `POST /api/v1/users/roles/list`
+
+```json
+{ "user_id": 7, "role_id": 3, "page": 1, "page_size": 25 }
+```
+
+Both filters optional — `user_id` answers "what does this user hold", `role_id`
+answers "who holds this role", neither returns everything.
+
+### 8.4 `POST /api/v1/roles/permissions/grant`
+
+```json
+{ "role_id": 3, "permission_id": 2,
+  "resource_path": "db:crm_postgres:employee", "effect": "allow" }
+```
+
+| Field | Required | Notes |
+|---|---|---|
+| `role_id`, `permission_id` | yes | must both be **active** |
+| `resource_path` | no | canonical path, or `""` for a permission that is not resource-scoped (`user.manage`) |
+| `effect` | no | `allow` (default) or `deny` |
+
+**Re-granting the same triple with the opposite effect UPDATES it (200), it does not
+add a second row.** `(role, permission, resource_path)` is unique *without* `effect` —
+two rows disagreeing about one triple would make the outcome depend on row order.
+
+Response adds **`resource_exists`**: whether that path is currently a live catalog
+resource. Granting on an undiscovered path is **allowed** (pre-provisioning a source
+that is still ingesting), so this flag is how a typo becomes visible instead of hiding
+until someone wonders why access never worked.
+
+| HTTP | `code` | When |
+|---|---|---|
+| 400 | — | `resource_path` not canonical |
+| 404 | `ROLE_NOT_FOUND` / `PERMISSION_NOT_FOUND` | unknown target |
+| 409 | `ROLE_INACTIVE` / `PERMISSION_INACTIVE` | target switched off |
+
+### 8.5 `POST /api/v1/roles/permissions/{revoke,list}`
+
+`revoke` takes `{role_id, permission_id, resource_path?}` — no `effect`, because there
+is only ever one decision per triple. **Removing a DENY does not create an ALLOW**:
+with nothing matching, default-deny applies.
+
+`list` filters by `role_id`, `permission_id`, `resource_path` and reports
+`resource_exists` for the whole page in one query.
+
+### 8.6 How the decision *will* be made (not built)
+
+Recorded so client-side gating logic matches the server when it arrives:
+
+```
+1. Collect every grant whose path is a prefix-or-equal of the requested resource.
+2. If ANY is deny  -> DENY.
+3. Else if ANY is allow -> ALLOW.
+4. Else -> DENY.                    (absence of a grant is a denial)
+```
+
+**DENY wins globally at any depth.** Consequence: "deny the whole source except one
+table" is not expressible — grant only that table instead.
+
+### 8.7 There is no approval workflow
+
+Assign and grant take effect **immediately**. There is no pending state, no requester,
+no approver, no approve/reject endpoint. `granted_by` records who acted, but nothing
+gates it. Deliberate, and out of scope.
+
+---
+
+## 9. Password policy
 
 Enforced by the project's `AUTH_PASSWORD_VALIDATORS` (`config/settings/base.py`) —
 reused as configured, not reimplemented here:
@@ -493,13 +705,14 @@ client-side and let the server rule on strength.
 
 ---
 
-## 8. TypeScript types
+## 10. TypeScript types
 
 ```ts
 type AccessErrorCode =
   | "USERNAME_TAKEN" | "EMAIL_TAKEN" | "USER_CONFLICT" | "USER_NOT_FOUND"
   | "ROLE_NAME_TAKEN" | "ROLE_NOT_FOUND"
-  | "PERMISSION_NOT_FOUND";
+  | "PERMISSION_NOT_FOUND" | "PERMISSION_INACTIVE"
+  | "ROLE_INACTIVE" | "RESOURCE_NOT_FOUND" | "INVALID_RESOURCE_PATH";
 
 // The shared user object — see §0.
 interface User {
@@ -606,6 +819,60 @@ interface ListPermissionsSuccess {
   status_code: 200; message: string;
   data: { permissions: Permission[]; pagination: Pagination };
 }
+
+type ResourceKind = "db" | "nosql" | "files" | "lake";
+
+interface CatalogResource {
+  path: string;
+  kind: ResourceKind;
+  parent_path: string;
+  source_id: number;
+  substrate_id: string | null;
+  is_active: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+interface ListCatalogRequest {
+  page?: number; page_size?: number; search?: string;
+  is_active?: boolean | null;
+  ordering?: "id" | "path" | "kind" | "-id" | "-path" | "-kind";
+  parent_path?: string | null;   // null = all, "" = roots, path = children
+  kind?: ResourceKind | "";
+  source_id?: number | null;
+}
+interface CatalogDetailRequest { path: string }
+
+interface RoleAssignment {
+  user_id: number;
+  role_id: number;
+  granted_by: number | null;
+  created_at: string;
+}
+
+interface PermissionGrant {
+  role_id: number;
+  permission_id: number;
+  resource_path: string;          // "" = not resource-scoped
+  effect: "allow" | "deny";
+  resource_exists: boolean;       // false = granted on a path the catalog lacks
+  granted_by: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AssignRoleRequest { user_id: number; role_id: number }
+interface GrantPermissionRequest {
+  role_id: number;
+  permission_id: number;
+  resource_path?: string;
+  effect?: "allow" | "deny";
+}
+//  assign/grant -> 201 when created, 200 when it already existed
+//  revoke       -> 200 always, data.removed says which
+interface RevokeSuccess {
+  status_code: 200; message: string; data: { removed: boolean };
+}
 interface CreateUserConflict {
   status_code: 409; message: string; code: AccessErrorCode;
 }
@@ -617,7 +884,7 @@ interface ValidationFailure {
 
 ---
 
-## 9. Operational note — there is no bootstrap path
+## 11. Operational note — there is no bootstrap path
 
 This endpoint requires an existing **staff** account, and creates only
 non-staff accounts. It therefore cannot produce the first administrator.
@@ -629,7 +896,7 @@ phase.
 
 ---
 
-## 10. Not built yet
+## 12. Not built yet
 
 Nothing below exists. Do not code against these shapes — this is a scope list, not a
 contract. There is still **no authorization layer**: no roles, no permissions, and no
@@ -661,11 +928,13 @@ for up to `expires_in` after a role change).
 
 ---
 
-## 11. Revision history
+## 13. Revision history
 
 | Date | Change |
 |---|---|
 | 2026-08-05 | Initial contract: `POST /api/v1/users`. Split out of `AUTH_API_CONTRACT.md` §7, which now points here for user management. |
+| 2026-08-06 (grants) | Added §8 — `users/roles/{assign,revoke,list}` and `roles/permissions/{grant,revoke,list}`. Idempotent (201 new / 200 existing), one decision per `(role, permission, resource)` triple, no approval workflow. The RBAC graph is now complete — and still unenforced. |
+| 2026-08-06 (catalog) | Added §7 — resource paths (ADR-0001) and the read-only `catalog/{list,detail}` projection, populated by `manage.py sync_catalog`. |
 | 2026-08-06 (permissions) | Added §6 — the read-only permission catalogue on a new `access_management_permission` table, seeded by migration 0004. No write endpoints: only code can enforce a permission. Roles remain the admin-composable layer. |
 | 2026-08-06 (roles) | Added §5 — role management (`create`/`detail`/`list`/`update`) on a new `access_management_role` table. No `roles/delete`: retirement is `update {is_active:false}`. Paging contract now shared with `users/list`, so both answer identically. |
 | 2026-08-05 (detail) | Added §2 `users/detail`. `apps/access_management` restructured into `serializers/`, `services/`, `views/`, `urls/` packages (one module per domain) so roles and permissions can land beside users — no endpoint behaviour changed. |

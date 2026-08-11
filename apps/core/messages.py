@@ -53,6 +53,7 @@ MESSAGES = {
         "deleted": "Role deleted successfully.",
         "invalid_grant": ("Some of the permissions or resource grants in this "
                           "request are invalid."),
+        "invalid_role": "One or more specified roles do not exist or are inactive.",
     },
     "permission": {
         "retrieved": "Permission retrieved successfully.",

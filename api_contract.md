@@ -12,7 +12,7 @@ This document is the authoritative V1 contract for the VEDA RBAC flow.
 ```text
 Admin connects a data source
   → Admin creates a role and selects permitted resources
-  → Admin creates a user and assigns exactly one role
+  → Admin creates a user and assigns one or more roles
   → User logs into Chatbot
   → Backend permits or rejects protected-data access using the current role grants
 ```
@@ -25,7 +25,8 @@ The frontend manages forms and renders backend results. Authorization decisions,
 
 The following decisions are fixed for V1:
 
-1. A user has exactly one assigned role.
+1. A user may hold multiple roles; effective permissions are the union of every
+   assigned role's grants (`users/roles/assign` does not replace a prior role).
 2. A role may exist with no permissions; empty permissions mean no data access.
 3. Permissions are binary. V1 does not expose `READ`, `QUERY`, `DOWNLOAD`, or deny actions.
 4. A grant applies either to one exact resource or to a resource and its descendants.
@@ -62,7 +63,7 @@ Platform privilege:
   Admin account → may use Admin APIs
 
 Data-access role:
-  Chatbot user → exactly one role containing source/resource grants
+  Chatbot user → one or more roles, each containing source/resource grants
 ```
 
 V1 Admin provisioning rules:
@@ -1331,7 +1332,8 @@ POST /api/v1/users/create
   "email": "alice@example.com",
   "password": "permanent-initial-password",
   "first_name": "Alice",
-  "last_name": "Smith"
+  "last_name": "Smith",
+  "role_ids": [1, 2]
 }
 ```
 
@@ -1339,10 +1341,9 @@ POST /api/v1/users/create
 - `email` is required, validated as a proper email address.
 - `password` is required, write-only, validated against `AUTH_PASSWORD_VALIDATORS` (including `UserAttributeSimilarityValidator` against the submitted username/email).
 - `first_name` and `last_name` are optional, default to `""`.
-- Non-string values for any field (e.g. `{"username": 12345}`) are rejected.
+- `role_ids` is optional list of integer role IDs to assign atomically on creation.
+- Non-string values for textual fields are rejected.
 - Privileged fields (`is_staff`, `is_superuser`, `is_active`, `groups`, `user_permissions`, `last_login`, `date_joined`, `password_hash`, `id`, `pk`) are rejected with `"This field cannot be set through this endpoint."`.
-
-Roles are assigned separately via `POST /api/v1/users/roles/assign`.
 
 ```http
 201 Created
@@ -1383,14 +1384,13 @@ GET /api/v1/users/detail?user_id=101
     "is_active": true,
     "is_staff": false,
     "date_joined": "2026-07-31T10:00:00Z",
-    "last_login": "2026-08-01T08:00:00Z"
+    "last_login": "2026-08-01T08:00:00Z",
+    "role_ids": [1, 2]
   }
 }
 ```
 
-Same projection as list — the `public_fields()` shape. The response never contains a password or password hash.
-
-Role assignments are loaded separately via `GET /api/v1/users/roles/list?user_id=101`.
+Returns user metadata along with `role_ids` — the list of role IDs currently assigned (empty list if none) for pre-filling Admin UI edit modals. The response never contains a password or password hash.
 
 **Errors:**
 
@@ -1411,13 +1411,14 @@ POST /api/v1/users/update
   "email": "alice.new@example.com",
   "first_name": "Alice New",
   "last_name": "Smith",
-  "is_active": false
+  "is_active": false,
+  "role_ids": [1, 2]
 }
 ```
 
 **Partial update** — only the fields present (besides `user_id`) are written. At least one updatable field must be provided.
 
-Updatable fields: `email`, `first_name`, `last_name`, `is_active`.
+Updatable fields: `email`, `first_name`, `last_name`, `is_active`, `role_ids`.
 
 Deliberately excluded (and rejected if submitted):
 - `username` — renaming an identity is a separate concern.
@@ -1817,7 +1818,7 @@ GET role details
 Open Create User
 → load /roles/available
 → enter email, username, permanent password and confirmation
-→ select exactly one role
+→ select one or more roles
 → disable Create while saving
 → POST user
 → clear password fields
@@ -1881,7 +1882,7 @@ Delete → confirm → DELETE user → refresh users
 
 ### Users
 
-- [ ] User creation requires exactly one assignable role.
+- [ ] User creation requires at least one assignable role; more than one may be held at once.
 - [ ] Password is permanent, write-only, and never returned.
 - [ ] Updating a user and replacing their role is one request.
 - [ ] Users can be activated and deactivated.

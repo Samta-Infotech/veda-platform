@@ -1025,6 +1025,27 @@ def test_update_with_no_fields_and_no_grants_still_requires_something(role_id):
         RoleService().update_role(role_id)
 
 
+def test_a_grants_only_update_still_bumps_updated_at(role_id):
+    """A request carrying only permission_ids/resource_grants (no name/description/
+    is_active) still changes the role — updated_at must reflect that, or "last
+    updated" sorting/display would silently lie about the most recent write.
+
+    Backdates updated_at via .update() (bypasses auto_now) rather than sleeping, so
+    the assertion does not depend on wall-clock/DB timestamp precision.
+    """
+    from datetime import timedelta
+
+    from django.utils import timezone
+
+    stale = timezone.now() - timedelta(days=1)
+    Role.objects.filter(pk=role_id).update(updated_at=stale)
+
+    read = Permission.objects.get(code="data.read")
+    RoleService().update_role(role_id, permission_ids=[read.pk])
+
+    assert Role.objects.get(pk=role_id).updated_at > stale
+
+
 def test_create_role_with_grants_atomically():
     role = RoleService().create_role(
         name="Grant On Create", resource_grants=[{"resource_path": "db:crm", "effect": "allow"}])

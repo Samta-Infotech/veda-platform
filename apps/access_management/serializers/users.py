@@ -74,6 +74,8 @@ class UserCreateSerializer(serializers.Serializer):
         max_length=_FIRST_NAME.max_length, required=False, allow_blank=True, default="")
     last_name = serializers.CharField(
         max_length=_LAST_NAME.max_length, required=False, allow_blank=True, default="")
+    role_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_empty=True)
 
     def validate(self, attrs):
         self._reject_non_string_fields()
@@ -184,10 +186,12 @@ class UserUpdateSerializer(serializers.Serializer):
     last_name = serializers.CharField(
         max_length=_LAST_NAME.max_length, required=False, allow_blank=True)
     is_active = serializers.BooleanField(required=False)
+    role_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, allow_empty=True)
 
     #: Fields this endpoint may actually write — ``user_id`` selects the row, it is
     #: not a change. Used by the view to split the target from the changes.
-    UPDATABLE_FIELDS = ("email", "first_name", "last_name", "is_active")
+    UPDATABLE_FIELDS = ("email", "first_name", "last_name", "is_active", "role_ids")
 
     def validate(self, attrs):
         self._reject_unknown_and_privileged()

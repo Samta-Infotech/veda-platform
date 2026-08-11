@@ -233,6 +233,44 @@ def test_optional_names_may_be_omitted(admin_client):
     assert (user.first_name or user.username) == "minimal"
 
 
+def test_create_can_assign_roles_atomically(admin_client):
+    role_a = Role.objects.create(name="Data Analyst")
+    role_b = Role.objects.create(name="Reviewer")
+
+    response = _create(admin_client, role_ids=[role_a.pk, role_b.pk])
+
+    assert response.status_code == 201
+    user = get_user_model().objects.get(username="jdoe")
+    assert set(UserRole.objects.filter(user=user).values_list("role_id", flat=True)) == {
+        role_a.pk, role_b.pk}
+
+
+def test_create_omitting_role_ids_leaves_the_user_roleless(admin_client):
+    _create(admin_client)
+
+    user = get_user_model().objects.get(username="jdoe")
+    assert not UserRole.objects.filter(user=user).exists()
+
+
+def test_create_rejects_an_unknown_role_id(admin_client):
+    """The whole call is one transaction — an invalid role must not leave a
+    half-created user with no roles."""
+    response = _create(admin_client, role_ids=[999_999])
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_ROLE"
+    assert not get_user_model().objects.filter(username="jdoe").exists()
+
+
+def test_create_rejects_a_retired_role_id(admin_client):
+    retired = Role.objects.create(name="Retired Role", is_active=False)
+
+    response = _create(admin_client, role_ids=[retired.pk])
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_ROLE"
+
+
 # ---------------------------------------------------------------------------
 # Access control
 # ---------------------------------------------------------------------------
@@ -815,7 +853,9 @@ def test_detail_uses_the_same_projection_as_create_and_list(admin_client):
     different shape from the row that was clicked. ``list`` carries a few extra
     admin-table fields on top (``LIST_EXTRA_FIELDS``) but must not disagree with
     ``detail`` about any field the two share. ``create`` is out of scope here — it
-    returns no ``data`` at all, by design."""
+    returns no ``data`` at all, by design. ``role_ids`` is detail-only, mirroring
+    ``permission_ids`` on ``RoleDetailView`` — an edit-form's-worth of ids, not part
+    of the base shared projection."""
     _create(admin_client)
     user_id = get_user_model().objects.get(username="jdoe").pk
 
@@ -823,9 +863,11 @@ def test_detail_uses_the_same_projection_as_create_and_list(admin_client):
     listed = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
                   if u["user_id"] == user_id)
 
-    assert set(detail) == PUBLIC_FIELDS
+    assert set(detail) == PUBLIC_FIELDS | {"role_ids"}
+    assert detail["role_ids"] == []
     assert set(listed) == PUBLIC_FIELDS | LIST_EXTRA_FIELDS
-    assert {k: v for k, v in listed.items() if k in PUBLIC_FIELDS} == detail
+    shared_detail = {k: v for k, v in detail.items() if k != "role_ids"}
+    assert {k: v for k, v in listed.items() if k in PUBLIC_FIELDS} == shared_detail
 
 
 def test_detail_never_exposes_the_password_hash(admin_client):
@@ -1059,6 +1101,102 @@ def test_service_update_requires_at_least_one_field(target):
 
     with pytest.raises(ValueError):
         Svc().update_user(target)
+
+
+def test_update_with_only_user_id_is_a_400_not_a_500(admin_client, target):
+    """Regression: role_ids briefly carried a serializer-level default that made it
+    always present in validated data, which broke the "provide at least one field"
+    guard for every update (not just role_ids-only ones) and let a bare
+    ``{"user_id": ...}`` reach the service layer's own ValueError unhandled."""
+    response = _update(admin_client, user_id=target)
+
+    assert response.status_code == 400
+    assert "detail" in response.json()["errors"]
+
+
+def test_update_role_ids_is_a_full_replace(admin_client, target):
+    role_a = Role.objects.create(name="Data Analyst")
+    role_b = Role.objects.create(name="Reviewer")
+    _update(admin_client, user_id=target, role_ids=[role_a.pk])
+
+    response = _update(admin_client, user_id=target, role_ids=[role_b.pk])
+
+    assert response.status_code == 200
+    assert "data" not in response.json()
+    assert set(UserRole.objects.filter(user_id=target).values_list("role_id", flat=True)) == {
+        role_b.pk}
+
+
+def test_update_role_ids_to_empty_list_clears_every_role(admin_client, target):
+    role_a = Role.objects.create(name="Data Analyst")
+    _update(admin_client, user_id=target, role_ids=[role_a.pk])
+
+    _update(admin_client, user_id=target, role_ids=[])
+
+    assert not UserRole.objects.filter(user_id=target).exists()
+
+
+def test_update_role_ids_alone_needs_no_other_field(admin_client, target):
+    """role_ids is a real, independently-sufficient update — not something that
+    must ride along with a profile-field change to take effect."""
+    role_a = Role.objects.create(name="Data Analyst")
+
+    response = _update(admin_client, user_id=target, role_ids=[role_a.pk])
+
+    assert response.status_code == 200
+    assert UserRole.objects.filter(user_id=target, role=role_a).exists()
+
+
+def test_update_rejects_an_unknown_role_id(admin_client, target):
+    response = _update(admin_client, user_id=target, role_ids=[999_999])
+
+    assert response.status_code == 400
+    assert response.json()["code"] == "INVALID_ROLE"
+
+
+def test_update_role_ids_from_the_last_admin_must_keep_the_admin_role(admin_client):
+    """The regression this was built to close: role_ids is a full-replace path
+    just like RoleService._sync_grants — before this guard existed, dropping the
+    Admin role via role_ids (e.g. an empty list, or any list that omits it)
+    silently succeeded on the platform's last active admin, the exact outcome
+    UserRoleService.revoke() already refuses one role at a time."""
+    from apps.access_management.services import ADMIN_ROLE_NAME, CODE_LAST_ADMIN_ROLE_PROTECTED
+
+    admin_user = get_user_model().objects.get(username="root")
+    admin_role = Role.objects.get(name__iexact=ADMIN_ROLE_NAME)
+    other_role = Role.objects.create(name="Data Analyst")
+    UserRole.objects.create(user=admin_user, role=admin_role)
+
+    response = _update(admin_client, user_id=admin_user.pk, role_ids=[other_role.pk])
+
+    assert response.status_code == 409
+    assert response.json()["code"] == CODE_LAST_ADMIN_ROLE_PROTECTED
+    assert UserRole.objects.filter(user=admin_user, role=admin_role).exists()
+    assert not UserRole.objects.filter(user=admin_user, role=other_role).exists()
+
+
+def test_update_role_ids_from_the_last_admin_succeeds_if_the_admin_role_stays(admin_client):
+    from apps.access_management.services import ADMIN_ROLE_NAME
+
+    admin_user = get_user_model().objects.get(username="root")
+    admin_role = Role.objects.get(name__iexact=ADMIN_ROLE_NAME)
+    other_role = Role.objects.create(name="Data Analyst")
+
+    response = _update(
+        admin_client, user_id=admin_user.pk, role_ids=[admin_role.pk, other_role.pk])
+
+    assert response.status_code == 200
+    assert set(UserRole.objects.filter(user=admin_user).values_list("role_id", flat=True)) == {
+        admin_role.pk, other_role.pk}
+
+
+def test_update_role_ids_guard_does_not_apply_to_a_non_admin_user(admin_client, target):
+    """The guard is scoped to the platform's last active admin — an ordinary user
+    clearing their own roles is never blocked by it."""
+    response = _update(admin_client, user_id=target, role_ids=[])
+
+    assert response.status_code == 200
+    assert not UserRole.objects.filter(user_id=target).exists()
 
 
 # ---------------------------------------------------------------------------
