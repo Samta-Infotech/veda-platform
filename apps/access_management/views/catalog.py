@@ -9,7 +9,11 @@ from apps.core import api
 from apps.core.messages import MESSAGES
 
 from ..codes import PermissionCode
-from ..serializers import CatalogResourceDetailSerializer, CatalogResourceListSerializer
+from ..serializers import (
+    CatalogResourceDetailSerializer,
+    CatalogResourceListSerializer,
+    CatalogTreeSerializer,
+)
 from ..services import AccessManagementError, CatalogService
 from .base import AdminView, pagination_payload
 
@@ -78,3 +82,23 @@ class CatalogDetailView(AdminView):
 
         return api.success(MESSAGES["catalog"]["retrieved"],
                            public_fields(resource))
+
+
+class CatalogTreeView(AdminView):
+    """GET /api/v1/catalog/tree?role_id=&category=&parent_path=&search=
+
+    Hierarchical catalog tree projection with optional role permissions resolution.
+    """
+
+    serializer_class = CatalogTreeSerializer
+    action = "catalog tree"
+    required_permission = PermissionCode.PERMISSION_READ
+
+    def get(self, request):
+        data, failure = self.validate(request)
+        if failure:
+            return failure
+
+        tree_data = CatalogService(request).get_tree(**data)
+        return api.success(MESSAGES["catalog"]["list"], tree_data)
+

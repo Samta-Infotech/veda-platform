@@ -9,17 +9,18 @@ from apps.core import api
 from apps.core.messages import MESSAGES
 
 from ..codes import PermissionCode
-from ..serializers import PermissionDetailSerializer, PermissionListSerializer
+from ..serializers import (
+    PermissionDetailSerializer,
+    PermissionDropdownSerializer,
+    PermissionListSerializer,
+)
 from ..services import AccessManagementError, PermissionService
 from .base import AdminView, pagination_payload
 
 
 def public_fields(permission) -> dict:
-    """What a caller may see of a permission — the ONE projection for both endpoints.
 
-    An explicit projection, not a model dump, so a column added by a future migration
-    cannot leak into responses by accident.
-    """
+    """What a caller may see of a permission — the ONE projection for both endpoints."""
     return {
         "permission_id": permission.pk,
         "code": permission.code,
@@ -32,11 +33,7 @@ def public_fields(permission) -> dict:
 
 
 class PermissionListView(AdminView):
-    """GET /api/v1/permissions/list?page=&page_size=&search=&is_active=&ordering=
-
-    The catalogue a role screen renders to ask "what can I grant?". Read-only,
-    so GET only — cacheable/bookmarkable/safely-retryable, unlike POST.
-    """
+    """GET /api/v1/permissions/list?page=&page_size=&search=&is_active=&ordering="""
 
     serializer_class = PermissionListSerializer
     action = "permission list"
@@ -74,4 +71,23 @@ class PermissionDetailView(AdminView):
             return self.failure(request, exc)
 
         return api.success(MESSAGES["permission"]["retrieved"], public_fields(permission))
+
+
+class PermissionDropdownView(AdminView):
+    """GET /api/v1/permissions/dropdown -> unpaginated list of active permissions."""
+
+    serializer_class = PermissionDropdownSerializer
+    action = "permission dropdown"
+    required_permission = PermissionCode.PERMISSION_READ
+
+    def get(self, request):
+        """Return all active permissions, unpaginated."""
+        permissions = PermissionService(request).list_active_permissions()
+
+        data = [{"label": p.code, "value": p.pk} for p in permissions]
+        return api.success(MESSAGES["permission"]["list"], data)
+
+
+
+
 

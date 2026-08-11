@@ -179,12 +179,12 @@ def test_admin_creates_a_user(admin_client):
     body = response.json()
     assert body["status_code"] == 201
     assert body["message"] == "User created successfully."
-    data = body["data"]
-    assert data["username"] == "jdoe"
-    assert data["email"] == "j.doe@example.com"
-    assert data["display_name"] == "Jane"
-    assert data["is_active"] is True
-    assert isinstance(data["user_id"], int)
+    assert "data" not in body
+
+    user = get_user_model().objects.get(username="jdoe")
+    assert user.email == "j.doe@example.com"
+    assert user.first_name == "Jane"
+    assert user.is_active is True
 
 
 @override_settings(PASSWORD_HASHERS=PRODUCTION_HASHERS)
@@ -220,7 +220,7 @@ def test_response_never_exposes_the_password_or_flags(admin_client):
     serialized = str(body)
     assert NEW_PASSWORD not in serialized
     assert "pbkdf2" not in serialized
-    assert set(body["data"]) == PUBLIC_FIELDS
+    assert "data" not in body
 
 
 def test_optional_names_may_be_omitted(admin_client):
@@ -229,7 +229,8 @@ def test_optional_names_may_be_omitted(admin_client):
 
     assert response.status_code == 201
     # display_name falls back to the username, matching what login returns.
-    assert response.json()["data"]["display_name"] == "minimal"
+    user = get_user_model().objects.get(username="minimal")
+    assert (user.first_name or user.username) == "minimal"
 
 
 # ---------------------------------------------------------------------------
@@ -703,56 +704,63 @@ def test_list_costs_two_queries_regardless_of_page_size(admin_client, population
 
 
 def test_list_roles_reflects_actual_assignments(admin_client):
-    created = _create(admin_client).json()["data"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
     role_a = Role.objects.create(name="Data Analyst")
     role_b = Role.objects.create(name="Reviewer")
-    UserRole.objects.create(user_id=created["user_id"], role=role_a)
-    UserRole.objects.create(user_id=created["user_id"], role=role_b)
+    UserRole.objects.create(user_id=user_id, role=role_a)
+    UserRole.objects.create(user_id=user_id, role=role_b)
 
     row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
-              if u["user_id"] == created["user_id"])
+              if u["user_id"] == user_id)
 
-    assert {r["id"] for r in row["roles"]} == {role_a.pk, role_b.pk}
-    assert {r["name"] for r in row["roles"]} == {"Data Analyst", "Reviewer"}
+    # UserRoleService.roles_for_users returns {user_id: [role_name, ...]} — plain
+    # names, not id/name dicts (see its own docstring); this was already the
+    # documented, real shape, not something this session's cleanup changed.
+    assert set(row["roles"]) == {"Data Analyst", "Reviewer"}
 
 
 def test_list_roles_is_empty_for_an_unassigned_user(admin_client):
-    created = _create(admin_client).json()["data"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
 
     row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
-              if u["user_id"] == created["user_id"])
+              if u["user_id"] == user_id)
 
     assert row["roles"] == []
 
 
 def test_deactivating_a_user_sets_deleted_at(admin_client):
-    created = _create(admin_client).json()["data"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
 
-    _update(admin_client, user_id=created["user_id"], is_active=False)
+    _update(admin_client, user_id=user_id, is_active=False)
 
     row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
-              if u["user_id"] == created["user_id"])
+              if u["user_id"] == user_id)
     assert row["deleted_at"] is not None
 
 
 def test_reactivating_a_user_clears_deleted_at(admin_client):
-    created = _create(admin_client).json()["data"]
-    _update(admin_client, user_id=created["user_id"], is_active=False)
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
+    _update(admin_client, user_id=user_id, is_active=False)
 
-    _update(admin_client, user_id=created["user_id"], is_active=True)
+    _update(admin_client, user_id=user_id, is_active=True)
 
     row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
-              if u["user_id"] == created["user_id"])
+              if u["user_id"] == user_id)
     assert row["deleted_at"] is None
 
 
 def test_a_new_user_has_no_deleted_at_and_a_real_updated_at(admin_client):
     """create_user() creates the profile row in the same unit of work — no user
     ever has to wait for its first deactivation before ``updated_at`` is real."""
-    created = _create(admin_client).json()["data"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
 
     row = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
-              if u["user_id"] == created["user_id"])
+              if u["user_id"] == user_id)
 
     assert row["deleted_at"] is None
     assert row["updated_at"] != ""
@@ -790,9 +798,10 @@ def _detail(client, **body):
 
 
 def test_detail_returns_one_user(admin_client):
-    created = _create(admin_client).json()["data"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
 
-    response = _detail(admin_client, user_id=created["user_id"])
+    response = _detail(admin_client, user_id=user_id)
 
     assert response.status_code == 200
     body = response.json()
@@ -805,24 +814,26 @@ def test_detail_uses_the_same_projection_as_create_and_list(admin_client):
     """One user representation across the API — opening a row must not return a
     different shape from the row that was clicked. ``list`` carries a few extra
     admin-table fields on top (``LIST_EXTRA_FIELDS``) but must not disagree with
-    ``detail``/``create`` about any field the three share."""
-    created = _create(admin_client).json()["data"]
+    ``detail`` about any field the two share. ``create`` is out of scope here — it
+    returns no ``data`` at all, by design."""
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
 
-    detail = _detail(admin_client, user_id=created["user_id"]).json()["data"]
+    detail = _detail(admin_client, user_id=user_id).json()["data"]
     listed = next(u for u in _list(admin_client, page_size=100).json()["data"]["users"]
-                  if u["user_id"] == created["user_id"])
+                  if u["user_id"] == user_id)
 
     assert set(detail) == PUBLIC_FIELDS
     assert set(listed) == PUBLIC_FIELDS | LIST_EXTRA_FIELDS
-    assert detail == created
     assert {k: v for k, v in listed.items() if k in PUBLIC_FIELDS} == detail
 
 
 def test_detail_never_exposes_the_password_hash(admin_client):
-    created = _create(admin_client).json()["data"]
-    stored = get_user_model().objects.get(pk=created["user_id"]).password
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
+    stored = get_user_model().objects.get(pk=user_id).password
 
-    body = str(_detail(admin_client, user_id=created["user_id"]).json())
+    body = str(_detail(admin_client, user_id=user_id).json())
 
     assert stored not in body
     assert "password" not in body
@@ -850,7 +861,8 @@ def test_detail_rejects_a_malformed_body(admin_client, body):
 
 def test_detail_reflects_a_prior_update(admin_client):
     """Reads the committed row, not a cache."""
-    user_id = _create(admin_client).json()["data"]["user_id"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
     _update(admin_client, user_id=user_id, first_name="Janet")
 
     assert _detail(admin_client, user_id=user_id).json()["data"]["display_name"] == "Janet"
@@ -862,7 +874,8 @@ def test_detail_costs_one_query(admin_client):
 
     from apps.access_management.services import UserService
 
-    user_id = _create(admin_client).json()["data"]["user_id"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
 
     with CaptureQueriesContext(connection) as ctx:
         UserService().get_user(user_id)
@@ -871,7 +884,8 @@ def test_detail_costs_one_query(admin_client):
 
 
 def test_detail_requires_staff(plain_user, admin_client):
-    user_id = _create(admin_client).json()["data"]["user_id"]
+    _create(admin_client)
+    user_id = get_user_model().objects.get(username="jdoe").pk
     client = Client()
     client.force_login(plain_user)
 
@@ -895,7 +909,8 @@ def _delete(client, **body):
 @pytest.fixture
 def target(admin_client):
     """A user created through the API, to be updated."""
-    return _create(admin_client).json()["data"]["user_id"]
+    _create(admin_client)
+    return get_user_model().objects.get(username="jdoe").pk
 
 
 def test_update_changes_profile_fields(admin_client, target):
@@ -903,9 +918,7 @@ def test_update_changes_profile_fields(admin_client, target):
                        last_name="Doherty", email="janet@example.com")
 
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["display_name"] == "Janet"
-    assert data["email"] == "janet@example.com"
+    assert "data" not in response.json()
 
     user = get_user_model().objects.get(pk=target)
     assert (user.first_name, user.last_name, user.email) == (
@@ -922,10 +935,10 @@ def test_update_is_partial(admin_client, target):
     assert user.email == "j.doe@example.com"          # untouched
 
 
-def test_update_returns_the_shared_projection(admin_client, target):
+def test_update_returns_no_data(admin_client, target):
     body = _update(admin_client, user_id=target, first_name="Janet").json()
 
-    assert set(body["data"]) == PUBLIC_FIELDS
+    assert "data" not in body
     assert "pbkdf2" not in str(body)
 
 

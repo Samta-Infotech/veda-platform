@@ -78,3 +78,9 @@ class PermissionService:
         if permission is None:
             raise PermissionNotFound()
         return permission
+
+    def list_active_permissions(self) -> list[Permission]:
+        """Every active permission — for a picker/dropdown in the admin UI."""
+        return list(Permission.objects.filter(is_active=True).order_by("code")
+                    .only("id", "code", "name", "description"))
+

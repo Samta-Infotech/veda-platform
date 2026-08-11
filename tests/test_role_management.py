@@ -171,18 +171,19 @@ def test_admin_creates_a_role(admin_client):
     assert response.status_code == 201
     body = response.json()
     assert body["message"] == "Role created successfully."
-    data = body["data"]
-    assert data["name"] == "Data Analyst"
-    assert data["description"] == "Reads dashboards."
-    assert data["is_active"] is True
-    assert isinstance(data["role_id"], int)
-    assert set(data) == PUBLIC_FIELDS
+    # create returns no data at all (2026-08-09) — a client that needs the new
+    # role's id looks it up via roles/list or roles/dropdown.
+    assert "data" not in body
+
+    role = Role.objects.get(name="Data Analyst")
+    assert role.description == "Reads dashboards."
+    assert role.is_active is True
 
 
 def test_created_role_is_persisted(admin_client):
-    role_id = _create(admin_client).json()["data"]["role_id"]
+    _create(admin_client)
 
-    role = Role.objects.get(pk=role_id)
+    role = Role.objects.get(name="Data Analyst")
     assert role.name == "Data Analyst"
     assert role.is_active is True
     assert role.created_at is not None
@@ -193,7 +194,7 @@ def test_description_is_optional(admin_client):
                                  content_type="application/json")
 
     assert response.status_code == 201
-    assert response.json()["data"]["description"] == ""
+    assert Role.objects.get(name="Minimal").description == ""
 
 
 def test_role_name_is_trimmed(admin_client):
@@ -201,7 +202,8 @@ def test_role_name_is_trimmed(admin_client):
     every human reading the list."""
     response = _create(admin_client, name="  Spaced Out  ")
 
-    assert response.json()["data"]["name"] == "Spaced Out"
+    assert response.status_code == 201
+    assert Role.objects.filter(name="Spaced Out").exists()
 
 
 # ---------------------------------------------------------------------------
@@ -244,7 +246,8 @@ def test_uniqueness_is_enforced_by_the_database(admin_client):
 def test_a_retired_role_still_holds_its_name(admin_client):
     """Deactivation is not deletion: the name stays taken, so a new role cannot
     silently shadow a retired one in the audit history."""
-    role_id = _create(admin_client).json()["data"]["role_id"]
+    _create(admin_client)
+    role_id = Role.objects.get(name="Data Analyst").pk
     _update(admin_client, role_id=role_id, is_active=False)
 
     response = _create(admin_client)
@@ -305,13 +308,17 @@ def test_create_rejects_a_non_object_body(admin_client):
 
 
 def test_detail_returns_one_role(admin_client):
-    created = _create(admin_client).json()["data"]
+    _create(admin_client)
+    role = Role.objects.get(name="Data Analyst")
 
-    response = _detail(admin_client, role_id=created["role_id"])
+    response = _detail(admin_client, role_id=role.pk)
 
     assert response.status_code == 200
     assert response.json()["message"] == "Role retrieved successfully."
-    assert response.json()["data"] == created
+    from apps.access_management.views.roles import public_fields as _role_public_fields
+    data = response.json()["data"]
+    assert data == {**_role_public_fields(role), "permission_ids": data["permission_ids"]}
+    assert data["permission_ids"] == []
 
 
 def test_detail_of_a_missing_role_is_404(admin_client):
@@ -512,14 +519,13 @@ def test_dropdown_returns_every_active_role_unpaginated(admin_client, population
     assert response.status_code == 200
     assert response.json()["message"] == "Roles retrieved successfully."
     body = response.json()["data"]
-    assert "pagination" not in body
-    assert len(body["roles"]) == Role.objects.filter(is_active=True).count()
+    assert len(body) == Role.objects.filter(is_active=True).count()
 
 
 def test_dropdown_excludes_retired_roles(admin_client, population):
     body = _dropdown(admin_client).json()["data"]
 
-    returned_ids = {row["role_id"] for row in body["roles"]}
+    returned_ids = {row["value"] for row in body}
     retired_ids = set(Role.objects.filter(is_active=False).values_list("id", flat=True))
 
     assert returned_ids.isdisjoint(retired_ids)
@@ -539,9 +545,9 @@ def test_dropdown_service_includes_a_newly_created_role():
 def test_dropdown_projection_via_api(admin_client):
     Role.objects.create(name="Data Analyst", description="Reads dashboards.")
 
-    row = _dropdown(admin_client).json()["data"]["roles"][0]
+    row = _dropdown(admin_client).json()["data"][0]
 
-    assert set(row) == {"role_id", "name"}
+    assert set(row) == {"label", "value"}
 
 
 def test_dropdown_is_ordered_by_name(admin_client):
@@ -549,9 +555,9 @@ def test_dropdown_is_ordered_by_name(admin_client):
     Role.objects.create(name="Alpha")
     Role.objects.create(name="Mu")
 
-    names = [row["name"] for row in _dropdown(admin_client).json()["data"]["roles"]]
+    labels = [row["label"] for row in _dropdown(admin_client).json()["data"]]
 
-    assert names == sorted(names)
+    assert labels == sorted(labels)
 
 
 def test_dropdown_requires_staff():
@@ -581,7 +587,8 @@ def test_dropdown_costs_one_query(admin_client, population):
 
 @pytest.fixture
 def role_id(admin_client):
-    return _create(admin_client).json()["data"]["role_id"]
+    _create(admin_client)
+    return Role.objects.get(name="Data Analyst").pk
 
 
 def test_update_changes_fields(admin_client, role_id):
@@ -589,9 +596,9 @@ def test_update_changes_fields(admin_client, role_id):
                        description="Reads and exports.")
 
     assert response.status_code == 200
-    data = response.json()["data"]
-    assert data["name"] == "Senior Analyst"
-    assert data["description"] == "Reads and exports."
+    role = Role.objects.get(pk=role_id)
+    assert role.name == "Senior Analyst"
+    assert role.description == "Reads and exports."
 
 
 def test_update_is_partial(admin_client, role_id):
@@ -618,7 +625,6 @@ def test_update_retires_a_role(admin_client, role_id):
     response = _update(admin_client, role_id=role_id, is_active=False)
 
     assert response.status_code == 200
-    assert response.json()["data"]["is_active"] is False
     assert Role.objects.get(pk=role_id).is_active is False
 
 
@@ -632,7 +638,7 @@ def test_a_retired_role_can_be_reactivated(admin_client, role_id):
 def test_retiring_a_role_sets_deleted_at(admin_client, role_id):
     response = _update(admin_client, role_id=role_id, is_active=False)
 
-    assert response.json()["data"]["deleted_at"] is not None
+    assert response.status_code == 200
     assert Role.objects.get(pk=role_id).deleted_at is not None
 
 
@@ -641,7 +647,7 @@ def test_reactivating_a_role_clears_deleted_at(admin_client, role_id):
 
     response = _update(admin_client, role_id=role_id, is_active=True)
 
-    assert response.json()["data"]["deleted_at"] is None
+    assert response.status_code == 200
     assert Role.objects.get(pk=role_id).deleted_at is None
 
 
@@ -891,3 +897,132 @@ def test_role_reuses_the_shared_timestamp_base():
     from apps.core.models import TimeStampedModel
 
     assert issubclass(Role, TimeStampedModel)
+
+
+# ---------------------------------------------------------------------------
+# Grant sync (permission_ids / resource_grants) — 2026-08-09
+#
+# RoleService.update_role's grant sync must fully replace the desired state
+# (a permission/path omitted from the new list is REVOKED, not left alone),
+# fail loudly on bad input rather than misapplying a grant, and never fall
+# back to an arbitrary permission. See RBAC_PROGRESS_LOG.md for the bugs this
+# closes.
+# ---------------------------------------------------------------------------
+
+def test_sync_global_permissions_is_a_full_replace(role_id):
+    read = Permission.objects.get(code="data.read")
+    manage = Permission.objects.get(code="role.manage")
+
+    RoleService().update_role(role_id, permission_ids=[read.pk, manage.pk])
+    granted = set(RolePermission.objects.filter(
+        role_id=role_id, resource_path="").values_list("permission_id", flat=True))
+    assert granted == {read.pk, manage.pk}
+
+    # Re-sync with only ONE of the two -> the other must be REVOKED, not left.
+    RoleService().update_role(role_id, permission_ids=[read.pk])
+    granted = set(RolePermission.objects.filter(
+        role_id=role_id, resource_path="").values_list("permission_id", flat=True))
+    assert granted == {read.pk}
+
+
+def test_sync_global_permissions_to_empty_list_revokes_everything(role_id):
+    read = Permission.objects.get(code="data.read")
+    RoleService().update_role(role_id, permission_ids=[read.pk])
+
+    RoleService().update_role(role_id, permission_ids=[])
+
+    assert not RolePermission.objects.filter(role_id=role_id, resource_path="").exists()
+
+
+def test_sync_global_permissions_rejects_an_unknown_id(role_id):
+    with pytest.raises(ValueError):
+        RoleService().update_role(role_id, permission_ids=[999_999])
+
+
+def test_sync_resource_grants_is_a_full_replace_not_add_only(role_id):
+    """THE bug this closes: a grant omitted from a re-sync used to survive
+    because the old code only ever update_or_create'd the new list — it never
+    deleted what fell off it."""
+    RoleService().update_role(role_id, resource_grants=[
+        {"resource_path": "db:crm", "effect": "allow"},
+        {"resource_path": "db:billing", "effect": "allow"},
+    ])
+    read = Permission.objects.get(code="data.read")
+    granted = set(RolePermission.objects.filter(
+        role_id=role_id, permission=read).exclude(resource_path="")
+        .values_list("resource_path", flat=True))
+    assert granted == {"db:crm", "db:billing"}
+
+    # Re-sync WITHOUT db:billing -> it must be gone, not merely un-updated.
+    RoleService().update_role(role_id, resource_grants=[
+        {"resource_path": "db:crm", "effect": "allow"},
+    ])
+    granted = set(RolePermission.objects.filter(
+        role_id=role_id, permission=read).exclude(resource_path="")
+        .values_list("resource_path", flat=True))
+    assert granted == {"db:crm"}
+
+
+def test_sync_resource_grants_never_touches_a_global_data_read_grant(role_id):
+    """The resource-grants sync must only ever delete/replace resource-SCOPED
+    data.read rows — a separately-held global (resource_path="") data.read
+    grant belongs to the permission_ids sync, not this one."""
+    read = Permission.objects.get(code="data.read")
+    RoleService().update_role(role_id, permission_ids=[read.pk])
+
+    RoleService().update_role(role_id, resource_grants=[])  # sync to nothing
+
+    assert RolePermission.objects.filter(
+        role_id=role_id, permission=read, resource_path="").exists()
+
+
+def test_sync_resource_grants_canonicalises_the_path(role_id):
+    """A grant submitted in a non-canonical case must still be stored/matched
+    the way the resolver actually reads it (lowercased) — see the case-mismatch
+    bug class this whole RBAC programme has hit before."""
+    RoleService().update_role(role_id, resource_grants=[
+        {"resource_path": "DB:CRM:Employee", "effect": "allow"},
+    ])
+    read = Permission.objects.get(code="data.read")
+    granted = list(RolePermission.objects.filter(
+        role_id=role_id, permission=read).exclude(resource_path="")
+        .values_list("resource_path", flat=True))
+    assert granted == ["db:crm:employee"]
+
+
+def test_sync_resource_grants_rejects_a_malformed_path(role_id):
+    with pytest.raises(ValueError):
+        RoleService().update_role(role_id, resource_grants=[
+            {"resource_path": "not a path", "effect": "allow"},
+        ])
+
+
+def test_sync_resource_grants_fails_closed_on_an_invalid_effect(role_id):
+    """A typo'd effect (e.g. 'dny') must never silently become ALLOW."""
+    with pytest.raises(ValueError):
+        RoleService().update_role(role_id, resource_grants=[
+            {"resource_path": "db:crm", "effect": "dny"},
+        ])
+
+
+def test_sync_resource_grants_can_deny(role_id):
+    RoleService().update_role(role_id, resource_grants=[
+        {"resource_path": "db:crm", "effect": "deny"},
+    ])
+    read = Permission.objects.get(code="data.read")
+    grant = RolePermission.objects.get(
+        role_id=role_id, permission=read, resource_path="db:crm")
+    assert grant.effect == "deny"
+
+
+def test_update_with_no_fields_and_no_grants_still_requires_something(role_id):
+    with pytest.raises(ValueError):
+        RoleService().update_role(role_id)
+
+
+def test_create_role_with_grants_atomically():
+    role = RoleService().create_role(
+        name="Grant On Create", resource_grants=[{"resource_path": "db:crm", "effect": "allow"}])
+    read = Permission.objects.get(code="data.read")
+    assert RolePermission.objects.filter(
+        role=role, permission=read, resource_path="db:crm", effect="allow").exists()

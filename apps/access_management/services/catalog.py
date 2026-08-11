@@ -316,3 +316,124 @@ class CatalogService:
         if resource is None:
             raise ResourceNotFound()
         return resource
+
+    def get_tree(self, *, role_id: int | None = None, category: str = "",
+                 parent_path: str | None = None, search: str = "") -> dict:
+        """Dynamic hierarchical resource catalog tree projection.
+
+        Supports grouped tabs (database, datalake, file_system) or level-by-level
+        tree navigation with optional permission resolution for a role.
+        """
+        from ..models import RolePermission, Effect
+
+        # Fetch active catalog items
+        qs = CatalogResource.objects.filter(is_active=True)
+        if search:
+            qs = qs.filter(path__icontains=search)
+
+        # Kind filter mapping
+        category_kinds = {
+            "database": ["db", "nosql"],
+            "db": ["db", "nosql"],
+            "datalake": ["lake"],
+            "lake": ["lake"],
+            "file_system": ["files"],
+            "files": ["files"],
+        }
+
+        # Handle role permission lookup if role_id is provided
+        grants = {}
+        if role_id is not None:
+            rp_qs = RolePermission.objects.filter(role_id=role_id)
+            for rp in rp_qs:
+                if rp.resource_path:
+                    grants[rp.resource_path] = rp.effect
+
+        if parent_path is not None:
+            qs = qs.filter(parent_path=parent_path)
+            if category and category in category_kinds:
+                qs = qs.filter(kind__in=category_kinds[category])
+
+            items = list(qs.order_by("path"))
+            parent_paths_set = set(
+                CatalogResource.objects.filter(is_active=True)
+                .values_list("parent_path", flat=True).distinct()
+            )
+
+            resources = []
+            for item in items:
+                display_name = item.path.split(".")[-1] if "." in item.path else item.path
+                has_children = item.path in parent_paths_set
+
+                node = {
+                    "path": item.path,
+                    "name": display_name,
+                    "kind": item.kind,
+                    "parent_path": item.parent_path,
+                    "source_id": item.source_id,
+                    "has_children": has_children,
+                }
+
+                if role_id is not None:
+                    # Check exact or ancestor grant
+                    effect_val = None
+                    cur = item.path
+                    while cur:
+                        if cur in grants:
+                            effect_val = grants[cur]
+                            break
+                        if "." not in cur:
+                            break
+                        cur = cur.rsplit(".", 1)[0]
+
+                    node["effect"] = effect_val.upper() if effect_val else None
+                    node["is_allowed"] = (effect_val == Effect.ALLOW)
+
+                resources.append(node)
+
+            return {
+                "role_id": role_id,
+                "parent_path": parent_path,
+                "category": category or None,
+                "resources": resources,
+            }
+
+        # Default case (no parent_path): return grouped categories or top level sources
+        root_qs = qs.filter(parent_path="")
+        parent_paths_set = set(
+            CatalogResource.objects.filter(is_active=True)
+            .values_list("parent_path", flat=True).distinct()
+        )
+
+        def format_nodes(nodes_qs):
+            nodes = []
+            for item in nodes_qs:
+                display_name = item.path.split(".")[-1] if "." in item.path else item.path
+                has_children = item.path in parent_paths_set
+                node = {
+                    "path": item.path,
+                    "name": display_name,
+                    "kind": item.kind,
+                    "parent_path": item.parent_path,
+                    "source_id": item.source_id,
+                    "has_children": has_children,
+                }
+                if role_id is not None:
+                    effect_val = grants.get(item.path)
+                    node["effect"] = effect_val.upper() if effect_val else None
+                    node["is_allowed"] = (effect_val == Effect.ALLOW)
+                nodes.append(node)
+            return nodes
+
+        db_nodes = format_nodes(root_qs.filter(kind__in=["db", "nosql"]).order_by("path"))
+        lake_nodes = format_nodes(root_qs.filter(kind="lake").order_by("path"))
+        files_nodes = format_nodes(root_qs.filter(kind="files").order_by("path"))
+
+        return {
+            "role_id": role_id,
+            "parent_path": "",
+            "database": db_nodes,
+            "datalake": lake_nodes,
+            "file_system": files_nodes,
+        }
+
