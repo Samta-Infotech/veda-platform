@@ -40,8 +40,8 @@ def public_fields(role) -> dict:
         "name": role.name,
         "description": role.description,
         "is_active": role.is_active,
-        "created_at": api.human_date(role.created_at),
         "updated_at": api.human_date(role.updated_at),
+        "created_at": api.human_date(role.created_at),  
         "deleted_at": api.human_date(role.deleted_at),
     }
 
@@ -130,10 +130,8 @@ class RoleListView(AdminView):
             "roles": [
                 {
                     **public_fields(role),
-                    "role_name": role.name,
                     "users_count": stats[role.pk]["users_count"],
                     "connected_sources": stats[role.pk]["connected_sources"],
-                    "last_updated": api.human_date(role.updated_at),
                 }
                 for role in roles
             ],
