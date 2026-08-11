@@ -47,13 +47,16 @@ def _validate_name(value: str) -> str:
 class RoleCreateSerializer(serializers.Serializer):
     """Body of ``POST /api/v1/roles/create``.
 
-    A role is created active; there is no ``is_active`` here because "create a role
-    that is already retired" is not a thing an administrator means to do. Retiring is
-    an update.
+    Accepts optional ``permission_ids`` (global permissions) and ``resource_grants``
+    (resource-level catalog permissions) for atomic role creation.
     """
 
     name = serializers.CharField(max_length=_NAME.max_length, validators=[_validate_name])
     description = serializers.CharField(required=False, allow_blank=True, default="")
+    permission_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False, default=list)
+    resource_grants = serializers.ListField(
+        child=serializers.DictField(), required=False, default=list)
 
     def validate(self, attrs):
         _reject_unknown_fields(self.initial_data, allowed=set(self.fields))
@@ -84,10 +87,7 @@ class RoleDetailSerializer(serializers.Serializer):
 class RoleUpdateSerializer(serializers.Serializer):
     """Body of ``POST /api/v1/roles/update`` — partial.
 
-    ``is_active`` is updatable here, and that is how a role is retired: there is no
-    delete endpoint. Hard deletion's semantics depend entirely on role *assignment*
-    (what happens to the users holding it?), which does not exist yet, and an audit
-    trail that says "granted role #7" must still be able to resolve #7.
+    Accepts optional ``permission_ids`` and ``resource_grants`` for updating grants.
     """
 
     role_id = serializers.IntegerField(min_value=1)
@@ -95,10 +95,12 @@ class RoleUpdateSerializer(serializers.Serializer):
         max_length=_NAME.max_length, required=False, validators=[_validate_name])
     description = serializers.CharField(required=False, allow_blank=True)
     is_active = serializers.BooleanField(required=False)
+    permission_ids = serializers.ListField(
+        child=serializers.IntegerField(min_value=1), required=False)
+    resource_grants = serializers.ListField(
+        child=serializers.DictField(), required=False)
 
-    #: Fields this endpoint may actually write — ``role_id`` selects the row, it is
-    #: not a change. Used by the view to split the target from the changes.
-    UPDATABLE_FIELDS = ("name", "description", "is_active")
+    UPDATABLE_FIELDS = ("name", "description", "is_active", "permission_ids", "resource_grants")
 
     def validate(self, attrs):
         _reject_unknown_fields(self.initial_data, allowed=set(self.fields))
@@ -108,6 +110,7 @@ class RoleUpdateSerializer(serializers.Serializer):
         if "name" in attrs:
             attrs["name"] = attrs["name"].strip()
         return attrs
+
 
 
 class RoleListSerializer(PaginatedListSerializer):

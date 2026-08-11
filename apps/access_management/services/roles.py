@@ -22,12 +22,15 @@ from django.utils import timezone
 from apps.core.messages import MESSAGES
 
 from ..models import Role
-from .base import ConflictError, NotFoundError, paginate
-
+from .base import AccessManagementError, ConflictError, NotFoundError, paginate
+from .. import resource_path as rp
+from ..codes import PermissionCode
+from ..models import Effect, Permission, RolePermission
 logger = logging.getLogger(__name__)
 
 CODE_ROLE_NAME_TAKEN = "ROLE_NAME_TAKEN"
 CODE_ROLE_NOT_FOUND = "ROLE_NOT_FOUND"
+CODE_INVALID_GRANT = "INVALID_GRANT"
 
 #: Exactly the columns ``views/roles.py::public_fields`` renders. Passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift: adding a column
@@ -53,6 +56,22 @@ class RoleNameTaken(ConflictError):
     message = MESSAGES["role"]["name_taken"]
 
 
+class InvalidGrant(AccessManagementError):
+    """``permission_ids``/``resource_grants`` named something that cannot be
+    granted — an unknown permission id, an unaddressable resource path, or an
+    effect that is neither ``allow`` nor ``deny``.
+
+    Rendered as 400 (the ``AccessManagementError`` fallback status): the request
+    itself was malformed, not a conflict with existing state and not a missing
+    record. The originating ``ValueError`` detail from ``_sync_grants`` is logged,
+    never rendered — same doctrine as every other typed error here, so a caller
+    cannot fish debugging detail out of the response.
+    """
+
+    code = CODE_INVALID_GRANT
+    message = MESSAGES["role"]["invalid_grant"]
+
+
 class RoleService:
     """Role administration for one request.
 
@@ -63,27 +82,21 @@ class RoleService:
     def __init__(self, request=None):
         self._request = request
 
-    def create_role(self, *, name: str, description: str = "") -> Role:
-        """Create one active role.
-
-        Keyword-only by design: two same-typed strings, and a positional call that
-        transposed them would be accepted silently.
-
-        Uniqueness is enforced by the database, not by a preceding SELECT. The obvious
-        implementation — "does this name exist? no? then insert" — is a
-        check-then-insert race: two concurrent requests both find nothing and both
-        proceed. Letting the INSERT fail and translating the error is the only version
-        that cannot create a duplicate, and it costs one query fewer on the happy path.
+    def create_role(self, *, name: str, description: str = "",
+                    permission_ids: list[int] | None = None,
+                    resource_grants: list[dict] | None = None) -> Role:
+        """Create one active role with optional permissions and resource grants.
 
         Raises:
-            RoleNameTaken: the name is in use (case-insensitively).
+            RoleNameTaken: another role already holds ``name``.
+            InvalidGrant: ``permission_ids``/``resource_grants`` named something
+                that cannot be granted — see ``_sync_grants``. The role is not
+                created; the whole call is one transaction.
         """
         try:
-            # One statement today, but wrapped so that work added later — seeding
-            # default permissions onto a new role, for instance — joins the same unit
-            # and a role can never be left half-created.
             with transaction.atomic():
                 role = Role.objects.create(name=name, description=description)
+                self._sync_grants(role, permission_ids, resource_grants)
         except IntegrityError as exc:
             conflict = self._classify_conflict(name)
             if conflict is None:
@@ -91,6 +104,10 @@ class RoleService:
                                  "error name=%s %s", name, self._log_context())
                 raise
             raise conflict from exc
+        except ValueError as exc:
+            logger.warning("role creation rejected an invalid grant name=%s %s: %s",
+                           name, self._log_context(), exc)
+            raise InvalidGrant() from exc
 
         logger.info("role created role_id=%s name=%s %s",
                     role.pk, role.name, self._log_context())
@@ -120,16 +137,6 @@ class RoleService:
     def list_active_roles(self) -> list[Role]:
         """Every active role — id and name only. For a picker/dropdown, not the
         admin table.
-
-        Deliberately UNPAGINATED, unlike ``list_roles``: a dropdown needs every
-        option in one response, and paging it would just move the "fetch every
-        page" work onto every frontend that renders one. Safe specifically because
-        roles are administrator-authored (see ``models/roles.py`` — "tens to
-        hundreds", never per-row user data), which is the same reasoning
-        ``list_roles`` itself gives for skipping an index on ``is_active``: a table
-        this small costs nothing to scan in full. This would NOT be a safe pattern
-        for ``users`` or ``catalog`` — both are populated by something other than an
-        administrator's own typing and have no such bound.
         """
         return list(Role.objects.filter(is_active=True).order_by("name")
                     .only("id", "name"))
@@ -148,32 +155,18 @@ class RoleService:
     def update_role(self, role_id: int, **fields) -> Role:
         """Apply changes to one role.
 
-        Only the fields present in ``fields`` are written (``update_fields``), so a
-        concurrent change to a column this request did not touch is not clobbered.
-
-        The row is locked for the duration: read-modify-write on an unlocked row loses
-        one of two concurrent updates. Cheap here — one row, one short transaction.
-
-        Caveat worth knowing: ``select_for_update`` is a **Postgres-only** guarantee.
-        SQLite reports ``has_select_for_update = False`` and Django silently ignores
-        it there, so the local test suite exercises this path but does NOT prove the
-        lock. Production runs Postgres, where it holds.
-
-        Setting ``is_active=False`` is how a role is retired; there is no hard
-        delete. ``deleted_at`` is stamped in the same write when that happens
-        (cleared if ``is_active`` flips back) — a timestamp on the retirement
-        decision, not a second one; ``is_active`` alone still decides whether the
-        role grants anything.
-
-        Args:
-            role_id: Target role.
-            fields: Any of ``name``, ``description``, ``is_active``.
-
         Raises:
-            RoleNotFound: no role with that id.
+            RoleNotFound: no role with ``role_id``.
             RoleNameTaken: the new name belongs to a different role.
+            InvalidGrant: ``permission_ids``/``resource_grants`` named something
+                that cannot be granted — see ``_sync_grants``. Nothing is
+                written; the whole call is one transaction.
         """
-        if not fields:  # the serializer rejects this; belt-and-braces for direct calls
+        permission_ids = fields.pop("permission_ids", None)
+        resource_grants = fields.pop("resource_grants", None)
+
+        if not fields and permission_ids is None and resource_grants is None:
+            # the serializer rejects this too; belt-and-braces for direct calls
             raise ValueError("update_role requires at least one field")
 
         try:
@@ -181,15 +174,17 @@ class RoleService:
                 role = Role.objects.select_for_update().filter(pk=role_id).first()
                 if role is None:
                     raise RoleNotFound()
-                touched = list(fields)
-                if "is_active" in fields and fields["is_active"] != role.is_active:
-                    role.deleted_at = None if fields["is_active"] else timezone.now()
-                    touched.append("deleted_at")
-                for name, value in fields.items():
-                    setattr(role, name, value)
-                # updated_at is auto_now, so it must be named explicitly or the
-                # timestamp silently stops tracking edits.
-                role.save(update_fields=[*touched, "updated_at"])
+
+                if fields:
+                    touched = list(fields)
+                    if "is_active" in fields and fields["is_active"] != role.is_active:
+                        role.deleted_at = None if fields["is_active"] else timezone.now()
+                        touched.append("deleted_at")
+                    for name, value in fields.items():
+                        setattr(role, name, value)
+                    role.save(update_fields=[*touched, "updated_at"])
+
+                self._sync_grants(role, permission_ids, resource_grants)
         except IntegrityError as exc:
             conflict = self._classify_conflict(fields.get("name", ""), exclude_pk=role_id)
             if conflict is None:
@@ -197,10 +192,118 @@ class RoleService:
                                  "error role_id=%s %s", role_id, self._log_context())
                 raise
             raise conflict from exc
+        except ValueError as exc:
+            logger.warning("role update rejected an invalid grant role_id=%s %s: %s",
+                           role_id, self._log_context(), exc)
+            raise InvalidGrant() from exc
 
-        logger.info("role updated role_id=%s fields=%s %s",
-                    role.pk, sorted(fields), self._log_context())
+        logger.info("role updated role_id=%s %s", role.pk, self._log_context())
         return role
+
+    def _sync_grants(self, role: Role, permission_ids: list[int] | None,
+                     resource_grants: list[dict] | None) -> None:
+        """Synchronize global system permissions and resource-level ``data.read``
+        grants for ``role``.
+
+        Both ``permission_ids`` and ``resource_grants`` are a FULL desired-state
+        replacement, not an add-only patch: a permission/path that existed before
+        but is absent from the new list is revoked. ``None`` (the field was
+        omitted from the request) means "leave these grants untouched" — the one
+        way to distinguish "sync to nothing" (an explicit ``[]``) from "don't
+        touch this at all".
+
+        Raises:
+            ValueError: an unknown ``permission_id``, a resource path that fails
+                canonicalization, or an ``effect`` that is neither ``allow`` nor
+                ``deny`` — fails loudly rather than silently dropping/misapplying
+                a caller's grant.
+        """
+
+
+        actor = getattr(self._request, "user", None)
+        if actor is not None and not getattr(actor, "is_authenticated", False):
+            actor = None
+
+        # 1. Sync global system permissions (resource_path="") — full replace.
+        if permission_ids is not None:
+            deduped_ids = list(dict.fromkeys(permission_ids))
+            valid_perms = {p.id: p for p in Permission.objects.filter(id__in=deduped_ids)}
+            unknown = [pid for pid in deduped_ids if pid not in valid_perms]
+            if unknown:
+                raise ValueError(f"unknown permission_ids: {unknown}")
+
+            RolePermission.objects.filter(role=role, resource_path="").delete()
+            to_create = [
+                RolePermission(role=role, permission=valid_perms[pid], resource_path="",
+                               effect=Effect.ALLOW, granted_by=actor)
+                for pid in deduped_ids
+            ]
+            if to_create:
+                try:
+                    RolePermission.objects.bulk_create(to_create)
+                except IntegrityError as exc:
+                    # Only the (role, permission, resource_path) constraint applies
+                    # here — a concurrent sync for the same role lost the race. Not a
+                    # role-name conflict, so it must not reach _classify_conflict,
+                    # which only knows how to attribute THAT constraint; surfacing it
+                    # as ValueError routes it through the caller's own translation
+                    # into a client-safe InvalidGrant instead of an unattributed 500.
+                    raise ValueError(
+                        "permission_ids sync collided with a concurrent change to "
+                        "this role — retry the request") from exc
+
+        # 2. Sync resource-level data.read grants — also a full replace, mirroring
+        # the global-permission sync above (an admin removing a row in the UI
+        # must actually revoke it, not just fail to add a duplicate).
+        if resource_grants is not None:
+            data_read_perm = Permission.objects.filter(code=PermissionCode.DATA_READ).first()
+            if data_read_perm is None:
+                # Never fall back to "whichever permission happens to be first" —
+                # that would silently grant/deny an unrelated system permission
+                # (e.g. user.manage) on a data resource path, which is meaningless
+                # and dangerous. A missing seeded permission is a deployment bug
+                # that must fail loudly, not misapply grants.
+                raise RuntimeError(
+                    f"the {PermissionCode.DATA_READ!r} permission is not seeded — "
+                    "cannot sync resource grants")
+
+            canonical: dict[str, str] = {}
+            for grant in resource_grants:
+                raw_path = (grant.get("resource_path") or "").strip()
+                if not raw_path:
+                    continue
+                try:
+                    res_path = rp.validate(raw_path)
+                except rp.InvalidResourcePath as exc:
+                    raise ValueError(f"invalid resource_path {raw_path!r}: {exc}") from exc
+
+                eff_raw = (grant.get("effect") or "allow").strip().lower()
+                if eff_raw not in ("allow", "deny"):
+                    raise ValueError(
+                        f"invalid effect {grant.get('effect')!r} for {raw_path!r} — "
+                        "must be 'allow' or 'deny'")
+                canonical[res_path] = Effect.DENY if eff_raw == "deny" else Effect.ALLOW
+
+            # Revoke any existing resource-scoped data.read grant not in the new
+            # set — global (resource_path="") data.read grants are untouched;
+            # those belong to the permission_ids sync above, not this one.
+            (RolePermission.objects.filter(role=role, permission=data_read_perm)
+             .exclude(resource_path="")
+             .exclude(resource_path__in=canonical)
+             .delete())
+
+            for res_path, effect in canonical.items():
+                try:
+                    RolePermission.objects.update_or_create(
+                        role=role, permission=data_read_perm, resource_path=res_path,
+                        defaults={"effect": effect, "granted_by": actor})
+                except IntegrityError as exc:
+                    # Same reasoning as the permission_ids sync above: a concurrent
+                    # writer raced this exact (role, permission, resource_path) row.
+                    raise ValueError(
+                        f"resource_grants sync collided with a concurrent change to "
+                        f"{res_path!r} on this role — retry the request") from exc
+
 
     @staticmethod
     def _classify_conflict(name: str,

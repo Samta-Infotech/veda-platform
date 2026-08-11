@@ -62,3 +62,30 @@ class CatalogResourceListSerializer(PaginatedListSerializer):
             return resource_path.validate(value)
         except resource_path.InvalidResourcePath as exc:
             raise serializers.ValidationError(str(exc)) from exc
+
+
+class CatalogTreeSerializer(serializers.Serializer):
+    """Query parameters for GET /api/v1/catalog/tree."""
+
+    role_id = serializers.IntegerField(required=False, min_value=1, allow_null=True, default=None)
+    category = serializers.CharField(required=False, allow_blank=True, default="")
+    parent_path = serializers.CharField(required=False, allow_blank=True, allow_null=True, default=None)
+    search = serializers.CharField(required=False, allow_blank=True, default="")
+
+    def validate_category(self, value):
+        if value:
+            normalized = value.strip().lower()
+            allowed = {"database", "datalake", "file_system", "db", "lake", "files", "nosql"}
+            if normalized not in allowed:
+                raise serializers.ValidationError("Category must be one of: database, datalake, file_system.")
+            return normalized
+        return ""
+
+    def validate_parent_path(self, value):
+        if value is None or value == "":
+            return value
+        try:
+            return resource_path.validate(value)
+        except resource_path.InvalidResourcePath as exc:
+            raise serializers.ValidationError(str(exc)) from exc
+

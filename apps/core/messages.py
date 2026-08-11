@@ -51,6 +51,8 @@ MESSAGES = {
         "name_taken": "A role with that name already exists.",
         "not_found": "No such role.",
         "deleted": "Role deleted successfully.",
+        "invalid_grant": ("Some of the permissions or resource grants in this "
+                          "request are invalid."),
     },
     "permission": {
         "retrieved": "Permission retrieved successfully.",

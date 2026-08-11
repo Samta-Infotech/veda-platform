@@ -5,7 +5,7 @@ HTTP-status mapping, the validate-or-400 branch); ``users.py`` holds the user
 endpoints. Re-exported here so callers — chiefly ``urls/`` — import from the package.
 """
 from .base import AdminView, error_status, log_context, pagination_payload
-from .catalog import CatalogDetailView, CatalogListView
+from .catalog import CatalogDetailView, CatalogListView, CatalogTreeView
 from .catalog import public_fields as catalog_public_fields
 from .grants import (
     RolePermissionGrantView,
@@ -17,7 +17,7 @@ from .grants import (
     assignment_fields,
     grant_fields,
 )
-from .permissions import PermissionDetailView, PermissionListView
+from .permissions import PermissionDetailView, PermissionDropdownView, PermissionListView
 from .resolver import EffectivePermissionsView
 from .permissions import public_fields as permission_public_fields
 from .roles import (
@@ -42,8 +42,12 @@ __all__ = [
     "AdminView",
     "CatalogDetailView",
     "CatalogListView",
+    "CatalogTreeView",
     "EffectivePermissionsView",
+
     "PermissionDetailView",
+    "PermissionDropdownView",
+    "PermissionListView",
     "RolePermissionGrantView",
     "RolePermissionListView",
     "RolePermissionRevokeView",
@@ -52,10 +56,10 @@ __all__ = [
     "UserRoleRevokeView",
     "assignment_fields",
     "grant_fields",
-    "PermissionListView",
     "RoleCreateView",
     "RoleDeleteView",
     "RoleDetailView",
+
     "RoleDropdownView",
     "RoleListView",
     "RoleUpdateView",

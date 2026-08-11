@@ -23,6 +23,7 @@ from ..serializers import (
     RoleListSerializer,
     RoleUpdateSerializer,
 )
+from ..models import RolePermission
 from ..services import AccessManagementError, RoleService, role_stats
 from .base import AdminView, pagination_payload
 
@@ -72,11 +73,7 @@ class RoleCreateView(AdminView):
 
 
 class RoleDetailView(AdminView):
-    """GET /api/v1/roles/detail?role_id= -> one role.
-
-    Same projection as list. No permission or member counts: neither exists yet, and
-    a placeholder would be a contract we would have to break.
-    """
+    """GET /api/v1/roles/detail?role_id= -> one role."""
 
     serializer_class = RoleDetailSerializer
     action = "role detail"
@@ -92,7 +89,19 @@ class RoleDetailView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
-        return api.success(MESSAGES["role"]["retrieved"], public_fields(role))
+        role_perms = (
+            RolePermission.objects.filter(role=role, resource_path="")
+            .select_related("permission")
+        )
+        perm_ids = [rp.permission_id for rp in role_perms]
+
+
+        return api.success(MESSAGES["role"]["retrieved"], {
+            **public_fields(role),
+            "permission_ids": perm_ids,
+        })
+
+
 
 
 class RoleListView(AdminView):
@@ -132,6 +141,8 @@ class RoleListView(AdminView):
         })
 
 
+
+
 class RoleDropdownView(AdminView):
     """GET /api/v1/roles/dropdown -> every active role, unpaginated.
 
@@ -152,9 +163,8 @@ class RoleDropdownView(AdminView):
 
         roles = RoleService(request).list_active_roles()
 
-        return api.success(MESSAGES["role"]["dropdown"], {
-            "roles": [{"role_id": role.pk, "name": role.name} for role in roles],
-        })
+        data = [{"label": role.name, "value": role.pk} for role in roles]
+        return api.success(MESSAGES["role"]["dropdown"], data)
 
 
 class RoleUpdateView(AdminView):

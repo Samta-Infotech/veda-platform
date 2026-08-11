@@ -4,7 +4,11 @@ Same rationale and same re-export rule as ``services/``: callers import from the
 package, so a name can move between modules without breaking them.
 """
 from .base import PaginatedListSerializer
-from .catalog import CatalogResourceDetailSerializer, CatalogResourceListSerializer
+from .catalog import (
+    CatalogResourceDetailSerializer,
+    CatalogResourceListSerializer,
+    CatalogTreeSerializer,
+)
 from .resolver import EffectivePermissionsSerializer
 from .grants import (
     RolePermissionGrantSerializer,
@@ -15,6 +19,7 @@ from .grants import (
 )
 from .permissions import (
     PermissionDetailSerializer,
+    PermissionDropdownSerializer,
     PermissionListSerializer,
 )
 from .roles import (
@@ -41,6 +46,7 @@ __all__ = [
     "PRIVILEGED_FIELDS",
     "CatalogResourceDetailSerializer",
     "CatalogResourceListSerializer",
+    "CatalogTreeSerializer",
     "EffectivePermissionsSerializer",
     "PaginatedListSerializer",
     "RolePermissionGrantSerializer",
@@ -49,6 +55,7 @@ __all__ = [
     "UserRoleAssignSerializer",
     "UserRoleListSerializer",
     "PermissionDetailSerializer",
+    "PermissionDropdownSerializer",
     "PermissionListSerializer",
     "READ_ONLY_FIELDS",
     "RoleCreateSerializer",

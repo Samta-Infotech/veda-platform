@@ -69,7 +69,7 @@ V1 Admin provisioning rules:
 
 - Initial and additional Admin accounts are provisioned by backend/DevOps.
 - Public self-registration is not supported.
-- `POST /v1/admin/users` creates Chatbot users only.
+- `POST /api/v1/users/create` creates Chatbot users only.
 - User create/update requests MUST NOT accept `is_admin`, `account_type`, or equivalent privilege fields.
 - Admin endpoints independently verify that the authenticated account has Admin privileges.
 
@@ -84,7 +84,7 @@ V1 Admin provisioning rules:
 
 ### 2.3 Single-resource success
 
-The HTTP status is authoritative. Responses do not duplicate it as `status_code`.
+The HTTP status is mirrored in `status_code` within the unified response envelope:
 
 ```json
 {
@@ -210,10 +210,10 @@ There is no public registration endpoint in V1.
 ### 2.10 Login
 
 ```http
-POST /v1/auth/login
+POST /api/v1/auth/login
 ```
 
-The Chatbot user enters the same `username` and permanent password created by the Admin:
+Request payload:
 
 ```json
 {
@@ -224,66 +224,126 @@ The Chatbot user enters the same `username` and permanent password created by th
 
 Before issuing tokens, the backend verifies:
 
-1. username/password credentials are valid;
-2. the account is `ACTIVE`; and
-3. a non-Admin Chatbot user has a valid assigned role.
+1. `username` and `password` credentials are valid via `django.contrib.auth.authenticate`;
+2. the account is active (`is_active=True`); and
+3. non-staff users have at least one active assigned role (`UserRole`). `is_staff` admin accounts bypass role checking.
 
-Admin accounts do not require a data-access role to enter the Admin Portal.
+#### Success Response (`VEDA_JWT_AUTH=1`)
 
 ```http
 200 OK
 ```
 
-Chatbot user response:
-
 ```json
 {
   "status_code": 200,
-  "message": "Logged in successfully.",
+  "message": "Login successful.",
   "data": {
-    "access_token": "access-token",
-    "refresh_token": "refresh-token",
+    "username": "alice",
+    "display_name": "Alice",
+    "email": "alice@example.com",
+    "access_token": "eyJhbGciOi...",
+    "refresh_token": "eyJhbGciOi...",
     "token_type": "Bearer",
-    "user": {
-      "user_id": 101,
-      "username": "alice",
-      "email": "alice@example.com",
-      "is_admin": false,
-      "status": "ACTIVE",
-      "role": {
-        "role_id": 1,
-        "role_name": "Database Analyst"
-      }
-    }
+    "expires_in": 900,
+    "roles": [
+      "Database Analyst"
+    ],
+    "permission_codes": [
+      "query.execute",
+      "data.read"
+    ]
   }
 }
 ```
 
-Admin response:
+#### Success Response (`VEDA_JWT_AUTH=0` Legacy Mode)
 
 ```json
 {
   "status_code": 200,
-  "message": "Logged in successfully.",
+  "message": "Login successful.",
   "data": {
-    "access_token": "access-token",
-    "refresh_token": "refresh-token",
-    "token_type": "Bearer",
-    "user": {
-      "user_id": 1,
-      "username": "admin",
-      "email": "admin@example.com",
-      "is_admin": true,
-      "status": "ACTIVE",
-      "role": null
-    }
+    "username": "alice",
+    "display_name": "Alice",
+    "email": "alice@example.com",
+    "access_token": "dummy_access_token",
+    "token_type": "Bearer"
   }
 }
 ```
 
-The returned role is a display/session summary. Full permission trees are not returned to or enforced by the frontend. Protected backend operations evaluate the current saved grants.
+#### Error Responses
 
-Invalid username or password returns the same generic response:
+- **Invalid Credentials / Inactive Account / Unassigned Role**:
+  To prevent user enumeration, wrong passwords, unknown usernames, inactive accounts (`is_active=False`), and accounts with no assigned roles all return an identical `401 Unauthorized` response:
+
+  ```http
+  401 Unauthorized
+  ```
+
+  ```json
+  {
+    "status_code": 401,
+    "message": "Invalid username or password.",
+    "code": "INVALID_CREDENTIALS"
+  }
+  ```
+
+- **Account Locked**:
+  Exceeding failure thresholds (per-IP or account-wide wrong guesses) triggers lockout:
+
+  ```http
+  429 Too Many Requests
+  ```
+
+  ```json
+  {
+    "status_code": 429,
+    "message": "Too many failed login attempts. Please try again later.",
+    "code": "ACCOUNT_LOCKED"
+  }
+  ```
+
+### 2.11 Refresh Access Token
+
+```http
+POST /api/v1/auth/refresh
+```
+
+Request payload:
+
+```json
+{
+  "refresh_token": "eyJhbGciOi..."
+}
+```
+
+#### Success Response
+
+```http
+200 OK
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Token refreshed successfully.",
+  "data": {
+    "username": "alice",
+    "display_name": "Alice",
+    "email": "alice@example.com",
+    "access_token": "eyJhbGciOi...",
+    "refresh_token": "eyJhbGciOi...",
+    "token_type": "Bearer",
+    "expires_in": 900
+  }
+}
+```
+
+#### Error Responses
+
+An invalid, expired, malformed, or replayed refresh token returns `401 Unauthorized`:
 
 ```http
 401 Unauthorized
@@ -292,84 +352,109 @@ Invalid username or password returns the same generic response:
 ```json
 {
   "status_code": 401,
-  "message": "Invalid username or password.",
-  "code": "INVALID_CREDENTIALS"
+  "message": "Invalid or expired token.",
+  "code": "INVALID_TOKEN"
 }
 ```
 
-The response MUST NOT reveal whether the username exists.
+When a refresh token replay is detected, all refresh tokens for that user are invalidated automatically.
 
-Inactive account:
+### 2.12 Logout
 
 ```http
-403 Forbidden
+POST /api/v1/auth/logout
 ```
+
+Request payload:
 
 ```json
 {
-  "status_code": 403,
-  "message": "Your account has been deactivated. Please contact your admin.",
-  "code": "ACCOUNT_INACTIVE"
+  "refresh_token": "eyJhbGciOi..."
 }
 ```
 
-Chatbot user without an assigned role:
+#### Response
+
+Logout is idempotent and always succeeds (even for dead/expired tokens) to prevent session probing:
 
 ```http
-403 Forbidden
-```
-
-```json
-{
-  "status_code": 403,
-  "message": "No role has been assigned to your account. Please contact your admin.",
-  "code": "ROLE_NOT_ASSIGNED"
-}
-```
-
-### 2.11 Refresh access token
-
-```http
-POST /v1/auth/refresh
-```
-
-```json
-{
-  "refresh_token": "refresh-token"
-}
+200 OK
 ```
 
 ```json
 {
   "status_code": 200,
-  "message": "Token refreshed.",
-  "data": {
-    "access_token": "new-access-token",
-    "token_type": "Bearer"
-  }
+  "message": "Logout successful."
 }
 ```
 
-An invalid, expired, or unusable refresh token returns `401 INVALID_REFRESH_TOKEN` and the frontend clears local authentication state.
+The frontend clears local authentication state upon calling logout.
 
-### 2.12 Logout
+### 2.13 Change Password
 
 ```http
-POST /v1/auth/logout
+POST /api/v1/auth/password/change
 Authorization: Bearer <access-token>
+```
+
+Request payload:
+
+```json
+{
+  "current_password": "old-password",
+  "new_password": "NewComplexPassword123!"
+}
+```
+
+#### Success Response
+
+On success, all active refresh tokens for the user are revoked.
+
+```http
+200 OK
 ```
 
 ```json
 {
-  "refresh_token": "refresh-token"
+  "status_code": 200,
+  "message": "Password changed successfully."
 }
 ```
 
-```http
-204 No Content
-```
+#### Error Responses
 
-The frontend clears local authentication state after logout completion. A subsequent refresh using the ended session returns `401 INVALID_REFRESH_TOKEN`.
+- **Incorrect Current Password**:
+
+  ```http
+  401 Unauthorized
+  ```
+
+  ```json
+  {
+    "status_code": 401,
+    "message": "The current password is incorrect.",
+    "code": "CURRENT_PASSWORD_INCORRECT"
+  }
+  ```
+
+- **Password Policy Failure**:
+
+  ```http
+  400 Bad Request
+  ```
+
+  ```json
+  {
+    "status_code": 400,
+    "message": "Invalid request data.",
+    "errors": {
+      "new_password": [
+        "This password is too short. It must contain at least 8 characters."
+      ]
+    }
+  }
+  ```
+
 
 ---
 
@@ -491,8 +576,7 @@ If a granted resource is later removed from the connected source:
 
 ## 4. Endpoint summary
 
-All endpoints in the platform use an RPC-style `<resource>/<action>` pattern and are mounted under `/api/v1/`.
-All requests use the `POST` HTTP method. Parameters (including pagination and filters) travel in the JSON body rather than the URL path or query string.
+All endpoints in the platform follow consistent RPC-style `<resource>/<action>` patterns mounted under `/api/v1/`. Read-only endpoints use `GET` with query parameters; state-modifying endpoints use `POST` with JSON bodies.
 
 ### Authentication (`apps.authentication`)
 
@@ -507,17 +591,19 @@ All requests use the `POST` HTTP method. Parameters (including pagination and fi
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/catalog/detail` | Load catalog item details. |
-| `POST` | `/api/v1/catalog/list` | List catalog items (replaces old data-sources list). |
+| `GET` | `/api/v1/catalog/detail` | Load catalog item details. |
+| `GET` | `/api/v1/catalog/list` | List catalog items (flat paginated view). |
+| `GET` | `/api/v1/catalog/tree` | Load hierarchical resource tree with optional role permissions resolution. |
+
 
 ### Roles (`apps.access_management.urls.roles`)
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/roles/create` | Create a role. |
-| `POST` | `/api/v1/roles/detail` | Load role details. |
-| `POST` | `/api/v1/roles/list` | List roles. |
-| `POST` | `/api/v1/roles/dropdown` | List roles available for user assignment. |
+| `GET` | `/api/v1/roles/detail` | Load role details. |
+| `GET` | `/api/v1/roles/list` | List roles. |
+| `GET` | `/api/v1/roles/dropdown` | List roles available for user assignment. |
 | `POST` | `/api/v1/roles/update` | Update a role. |
 | `POST` | `/api/v1/roles/delete` | Soft delete an unassigned role. |
 
@@ -525,23 +611,25 @@ All requests use the `POST` HTTP method. Parameters (including pagination and fi
 
 | Method | Endpoint | Purpose |
 |---|---|---|
-| `POST` | `/api/v1/permissions/detail` | Load permission details. |
-| `POST` | `/api/v1/permissions/list` | List available permissions. |
+| `GET` | `/api/v1/permissions/detail` | Load permission details. |
+| `GET` | `/api/v1/permissions/dropdown` | Unpaginated list of active system permissions for UI dropdowns. |
+| `GET` | `/api/v1/permissions/list` | List available permissions. |
+
 | `POST` | `/api/v1/roles/permissions/grant` | Grant a permission to a role. |
 | `POST` | `/api/v1/roles/permissions/revoke`| Revoke a permission from a role. |
-| `POST` | `/api/v1/roles/permissions/list`  | List permissions for a role. |
+| `GET` | `/api/v1/roles/permissions/list`  | List permissions for a role. |
 | `POST` | `/api/v1/users/roles/assign`      | Assign a role to a user. |
 | `POST` | `/api/v1/users/roles/revoke`      | Revoke a role from a user. |
-| `POST` | `/api/v1/users/roles/list`        | List roles assigned to a user. |
-| `POST` | `/api/v1/users/permissions/effective` | Resolve effective permissions for a user. |
+| `GET` | `/api/v1/users/roles/list`        | List roles assigned to a user. |
+| `GET` | `/api/v1/users/permissions/effective` | Resolve effective permissions for a user. |
 
 ### Users (`apps.access_management.urls.users`)
 
 | Method | Endpoint | Purpose |
 |---|---|---|
 | `POST` | `/api/v1/users/create` | Create a user. |
-| `POST` | `/api/v1/users/detail` | Load user details. |
-| `POST` | `/api/v1/users/list` | List users. |
+| `GET` | `/api/v1/users/detail` | Load user details. |
+| `GET` | `/api/v1/users/list` | List users. |
 | `POST` | `/api/v1/users/update` | Update user details. |
 | `POST` | `/api/v1/users/delete` | Delete a user. |
 
@@ -551,8 +639,8 @@ All requests use the `POST` HTTP method. Parameters (including pagination and fi
 |---|---|---|
 | `POST` | `/api/v1/conversations/query` | Submit a query in a conversation. |
 | `POST` | `/api/v1/conversations/create`| Create a new conversation. |
-| `POST` | `/api/v1/conversations/list`  | List conversations. |
-| `POST` | `/api/v1/conversations/history`| Load conversation history. |
+| `GET`  | `/api/v1/conversations/list`  | List conversations. |
+| `GET`  | `/api/v1/conversations/history`| Load conversation history. |
 
 ### Query Engine (`apps.query`)
 
@@ -564,7 +652,10 @@ All requests use the `POST` HTTP method. Parameters (including pagination and fi
 
 ---
 
-## 5. Data Sources APIs
+## 5. Data Sources & Catalog APIs
+
+> [!NOTE]
+> In the current implementation (`apps.access_management`), catalog browsing and data source inspection are served via `GET /api/v1/catalog/list` and `GET /api/v1/catalog/detail`. Data source discovery and catalog re-indexing are operations actions performed via `manage.py sync_catalog`.
 
 ### 5.1 V1 cardinality and future compatibility
 
@@ -986,6 +1077,8 @@ Each role in the list carries enriched fields from `role_stats()`:
 - `role_name`: duplicate of `name`, included for backward compatibility.
 - `last_updated`: human-formatted date string (e.g. `"Jul 31, 2026"`), not ISO-8601.
 
+
+
 ### 6.2 Roles dropdown (for user assignment selector)
 
 ```http
@@ -998,16 +1091,15 @@ No query params. Returns every active role, **unpaginated** — safe because rol
 {
   "status_code": 200,
   "message": "Roles retrieved successfully.",
-  "data": {
-    "roles": [
-      {
-        "role_id": 1,
-        "name": "Database Analyst"
-      }
-    ]
-  }
+  "data": [
+    {
+      "label": "Database Analyst",
+      "value": 1
+    }
+  ]
 }
 ```
+
 
 Retired (`is_active=false`) roles are excluded.
 
@@ -1020,12 +1112,20 @@ POST /api/v1/roles/create
 ```json
 {
   "name": "Database Analyst",
-  "description": "Access to finance databases."
+  "description": "Access to finance databases.",
+  "permission_ids": [1, 2, 8],
+  "resource_grants": [
+    { "resource_path": "db:postgres.homzhub_prod", "effect": "ALLOW" },
+    { "resource_path": "db:postgres.homzhub_prod:payroll", "effect": "DENY" }
+  ]
 }
 ```
 
+
 - `name` is required, max length from model, trimmed, must not be blank after trimming.
 - `description` is optional, defaults to `""`.
+- `permission_ids` is optional list of integer system permission IDs for atomic assignment.
+- `resource_grants` is optional list of resource grants (`{"resource_path": "...", "effect": "ALLOW"|"DENY"}`).
 - Unknown fields are rejected (400), not silently ignored.
 - Server-owned fields (`id`, `created_at`, `updated_at`) are rejected with `"This field is read-only."`.
 
@@ -1039,8 +1139,6 @@ POST /api/v1/roles/create
   "message": "Role created successfully."
 }
 ```
-
-No `data` in the response — the created role's id is not returned. Permissions are granted separately via `POST /api/v1/roles/permissions/grant`.
 
 **Errors:**
 
@@ -1066,14 +1164,14 @@ GET /api/v1/roles/detail?role_id=1
     "is_active": true,
     "created_at": "2026-07-31T09:00:00Z",
     "updated_at": "2026-07-31T10:00:00Z",
-    "deleted_at": null
+    "deleted_at": null,
+    "permission_ids": [1, 2, 8]
   }
 }
 ```
 
-Same projection as create/list/update — the `public_fields()` shape. `deleted_at` is the timestamp when `is_active` was set to `false` (or `null` if still active).
+Returns role metadata along with `permission_ids` — the list of global system capability IDs currently assigned (empty list if none). Live-verified `2026-08-11`: the response carries only `permission_ids`, not a nested `permissions` object array — the frontend resolves each id's label/code via `GET /api/v1/permissions/dropdown`.
 
-Permissions are loaded separately via `GET /api/v1/roles/permissions/list?role_id=1`.
 
 **Errors:**
 
@@ -1093,13 +1191,19 @@ POST /api/v1/roles/update
   "role_id": 1,
   "name": "Senior Database Analyst",
   "description": "Updated description.",
-  "is_active": false
+  "is_active": true,
+  "permission_ids": [1, 2, 3, 8],
+  "resource_grants": [
+    { "resource_path": "db:postgres.homzhub_prod", "effect": "ALLOW" }
+  ]
 }
 ```
 
+
 **Partial update** — only the fields present (besides `role_id`) are written. At least one updatable field must be provided or the request is rejected.
 
-Updatable fields: `name`, `description`, `is_active`.
+Updatable fields: `name`, `description`, `is_active`, `permission_ids`, `resource_grants`.
+
 
 Setting `is_active` to `false` is how a role is **retired**. When that happens, `deleted_at` is automatically stamped. If `is_active` flips back to `true`, `deleted_at` is cleared.
 
@@ -1388,30 +1492,156 @@ The Chatbot frontend does not calculate, cache, or override authorization.
 
 ```text
 User submits a question
-  → Backend authenticates the user
+  → Backend authenticates the user (via Bearer JWT)
   → Backend evaluates current user status and assigned role
   → Backend identifies every protected resource required by the operation
-  → Backend evaluates the saved grants
+  → Backend evaluates the saved grants (via compute_data_scope & resolve_effective_permissions)
   → All resources allowed: perform operation
-  → Any resource denied/unavailable: do not fetch restricted data; return safe error
+  → Any resource denied/unavailable: do not fetch restricted data; return safe 403 error
 ```
 
-### 8.1 Submit message
+### 8.1 Submit Conversation Query
 
 ```http
-POST /v1/chat/sessions/{session_id}/messages
+POST /api/v1/conversations/query
+Authorization: Bearer <access-token>
 ```
+
+Request payload:
 
 ```json
 {
   "message": "What was the revenue last month?",
-  "client_message_id": "client_msg_01J..."
+  "chat_id": 42,
+  "stream": false
 }
 ```
 
-The backend obtains user and role context from the authenticated request. The request does not accept trusted `user_id`, `role_id`, or permission data.
+The backend obtains user and role context from the authenticated request (`request.user`). The request does not accept client-provided `user_id`, `role_id`, or permission overrides.
 
-### 8.2 Allowed response
+### 8.2 Direct Query Engine Execution
+
+```http
+POST /api/v1/query
+Authorization: Bearer <access-token>
+```
+
+Request payload:
+
+```json
+{
+  "query": "What was the revenue last month?",
+  "source_id": "source_db_01"
+}
+```
+
+### 8.3 Allowed Response
+
+```http
+200 OK
+```
+
+For `/api/v1/conversations/query`:
+
+```json
+{
+  "status_code": 200,
+  "message": "Query processed successfully.",
+  "data": {
+    "chat_id": 42,
+    "message_id": 105,
+    "summary": "Monthly revenue summary",
+    "response": [
+      {
+        "type": "markdown",
+        "content": "The revenue last month was $125,000."
+      }
+    ],
+    "metadata": {
+      "usage": {
+        "prompt_tokens": 120,
+        "completion_tokens": 45,
+        "total_tokens": 165
+      }
+    }
+  }
+}
+```
+
+### 8.4 Restricted / Access Denied Response
+
+If any required resource is outside the user's assigned grants, or if the account has no permitted sources, the backend fails closed before executing any inference or database queries:
+
+```http
+403 Forbidden
+```
+
+```json
+{
+  "status_code": 403,
+  "message": "You do not have permission to access this resource."
+}
+```
+
+The error response MUST NOT reveal restricted resource names, paths, schemas, SQL, metadata, or internal RBAC details.
+
+An unauthenticated caller receives:
+
+```http
+401 Unauthorized
+```
+
+```json
+{
+  "status_code": 401,
+  "message": "Authentication required."
+}
+```
+
+### 8.5 Create Conversation
+
+```http
+POST /api/v1/conversations/create
+Authorization: Bearer <access-token>
+```
+
+Request payload (optional):
+
+```json
+{
+  "conversation_title": "Monthly Financial Review"
+}
+```
+
+#### Success Response
+
+```http
+201 Created
+```
+
+```json
+{
+  "status_code": 201,
+  "message": "Conversation created successfully.",
+  "data": {
+    "chat_id": 42,
+    "conversation_title": "Monthly Financial Review",
+    "created_at": "2026-08-10T13:50:00Z",
+    "created_by": 101
+  }
+}
+```
+
+### 8.6 List Conversations
+
+```http
+GET /api/v1/conversations/list
+Authorization: Bearer <access-token>
+```
+
+Returns all non-deleted conversations owned by the authenticated user. No query parameters required.
+
+#### Success Response
 
 ```http
 200 OK
@@ -1419,58 +1649,92 @@ The backend obtains user and role context from the authenticated request. The re
 
 ```json
 {
+  "status_code": 200,
+  "message": "Conversations retrieved successfully.",
   "data": {
-    "message_id": "assistant_msg_01J...",
-    "type": "ANSWER",
-    "answer": "The revenue last month was $125,000."
-  },
-  "meta": {
-    "request_id": "req_01J..."
+    "conversations": [
+      {
+        "chat_id": 42,
+        "conversation_title": "Monthly Financial Review",
+        "created_at": "2026-08-10T13:50:00Z",
+        "updated_at": "2026-08-10T13:52:00Z"
+      }
+    ]
   }
 }
 ```
 
-### 8.3 Restricted response
-
-If any required resource is outside the assigned grants, unavailable, or belongs to an unavailable source:
+### 8.7 Get Conversation History
 
 ```http
-403 Forbidden
+GET /api/v1/conversations/history?chat_id=42
+Authorization: Bearer <access-token>
+```
+
+Query parameter `chat_id` (integer) is required.
+
+#### Success Response
+
+```http
+200 OK
 ```
 
 ```json
 {
-  "error": {
-    "code": "DATA_ACCESS_DENIED",
-    "message": "You don't have permission to access this data. Please contact your admin for more details.",
-    "details": {},
-    "request_id": "req_01J..."
+  "status_code": 200,
+  "message": "Conversation retrieved successfully.",
+  "data": {
+    "chat_id": 42,
+    "conversation_title": "Monthly Financial Review",
+    "created_at": "2026-08-10T13:50:00Z",
+    "messages": [
+      {
+        "message_id": 101,
+        "role": "USER",
+        "content": "What was the revenue last month?",
+        "created_at": "2026-08-10T13:50:05Z"
+      },
+      {
+        "message_id": 102,
+        "role": "ASSISTANT",
+        "content": {
+          "response": [
+            {
+              "type": "markdown",
+              "content": "The revenue last month was $125,000."
+            }
+          ],
+          "metadata": {
+            "thinking": "Calculated total revenue from sales table.",
+            "explainability": null,
+            "usage": {
+              "prompt_tokens": 120,
+              "completion_tokens": 45,
+              "total_tokens": 165
+            }
+          }
+        },
+        "created_at": "2026-08-10T13:50:10Z"
+      }
+    ]
   }
 }
 ```
 
-The error MUST NOT reveal restricted resource names, paths, schemas, SQL, metadata, or data values.
-
-An authenticated but inactive account receives:
+#### Error Response
 
 ```http
-403 Forbidden
+404 Not Found
 ```
 
 ```json
 {
-  "error": {
-    "code": "ACCOUNT_INACTIVE",
-    "message": "Your account has been deactivated. Please contact your admin.",
-    "details": {},
-    "request_id": "req_01J..."
-  }
+  "status_code": 404,
+  "message": "Conversation not found."
 }
 ```
 
-A deleted account is handled by the existing authentication flow and cannot establish or continue an authenticated application session.
-
-### 8.4 No-access cases
+### 8.8 No-access cases
 
 The backend denies protected-data access when any of the following is true:
 
@@ -1642,4 +1906,322 @@ Delete → confirm → DELETE user → refresh users
 - Optimistic-lock versions and `If-Match`.
 - Catalog snapshot/version tokens.
 - Frontend-defined session, cache, transaction, archival, or token-revocation mechanisms.
+
+---
+
+## 12. Dynamic Resource Catalog Tree Endpoint
+
+```http
+GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_test&search=
+```
+
+### Query Parameters:
+
+- `role_id` *(optional, integer)*: Target role ID to resolve current `is_allowed` (boolean) and `effect` (`ALLOW`/`DENY`/`null`) flags against.
+- `category` *(optional, string)*: Filter top-level sources by category tab: `database`, `datalake`, or `file_system`.
+- `parent_path` *(optional, string)*: Parent canonical path for level-by-level (on-demand / lazy) tree navigation. Omit or set to `""` for root sources.
+- `search` *(optional, string)*: Case-insensitive substring search on resource path.
+
+### Payload Query Modes & Response Envelopes:
+
+#### Mode 1: Default Full Catalog Tree (No Query Params)
+`GET /api/v1/catalog/tree`
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": null,
+    "parent_path": "",
+    "database": [
+      {
+        "path": "postgres.homzhub_prod",
+        "name": "homzhub_prod",
+        "kind": "db",
+        "parent_path": "",
+        "source_id": 31,
+        "has_children": true
+      }
+    ],
+    "datalake": [
+      {
+        "path": "delta.analytics_lake",
+        "name": "analytics_lake",
+        "kind": "lake",
+        "parent_path": "",
+        "source_id": 32,
+        "has_children": true
+      }
+    ],
+    "file_system": []
+  }
+}
+```
+
+#### Mode 2: Role Permission Edit Mode (Grouped Tabs with Permission Status)
+`GET /api/v1/catalog/tree?role_id=1`
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": 1,
+    "parent_path": "",
+    "database": [
+      {
+        "path": "postgres.homzhub_prod",
+        "name": "homzhub_prod",
+        "kind": "db",
+        "parent_path": "",
+        "source_id": 31,
+        "has_children": true,
+        "effect": "ALLOW",
+        "is_allowed": true
+      }
+    ],
+    "datalake": [
+      {
+        "path": "delta.analytics_lake",
+        "name": "analytics_lake",
+        "kind": "lake",
+        "parent_path": "",
+        "source_id": 32,
+        "has_children": true,
+        "effect": null,
+        "is_allowed": false
+      }
+    ],
+    "file_system": []
+  }
+}
+```
+
+#### Mode 3: Lazy-Load Node / Expand Subtree Mode
+`GET /api/v1/catalog/tree?parent_path=postgres.homzhub_prod&role_id=1`
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": 1,
+    "parent_path": "postgres.homzhub_prod",
+    "category": null,
+    "resources": [
+      {
+        "path": "postgres.homzhub_prod.fast_test",
+        "name": "fast_test",
+        "kind": "db",
+        "parent_path": "postgres.homzhub_prod",
+        "source_id": 31,
+        "has_children": true,
+        "effect": "ALLOW",
+        "is_allowed": true
+      },
+      {
+        "path": "postgres.homzhub_prod.payroll",
+        "name": "payroll",
+        "kind": "db",
+        "parent_path": "postgres.homzhub_prod",
+        "source_id": 31,
+        "has_children": true,
+        "effect": "DENY",
+        "is_allowed": false
+      }
+    ]
+  }
+}
+```
+
+#### Mode 4: Category Tab Filter Mode
+`GET /api/v1/catalog/tree?category=database&role_id=1`
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": 1,
+    "parent_path": "",
+    "database": [
+      {
+        "path": "postgres.homzhub_prod",
+        "name": "homzhub_prod",
+        "kind": "db",
+        "parent_path": "",
+        "source_id": 31,
+        "has_children": true,
+        "effect": "ALLOW",
+        "is_allowed": true
+      }
+    ],
+    "datalake": [],
+    "file_system": []
+  }
+}
+```
+
+#### Mode 5: Subtree Search Mode
+`GET /api/v1/catalog/tree?search=payroll&role_id=1`
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": 1,
+    "parent_path": "",
+    "database": [
+      {
+        "path": "postgres.homzhub_prod.payroll",
+        "name": "payroll",
+        "kind": "db",
+        "parent_path": "postgres.homzhub_prod",
+        "source_id": 31,
+        "has_children": true,
+        "effect": "DENY",
+        "is_allowed": false
+      }
+    ],
+    "datalake": [],
+    "file_system": []
+  }
+}
+```
+
+### 12.1 Fixed since the previous revision of this doc (`2026-08-11`)
+
+`CatalogService.get_tree` was refactored and three real bugs were fixed, all live-verified:
+
+- **Category filter was a no-op in the default grouped view.** `GET /catalog/tree?category=database` used to still return non-empty `datalake`/`file_system` arrays — `category` only took effect on the lazy-load branch. Now filters all three modes identically; the Mode 4 example above (empty `datalake`/`file_system`) reflects current behavior.
+- **Descendant-grant inheritance never resolved past the exact granted path.** A grant on a parent (e.g. `db:homzhub` → `ALLOW`) is supposed to cover every table beneath it (§3.2, SELF_AND_DESCENDANTS), but the ancestor walk split paths on `.` while this codebase's paths are `:`-delimited (`db:homzhub:accounts_generalledger`) — so it never found the parent grant and every descendant showed `is_allowed: false`. Now uses `resource_path.prefixes()`, the same helper the runtime resolver (`services/resolver.py`) already uses for this exact question, so tree display and actual query-time enforcement agree.
+- **`name` was the full path, not the leaf segment.** Same `.`-vs-`:` mistake — `display_name = path.split(".")[-1]` never found a `.`, so `name` always equaled the entire `path` (e.g. `"db:homzhub:accounts_generalledger"` instead of `"accounts_generalledger"`). Fixed via `resource_path.segments(path)[-1]`.
+- **Search only ever matched root-level resources, even in the default grouped view.** `search=<a nested table's name>` used to return empty because the default branch always restricted to `parent_path=""` before applying the search filter. Now: a bare `GET /catalog/tree` (no `search`) still shows roots only — it does not eagerly scan every level on a plain page load — but as soon as `search` is given, it searches every level and returns matches grouped by kind, wherever they live in the tree, matching the Mode 5 example above.
+
+Regression tests: `tests/test_catalog_resources.py` (`test_a_grant_on_a_root_covers_its_descendants`, `test_a_closer_grant_overrides_a_further_ancestor`, `test_category_filters_the_default_view_to_one_tab`, `test_name_is_the_leaf_segment_not_the_full_path`, plus 11 more covering lazy-load, search, and the global-grant/unknown-role edge cases).
+
+### 12.2 Query parameter reference
+
+| Param | Type | Required | Notes |
+|---|---|---|---|
+| `role_id` | integer | No | Non-existent id silently resolves to `is_allowed: false` everywhere — no 404, no distinction from a real role with zero grants. |
+| `category` | string | No | Must be one of `database`, `datalake`, `file_system` — anything else is a 400. Only takes effect when `parent_path` is also present (§12.1). |
+| `parent_path` | string | No | A non-existent path returns `200` with an empty `resources` array, not `404` — treated like an empty folder. |
+| `search` | string | No | Case-insensitive substring on `path`. Only matches root-level nodes in the default (no `parent_path`) view (§12.1). |
+
+### 12.3 Additional payload/response examples (live-verified `2026-08-11`)
+
+**Lazy-load one level with a category filter** (the one place `category` is honored):
+
+```http
+GET /api/v1/catalog/tree?parent_path=db:homzhub&category=database
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": {
+    "role_id": null,
+    "parent_path": "db:homzhub",
+    "category": "database",
+    "resources": [
+      {
+        "path": "db:homzhub:accounts_generalledger",
+        "name": "db:homzhub:accounts_generalledger",
+        "kind": "db",
+        "parent_path": "db:homzhub",
+        "source_id": 2,
+        "has_children": true
+      }
+    ]
+  }
+}
+```
+
+**`role_id` is not an integer:**
+
+```http
+GET /api/v1/catalog/tree?role_id=abc
+```
+
+```json
+{
+  "status_code": 400,
+  "message": "Invalid request data.",
+  "errors": { "role_id": ["A valid integer is required."] }
+}
+```
+
+**`category` outside the accepted set:**
+
+```http
+GET /api/v1/catalog/tree?category=bogus
+```
+
+```json
+{
+  "status_code": 400,
+  "message": "Invalid request data.",
+  "errors": { "category": ["Category must be one of: database, datalake, file_system."] }
+}
+```
+
+**`parent_path` that does not exist** — `200`, not `404`:
+
+```http
+GET /api/v1/catalog/tree?parent_path=db:doesnotexist
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Catalog resources retrieved successfully.",
+  "data": { "role_id": null, "parent_path": "db:doesnotexist", "category": null, "resources": [] }
+}
+```
+
+**Unauthenticated caller** — `401`, but note the body is DRF's default shape, not the unified envelope (`status_code`/`message`), same as every other admin endpoint in this codebase:
+
+```json
+{ "detail": "Authentication credentials were not provided." }
+```
+
+A Postman folder with all of the above as runnable requests is in `VEDA_Postman_Collection.json` → **"04 - Catalog Tree API (various payloads, live-verified 2026-08-11)"**.
+
+---
+
+## 13. System Permissions Dropdown Endpoint
+
+```http
+GET /api/v1/permissions/dropdown
+```
+
+Returns an unpaginated list of all active global system capability verbs for rendering in UI dropdowns/checkbox lists.
+
+### Response (`200 OK`):
+
+```json
+{
+  "status_code": 200,
+  "message": "Permissions retrieved successfully.",
+  "data": [
+    { "label": "query.execute", "value": 1 },
+    { "label": "data.read", "value": 2 },
+    { "label": "source.manage", "value": 3 },
+    { "label": "ingestion.run", "value": 4 },
+    { "label": "evaluation.run", "value": 5 },
+    { "label": "user.manage", "value": 6 },
+    { "label": "role.manage", "value": 7 },
+    { "label": "permission.read", "value": 8 }
+  ]
+}
+```
+
+
+
+
+
 - Denied-access audit logging and Admin audit-log APIs.

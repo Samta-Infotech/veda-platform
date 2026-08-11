@@ -713,3 +713,197 @@ def test_sync_catalog_command_reports_unaddressable_resources(source):
     call_command("sync_catalog", stdout=out, stderr=err)
 
     assert "unaddressable" in err.getvalue()
+
+
+# ---------------------------------------------------------------------------
+# get_tree — grouped tabs, lazy-load, and role permission overlay
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tree(source):
+    """A small, hand-built tree — deliberately not run through discovery, since
+    these tests are about ``get_tree``'s projection, not reconciliation.
+
+      db:crm  (root, has children)
+        db:crm:employee  (has children)
+          db:crm:employee:salary  (leaf)
+      lake:analytics  (root, leaf)
+      files:docs  (root, leaf)
+    """
+    CatalogResource.objects.create(path="db:crm", kind="db", parent_path="", source=source)
+    CatalogResource.objects.create(
+        path="db:crm:employee", kind="db", parent_path="db:crm", source=source)
+    CatalogResource.objects.create(
+        path="db:crm:employee:salary", kind="db", parent_path="db:crm:employee",
+        source=source)
+    CatalogResource.objects.create(
+        path="lake:analytics", kind="lake", parent_path="", source=source)
+    CatalogResource.objects.create(
+        path="files:docs", kind="files", parent_path="", source=source)
+    return source
+
+
+def _role_with_grants(*grants):
+    """A role holding one or more ``data.read`` resource grants.
+
+    ``grants`` is ``(resource_path, effect)`` pairs, e.g. ``("db:crm", Effect.ALLOW)``.
+    """
+    from apps.access_management.models import Permission, Role, RolePermission
+
+    role = Role.objects.create(name="Tree Test Role")
+    data_read = Permission.objects.get(code="data.read")
+    for resource_path_, effect in grants:
+        RolePermission.objects.create(
+            role=role, permission=data_read, resource_path=resource_path_, effect=effect)
+    return role
+
+
+def test_default_view_groups_roots_by_kind(tree):
+    result = CatalogService().get_tree()
+
+    assert [n["path"] for n in result["database"]] == ["db:crm"]
+    assert [n["path"] for n in result["datalake"]] == ["lake:analytics"]
+    assert [n["path"] for n in result["file_system"]] == ["files:docs"]
+
+
+def test_default_view_never_descends_without_a_search(tree):
+    """Roots only — a bare tree call must not eagerly walk every level."""
+    result = CatalogService().get_tree()
+
+    assert all(n["parent_path"] == "" for n in result["database"])
+
+
+def test_name_is_the_leaf_segment_not_the_full_path(tree):
+    """``name`` is a display value distinct from ``path`` — a nested node's name is
+    just its own segment, so a deep tree does not render illegibly long labels."""
+    result = CatalogService().get_tree(parent_path="db:crm")
+
+    node = result["resources"][0]
+    assert node["path"] == "db:crm:employee"
+    assert node["name"] == "employee"
+
+
+def test_has_children_reflects_whether_anything_is_parented_to_it(tree):
+    result = CatalogService().get_tree()
+
+    root = next(n for n in result["database"] if n["path"] == "db:crm")
+    assert root["has_children"] is True
+
+    leaf = CatalogService().get_tree(parent_path="db:crm:employee")["resources"][0]
+    assert leaf["path"] == "db:crm:employee:salary"
+    assert leaf["has_children"] is False
+
+
+def test_lazy_load_returns_only_direct_children(tree):
+    result = CatalogService().get_tree(parent_path="db:crm")
+
+    assert [n["path"] for n in result["resources"]] == ["db:crm:employee"]
+    assert result["category"] is None
+
+
+def test_lazy_load_of_an_unknown_path_is_an_empty_list_not_an_error(tree):
+    result = CatalogService().get_tree(parent_path="db:nope")
+
+    assert result["resources"] == []
+
+
+def test_category_filters_the_default_view_to_one_tab(tree):
+    """A category tab must not leak the other two — a database-tab request that
+    still returns datalake/file_system rows defeats the filter for the caller."""
+    result = CatalogService().get_tree(category="database")
+
+    assert [n["path"] for n in result["database"]] == ["db:crm"]
+    assert result["datalake"] == []
+    assert result["file_system"] == []
+
+
+def test_category_filters_a_lazy_load_level_too(tree, source):
+    CatalogResource.objects.create(
+        path="lake:crm_export", kind="lake", parent_path="db:crm", source=source)
+    result = CatalogService().get_tree(parent_path="db:crm", category="database")
+
+    assert [n["path"] for n in result["resources"]] == ["db:crm:employee"]
+
+
+def test_search_matches_a_descendant_in_the_default_view(tree):
+    """A search for a nested resource's own name must surface it even though the
+    default view otherwise shows roots only — an admin searching for a known table
+    should not have to expand every branch by hand to find it."""
+    result = CatalogService().get_tree(search="salary")
+
+    paths = [n["path"] for n in result["database"]]
+    assert paths == ["db:crm:employee:salary"]
+
+
+def test_search_with_no_match_returns_empty_groups(tree):
+    result = CatalogService().get_tree(search="does-not-exist-anywhere")
+
+    assert result["database"] == result["datalake"] == result["file_system"] == []
+
+
+def test_without_a_role_id_no_effect_or_is_allowed_fields_are_added(tree):
+    result = CatalogService().get_tree()
+
+    assert "effect" not in result["database"][0]
+    assert "is_allowed" not in result["database"][0]
+
+
+def test_role_with_no_grants_shows_everything_denied(tree):
+    from apps.access_management.models import Effect
+
+    role = _role_with_grants()
+    result = CatalogService().get_tree(role_id=role.pk)
+
+    node = result["database"][0]
+    assert node["effect"] is None
+    assert node["is_allowed"] is False
+
+
+def test_a_grant_on_a_root_covers_its_descendants(tree):
+    """The central regression: a grant two levels above a node must still resolve,
+    not just an exact-path match. Paths in this codebase are ':'-delimited, so this
+    pins the walk against a '.'-based implementation silently never matching."""
+    from apps.access_management.models import Effect
+
+    role = _role_with_grants(("db:crm", Effect.ALLOW))
+
+    grandchild = CatalogService().get_tree(
+        parent_path="db:crm:employee", role_id=role.pk)["resources"][0]
+
+    assert grandchild["path"] == "db:crm:employee:salary"
+    assert grandchild["effect"] == "ALLOW"
+    assert grandchild["is_allowed"] is True
+
+
+def test_a_closer_grant_overrides_a_further_ancestor(tree):
+    """'Allow the whole database except this one table' — the nearer, more specific
+    grant must win over the broader one further up the tree."""
+    from apps.access_management.models import Effect
+
+    role = _role_with_grants(
+        ("db:crm", Effect.ALLOW), ("db:crm:employee", Effect.DENY))
+
+    child = CatalogService().get_tree(parent_path="db:crm", role_id=role.pk)["resources"][0]
+
+    assert child["path"] == "db:crm:employee"
+    assert child["effect"] == "DENY"
+    assert child["is_allowed"] is False
+
+
+def test_global_grants_do_not_leak_into_the_tree_overlay(tree):
+    """A blank-path (global) grant answers 'may this role use data.read at all', not
+    'is this specific node allowed' — it must not make every node look granted."""
+    from apps.access_management.models import Effect
+
+    role = _role_with_grants(("", Effect.ALLOW))
+
+    result = CatalogService().get_tree(role_id=role.pk)
+
+    assert result["database"][0]["is_allowed"] is False
+
+
+def test_a_nonexistent_role_id_resolves_to_denied_not_an_error(tree):
+    result = CatalogService().get_tree(role_id=999_999)
+
+    assert result["database"][0]["is_allowed"] is False

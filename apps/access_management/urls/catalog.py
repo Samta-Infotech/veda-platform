@@ -6,9 +6,11 @@ No write routes: the catalog is a projection rebuilt by discovery from `Source` 
 """
 from django.urls import path
 
-from ..views import CatalogDetailView, CatalogListView
+from ..views import CatalogDetailView, CatalogListView, CatalogTreeView
 
 urlpatterns = [
     path("catalog/detail", CatalogDetailView.as_view(), name="catalog-detail"),
     path("catalog/list", CatalogListView.as_view(), name="catalog-list"),
+    path("catalog/tree", CatalogTreeView.as_view(), name="catalog-tree"),
 ]
+

@@ -31,3 +31,10 @@ class PermissionListSerializer(PaginatedListSerializer):
     ORDERING_FIELDS = ("id", "code", "name")
 
     ordering = serializers.CharField(required=False, default="code")
+
+
+class PermissionDropdownSerializer(serializers.Serializer):
+    """Query/body parameters for GET /api/v1/permissions/dropdown."""
+
+    pass
+
