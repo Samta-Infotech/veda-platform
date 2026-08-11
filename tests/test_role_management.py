@@ -43,6 +43,7 @@ from apps.access_management.models import Permission, Role, RolePermission, User
 from apps.access_management.services import (  # noqa: E402
     CODE_ROLE_NAME_TAKEN,
     CODE_ROLE_NOT_FOUND,
+    InvalidGrant,
     RoleNameTaken,
     RoleNotFound,
     RoleService,
@@ -935,7 +936,11 @@ def test_sync_global_permissions_to_empty_list_revokes_everything(role_id):
 
 
 def test_sync_global_permissions_rejects_an_unknown_id(role_id):
-    with pytest.raises(ValueError):
+    """The raw ValueError _sync_grants raises is translated to the typed,
+    client-safe InvalidGrant at the service boundary — the view only ever
+    catches AccessManagementError, so an untranslated ValueError would have
+    surfaced as an unhandled 500 instead of a 400."""
+    with pytest.raises(InvalidGrant):
         RoleService().update_role(role_id, permission_ids=[999_999])
 
 
@@ -991,7 +996,7 @@ def test_sync_resource_grants_canonicalises_the_path(role_id):
 
 
 def test_sync_resource_grants_rejects_a_malformed_path(role_id):
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidGrant):
         RoleService().update_role(role_id, resource_grants=[
             {"resource_path": "not a path", "effect": "allow"},
         ])
@@ -999,7 +1004,7 @@ def test_sync_resource_grants_rejects_a_malformed_path(role_id):
 
 def test_sync_resource_grants_fails_closed_on_an_invalid_effect(role_id):
     """A typo'd effect (e.g. 'dny') must never silently become ALLOW."""
-    with pytest.raises(ValueError):
+    with pytest.raises(InvalidGrant):
         RoleService().update_role(role_id, resource_grants=[
             {"resource_path": "db:crm", "effect": "dny"},
         ])

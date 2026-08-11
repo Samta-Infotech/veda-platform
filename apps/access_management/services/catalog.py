@@ -42,8 +42,9 @@ from django.utils import timezone
 
 from .. import resource_path
 from apps.core.messages import MESSAGES
+from ..models import RolePermission
 
-from ..models import CatalogResource
+from ..models import CatalogResource, Effect
 from .base import NotFoundError, paginate
 
 logger = logging.getLogger(__name__)
@@ -317,6 +318,15 @@ class CatalogService:
             raise ResourceNotFound()
         return resource
 
+    #: category -> the CatalogResource.kind values it covers. Both the canonical
+    #: names (validated by CatalogTreeSerializer) and their internal aliases map here,
+    #: since the serializer normalises "db"/"lake"/"files"/"nosql" through too.
+    _CATEGORY_KINDS = {
+        "database": ("db", "nosql"), "db": ("db", "nosql"), "nosql": ("db", "nosql"),
+        "datalake": ("lake",), "lake": ("lake",),
+        "file_system": ("files",), "files": ("files",),
+    }
+
     def get_tree(self, *, role_id: int | None = None, category: str = "",
                  parent_path: str | None = None, search: str = "") -> dict:
         """Dynamic hierarchical resource catalog tree projection.
@@ -324,73 +334,19 @@ class CatalogService:
         Supports grouped tabs (database, datalake, file_system) or level-by-level
         tree navigation with optional permission resolution for a role.
         """
-        from ..models import RolePermission, Effect
-
-        # Fetch active catalog items
         qs = CatalogResource.objects.filter(is_active=True)
         if search:
             qs = qs.filter(path__icontains=search)
+        if category in self._CATEGORY_KINDS:
+            qs = qs.filter(kind__in=self._CATEGORY_KINDS[category])
 
-        # Kind filter mapping
-        category_kinds = {
-            "database": ["db", "nosql"],
-            "db": ["db", "nosql"],
-            "datalake": ["lake"],
-            "lake": ["lake"],
-            "file_system": ["files"],
-            "files": ["files"],
-        }
-
-        # Handle role permission lookup if role_id is provided
-        grants = {}
-        if role_id is not None:
-            rp_qs = RolePermission.objects.filter(role_id=role_id)
-            for rp in rp_qs:
-                if rp.resource_path:
-                    grants[rp.resource_path] = rp.effect
+        grants = self._resource_grants(role_id) if role_id is not None else None
+        has_children_of = self._has_children_index()
 
         if parent_path is not None:
-            qs = qs.filter(parent_path=parent_path)
-            if category and category in category_kinds:
-                qs = qs.filter(kind__in=category_kinds[category])
-
-            items = list(qs.order_by("path"))
-            parent_paths_set = set(
-                CatalogResource.objects.filter(is_active=True)
-                .values_list("parent_path", flat=True).distinct()
-            )
-
-            resources = []
-            for item in items:
-                display_name = item.path.split(".")[-1] if "." in item.path else item.path
-                has_children = item.path in parent_paths_set
-
-                node = {
-                    "path": item.path,
-                    "name": display_name,
-                    "kind": item.kind,
-                    "parent_path": item.parent_path,
-                    "source_id": item.source_id,
-                    "has_children": has_children,
-                }
-
-                if role_id is not None:
-                    # Check exact or ancestor grant
-                    effect_val = None
-                    cur = item.path
-                    while cur:
-                        if cur in grants:
-                            effect_val = grants[cur]
-                            break
-                        if "." not in cur:
-                            break
-                        cur = cur.rsplit(".", 1)[0]
-
-                    node["effect"] = effect_val.upper() if effect_val else None
-                    node["is_allowed"] = (effect_val == Effect.ALLOW)
-
-                resources.append(node)
-
+            items = qs.filter(parent_path=parent_path).order_by("path")
+            resources = [self._node(item, has_children_of, role_id, grants)
+                        for item in items]
             return {
                 "role_id": role_id,
                 "parent_path": parent_path,
@@ -398,42 +354,70 @@ class CatalogService:
                 "resources": resources,
             }
 
-        # Default case (no parent_path): return grouped categories or top level sources
-        root_qs = qs.filter(parent_path="")
-        parent_paths_set = set(
+        # Grouped tabs: every level when searching (a match can be at any depth),
+        # otherwise just the roots — the entry points each tab starts from.
+        scoped = qs if search else qs.filter(parent_path="")
+        return {
+            "role_id": role_id,
+            "parent_path": "",
+            "database": self._nodes(scoped, ("db", "nosql"), has_children_of, role_id, grants),
+            "datalake": self._nodes(scoped, ("lake",), has_children_of, role_id, grants),
+            "file_system": self._nodes(scoped, ("files",), has_children_of, role_id, grants),
+        }
+
+    @staticmethod
+    def _resource_grants(role_id: int) -> dict[str, str]:
+        """One role's resource-scoped grants, ``{resource_path: effect}``.
+
+        Global grants (``resource_path == ""``) are excluded — they answer "may
+        this role use permission X at all", not "is this catalog node allowed",
+        so they have no place in a tree overlay.
+        """
+
+        return {
+            rp.resource_path: rp.effect
+            for rp in RolePermission.objects.filter(role_id=role_id).exclude(resource_path="")
+        }
+
+    @staticmethod
+    def _has_children_index() -> set[str]:
+        """Every path that is *someone's* parent, for an O(1) ``has_children`` check."""
+        return set(
             CatalogResource.objects.filter(is_active=True)
             .values_list("parent_path", flat=True).distinct()
         )
 
-        def format_nodes(nodes_qs):
-            nodes = []
-            for item in nodes_qs:
-                display_name = item.path.split(".")[-1] if "." in item.path else item.path
-                has_children = item.path in parent_paths_set
-                node = {
-                    "path": item.path,
-                    "name": display_name,
-                    "kind": item.kind,
-                    "parent_path": item.parent_path,
-                    "source_id": item.source_id,
-                    "has_children": has_children,
-                }
-                if role_id is not None:
-                    effect_val = grants.get(item.path)
-                    node["effect"] = effect_val.upper() if effect_val else None
-                    node["is_allowed"] = (effect_val == Effect.ALLOW)
-                nodes.append(node)
-            return nodes
+    def _nodes(self, qs, kinds: tuple[str, ...], has_children_of: set[str],
+               role_id: int | None, grants: dict | None) -> list[dict]:
+        items = qs.filter(kind__in=kinds).order_by("path")
+        return [self._node(item, has_children_of, role_id, grants) for item in items]
 
-        db_nodes = format_nodes(root_qs.filter(kind__in=["db", "nosql"]).order_by("path"))
-        lake_nodes = format_nodes(root_qs.filter(kind="lake").order_by("path"))
-        files_nodes = format_nodes(root_qs.filter(kind="files").order_by("path"))
-
-        return {
-            "role_id": role_id,
-            "parent_path": "",
-            "database": db_nodes,
-            "datalake": lake_nodes,
-            "file_system": files_nodes,
+    def _node(self, item, has_children_of: set[str], role_id: int | None,
+              grants: dict | None) -> dict:
+        node = {
+            "path": item.path,
+            "name": resource_path.segments(item.path)[-1],
+            "kind": item.kind,
+            "parent_path": item.parent_path,
+            "source_id": item.source_id,
+            "has_children": item.path in has_children_of,
         }
+        if role_id is not None:
+            effect = self._resolve_effect(item.path, grants)
+            node["effect"] = effect.upper() if effect else None
+            node["is_allowed"] = (effect == Effect.ALLOW)
+        return node
+
+    @staticmethod
+    def _resolve_effect(path: str, grants: dict[str, str]) -> str | None:
+        """The grant that governs ``path``: itself, else its nearest granted ancestor.
+
+        A grant on a parent covers every descendant (ADR §3.2's SELF_AND_DESCENDANTS)
+        until a more specific grant overrides it closer to the leaf — so this walks
+        from ``path`` outward and stops at the first match, most specific first.
+        """
+        for candidate in reversed(resource_path.prefixes(path)):
+            if candidate in grants:
+                return grants[candidate]
+        return None
 

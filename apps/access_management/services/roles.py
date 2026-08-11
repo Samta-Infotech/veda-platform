@@ -22,7 +22,7 @@ from django.utils import timezone
 from apps.core.messages import MESSAGES
 
 from ..models import Role
-from .base import ConflictError, NotFoundError, paginate
+from .base import AccessManagementError, ConflictError, NotFoundError, paginate
 from .. import resource_path as rp
 from ..codes import PermissionCode
 from ..models import Effect, Permission, RolePermission
@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 
 CODE_ROLE_NAME_TAKEN = "ROLE_NAME_TAKEN"
 CODE_ROLE_NOT_FOUND = "ROLE_NOT_FOUND"
+CODE_INVALID_GRANT = "INVALID_GRANT"
 
 #: Exactly the columns ``views/roles.py::public_fields`` renders. Passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift: adding a column
@@ -55,6 +56,22 @@ class RoleNameTaken(ConflictError):
     message = MESSAGES["role"]["name_taken"]
 
 
+class InvalidGrant(AccessManagementError):
+    """``permission_ids``/``resource_grants`` named something that cannot be
+    granted — an unknown permission id, an unaddressable resource path, or an
+    effect that is neither ``allow`` nor ``deny``.
+
+    Rendered as 400 (the ``AccessManagementError`` fallback status): the request
+    itself was malformed, not a conflict with existing state and not a missing
+    record. The originating ``ValueError`` detail from ``_sync_grants`` is logged,
+    never rendered — same doctrine as every other typed error here, so a caller
+    cannot fish debugging detail out of the response.
+    """
+
+    code = CODE_INVALID_GRANT
+    message = MESSAGES["role"]["invalid_grant"]
+
+
 class RoleService:
     """Role administration for one request.
 
@@ -68,7 +85,14 @@ class RoleService:
     def create_role(self, *, name: str, description: str = "",
                     permission_ids: list[int] | None = None,
                     resource_grants: list[dict] | None = None) -> Role:
-        """Create one active role with optional permissions and resource grants."""
+        """Create one active role with optional permissions and resource grants.
+
+        Raises:
+            RoleNameTaken: another role already holds ``name``.
+            InvalidGrant: ``permission_ids``/``resource_grants`` named something
+                that cannot be granted — see ``_sync_grants``. The role is not
+                created; the whole call is one transaction.
+        """
         try:
             with transaction.atomic():
                 role = Role.objects.create(name=name, description=description)
@@ -80,6 +104,10 @@ class RoleService:
                                  "error name=%s %s", name, self._log_context())
                 raise
             raise conflict from exc
+        except ValueError as exc:
+            logger.warning("role creation rejected an invalid grant name=%s %s: %s",
+                           name, self._log_context(), exc)
+            raise InvalidGrant() from exc
 
         logger.info("role created role_id=%s name=%s %s",
                     role.pk, role.name, self._log_context())
@@ -125,7 +153,15 @@ class RoleService:
         return role
 
     def update_role(self, role_id: int, **fields) -> Role:
-        """Apply changes to one role."""
+        """Apply changes to one role.
+
+        Raises:
+            RoleNotFound: no role with ``role_id``.
+            RoleNameTaken: the new name belongs to a different role.
+            InvalidGrant: ``permission_ids``/``resource_grants`` named something
+                that cannot be granted — see ``_sync_grants``. Nothing is
+                written; the whole call is one transaction.
+        """
         permission_ids = fields.pop("permission_ids", None)
         resource_grants = fields.pop("resource_grants", None)
 
@@ -156,6 +192,10 @@ class RoleService:
                                  "error role_id=%s %s", role_id, self._log_context())
                 raise
             raise conflict from exc
+        except ValueError as exc:
+            logger.warning("role update rejected an invalid grant role_id=%s %s: %s",
+                           role_id, self._log_context(), exc)
+            raise InvalidGrant() from exc
 
         logger.info("role updated role_id=%s %s", role.pk, self._log_context())
         return role
@@ -199,7 +239,18 @@ class RoleService:
                 for pid in deduped_ids
             ]
             if to_create:
-                RolePermission.objects.bulk_create(to_create)
+                try:
+                    RolePermission.objects.bulk_create(to_create)
+                except IntegrityError as exc:
+                    # Only the (role, permission, resource_path) constraint applies
+                    # here — a concurrent sync for the same role lost the race. Not a
+                    # role-name conflict, so it must not reach _classify_conflict,
+                    # which only knows how to attribute THAT constraint; surfacing it
+                    # as ValueError routes it through the caller's own translation
+                    # into a client-safe InvalidGrant instead of an unattributed 500.
+                    raise ValueError(
+                        "permission_ids sync collided with a concurrent change to "
+                        "this role — retry the request") from exc
 
         # 2. Sync resource-level data.read grants — also a full replace, mirroring
         # the global-permission sync above (an admin removing a row in the UI
@@ -242,9 +293,16 @@ class RoleService:
              .delete())
 
             for res_path, effect in canonical.items():
-                RolePermission.objects.update_or_create(
-                    role=role, permission=data_read_perm, resource_path=res_path,
-                    defaults={"effect": effect, "granted_by": actor})
+                try:
+                    RolePermission.objects.update_or_create(
+                        role=role, permission=data_read_perm, resource_path=res_path,
+                        defaults={"effect": effect, "granted_by": actor})
+                except IntegrityError as exc:
+                    # Same reasoning as the permission_ids sync above: a concurrent
+                    # writer raced this exact (role, permission, resource_path) row.
+                    raise ValueError(
+                        f"resource_grants sync collided with a concurrent change to "
+                        f"{res_path!r} on this role — retry the request") from exc
 
 
     @staticmethod
