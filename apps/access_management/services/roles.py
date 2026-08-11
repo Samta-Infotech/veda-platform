@@ -183,6 +183,11 @@ class RoleService:
                     for name, value in fields.items():
                         setattr(role, name, value)
                     role.save(update_fields=[*touched, "updated_at"])
+                elif permission_ids is not None or resource_grants is not None:
+                    # No plain field changed, but a grants-only request still changes
+                    # the role — updated_at must reflect that too, or "last updated"
+                    # sorting/display silently lies about the most recent write.
+                    role.save(update_fields=["updated_at"])
 
                 self._sync_grants(role, permission_ids, resource_grants)
         except IntegrityError as exc:
