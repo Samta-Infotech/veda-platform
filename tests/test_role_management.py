@@ -41,8 +41,11 @@ from django.test import Client, override_settings  # noqa: E402
 
 from apps.access_management.models import Permission, Role, RolePermission, UserRole  # noqa: E402
 from apps.access_management.services import (  # noqa: E402
+    ADMIN_ROLE_NAME,
+    CODE_ADMIN_ROLE_PROTECTED,
     CODE_ROLE_NAME_TAKEN,
     CODE_ROLE_NOT_FOUND,
+    AdminRoleProtected,
     InvalidGrant,
     RoleNameTaken,
     RoleNotFound,
@@ -1048,3 +1051,79 @@ def test_create_role_with_grants_atomically():
     read = Permission.objects.get(code="data.read")
     assert RolePermission.objects.filter(
         role=role, permission=read, resource_path="db:crm", effect="allow").exists()
+
+
+# ---------------------------------------------------------------------------
+# The seeded "Admin" role is protected from rename/deactivate/delete
+# ---------------------------------------------------------------------------
+#
+# Regression coverage for a live-reproduced incident: `roles/delete` (and
+# `roles/update {is_active: false}`) on the Admin role succeeded with no error,
+# and the platform's own only admin lost `roles/detail` access the instant
+# their sole role was deactivated — every other admin-identity guard in this
+# codebase (bootstrap_admin, UserRoleService.revoke(), get_admin_role()) looks
+# the role up by its exact name, so the record itself must never be renamed or
+# deactivated, independent of who holds it or how many other admins exist.
+
+
+@pytest.fixture
+def admin_role():
+    return Role.objects.get(name__iexact=ADMIN_ROLE_NAME)
+
+
+def test_deactivating_the_admin_role_is_refused(admin_role):
+    with pytest.raises(AdminRoleProtected) as exc_info:
+        RoleService().update_role(admin_role.pk, is_active=False)
+
+    assert exc_info.value.code == CODE_ADMIN_ROLE_PROTECTED
+    admin_role.refresh_from_db()
+    assert admin_role.is_active is True
+
+
+def test_deleting_the_admin_role_via_the_delete_endpoint_is_refused(admin_client, admin_role):
+    response = _delete(admin_client, role_id=admin_role.pk)
+
+    assert response.status_code == 409
+    assert response.json()["code"] == CODE_ADMIN_ROLE_PROTECTED
+    admin_role.refresh_from_db()
+    assert admin_role.is_active is True
+
+
+def test_renaming_the_admin_role_is_refused(admin_role):
+    with pytest.raises(AdminRoleProtected):
+        RoleService().update_role(admin_role.pk, name="Senior Database Analyst")
+
+    admin_role.refresh_from_db()
+    assert admin_role.name == ADMIN_ROLE_NAME
+
+
+def test_renaming_the_admin_role_is_refused_even_case_insensitively_the_same(admin_role):
+    """Re-submitting the exact same name (any case) is a no-op, not a rename —
+    must not be refused, since nothing about the protected identity changes."""
+    response = RoleService().update_role(admin_role.pk, name=ADMIN_ROLE_NAME.upper(),
+                                         description="still the same role")
+    assert response.name == ADMIN_ROLE_NAME.upper()
+
+
+def test_other_fields_on_the_admin_role_can_still_be_edited(admin_role):
+    """The guard is scoped to identity (name) and lifecycle (is_active) — the
+    Admin role's description and grants remain editable like any other role's."""
+    updated = RoleService().update_role(admin_role.pk, description="Updated description")
+    assert updated.description == "Updated description"
+
+
+def test_activating_the_admin_role_is_never_refused(admin_role):
+    """is_active=True is always a no-op or a reactivation, never the dangerous
+    direction — only is_active=False triggers the guard."""
+    updated = RoleService().update_role(admin_role.pk, is_active=True)
+    assert updated.is_active is True
+
+
+def test_a_non_admin_role_is_never_guarded_by_this(role_id):
+    """The guard is scoped to the Admin role specifically — an ordinary role can
+    still be renamed and deactivated exactly as before."""
+    RoleService().update_role(role_id, name="Renamed Freely", is_active=False)
+
+    role = Role.objects.get(pk=role_id)
+    assert role.name == "Renamed Freely"
+    assert role.is_active is False

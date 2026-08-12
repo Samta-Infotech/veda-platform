@@ -1049,15 +1049,13 @@ All query params are optional. `search` matches name or description (case-insens
       {
         "role_id": 1,
         "name": "Database Analyst",
-        "role_name": "Database Analyst",
         "description": "Access to finance databases.",
         "is_active": true,
-        "created_at": "2026-07-31T09:00:00Z",
-        "updated_at": "2026-07-31T10:00:00Z",
-        "deleted_at": null,
+        "created_at": "Jul 31, 2026",
+        "updated_at": "Jul 31, 2026",
+        "deleted_at": "",
         "users_count": 4,
-        "connected_sources": ["Database"],
-        "last_updated": "Jul 31, 2026"
+        "connected_sources": ["Database"]
       }
     ],
     "pagination": {
@@ -1072,11 +1070,11 @@ All query params are optional. `search` matches name or description (case-insens
 }
 ```
 
+Live-verified `2026-08-11`: `created_at`/`updated_at`/`deleted_at` are human-formatted display strings (e.g. `"Jul 31, 2026"`), **not** ISO-8601 — `deleted_at` is `""` (not `null`) when the role has never been retired, same convention as `users/list`. There is no `role_name` (it duplicated `name` and was removed) and no separate `last_updated` (folded into `updated_at`).
+
 Each role in the list carries enriched fields from `role_stats()`:
 - `users_count`: number of users holding this role (from `UserRole`).
 - `connected_sources`: list of human-readable source kind labels (e.g. `"Database"`, `"File System"`, `"Datalake"`, `"NoSQL"`) derived from the resource paths in this role's permission grants. Global grants (empty `resource_path`) do not contribute.
-- `role_name`: duplicate of `name`, included for backward compatibility.
-- `last_updated`: human-formatted date string (e.g. `"Jul 31, 2026"`), not ISO-8601.
 
 
 
@@ -1146,6 +1144,7 @@ POST /api/v1/roles/create
 | HTTP | Code | Meaning |
 |---:|---|---|
 | `400` | — | Malformed body, blank name, unknown field, read-only field. |
+| `400` | `INVALID_GRANT` | `permission_ids`/`resource_grants` named an unknown permission id, an unaddressable resource path, or an effect other than `allow`/`deny`. |
 | `409` | `ROLE_NAME_TAKEN` | A role with that name already exists (case-insensitive). |
 
 ### 6.4 Get role details
@@ -1163,15 +1162,15 @@ GET /api/v1/roles/detail?role_id=1
     "name": "Database Analyst",
     "description": "Access to finance databases.",
     "is_active": true,
-    "created_at": "2026-07-31T09:00:00Z",
-    "updated_at": "2026-07-31T10:00:00Z",
-    "deleted_at": null,
+    "created_at": "Jul 31, 2026",
+    "updated_at": "Jul 31, 2026",
+    "deleted_at": "",
     "permission_ids": [1, 2, 8]
   }
 }
 ```
 
-Returns role metadata along with `permission_ids` — the list of global system capability IDs currently assigned (empty list if none). Live-verified `2026-08-11`: the response carries only `permission_ids`, not a nested `permissions` object array — the frontend resolves each id's label/code via `GET /api/v1/permissions/dropdown`.
+Returns role metadata along with `permission_ids` — the list of global system capability IDs currently assigned (empty list if none). Live-verified `2026-08-11`: the response carries only `permission_ids`, not a nested `permissions` object array — the frontend resolves each id's label/code via `GET /api/v1/permissions/dropdown`. `created_at`/`updated_at`/`deleted_at` are human-formatted display strings (same as `roles/list`), not ISO-8601 — `deleted_at` is `""`, not `null`, when the role has never been retired.
 
 
 **Errors:**
@@ -1180,6 +1179,51 @@ Returns role metadata along with `permission_ids` — the list of global system 
 |---:|---|---|
 | `400` | — | `role_id` missing, not an integer, or < 1. |
 | `404` | `ROLE_NOT_FOUND` | No role with that id. |
+
+### 6.4.1 Edit Role flow — prefilling and safely re-saving resource grants
+
+`roles/detail` (§6.4) returns `permission_ids` only. It does not return `resource_grants`, and `catalog/tree` (§12) only ever returns *resolved* `effect`/`is_allowed` per node, one level at a time — it cannot tell an explicit grant apart from one inherited from an ancestor, and it never returns "the whole tree" in one call. Neither is a safe source for prefilling the Edit Role form.
+
+**Use this instead**, live-verified `2026-08-11`:
+
+```http
+GET /api/v1/roles/permissions/list?role_id=1&page_size=100
+```
+
+```json
+{
+  "status_code": 200,
+  "message": "Permission grants retrieved successfully.",
+  "data": {
+    "grants": [
+      { "role_id": 1, "permission_id": 2, "resource_path": "db:homzhub",
+        "effect": "allow", "resource_exists": true, "granted_by": 1,
+        "created_at": "2026-08-11T06:48:20Z", "updated_at": "2026-08-11T06:48:20Z" },
+      { "role_id": 1, "permission_id": 2, "resource_path": "db:homzhub:payroll",
+        "effect": "deny", "resource_exists": false, "granted_by": 1,
+        "created_at": "2026-08-11T06:48:20Z", "updated_at": "2026-08-11T06:48:20Z" },
+      { "role_id": 1, "permission_id": 2, "resource_path": "",
+        "effect": "allow", "resource_exists": true, "granted_by": null,
+        "created_at": "2026-08-11T07:02:02Z", "updated_at": "2026-08-11T07:02:02Z" }
+    ],
+    "pagination": { "page": 1, "page_size": 100, "total": 3, "total_pages": 1,
+                     "has_next": false, "has_previous": false }
+  }
+}
+```
+
+One call, unfiltered by category or level — a role's grant count is small enough that `page_size=100` (the max) returns every row for the role in one page in practice. This is the endpoint the Admin frontend uses to safely prefill and edit a role's resource grants.
+
+To use it:
+- Rows with `resource_path != ""` are the role's current `resource_grants` — hold onto this exact set as the edit form's starting state.
+- Rows with `resource_path == ""` are the role's current `permission_ids` (one row per id) — cross-checkable against `roles/detail`'s own `permission_ids`.
+- `resource_exists: false` means the catalog no longer has this resource (source disconnected, table/column dropped since the grant was made — the §3.5 "missing resource" case). Display these separately (e.g. greyed out / flagged "unavailable") rather than folding them into the normal tree — and never drop them from the resubmitted `resource_grants` on save unless the Admin explicitly removes that row. Silently dropping an unavailable grant on an unrelated edit would revoke access the Admin never asked to change.
+
+**Why this matters for saving — both grant lists on `roles/update` are independent full replacements, not patches:**
+- `resource_grants` you send **replaces every resource-scoped grant the role has** — anything you fetched via this endpoint but do not include in the resubmitted array is revoked.
+- `permission_ids` you send **replaces every global capability the role has**, independently of `resource_grants` — the two never affect each other's rows.
+
+So the frontend must always resubmit the **complete** `resource_grants` array on every `roles/update` call that touches grants — the rows the Admin edited in this session, plus every other row this endpoint returned that the Admin did not touch (including any `resource_exists: false` rows, unless explicitly removed). Submitting only the changed rows will silently revoke everything else.
 
 ### 6.5 Update role
 
@@ -1224,6 +1268,7 @@ No `data` in the response.
 | HTTP | Code | Meaning |
 |---:|---|---|
 | `400` | — | No updatable fields provided, unknown fields, read-only fields. |
+| `400` | `INVALID_GRANT` | `permission_ids`/`resource_grants` named an unknown permission id, an unaddressable resource path, or an effect other than `allow`/`deny`. |
 | `404` | `ROLE_NOT_FOUND` | No role with that id. |
 | `409` | `ROLE_NAME_TAKEN` | The new name belongs to a different role. |
 
@@ -1255,6 +1300,7 @@ A convenience wrapper — internally calls `RoleService.update_role(role_id, is_
 | HTTP | Code | Meaning |
 |---:|---|---|
 | `400` | — | Malformed body, blank name, unknown or read-only field. |
+| `400` | `INVALID_GRANT` | `permission_ids`/`resource_grants` named an unknown permission id, an unaddressable resource path, or an effect other than `allow`/`deny`. |
 | `404` | `ROLE_NOT_FOUND` | Role does not exist. |
 | `409` | `ROLE_NAME_TAKEN` | Name already used (case-insensitive). |
 
@@ -1266,7 +1312,7 @@ All user endpoints require `IsAdminUser` + `RequiresPermission(USER_MANAGE)`.
 
 ### 7.1 User rules
 
-- Roles are assigned via the separate `/api/v1/users/roles/assign` endpoint, not during user creation.
+- Roles can be assigned at creation time (`role_ids` on `users/create`) or later, either via `role_ids` on `users/update` (a full replace of every role the user holds) or one at a time via `/api/v1/users/roles/assign` / `/revoke`.
 - Permissions live on roles, never on user records.
 - `is_active` controls login and Chatbot access. An inactive user remains manageable in Admin.
 - Password changes use `POST /api/v1/auth/password/change` (authenticated endpoint in `apps.authentication`).
@@ -1290,6 +1336,8 @@ All query params are optional. `search` matches username or email (case-insensit
         "user_id": 101,
         "username": "alice",
         "email": "alice@example.com",
+        "first_name": "Alice",
+        "last_name": "Smith",
         "display_name": "Alice",
         "is_active": true,
         "is_staff": false,
@@ -1314,6 +1362,7 @@ All query params are optional. `search` matches username or email (case-insensit
 ```
 
 Each user in the list carries enriched fields:
+- `first_name` / `last_name`: raw stored values, alongside the derived `display_name` — an edit form pre-fills these two fields separately rather than guessing a split from `display_name`.
 - `display_name`: `first_name` if set, otherwise `username`.
 - `is_staff`: whether the account has admin privileges (reported but never writable through these endpoints).
 - `roles`: list of role name strings assigned to this user (from `UserRole`). May be empty.
@@ -1363,6 +1412,7 @@ No `data` in the response. The password is never returned.
 | HTTP | Code | Meaning |
 |---:|---|---|
 | `400` | — | Malformed body, non-string field, privileged field, password policy violation. |
+| `400` | `INVALID_ROLE` | A `role_ids` entry names an unknown or inactive role. The whole call is one transaction — the user is not created. |
 | `409` | `USERNAME_TAKEN` | A user with that username already exists. |
 | `409` | `EMAIL_TAKEN` | A user with that email already exists (case-insensitive). |
 
@@ -1380,6 +1430,8 @@ GET /api/v1/users/detail?user_id=101
     "user_id": 101,
     "username": "alice",
     "email": "alice@example.com",
+    "first_name": "Alice",
+    "last_name": "Smith",
     "display_name": "Alice",
     "is_active": true,
     "is_staff": false,
@@ -1390,7 +1442,7 @@ GET /api/v1/users/detail?user_id=101
 }
 ```
 
-Returns user metadata along with `role_ids` — the list of role IDs currently assigned (empty list if none) for pre-filling Admin UI edit modals. The response never contains a password or password hash.
+Returns user metadata along with `role_ids` — the list of role IDs currently assigned (empty list if none) for pre-filling Admin UI edit modals. `first_name`/`last_name` are the raw stored values (`display_name` is the derived `first_name or username` shown after login) — needed so an edit form can pre-fill the two fields separately rather than guessing a split from `display_name`. The response never contains a password or password hash.
 
 **Errors:**
 
@@ -1430,6 +1482,8 @@ Setting `is_active` to `false`:
 - Revokes all live refresh tokens (the user cannot mint new access tokens).
 - Is refused if this is the platform's **last active admin** (409 `LAST_ADMIN_PROTECTED`).
 
+`role_ids` is a **full replacement** of this user's role assignments, not a patch — a role omitted from the list is revoked. If this user is the platform's last active admin, the new set must still include the Admin role, or the request is refused (409 `LAST_ADMIN_ROLE_PROTECTED`) and nothing is written — the same protection `users/roles/revoke` already gives one role at a time, applied to this full-replace path too.
+
 The row is locked (`SELECT ... FOR UPDATE`) for the duration.
 
 ```json
@@ -1446,9 +1500,11 @@ No `data` in the response.
 | HTTP | Code | Meaning |
 |---:|---|---|
 | `400` | — | No updatable fields, unknown fields, privileged fields. |
+| `400` | `INVALID_ROLE` | A `role_ids` entry names an unknown or inactive role. Nothing is written. |
 | `404` | `USER_NOT_FOUND` | No user with that id. |
 | `409` | `EMAIL_TAKEN` | The new email belongs to someone else. |
 | `409` | `LAST_ADMIN_PROTECTED` | Cannot deactivate the platform's last active admin. |
+| `409` | `LAST_ADMIN_ROLE_PROTECTED` | `role_ids` would drop the Admin role from the platform's last active admin. |
 
 ### 7.6 Delete user (soft)
 
@@ -1480,10 +1536,12 @@ No row is ever removed. `deleted_at` on `UserProfile` records when this happened
 | HTTP | Code | Meaning |
 |---:|---|---|
 | `400` | — | Malformed body, non-string fields, privileged fields, password policy violation. |
+| `400` | `INVALID_ROLE` | A `role_ids` entry names an unknown or inactive role. |
 | `404` | `USER_NOT_FOUND` | User does not exist. |
 | `409` | `USERNAME_TAKEN` | Username already in use. |
 | `409` | `EMAIL_TAKEN` | Email already in use (case-insensitive). |
 | `409` | `LAST_ADMIN_PROTECTED` | Cannot deactivate the last active admin. |
+| `409` | `LAST_ADMIN_ROLE_PROTECTED` | `role_ids` would drop the Admin role from the platform's last active admin. |
 
 ---
 
@@ -1899,7 +1957,6 @@ Delete → confirm → DELETE user → refresh users
 
 ## 11. Explicitly deferred from V1
 
-- Multiple roles per user.
 - Multiple active sources per source type in the UI; API shapes remain future-compatible.
 - Action-level permissions such as `READ`, `QUERY`, and `DOWNLOAD`.
 - Explicit deny grants and “subtree except child” rules.
@@ -2096,7 +2153,7 @@ GET /api/v1/catalog/tree?role_id=1&category=database&parent_path=postgres.fast_t
 
 `CatalogService.get_tree` was refactored and three real bugs were fixed, all live-verified:
 
-- **Category filter was a no-op in the default grouped view.** `GET /catalog/tree?category=database` used to still return non-empty `datalake`/`file_system` arrays — `category` only took effect on the lazy-load branch. Now filters all three modes identically; the Mode 4 example above (empty `datalake`/`file_system`) reflects current behavior.
+- **Category filter was a no-op in the default grouped view.** `GET /catalog/tree?category=database` used to still return non-empty `datalake`/`file_system` arrays — `category` only took effect on the lazy-load branch. Now filters all three modes identically; the Mode 4 example above (empty `datalake`/`file_system`) reflects current behavior. Re-verified `2026-08-11` at root level for all three values — `category=database` → only `database` populated, `category=datalake` → only `datalake` populated, `category=file_system` → only `file_system` populated; the other two arrays come back empty in every case.
 - **Descendant-grant inheritance never resolved past the exact granted path.** A grant on a parent (e.g. `db:homzhub` → `ALLOW`) is supposed to cover every table beneath it (§3.2, SELF_AND_DESCENDANTS), but the ancestor walk split paths on `.` while this codebase's paths are `:`-delimited (`db:homzhub:accounts_generalledger`) — so it never found the parent grant and every descendant showed `is_allowed: false`. Now uses `resource_path.prefixes()`, the same helper the runtime resolver (`services/resolver.py`) already uses for this exact question, so tree display and actual query-time enforcement agree.
 - **`name` was the full path, not the leaf segment.** Same `.`-vs-`:` mistake — `display_name = path.split(".")[-1]` never found a `.`, so `name` always equaled the entire `path` (e.g. `"db:homzhub:accounts_generalledger"` instead of `"accounts_generalledger"`). Fixed via `resource_path.segments(path)[-1]`.
 - **Search only ever matched root-level resources, even in the default grouped view.** `search=<a nested table's name>` used to return empty because the default branch always restricted to `parent_path=""` before applying the search filter. Now: a bare `GET /catalog/tree` (no `search`) still shows roots only — it does not eagerly scan every level on a plain page load — but as soon as `search` is given, it searches every level and returns matches grouped by kind, wherever they live in the tree, matching the Mode 5 example above.
@@ -2108,13 +2165,13 @@ Regression tests: `tests/test_catalog_resources.py` (`test_a_grant_on_a_root_cov
 | Param | Type | Required | Notes |
 |---|---|---|---|
 | `role_id` | integer | No | Non-existent id silently resolves to `is_allowed: false` everywhere — no 404, no distinction from a real role with zero grants. |
-| `category` | string | No | Must be one of `database`, `datalake`, `file_system` — anything else is a 400. Only takes effect when `parent_path` is also present (§12.1). |
+| `category` | string | No | Must be one of `database`, `datalake`, `file_system` — anything else is a 400. Applies identically in every mode (root, lazy-load, search) — see §12.1. |
 | `parent_path` | string | No | A non-existent path returns `200` with an empty `resources` array, not `404` — treated like an empty folder. |
 | `search` | string | No | Case-insensitive substring on `path`. Only matches root-level nodes in the default (no `parent_path`) view (§12.1). |
 
 ### 12.3 Additional payload/response examples (live-verified `2026-08-11`)
 
-**Lazy-load one level with a category filter** (the one place `category` is honored):
+**Lazy-load one level with a category filter** (`category` applies here too, same as at root — see Mode 4 above for the root-level case):
 
 ```http
 GET /api/v1/catalog/tree?parent_path=db:homzhub&category=database
