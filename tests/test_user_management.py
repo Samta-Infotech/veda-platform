@@ -62,8 +62,8 @@ NEW_PASSWORD = "Fresh-Tapir-97!"
 
 # The one user representation every endpoint in this app returns. Asserted as an
 # exact set so a future field addition is a deliberate contract change, not a leak.
-PUBLIC_FIELDS = {"user_id", "username", "email", "display_name", "is_active",
-                 "is_staff", "date_joined", "last_login"}
+PUBLIC_FIELDS = {"user_id", "username", "email", "first_name", "last_name",
+                 "display_name", "is_active", "is_staff", "date_joined", "last_login"}
 
 #: Only ``users/list`` carries these — a per-row admin-table need (roles, and the
 #: display-date fields the frontend's table renders directly), not part of the

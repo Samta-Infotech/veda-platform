@@ -84,7 +84,7 @@ class PermissionDropdownView(AdminView):
         """Return all active permissions, unpaginated."""
         permissions = PermissionService(request).list_active_permissions()
 
-        data = [{"label": p.code, "value": p.pk} for p in permissions]
+        data = [{"label": p.name, "value": p.pk} for p in permissions]
         return api.success(MESSAGES["permission"]["list"], data)
 
 

@@ -66,7 +66,7 @@ PUBLIC_FIELDS = {"role_id", "name", "description", "is_active",
 #: Only ``roles/list`` carries these — an admin-table summary need (how many
 #: users, what kinds of source), not part of the shared create/detail/update
 #: representation. See RoleListView.
-LIST_EXTRA_FIELDS = {"role_name", "users_count", "connected_sources", "last_updated"}
+LIST_EXTRA_FIELDS = {"users_count", "connected_sources"}
 
 # Production hashers cost ~310ms per password by design; these tests only need an
 # admin to authenticate as. See tests/test_user_management.py for the full rationale.
@@ -503,12 +503,6 @@ def test_list_connected_sources_ignores_global_grants(admin_client):
     assert row["connected_sources"] == []
 
 
-def test_list_role_name_matches_name(admin_client, population):
-    row = _list(admin_client, page_size=1).json()["data"]["roles"][0]
-
-    assert row["role_name"] == row["name"]
-
-
 # ---------------------------------------------------------------------------
 # Dropdown
 # ---------------------------------------------------------------------------
@@ -653,7 +647,9 @@ def test_reactivating_a_role_clears_deleted_at(admin_client, role_id):
 
 
 def test_a_new_role_has_no_deleted_at(admin_client, role_id):
-    assert _detail(admin_client, role_id=role_id).json()["data"]["deleted_at"] is None
+    # api.human_date(None) == "" -- a display string, never null, for an
+    # empty-table-cell-friendly value (see apps/core/api.py::human_date).
+    assert _detail(admin_client, role_id=role_id).json()["data"]["deleted_at"] == ""
 
 
 def test_update_of_a_missing_role_is_404(admin_client):

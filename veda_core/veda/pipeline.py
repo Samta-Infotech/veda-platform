@@ -6,7 +6,7 @@ from veda.execution import execute_sql
 from veda.generation import generate_sql
 from veda.planning import existence_mode, try_multitable
 from veda.routing import recommended_projection, select_primary_table, vet_primary
-from veda.rbac_filter import filter_retrieval_results, narrow_allowed
+from veda.rbac_filter import filter_retrieval_results, narrow_allowed, restricted_names
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
 from utils.logger import get_logger
@@ -172,7 +172,17 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             return None
         try:
             from veda.feedback import explain_failure
-            fb = explain_failure(status, sm, **ctx)
+            # Attached to a COPY passed only to explain_failure, never to the
+            # `sm` the rest of run_query reasons over — a refusal must be able
+            # to say "you don't have permission" instead of "that doesn't
+            # exist" for a restricted table/column, without narrowing what
+            # retrieval/planning/SQL-generation see (that stays exactly the
+            # existing filter_retrieval_results/narrow_allowed's job).
+            _restricted = restricted_names(sm, _ambient_ctx())
+            _sm_for_feedback = (
+                {**sm, "_rbac_restricted": _restricted}
+                if (_restricted["tables"] or _restricted["columns"]) else sm)
+            fb = explain_failure(status, _sm_for_feedback, **ctx)
             print("\n" + fb["text"] + "\n")
             return fb
         except Exception:
@@ -1678,6 +1688,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # enforces it as a hard allowlist — see veda.rbac_filter's module docstring for
     # why this ONE gate, not patching every discovery site. A no-op when the
     # ambient context carries no allowed_resources.
+    #
+    # `_restricted_for_sql` is captured BEFORE narrowing so a rejection below can
+    # tell "the SQL referenced something RBAC just removed" apart from "the SQL
+    # is wrong for an unrelated reason" — narrow_allowed() itself only returns
+    # the narrowed sets, not what it took out.
+    _restricted_for_sql = restricted_names(sm, _ambient_ctx())
     allowed_tables, allowed_columns = narrow_allowed(
         allowed_tables, allowed_columns, sm, _ambient_ctx())
 
@@ -1692,6 +1708,19 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     if err:
         print(f"\n❌ [L6] Validation rejected the SQL: {err}\n      raw: {sql}\n")
         log_route(_route + ".invalid", query, (time.time() - start) * 1000, error=err)
+        # Was this rejection RBAC-caused? The AST error text isn't something to
+        # parse (format is validate_and_parameterize's, not ours to depend on) —
+        # instead check whether the generated SQL actually references a name
+        # RBAC just stripped. A quoted-identifier match, not a bare substring
+        # one: SQL here always double-quotes identifiers (see the generated
+        # examples throughout this module), so this cannot false-positive on an
+        # unrelated word that merely contains a restricted name.
+        _restricted_hit = any(
+            f'"{name}"' in sql
+            for name in _restricted_for_sql["tables"] + _restricted_for_sql["columns"])
+        if _restricted_hit:
+            fb = _feedback("access_denied")
+            return _done(1, "invalid", error=err, feedback=fb)
         return _done(1, "invalid", error=err)
     _np = len(params) if params else 0
     print(f"  [L6c] Validate     ✓  read-only · parameterized ({_np} bound value"

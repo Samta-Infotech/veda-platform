@@ -164,31 +164,33 @@ class CatalogDiscoveryService:
             return expected
         expected[source_path] = ("", None)
 
-        tables = (SchemaTable.objects.all_tenants()
-                  .filter(source_id=source.pk).only("id", "name"))
-        table_paths: dict[object, str] = {}
-        for table in tables:
-            table_path = self._safe_path(report, kind, source.name, table.name)
-            if table_path is None:
-                continue
-            # First writer wins on a tenant collision — one path, one row (see the
-            # module docstring on tenancy).
-            if table_path not in expected:
-                expected[table_path] = (source_path, table.id)
-            table_paths[table.id] = table_path
+        # Only relational databases have SchemaTable / SchemaColumn substrate rows
+        if kind == "db":
+            tables = (SchemaTable.objects.all_tenants()
+                      .filter(source_id=source.pk).only("id", "name"))
+            table_paths: dict[object, str] = {}
+            for table in tables:
+                table_path = self._safe_path(report, kind, source.name, table.name)
+                if table_path is None:
+                    continue
+                # First writer wins on a tenant collision — one path, one row (see the
+                # module docstring on tenancy).
+                if table_path not in expected:
+                    expected[table_path] = (source_path, table.id)
+                table_paths[table.id] = table_path
 
-        columns = (SchemaColumn.objects.all_tenants()
-                   .filter(source_id=source.pk).only("id", "name", "table_id"))
-        for column in columns:
-            table_path = table_paths.get(column.table_id)
-            if table_path is None:
-                continue  # orphan column, or its table was unaddressable
-            column_path = self._safe_path(
-                report, *resource_path.segments(table_path), column.name)
-            if column_path is None:
-                continue
-            if column_path not in expected:
-                expected[column_path] = (table_path, column.id)
+            columns = (SchemaColumn.objects.all_tenants()
+                       .filter(source_id=source.pk).only("id", "name", "table_id"))
+            for column in columns:
+                table_path = table_paths.get(column.table_id)
+                if table_path is None:
+                    continue  # orphan column, or its table was unaddressable
+                column_path = self._safe_path(
+                    report, *resource_path.segments(table_path), column.name)
+                if column_path is None:
+                    continue
+                if column_path not in expected:
+                    expected[column_path] = (table_path, column.id)
 
         return expected
 
