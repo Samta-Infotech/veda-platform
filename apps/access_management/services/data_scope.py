@@ -35,12 +35,11 @@ NAMES, NOT PATHS
 
 CONTRACT
     ``compute_data_scope(user, source_ids)`` returns ``None`` for "no restriction
-    at all" (RBAC off, or ``user.is_staff`` — the same admin-bypass precedent as
-    ``apps.query.scope``'s source-level narrowing) — the caller then must not
-    forward any scope payload, exactly as it must not narrow sources in that
-    case. Otherwise it returns one entry per ``source_id`` (assumed already
-    source-permitted by the caller; this function does not re-check
-    source-level reachability).
+    at all" (RBAC off only — ``user.is_staff`` is Django-admin-panel login, not a
+    data-scope bypass) — the caller then must not forward any scope payload,
+    exactly as it must not narrow sources in that case. Otherwise it returns one
+    entry per ``source_id`` (assumed already source-permitted by the caller;
+    this function does not re-check source-level reachability).
 
 RESOLVE ONCE PER REQUEST (User Story 3, Task 17 — centralized enforcement)
     ``resolve_effective_permissions(user)`` is the ONE place that decides "is
@@ -94,19 +93,19 @@ def resolve_effective_permissions(user):
     """The ONE per-request resolution point (User Story 3, Task 17): decides
     whether this user is even subject to RBAC narrowing at all, and if so, pays
     for the one resolver query. Returns ``None`` for "no restriction anywhere" —
-    no user, RBAC off, or ``user.is_staff`` (admin bypass) — else the resolved
-    ``EffectivePermissions``. Both the source-level check
-    (``apps.query.scope.permitted_source_ids``) and this module's table/column
-    check consume this SAME value when a caller centralizes it, instead of each
-    re-resolving independently."""
+    no user, or RBAC off — else the resolved ``EffectivePermissions``.
+    ``is_staff`` grants Django-admin-panel login only; it is NOT a data-scope
+    bypass, so it is intentionally not checked here — a staff user is scoped
+    by their granted role permissions like anyone else. Both the source-level
+    check (``apps.query.scope.permitted_source_ids``) and this module's
+    table/column check consume this SAME value when a caller centralizes it,
+    instead of each re-resolving independently."""
     if user is None:
         return None
 
     from ..gate import MODE_OFF, rbac_mode
 
     if rbac_mode() == MODE_OFF:
-        return None
-    if getattr(user, "is_staff", False):
         return None
     return PermissionResolver().resolve(user)
 
