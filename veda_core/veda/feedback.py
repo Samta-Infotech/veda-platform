@@ -49,6 +49,33 @@ def _closest(name, options, n=3):
     return [o for _, o in scored[:n]]
 
 
+#: Same wording everywhere a refusal is actually "you may not see this", not "this
+#: doesn't exist" or "I misunderstood" — see ``_restricted_match``'s docstring for
+#: why this is the ONE case that gets a distinct message rather than the generic
+#: "couldn't map/answer" text every other refusal uses.
+ACCESS_DENIED_WHY = "You don't have permission to access this data."
+ACCESS_DENIED_WHAT = "Contact your Admin to request access."
+
+
+def _restricted_match(term, sm) -> bool:
+    """Whether ``term`` names a real table/column that RBAC removed from ``sm``
+    (see ``veda.rbac_filter.filter_sm``'s ``_rbac_restricted``), rather than
+    something that never existed at all.
+
+    Exact (case-insensitive) match only — deliberately not the fuzzy/substring
+    scoring ``_closest`` uses for suggestions. A fuzzy match here would risk
+    revealing that a restricted name exists off a query that merely shares a
+    word with it; an exact match is the one case a user's own wording could
+    only produce by already knowing the real column/table name.
+    """
+    if not term:
+        return False
+    restricted = sm.get("_rbac_restricted") or {}
+    names = (restricted.get("tables") or []) + (restricted.get("columns") or [])
+    t = term.strip().lower()
+    return any(t == n.lower() for n in names)
+
+
 def explain_failure(status, sm, *, column=None, value=None, missing=None,
                     candidates=None, msg=None, error=None):
     """Return {why, what_needed, suggestions, text} for a non-answered status.
@@ -68,11 +95,23 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
         why = "I couldn't confidently match your question to a table in the schema."
         what = "Name the entity you're asking about, or pick a closest match."
         sugg = (candidates or [])[:5]
+    elif status == "access_denied":
+        # No suggestions: naming other restricted names here would be exactly
+        # the leak this whole path exists to avoid.
+        why = ACCESS_DENIED_WHY
+        what = ACCESS_DENIED_WHAT
     elif status == "qualifier_dropped":
-        cols = [k.split(".", 1)[1] for k in sm.get("columns", {})]
-        why = f"I couldn't map '{missing}' to any column or value in the data."
-        what = (f"Tell me what '{missing}' refers to — a column, or a value to filter on?")
-        sugg = _closest(missing, cols)
+        if _restricted_match(missing, sm):
+            # A real column/table the user's role doesn't grant, not a typo or
+            # a non-existent one — same reasoning as the "access_denied" branch
+            # above, reached via a different pipeline stage for the same cause.
+            why = ACCESS_DENIED_WHY
+            what = ACCESS_DENIED_WHAT
+        else:
+            cols = [k.split(".", 1)[1] for k in sm.get("columns", {})]
+            why = f"I couldn't map '{missing}' to any column or value in the data."
+            what = (f"Tell me what '{missing}' refers to — a column, or a value to filter on?")
+            sugg = _closest(missing, cols)
     elif status == "clarify":
         why = msg or "Your question is ambiguous about which entity it's about."
         what = "Re-ask naming the subject explicitly (e.g. 'for each <entity> …')."

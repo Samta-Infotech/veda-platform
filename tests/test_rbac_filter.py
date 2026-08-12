@@ -108,6 +108,37 @@ def test_restricted_table_keeps_only_listed_columns():
     assert set(out["columns"]) == {"employee.id", "employee.name"}
 
 
+def test_restricted_source_records_the_dropped_table_bare_name():
+    """``_rbac_restricted`` exists so a downstream refusal can tell "real but
+    restricted" apart from "doesn't exist" — see veda.feedback._restricted_match."""
+    sm = _sm(
+        tables={"employee": {}, "department": {}},
+        columns={"employee.id": {}, "department.id": {}},
+    )
+    ctx = _ctx([1], ((1, (False, (("employee", None),))),))
+    out = filter_sm(sm, ctx)
+    assert out["_rbac_restricted"]["tables"] == ["department"]
+    assert out["_rbac_restricted"]["columns"] == ["id"]  # department.id, bare
+
+
+def test_restricted_table_records_the_dropped_column_bare_name():
+    sm = _sm(
+        tables={"employee": {}},
+        columns={"employee.id": {}, "employee.name": {}, "employee.salary": {}},
+    )
+    ctx = _ctx([1], ((1, (False, (("employee", ("id", "name")),))),))
+    out = filter_sm(sm, ctx)
+    assert out["_rbac_restricted"]["tables"] == []
+    assert out["_rbac_restricted"]["columns"] == ["salary"]
+
+
+def test_nothing_restricted_leaves_the_marker_empty():
+    sm = _sm(tables={"employee": {}}, columns={"employee.id": {}})
+    ctx = _ctx([1], ((1, (True, ())),))  # source fully open
+    out = filter_sm(sm, ctx)
+    assert out["_rbac_restricted"] == {"tables": [], "columns": []}
+
+
 def test_source_absent_from_allowed_resources_is_denied():
     sm = _sm(tables={"employee": {}}, columns={"employee.id": {}})
     ctx = _ctx([1, 2], ((1, (True, ())),))  # source 2 never mentioned at all

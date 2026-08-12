@@ -120,11 +120,53 @@ def _column_allowed(open_sources, table_index, sid, table_key, col_name) -> bool
     return cols is None or col_name in cols
 
 
+def restricted_names(sm: dict, ctx) -> dict:
+    """Bare table/column names RBAC would remove from ``sm`` for ``ctx`` — the
+    same test ``filter_sm`` applies, without building a filtered copy of ``sm``
+    itself. ``{"tables": [], "columns": []}`` when there is nothing to restrict.
+
+    For a caller that must not change what the rest of the pipeline sees (e.g.
+    ``pipeline.py``'s feedback/explanation path, which needs to know a term
+    names something real-but-restricted without narrowing the live ``sm`` every
+    other part of ``run_query`` still reasons over) — see ``veda.feedback``.
+    """
+    if ctx is None or getattr(ctx, "allowed_resources", None) is None:
+        return {"tables": [], "columns": []}
+
+    open_sources, table_index = _index(ctx)
+
+    tables = sm.get("tables") or {}
+    restricted_tables = [
+        table_key.rpartition(".")[2] or table_key
+        for table_key, entry in tables.items()
+        if not _table_allowed(open_sources, table_index, _table_source_id(entry, ctx), table_key)
+    ]
+
+    columns = sm.get("columns") or {}
+    restricted_columns = []
+    for key, entry in columns.items():
+        table_key, _, col_name = key.rpartition(".")
+        if not table_key:
+            continue
+        sid = _table_source_id(entry, ctx)
+        if not _column_allowed(open_sources, table_index, sid, table_key, col_name):
+            restricted_columns.append(col_name)
+
+    return {"tables": sorted(restricted_tables), "columns": sorted(restricted_columns)}
+
+
 def filter_sm(sm: dict, ctx) -> dict:
     """A COPY of ``sm`` with ``tables``/``columns``/``retrieval_documents``
     narrowed to ``ctx.allowed_resources`` — or ``sm`` itself, unchanged, when
     there is nothing to restrict. Never mutates the input: ``sm`` is a shared,
-    scope-cached object (``_SM`` in ``veda_hybrid.py``)."""
+    scope-cached object (``_SM`` in ``veda_hybrid.py``).
+
+    Also attaches ``_rbac_restricted`` (bare table/column names removed by this
+    call) — never consumed by retrieval/SQL-generation, which only ever see the
+    narrowed ``tables``/``columns`` themselves. It exists solely so a downstream
+    refusal (``veda.feedback.explain_failure``) can tell "this term matches a
+    real but restricted table/column" apart from "this term matches nothing at
+    all", and phrase the two differently — see that module for why."""
     if ctx is None or getattr(ctx, "allowed_resources", None) is None:
         return sm
 
@@ -160,7 +202,8 @@ def filter_sm(sm: dict, ctx) -> dict:
             filtered_docs[key] = doc
 
     return {**sm, "tables": filtered_tables, "columns": filtered_columns,
-            "retrieval_documents": filtered_docs}
+            "retrieval_documents": filtered_docs,
+            "_rbac_restricted": restricted_names(sm, ctx)}
 
 
 def filter_retrieval_results(results, sm: dict, ctx):
