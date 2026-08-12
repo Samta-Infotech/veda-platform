@@ -22,6 +22,7 @@ from django.utils import timezone
 from apps.core.messages import MESSAGES
 
 from ..models import Role
+from .admin_guard import ADMIN_ROLE_NAME
 from .base import AccessManagementError, ConflictError, NotFoundError, paginate
 from .. import resource_path as rp
 from ..codes import PermissionCode
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 CODE_ROLE_NAME_TAKEN = "ROLE_NAME_TAKEN"
 CODE_ROLE_NOT_FOUND = "ROLE_NOT_FOUND"
 CODE_INVALID_GRANT = "INVALID_GRANT"
+CODE_ADMIN_ROLE_PROTECTED = "ADMIN_ROLE_PROTECTED"
 
 #: Exactly the columns ``views/roles.py::public_fields`` renders. Passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift: adding a column
@@ -70,6 +72,24 @@ class InvalidGrant(AccessManagementError):
 
     code = CODE_INVALID_GRANT
     message = MESSAGES["role"]["invalid_grant"]
+
+
+class AdminRoleProtected(ConflictError):
+    """Refused: this would rename or retire the platform's seeded "Admin" role.
+
+    Distinct from ``LastAdminRoleProtected`` (``admin_guard.py``), which protects
+    one USER from losing their last admin role — this protects the ROLE RECORD
+    itself, unconditionally, regardless of who currently holds it. Without this,
+    `roles/update {name: "..."}` or `roles/delete` on the Admin role succeeds with
+    no error, silently breaking every other guard that identifies it by name
+    (``bootstrap_admin``, ``UserRoleService.revoke()``, ``get_admin_role()``) and,
+    if retired, instantly strips `role.manage`/`user.manage`/etc. from every
+    holder — reproduced live: the platform's own only admin lost `roles/detail`
+    access the moment their sole role was deactivated this way.
+    """
+
+    code = CODE_ADMIN_ROLE_PROTECTED
+    message = MESSAGES["role"]["admin_role_protected"]
 
 
 class RoleService:
@@ -161,6 +181,14 @@ class RoleService:
             InvalidGrant: ``permission_ids``/``resource_grants`` named something
                 that cannot be granted — see ``_sync_grants``. Nothing is
                 written; the whole call is one transaction.
+            AdminRoleProtected: this role is the seeded "Admin" role and the
+                request would rename it or set ``is_active=False`` (also refused
+                for the same role via ``RoleDeleteView``, which calls this with
+                ``is_active=False``). Unconditional — it does not matter who
+                currently holds the role or how many other admins exist; the
+                record itself must stay named "Admin" and stay active, because
+                every other admin-identity guard in this codebase looks it up by
+                that exact name.
         """
         permission_ids = fields.pop("permission_ids", None)
         resource_grants = fields.pop("resource_grants", None)
@@ -174,6 +202,13 @@ class RoleService:
                 role = Role.objects.select_for_update().filter(pk=role_id).first()
                 if role is None:
                     raise RoleNotFound()
+
+                if role.name.strip().lower() == ADMIN_ROLE_NAME.lower():
+                    renaming = ("name" in fields
+                               and fields["name"].strip().lower() != ADMIN_ROLE_NAME.lower())
+                    deactivating = fields.get("is_active") is False
+                    if renaming or deactivating:
+                        raise AdminRoleProtected()
 
                 if fields:
                     touched = list(fields)

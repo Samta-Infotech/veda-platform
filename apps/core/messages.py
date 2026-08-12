@@ -54,6 +54,8 @@ MESSAGES = {
         "invalid_grant": ("Some of the permissions or resource grants in this "
                           "request are invalid."),
         "invalid_role": "One or more specified roles do not exist or are inactive.",
+        "admin_role_protected": ("The Admin role cannot be renamed, deactivated, "
+                                 "or deleted."),
     },
     "permission": {
         "retrieved": "Permission retrieved successfully.",
