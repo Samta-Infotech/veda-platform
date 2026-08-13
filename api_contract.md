@@ -38,7 +38,7 @@ The following decisions are fixed for V1:
 10. Users support `ACTIVE` and `INACTIVE` status.
 11. V1 does not require idempotency keys, optimistic-lock versions, `If-Match`, or catalog-version tokens.
 12. Submit buttons are disabled while their mutation is in progress.
-13. Admin accounts are provisioned by backend/DevOps; the Admin Portal does not create other Admins.
+13. Admin accounts may also be provisioned through the Admin Portal: `POST /api/v1/users/create` and `POST /api/v1/users/update` accept an `is_admin` flag, which decides whether the account may sign into the Admin frontend (see §2.1, §7.3–7.5).
 14. Chatbot users log in with the `username` and permanent password created through User Management.
 
 ---
@@ -68,11 +68,10 @@ Data-access role:
 
 V1 Admin provisioning rules:
 
-- Initial and additional Admin accounts are provisioned by backend/DevOps.
 - Public self-registration is not supported.
-- `POST /api/v1/users/create` creates Chatbot users only.
-- User create/update requests MUST NOT accept `is_admin`, `account_type`, or equivalent privilege fields.
-- Admin endpoints independently verify that the authenticated account has Admin privileges.
+- `POST /api/v1/users/create` and `POST /api/v1/users/update` accept an optional `is_admin` boolean (default `false` on create). It is this platform's flag for which frontend app the account may sign into — checked at login (§2.10) — and grants no permission by itself; permissions still come entirely from role assignment.
+- `is_admin` is the public name for the underlying `is_superuser` column; the raw name `is_superuser` is never accepted by either endpoint.
+- Admin endpoints independently verify that the authenticated account has Admin privileges (`is_staff`, unrelated to `is_admin`), returning `403` with `"Access Denied: Admin privileges required."` when it does not (see §2.7).
 
 ### 2.2 Naming and formats
 
@@ -181,7 +180,7 @@ Validation errors may include field errors:
 | `204` | Successful deletion; response has no body. |
 | `400` | Malformed request. |
 | `401` | Authentication missing or invalid. |
-| `403` | Authenticated caller is not allowed. |
+| `403` | Authenticated caller is not allowed. On `IsAdminUser`-gated endpoints (Roles/Users/Permissions APIs), the body is `{"status_code": 403, "message": "Access Denied: Admin privileges required."}` for a non-staff caller. |
 | `404` | Requested resource does not exist. |
 | `409` | Duplicate or dependency/state conflict. |
 | `422` | Request fields or selected resources are invalid. |
@@ -219,15 +218,19 @@ Request payload:
 ```json
 {
   "username": "alice",
-  "password": "permanent-password"
+  "password": "permanent-password",
+  "is_admin": true
 }
 ```
+
+`is_admin` is optional and sent by the Admin frontend only, to claim this login is for it — the Chatbot frontend never sends this field. It is not merely `false` when absent: an absent field means "no claim made" and is not checked at all, distinct from an explicit `false`.
 
 Before issuing tokens, the backend verifies:
 
 1. `username` and `password` credentials are valid via `django.contrib.auth.authenticate`;
-2. the account is active (`is_active=True`); and
-3. non-staff users have at least one active assigned role (`UserRole`). `is_staff` admin accounts bypass role checking.
+2. the account is active (`is_active=True`);
+3. non-staff users have at least one active assigned role (`UserRole`). `is_staff` admin accounts bypass role checking; and
+4. if `is_admin` was sent as `true`, the account's `is_admin` flag (the public name for `is_superuser`, set at user creation/update — see §7.3–7.5) is also `true`. This step is skipped entirely when `is_admin` is omitted from the request.
 
 #### Success Response (`VEDA_JWT_AUTH=1`)
 
@@ -243,6 +246,7 @@ Before issuing tokens, the backend verifies:
     "username": "alice",
     "display_name": "Alice",
     "email": "alice@example.com",
+    "is_admin": false,
     "access_token": "eyJhbGciOi...",
     "refresh_token": "eyJhbGciOi...",
     "token_type": "Bearer",
@@ -258,6 +262,8 @@ Before issuing tokens, the backend verifies:
 }
 ```
 
+`is_admin` reflects the account's own flag (§7.3–7.5) regardless of whether the request claimed it — the frontend should check it after every login/refresh and refuse to proceed if it does not match the app it is running.
+
 #### Success Response (`VEDA_JWT_AUTH=0` Legacy Mode)
 
 ```json
@@ -268,6 +274,7 @@ Before issuing tokens, the backend verifies:
     "username": "alice",
     "display_name": "Alice",
     "email": "alice@example.com",
+    "is_admin": false,
     "access_token": "dummy_access_token",
     "token_type": "Bearer"
   }
@@ -303,6 +310,21 @@ Before issuing tokens, the backend verifies:
     "status_code": 429,
     "message": "Too many failed login attempts. Please try again later.",
     "code": "ACCOUNT_LOCKED"
+  }
+  ```
+
+- **Admin Privileges Required**:
+  The request claimed `"is_admin": true` but the account's own `is_admin` flag is `false`. Credentials are correct — this is a portal mismatch, not a credential failure, so it is reported distinctly rather than folded into `INVALID_CREDENTIALS` (the claim only ever comes from the Admin frontend itself, never a bare guess, so there is no enumeration risk in being specific here):
+
+  ```http
+  403 Forbidden
+  ```
+
+  ```json
+  {
+    "status_code": 403,
+    "message": "Access Denied: Admin privileges required.",
+    "code": "ADMIN_REQUIRED"
   }
   ```
 
@@ -1328,7 +1350,7 @@ All user endpoints require `IsAdminUser` + `RequiresPermission(USER_MANAGE)`.
 ### 7.1 User rules
 
 - Roles can be assigned at creation time (`role_ids` on `users/create`) or later, either via `role_ids` on `users/update` (a full replace of every role the user holds) or one at a time via `/api/v1/users/roles/assign` / `/revoke`.
-- Permissions live on roles, never on user records.
+- Permissions live on roles, never on user records. `is_admin` (§7.3–7.5) is a separate, orthogonal concept — it decides which frontend app the account may sign into, not what it may do once inside.
 - `is_active` controls login and Chatbot access. An inactive user remains manageable in Admin.
 - Password changes use `POST /api/v1/auth/password/change` (authenticated endpoint in `apps.authentication`).
 - The platform must always have at least one active admin — deactivating the last one is refused.
@@ -1397,7 +1419,8 @@ POST /api/v1/users/create
   "password": "permanent-initial-password",
   "first_name": "Alice",
   "last_name": "Smith",
-  "role_ids": [1, 2]
+  "role_ids": [1, 2],
+  "is_admin": false
 }
 ```
 
@@ -1406,8 +1429,9 @@ POST /api/v1/users/create
 - `password` is required, write-only, validated against `AUTH_PASSWORD_VALIDATORS` (including `UserAttributeSimilarityValidator` against the submitted username/email).
 - `first_name` and `last_name` are optional, default to `""`.
 - `role_ids` is optional list of integer role IDs to assign atomically on creation.
+- `is_admin` is optional, defaults to `false`. Decides which frontend app the account may sign into (checked at login, §2.10) — it is not a permission grant, and is the one exception to the privileged-fields rule below: it is accepted here under this name, and *only* this name (`is_superuser`, the underlying column, is never accepted).
 - Non-string values for textual fields are rejected.
-- Privileged fields (`is_staff`, `is_superuser`, `is_active`, `groups`, `user_permissions`, `last_login`, `date_joined`, `password_hash`, `id`, `pk`) are rejected with `"This field cannot be set through this endpoint."`.
+- Privileged fields (`is_staff`, `is_superuser`, `is_active`, `groups`, `user_permissions`, `last_login`, `date_joined`, `password_hash`, `id`, `pk`) are rejected with `"This field cannot be set through this endpoint."`. (`is_admin` above is the public alias for `is_superuser` and is accepted; the raw `is_superuser` key is simply ignored, not rejected, since it is not a recognized field.)
 
 ```http
 201 Created
@@ -1452,12 +1476,13 @@ GET /api/v1/users/detail?user_id=101
     "is_staff": false,
     "date_joined": "2026-07-31T10:00:00Z",
     "last_login": "2026-08-01T08:00:00Z",
-    "role_ids": [1, 2]
+    "role_ids": [1, 2],
+    "is_admin": false
   }
 }
 ```
 
-Returns user metadata along with `role_ids` — the list of role IDs currently assigned (empty list if none) for pre-filling Admin UI edit modals. `first_name`/`last_name` are the raw stored values (`display_name` is the derived `first_name or username` shown after login) — needed so an edit form can pre-fill the two fields separately rather than guessing a split from `display_name`. The response never contains a password or password hash.
+Returns user metadata along with `role_ids` — the list of role IDs currently assigned (empty list if none) for pre-filling Admin UI edit modals. `first_name`/`last_name` are the raw stored values (`display_name` is the derived `first_name or username` shown after login) — needed so an edit form can pre-fill the two fields separately rather than guessing a split from `display_name`. `is_admin` (the public name for `is_superuser`, §7.3) is included only on this detail endpoint, not on `users/list`. The response never contains a password or password hash.
 
 **Errors:**
 
@@ -1479,18 +1504,21 @@ POST /api/v1/users/update
   "first_name": "Alice New",
   "last_name": "Smith",
   "is_active": false,
-  "role_ids": [1, 2]
+  "role_ids": [1, 2],
+  "is_admin": true
 }
 ```
 
 **Partial update** — only the fields present (besides `user_id`) are written. At least one updatable field must be provided.
 
-Updatable fields: `email`, `first_name`, `last_name`, `is_active`, `role_ids`.
+Updatable fields: `email`, `first_name`, `last_name`, `is_active`, `role_ids`, `is_admin`.
+
+`is_admin` is the same flag as on create (§7.3) — the public name for `is_superuser`. Sending the raw `is_superuser` key has no effect (it is not a recognized field, so it is dropped, not rejected).
 
 Deliberately excluded (and rejected if submitted):
 - `username` — renaming an identity is a separate concern.
 - `password` — password lifecycle lives in `apps.authentication`.
-- `is_staff` / `is_superuser` — privilege granting is role assignment.
+- `is_staff` — privilege granting is role assignment.
 
 Setting `is_active` to `false`:
 - Stamps `deleted_at` on the user's `UserProfile`.
