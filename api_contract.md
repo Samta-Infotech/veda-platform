@@ -660,9 +660,9 @@ All endpoints in the platform follow consistent RPC-style `<resource>/<action>` 
 
 ### 5.1 V1 cardinality and future compatibility
 
-The API models sources as a collection and all permission payloads use `source_id`. V1 may enforce one connected source for each type. This limit can be removed later without changing response or permission shapes.
+`database` and `file_system` each hold **one** connected source (V1 limit) — a second `connect` call for a type that already has a connected source is refused (see §5.6). `datalake` is the one type already confirmed to run more than one connected source at a time (e.g. a CSV lake alongside a Parquet lake), so it is shaped as a list from the start rather than needing a future breaking change.
 
-If the V1 limit is reached:
+If the single-source-per-type limit is reached for `database`/`file_system`:
 
 ```http
 409 Conflict
@@ -679,8 +679,6 @@ If the V1 limit is reached:
 }
 ```
 
-The frontend stores sources as an array even when only one item of each type exists.
-
 ### 5.2 List sources
 
 ```http
@@ -690,59 +688,76 @@ POST /api/v1/data-sources/list
 ```json
 {
   "source_type": "DATABASE",
-  "status": "CONNECTED",
-  "page": 1,
-  "page_size": 20,
   "search": "finance"
 }
 ```
 
-`source_type`, `status`, and `search` are optional.
+`source_type` and `search` are optional. There is no `status` filter and no pagination — this endpoint only ever returns **connected** sources (a source that is registered but hasn't completed its initial connection is onboarding-in-progress noise, not something to list here), and the number of data sources an org onboards is small and admin-curated, never large enough to need paging.
+
+The response is grouped by category, not a flat array: `database` and `file_system` are each a single object (or `{"status": "Not Connected", "is_connected": false, "metadata": {}}` if nothing of that type is connected yet); `datalake` is always a list, per §5.1.
 
 ```json
 {
   "status_code": 200,
-  "message": "Data sources retrieved successfully.",
+  "message": "data source status fetched successfully",
   "data": {
-    "items": [
-      {
-        "source_id": "source_db_01",
-        "source_type": "DATABASE",
-        "name": "Finance PostgreSQL",
-        "status": "CONNECTED",
-        "metadata": {
-          "db_type": "POSTGRESQL",
-          "host": "db.example.com",
-          "port": 5432,
-          "database": "finance",
-          "username": "veda_reader"
-        },
-        "last_checked_at": "2026-07-31T10:30:00Z",
-        "status_message": null,
-        "created_at": "2026-07-31T09:00:00Z",
-        "updated_at": "2026-07-31T09:00:00Z"
+    "database": {
+      "status": "Connected",
+      "is_connected": true,
+      "metadata": {
+        "connection_id": 2,
+        "db_type": "POSTGRESQL",
+        "host": "db.example.com",
+        "port": 5432,
+        "database": "finance",
+        "username": "veda_reader",
+        "schema_filter": ""
       }
-    ],
-    "pagination": {
-      "page": 1,
-      "page_size": 20,
-      "total": 1,
-      "total_pages": 1,
-      "has_next": false,
-      "has_previous": false
-    }
+    },
+    "file_system": {
+      "status": "Connected",
+      "is_connected": true,
+      "metadata": {
+        "connection_id": 3,
+        "path": "/data/contracts",
+        "doc_formats": ["pdf", "docx", "md"],
+        "doc_recursive": true,
+        "doc_max_file_mb": null
+      }
+    },
+    "datalake": [
+      {
+        "status": "Connected",
+        "is_connected": true,
+        "metadata": {
+          "connection_id": 4,
+          "db_type": "CSV_LAKE",
+          "source_path": "/data/invoices_csv"
+        }
+      },
+      {
+        "status": "Connected",
+        "is_connected": true,
+        "metadata": {
+          "connection_id": 5,
+          "db_type": "PARQUET",
+          "source_path": "/data/catalog_parquet"
+        }
+      }
+    ]
   }
 }
 ```
 
-Supported statuses:
+`metadata` shape depends on the category — only fields that actually apply to that source type are present:
 
-| Status | Meaning |
+| Category | `metadata` fields |
 |---|---|
-| `CONNECTED` | Last connection validation succeeded. |
-| `ERROR` | Source is configured but is currently unavailable. |
+| `database` | `connection_id`, `db_type`, `host`, `port`, `database`, `username`, `schema_filter` |
+| `datalake` | `connection_id`, `db_type`, `source_path` |
+| `file_system` | `connection_id`, `path`, `doc_formats`, `doc_recursive`, `doc_max_file_mb` |
 
-An `ERROR` source remains listed. `status_message` contains only a safe message such as `The connection could not be established.` Existing role grants remain stored but cannot provide runtime access while the source is unavailable.
+Every field is `snake_case`, including `is_connected` and `connection_id`.
 
 ### 5.3 Connect Database
 
