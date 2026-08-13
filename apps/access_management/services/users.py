@@ -104,11 +104,15 @@ class UserService:
 
     def create_user(self, *, username: str, email: str, password: str,
                     first_name: str = "", last_name: str = "",
-                    role_ids: list[int] | None = None):
-        """Create one active, unprivileged user.
+                    role_ids: list[int] | None = None, is_superuser: bool = False):
+        """Create one active user.
 
         Keyword-only by design: these are five same-typed strings, and a positional
         call that transposed ``username`` and ``email`` would be accepted silently.
+
+        ``is_superuser`` decides which frontend app the account may sign into
+        (``AuthService`` checks it at login) — it grants no permission by itself,
+        so it is set here rather than through the role-assignment path.
         """
         user_model = get_user_model()
         try:
@@ -119,6 +123,7 @@ class UserService:
                     password=password,
                     first_name=first_name,
                     last_name=last_name,
+                    is_superuser=is_superuser,
                 )
                 UserProfile.objects.create(user=user)
                 if role_ids is not None:

@@ -109,6 +109,9 @@ class UserDetailView(AdminView):
         return api.success(MESSAGES["user"]["retrieved"], {
             **public_fields(user),
             "role_ids": role_ids,
+            # Which frontend app this account was created for — set once at
+            # creation (see UserCreateSerializer), shown only on the detail page.
+            "is_admin": user.is_superuser,
         })
 
 
@@ -160,14 +163,15 @@ class UserListView(AdminView):
 
 
 class UserUpdateView(AdminView):
-    """POST /api/v1/users/update {user_id, email?, first_name?, last_name?, is_active?}.
+    """POST /api/v1/users/update {user_id, email?, first_name?, last_name?, is_active?, is_superuser?}.
 
-    Partial: only the fields present are written. ``username``, ``password`` and the
-    privilege flags are deliberately not updatable here — see
+    Partial: only the fields present are written. ``username``, ``password`` and
+    ``is_staff`` are deliberately not updatable here — see
     ``serializers.UserUpdateSerializer`` for why each belongs elsewhere.
     ``is_active`` IS updatable here — deactivating a user is a profile edit, not a
     separate action, and ``UserService.update_user`` carries the last-admin guard
-    and the token-revocation-on-deactivate step for it.
+    and the token-revocation-on-deactivate step for it. ``is_superuser`` is also
+    updatable — this platform's "which frontend app" flag, checked at login.
 
     404 when the id does not exist, 409 when the new email belongs to someone else
     or when ``is_active: false`` targets the platform's last active admin.
