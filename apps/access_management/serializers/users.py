@@ -53,12 +53,13 @@ class UserCreateSerializer(serializers.Serializer):
     """Body of ``POST /api/v1/users/create``.
 
     ``is_staff`` and friends are not merely absent from the allowlist — submitting
-    them is an error (see ``PRIVILEGED_FIELDS``). ``is_superuser`` is the one
+    them is an error (see ``PRIVILEGED_FIELDS``). ``is_admin`` is the one
     exception: it is accepted here, decided once at creation, because it is this
     platform's flag for which frontend app the account may sign into (checked at
-    login — see ``AuthService._identity``), not a permission grant. New users are
-    otherwise always created active and unprivileged; granting anything beyond
-    that is role assignment, which is a later phase.
+    login — see ``AuthService._identity``), not a permission grant. It is the
+    public name for the ``is_superuser`` column — never accepted under that raw
+    name. New users are otherwise always created active and unprivileged;
+    granting anything beyond that is role assignment, which is a later phase.
     """
 
     username = serializers.CharField(
@@ -80,9 +81,10 @@ class UserCreateSerializer(serializers.Serializer):
     role_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, allow_empty=True)
     #: Which app this account may sign into: True -> admin frontend, False ->
-    #: normal-user frontend. Set once here; not updatable through this app's
-    #: update endpoint (see ``UserUpdateSerializer``).
-    is_superuser = serializers.BooleanField(required=False, default=False)
+    #: normal-user frontend. The public name for ``is_superuser`` — this API's
+    #: contract is ``is_admin``, never the raw column name (see
+    #: ``UserService.create_user``, which translates it).
+    is_admin = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         self._reject_non_string_fields()
@@ -185,9 +187,9 @@ class UserUpdateSerializer(serializers.Serializer):
     profile edit (see ``UserService.update_user`` for the last-admin guard and the
     token revocation that come with turning it off).
 
-    ``is_superuser`` is likewise updatable, same exception as on create — it is
-    this platform's "which frontend app" flag, checked at login, not a permission
-    grant.
+    ``is_admin`` is likewise updatable, same exception as on create — the public
+    name for ``is_superuser``, this platform's "which frontend app" flag, checked
+    at login, not a permission grant.
     """
 
     user_id = serializers.IntegerField(min_value=1)
@@ -199,12 +201,12 @@ class UserUpdateSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(required=False)
     role_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, allow_empty=True)
-    is_superuser = serializers.BooleanField(required=False)
+    is_admin = serializers.BooleanField(required=False)
 
     #: Fields this endpoint may actually write — ``user_id`` selects the row, it is
     #: not a change. Used by the view to split the target from the changes.
     UPDATABLE_FIELDS = ("email", "first_name", "last_name", "is_active", "role_ids",
-                       "is_superuser")
+                       "is_admin")
 
     def validate(self, attrs):
         self._reject_unknown_and_privileged()
