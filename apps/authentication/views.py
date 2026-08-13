@@ -29,12 +29,14 @@ from .serializers import (
     RefreshTokenRequestSerializer,
 )
 from .services import (
+    AccountInactive,
     AccountLocked,
     AuthError,
     AuthService,
     CurrentPasswordIncorrect,
     InvalidCredentials,
     InvalidRefreshToken,
+    NoRoleAssigned,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,6 +46,8 @@ logger = logging.getLogger(__name__)
 # names how that is expressed over HTTP.
 _ERROR_STATUS = {
     InvalidCredentials: status.HTTP_401_UNAUTHORIZED,
+    AccountInactive: status.HTTP_401_UNAUTHORIZED,
+    NoRoleAssigned: status.HTTP_401_UNAUTHORIZED,
     AccountLocked: status.HTTP_429_TOO_MANY_REQUESTS,
     InvalidRefreshToken: status.HTTP_401_UNAUTHORIZED,
 }

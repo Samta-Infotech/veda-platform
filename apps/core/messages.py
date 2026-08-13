@@ -20,6 +20,9 @@ MESSAGES = {
         "token_refreshed": "Token refreshed successfully.",
         "logout_success": "Logout successful.",
         "invalid_credentials": "Invalid username or password.",
+        "account_inactive": "This account has been deactivated. Please contact your admin.",
+        "no_role_assigned": ("Your account has no role assigned yet. Please contact "
+                             "your admin to get access."),
         "account_locked": "Too many failed login attempts. Please try again later.",
         "invalid_token": "Invalid or expired token.",
         "password_changed": "Password changed successfully.",

@@ -20,9 +20,14 @@ What this module adds on top is the part the library does not give us safely:
      many addresses is unbounded against one account. Counted in the shared
      ``redis-cache`` via Django's cache API — no new table. See the lockout
      section below for why there are two counters and why only one of them blocks.
-  2. **A uniform failure surface.** Unknown user, wrong password and inactive
-     account are one indistinguishable 401 (``MESSAGES["auth"]["invalid_credentials"]``), so the
-     endpoint cannot be used to enumerate accounts.
+  2. **A uniform failure surface, for the cases that matter.** Unknown user and
+     wrong password are one indistinguishable 401
+     (``MESSAGES["auth"]["invalid_credentials"]``) — telling those two apart is
+     the classic username-enumeration leak. A deactivated account and a
+     correct-password-but-no-role account get their OWN distinct 401s
+     (``AccountInactive``, ``NoRoleAssigned``) — user's call: VEDA is an internal,
+     single-org admin tool, so a real user hitting either of those deserves a
+     clear reason, not a confusing "invalid credentials".
   3. **Password-change revocation on the refresh path.** simplejwt enforces its
      ``CHECK_REVOKE_TOKEN`` claim only for access tokens (inside
      ``JWTAuthentication.get_user``); rotation would otherwise keep honouring a
@@ -63,6 +68,8 @@ logger = logging.getLogger(__name__)
 # or anything about the token internals.
 # ---------------------------------------------------------------------------
 CODE_INVALID_CREDENTIALS = "INVALID_CREDENTIALS"
+CODE_ACCOUNT_INACTIVE = "ACCOUNT_INACTIVE"
+CODE_NO_ROLE_ASSIGNED = "NO_ROLE_ASSIGNED"
 CODE_ACCOUNT_LOCKED = "ACCOUNT_LOCKED"
 CODE_INVALID_TOKEN = "INVALID_TOKEN"  # noqa: S105 — an error code, not a credential
 
@@ -112,11 +119,39 @@ class AuthError(Exception):
 
 
 class InvalidCredentials(AuthError):
-    """Wrong password, unknown username, or an inactive account — deliberately
-    one single error, so the response cannot distinguish the three."""
+    """Wrong password or unknown username — deliberately one single error, so the
+    response cannot distinguish the two.
+
+    ``AccountInactive`` and ``NoRoleAssigned`` (below) are deliberately carved OUT
+    of this generic bucket — user's call: VEDA is an internal, single-org admin
+    tool, not a public multi-tenant surface, so a clear "your account is
+    deactivated" / "you have no role yet" beats enumeration-safety here. Wrong
+    password vs. unknown username still collapse together, since telling those
+    two apart is the classic username-enumeration leak this error exists to deny.
+    """
 
     code = CODE_INVALID_CREDENTIALS
     message = MESSAGES["auth"]["invalid_credentials"]
+
+
+class AccountInactive(AuthError):
+    """Correct username, but the account has been deactivated.
+
+    See ``InvalidCredentials`` for why this is split out on purpose.
+    """
+
+    code = CODE_ACCOUNT_INACTIVE
+    message = MESSAGES["auth"]["account_inactive"]
+
+
+class NoRoleAssigned(AuthError):
+    """Correct credentials, active account, but no RBAC role — and not staff.
+
+    See ``InvalidCredentials`` for why this is split out on purpose.
+    """
+
+    code = CODE_NO_ROLE_ASSIGNED
+    message = MESSAGES["auth"]["no_role_assigned"]
 
 
 class AccountLocked(AuthError):
@@ -211,8 +246,10 @@ class AuthService:
         Raises:
             AccountLocked: too many recent failures from this source for this
                 username, or an account-wide flood *and* a wrong password.
-            InvalidCredentials: unknown user, wrong password, inactive account, or a
-                correct password for an account that holds no role and is not staff.
+            InvalidCredentials: unknown user, or a wrong password for a real one.
+            AccountInactive: correct password, but the account is deactivated.
+            NoRoleAssigned: correct password, active account, but no RBAC role and
+                not staff.
         """
         source_key = self._failure_key(username, self._client_ident())
         account_key = self._failure_key(username)
@@ -228,9 +265,23 @@ class AuthService:
             raise AccountLocked()
 
         user = authenticate(self._request, username=username, password=password)
-        # ModelBackend already rejects inactive users (``user_can_authenticate``),
-        # so this second guard is defence-in-depth for a future custom backend —
-        # and it collapses into the same generic error either way.
+        # ModelBackend already rejects inactive users inside authenticate()
+        # (``user_can_authenticate``), so a CORRECT password against a deactivated
+        # account also comes back as user=None here — indistinguishable, at this
+        # point, from a wrong password or an unknown username. Tell the two apart
+        # with a direct password check (bypassing the is_active gate) so a real,
+        # deactivated user gets told clearly rather than "invalid credentials" —
+        # user's call: this is an internal admin tool, not a public surface, so
+        # this one enumeration signal (does this username exist) is an acceptable
+        # trade for not confusing a legitimate deactivated user.
+        if user is None:
+            candidate = get_user_model().objects.filter(username=username).first()
+            if (candidate is not None and not candidate.is_active
+                    and candidate.check_password(password)):
+                logger.warning("auth login refused: account inactive user_id=%s "
+                               "username=%s %s", candidate.pk, username,
+                               self._log_context())
+                raise AccountInactive()
         if user is None or not user.is_active:
             source_failures = self._record_failure(source_key)
             account_failures = self._record_failure(account_key)
@@ -252,18 +303,17 @@ class AuthService:
         self._clear_failures(account_key)
 
         # An onboarded-but-unassigned account: credentials are correct, but there is
-        # nothing for the caller to do once inside. Reported as the SAME generic
-        # InvalidCredentials as a wrong password — a distinct error here would tell
-        # an attacker "these credentials are valid, this account just has no role
-        # yet", which is exactly the enumeration signal the generic 401 exists to
-        # deny. is_staff bypasses this: an admin account (bootstrap, or promoted
-        # directly in the database) must never be locked out of its own platform by
-        # a missing RBAC row, and last-admin protection already guarantees at least
-        # one is_staff account exists.
+        # nothing for the caller to do once inside. Reported with its own clear
+        # error — user's call: same trade-off as AccountInactive above, a distinct
+        # message here beats a confusing generic "invalid credentials" for a real
+        # user who did nothing wrong. is_staff bypasses this: an admin account
+        # (bootstrap, or promoted directly in the database) must never be locked
+        # out of its own platform by a missing RBAC row, and last-admin protection
+        # already guarantees at least one is_staff account exists.
         if not user.is_staff and not UserRole.objects.filter(user=user).exists():
             logger.warning("auth login refused: no role assigned user_id=%s "
                            "username=%s %s", user.pk, username, self._log_context())
-            raise InvalidCredentials()
+            raise NoRoleAssigned()
 
         payload = {**self._identity(user), **self._issue_tokens(user),
                    **self._authorization_context(user)}
