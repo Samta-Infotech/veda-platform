@@ -31,6 +31,11 @@ class LoginRequestSerializer(serializers.Serializer):
 
     username = serializers.CharField(required=True, allow_blank=False)
     password = serializers.CharField(required=True, allow_blank=False)
+    #: Sent by the admin frontend only, to claim this login is for it. Absent
+    #: entirely from the normal-user frontend's requests — not merely False, so
+    #: ``AuthService.login`` can tell "not claiming admin" apart from "claiming
+    #: admin explicitly", and only verify the claim when one was actually made.
+    is_admin = serializers.BooleanField(required=False)
 
 
 class RefreshTokenRequestSerializer(serializers.Serializer):

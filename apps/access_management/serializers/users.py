@@ -42,7 +42,7 @@ _LAST_NAME = _USER._meta.get_field("last_name")
 # serializer's allowlist — the allowlist alone already makes these unreachable, so
 # this exists to turn a silent no-op into a loud error.
 PRIVILEGED_FIELDS = frozenset({
-    "is_staff", "is_superuser", "is_active", "groups", "user_permissions",
+    "is_staff", "is_active", "groups", "user_permissions",
     "last_login", "date_joined", "password_hash", "id", "pk",
 })
 
@@ -52,9 +52,13 @@ MSG_PRIVILEGED_FIELD = "This field cannot be set through this endpoint."
 class UserCreateSerializer(serializers.Serializer):
     """Body of ``POST /api/v1/users/create``.
 
-    Only these five fields are accepted. ``is_staff``/``is_superuser`` and friends
-    are not merely absent from the allowlist — submitting them is an error (see
-    ``PRIVILEGED_FIELDS``). New users are always created active and unprivileged;
+    ``is_staff`` and friends are not merely absent from the allowlist — submitting
+    them is an error (see ``PRIVILEGED_FIELDS``). ``is_admin`` is the one
+    exception: it is accepted here, decided once at creation, because it is this
+    platform's flag for which frontend app the account may sign into (checked at
+    login — see ``AuthService._identity``), not a permission grant. It is the
+    public name for the ``is_superuser`` column — never accepted under that raw
+    name. New users are otherwise always created active and unprivileged;
     granting anything beyond that is role assignment, which is a later phase.
     """
 
@@ -76,6 +80,11 @@ class UserCreateSerializer(serializers.Serializer):
         max_length=_LAST_NAME.max_length, required=False, allow_blank=True, default="")
     role_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, allow_empty=True)
+    #: Which app this account may sign into: True -> admin frontend, False ->
+    #: normal-user frontend. The public name for ``is_superuser`` — this API's
+    #: contract is ``is_admin``, never the raw column name (see
+    #: ``UserService.create_user``, which translates it).
+    is_admin = serializers.BooleanField(required=False, default=False)
 
     def validate(self, attrs):
         self._reject_non_string_fields()
@@ -170,13 +179,17 @@ class UserUpdateSerializer(serializers.Serializer):
       * ``password`` — password lifecycle lives in ``apps.authentication`` (and a
         change there revokes tokens; see AUTH_API_CONTRACT.md §3.1). Duplicating it
         here would create a second way to set a credential.
-      * ``is_staff`` / ``is_superuser`` — privilege granting is role assignment, a
-        different concern from "is this account allowed to sign in at all".
-        Submitting either is an error, exactly as on create.
+      * ``is_staff`` — privilege granting is role assignment, a different concern
+        from "is this account allowed to sign in at all". Submitting it is an
+        error, exactly as on create.
 
     ``is_active`` is NOT excluded, unlike the other flags: deactivating a user IS a
     profile edit (see ``UserService.update_user`` for the last-admin guard and the
     token revocation that come with turning it off).
+
+    ``is_admin`` is likewise updatable, same exception as on create — the public
+    name for ``is_superuser``, this platform's "which frontend app" flag, checked
+    at login, not a permission grant.
     """
 
     user_id = serializers.IntegerField(min_value=1)
@@ -188,10 +201,12 @@ class UserUpdateSerializer(serializers.Serializer):
     is_active = serializers.BooleanField(required=False)
     role_ids = serializers.ListField(
         child=serializers.IntegerField(min_value=1), required=False, allow_empty=True)
+    is_admin = serializers.BooleanField(required=False)
 
     #: Fields this endpoint may actually write — ``user_id`` selects the row, it is
     #: not a change. Used by the view to split the target from the changes.
-    UPDATABLE_FIELDS = ("email", "first_name", "last_name", "is_active", "role_ids")
+    UPDATABLE_FIELDS = ("email", "first_name", "last_name", "is_active", "role_ids",
+                       "is_admin")
 
     def validate(self, attrs):
         self._reject_unknown_and_privileged()

@@ -16,11 +16,12 @@ from __future__ import annotations
 
 import logging
 
-from rest_framework import status
+from rest_framework import exceptions, status
 from rest_framework.permissions import IsAdminUser
 from rest_framework.views import APIView
 
 from apps.core import api
+from apps.core.messages import MESSAGES
 
 from ..gate import RequiresPermission
 from ..services import AccessManagementError, ConflictError, NotFoundError
@@ -107,6 +108,22 @@ class AdminView(APIView):
     #: Noun phrase used in log lines, e.g. "user creation", "role list". Carries the
     #: domain because the log format is domain-neutral.
     action = "request"
+
+    def permission_denied(self, request, message=None, code=None):
+        """Same unauthenticated-vs-forbidden split DRF's own implementation makes
+        (see ``APIView.permission_denied``) — overridden only so the "not staff"
+        case answers with this platform's own copy instead of DRF's generic
+        "You do not have permission to perform this action.". A denial from
+        ``RequiresPermission`` (a staff caller missing a specific RBAC grant)
+        keeps whatever message that gate passed in — it is a different reason
+        than not being staff at all.
+        """
+        if request.authenticators and not request.successful_authenticator:
+            raise exceptions.NotAuthenticated()
+        if not (request.user and request.user.is_staff):
+            raise exceptions.PermissionDenied(
+                detail=MESSAGES["auth"]["admin_required"], code=code)
+        raise exceptions.PermissionDenied(detail=message, code=code)
 
     def validate(self, request):
         """``(validated_data, None)`` on success, ``(None, response)`` on failure.

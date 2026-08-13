@@ -30,6 +30,7 @@ MESSAGES = {
         "already_bootstrapped": (
             "An administrator already exists; bootstrap can only run on an "
             "empty user table."),
+        "admin_required": "Access Denied: Admin privileges required.",
     },
     "user": {
         "created": "User created successfully.",

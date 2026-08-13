@@ -104,11 +104,17 @@ class UserService:
 
     def create_user(self, *, username: str, email: str, password: str,
                     first_name: str = "", last_name: str = "",
-                    role_ids: list[int] | None = None):
-        """Create one active, unprivileged user.
+                    role_ids: list[int] | None = None, is_admin: bool = False):
+        """Create one active user.
 
         Keyword-only by design: these are five same-typed strings, and a positional
         call that transposed ``username`` and ``email`` would be accepted silently.
+
+        ``is_admin`` decides which frontend app the account may sign into
+        (``AuthService`` checks it at login) — it grants no permission by itself,
+        so it is set here rather than through the role-assignment path. Written to
+        the ``is_superuser`` column, which is what it actually is under the hood;
+        ``is_admin`` is this API's public name for it, never the raw one.
         """
         user_model = get_user_model()
         try:
@@ -119,6 +125,7 @@ class UserService:
                     password=password,
                     first_name=first_name,
                     last_name=last_name,
+                    is_superuser=is_admin,
                 )
                 UserProfile.objects.create(user=user)
                 if role_ids is not None:
@@ -174,6 +181,11 @@ class UserService:
     def update_user(self, user_id: int, **fields):
         """Apply profile changes to one user — including, now, ``is_active`` and ``role_ids``."""
         role_ids = fields.pop("role_ids", None)
+        if "is_admin" in fields:
+            # ``is_admin`` is this API's public name for ``is_superuser`` — the
+            # generic setattr loop below writes actual model columns, and
+            # ``User`` has no ``is_admin`` attribute.
+            fields["is_superuser"] = fields.pop("is_admin")
         if not fields and role_ids is None:  # the serializer rejects this; belt-and-braces for direct calls
             raise ValueError("update_user requires at least one field")
 

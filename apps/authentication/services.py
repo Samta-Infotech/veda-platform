@@ -154,6 +154,31 @@ class NoRoleAssigned(AuthError):
     message = MESSAGES["auth"]["no_role_assigned"]
 
 
+class AdminPrivilegesRequired(AuthError):
+    """The caller's credentials are correct, but the login was made claiming
+    ``is_admin`` and the account is not a superuser — i.e. the account is real,
+    just not for the admin frontend that sent this login request.
+
+    A DISTINCT error from ``InvalidCredentials`` on purpose, unlike the
+    unknown-user/wrong-password/no-role cases above: those collapse into one
+    generic 401 to prevent account enumeration by an anonymous caller, but this
+    claim only comes from the admin frontend itself (never a bare guess), so
+    there is no enumeration signal to protect here — telling the admin UI
+    specifically "this account is not an admin" costs nothing.
+    """
+
+    code = "ADMIN_REQUIRED"
+    message = MESSAGES["auth"]["admin_required"]
+
+
+class AdminPrivilegesRequired(AuthError):
+    """``is_admin`` was claimed on login but ``user.is_superuser`` is False —
+    same flag, checked against the account it names."""
+
+    code = "ADMIN_REQUIRED"
+    message = MESSAGES["auth"]["admin_required"]
+
+
 class AccountLocked(AuthError):
     """The per-account failure counter is above its threshold.
 
@@ -233,12 +258,15 @@ class AuthService:
 
     # -- login --------------------------------------------------------------
 
-    def login(self, username: str, password: str) -> dict:
+    def login(self, username: str, password: str, is_admin: bool | None = None) -> dict:
         """Authenticate credentials and issue tokens.
 
         Args:
             username: Submitted username, already validated as a non-blank string.
             password: Submitted password, likewise. Never logged.
+            is_admin: Present and True only when the admin frontend sent the
+                login. None means the caller made no claim (the normal-user
+                frontend never sends this field), so nothing is checked.
 
         Returns:
             The response ``data`` payload: identity fields plus tokens.
@@ -250,6 +278,8 @@ class AuthService:
             AccountInactive: correct password, but the account is deactivated.
             NoRoleAssigned: correct password, active account, but no RBAC role and
                 not staff.
+            AdminPrivilegesRequired: ``is_admin`` was True but this account is not
+                a superuser.
         """
         source_key = self._failure_key(username, self._client_ident())
         account_key = self._failure_key(username)
@@ -301,6 +331,10 @@ class AuthService:
 
         self._clear_failures(source_key)
         self._clear_failures(account_key)
+
+        # is_admin, when sent, is checked against the same is_superuser flag.
+        if is_admin and not user.is_superuser:
+            raise AdminPrivilegesRequired()
 
         # An onboarded-but-unassigned account: credentials are correct, but there is
         # nothing for the caller to do once inside. Reported with its own clear
@@ -586,11 +620,22 @@ class AuthService:
     def _identity(user) -> dict:
         """Identity fields of the login response. ``display_name`` keeps the
         pre-JWT view's rule (first name, else username) so the contract the
-        frontend already consumes is unchanged."""
+        frontend already consumes is unchanged.
+
+        ``is_admin`` tells the caller which frontend app this account is for
+        (set once at creation via ``is_superuser`` — see
+        ``UserService.create_user``; renamed here because ``is_admin`` is the
+        contract the frontends consume, not the underlying column name): each
+        frontend checks it after login and refuses to proceed if it does not
+        match the app the caller is running. Included on refresh too, not only
+        login, so a long-lived session re-checks it on the same schedule as the
+        access token itself.
+        """
         return {
             "username": user.username,
             "display_name": user.first_name or user.username,
             "email": user.email,
+            "is_admin": user.is_superuser,
         }
 
     @staticmethod

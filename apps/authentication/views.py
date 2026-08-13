@@ -31,6 +31,7 @@ from .serializers import (
 from .services import (
     AccountInactive,
     AccountLocked,
+    AdminPrivilegesRequired,
     AuthError,
     AuthService,
     CurrentPasswordIncorrect,
@@ -50,6 +51,7 @@ _ERROR_STATUS = {
     NoRoleAssigned: status.HTTP_401_UNAUTHORIZED,
     AccountLocked: status.HTTP_429_TOO_MANY_REQUESTS,
     InvalidRefreshToken: status.HTTP_401_UNAUTHORIZED,
+    AdminPrivilegesRequired: status.HTTP_403_FORBIDDEN,
 }
 _FALLBACK_ERROR_STATUS = status.HTTP_401_UNAUTHORIZED
 
@@ -86,7 +88,8 @@ class LoginView(APIView):
         credentials = serializer.validated_data
         try:
             data = AuthService(request).login(
-                credentials["username"], credentials["password"])
+                credentials["username"], credentials["password"],
+                credentials.get("is_admin"))
         except AuthError as exc:
             return _error_response(exc)
 
