@@ -48,7 +48,7 @@ from apps.authentication.password_validators import PasswordComplexityValidator 
 from apps.authentication.services import (  # noqa: E402
     AuthService,
     CurrentPasswordIncorrect,
-    InvalidCredentials,
+    NoRoleAssigned,
 )
 
 LOGIN_URL = "/api/v1/auth/login"
@@ -454,10 +454,10 @@ def test_change_password_service_unit_rejects_wrong_current_password():
         AuthService().change_password(admin, "totally-wrong", GOOD_PASSWORD_2)
 
 
-def test_login_service_unit_raises_invalid_credentials_for_no_role_user():
+def test_login_service_unit_raises_no_role_assigned_for_no_role_user():
     get_user_model().objects.create_user(username="nobody", password=GOOD_PASSWORD)
 
-    with pytest.raises(InvalidCredentials):
+    with pytest.raises(NoRoleAssigned):
         AuthService().login("nobody", GOOD_PASSWORD)
 
 
@@ -498,9 +498,9 @@ def test_login_is_refused_for_a_user_with_no_role_and_not_staff(client):
     response = _login(client, "nobody", GOOD_PASSWORD)
 
     assert response.status_code == 401
-    # Same generic code a wrong password gets — no enumeration signal that the
-    # credentials were actually correct.
-    assert response.json()["code"] == "INVALID_CREDENTIALS"
+    # Its own clear code, not the generic wrong-password bucket — user's call
+    # (VEDA is internal, a real no-role user deserves a clear reason).
+    assert response.json()["code"] == "NO_ROLE_ASSIGNED"
 
 
 def test_login_succeeds_once_a_role_is_assigned(client):
