@@ -14,10 +14,22 @@ from django.db.models import Q
 
 from apps.core.messages import MESSAGES
 
+from ..codes import PermissionCode
 from ..models import Permission
 from .base import NotFoundError, paginate
 
 CODE_PERMISSION_NOT_FOUND = "PERMISSION_NOT_FOUND"
+
+#: Excluded from the dropdown/picker ONLY (``permissions/list`` still shows every
+#: permission — this is a UI-picker concern, not a catalogue-visibility one).
+#: ``data.read`` is resource-scoped: an admin never picks it standalone, they grant
+#: it implicitly by ALLOW/DENY-ing a resource in the catalog tree (see
+#: ``roles/permissions/grant``). Showing it in a flat picker meant for
+#: non-resource-scoped permissions (``user.manage``, ``role.manage``, ...) would
+#: invite granting it with no resource_path, which does nothing (a blank-path
+#: ``data.read`` grant never covers any resource — see ``resolver.py``'s module
+#: docstring).
+_HIDDEN_FROM_DROPDOWN = frozenset({PermissionCode.DATA_READ})
 
 #: Exactly the columns ``views/permissions.py::public_fields`` renders, passed to
 #: ``.only()`` so the set fetched and the set projected cannot drift.
@@ -80,7 +92,12 @@ class PermissionService:
         return permission
 
     def list_active_permissions(self) -> list[Permission]:
-        """Every active permission — for a picker/dropdown in the admin UI."""
-        return list(Permission.objects.filter(is_active=True).order_by("code")
+        """Every active, non-resource-scoped permission — for a picker/dropdown in
+        the admin UI. See ``_HIDDEN_FROM_DROPDOWN`` for why ``data.read`` is
+        excluded here specifically (and only here — ``list_permissions`` still
+        shows it)."""
+        return list(Permission.objects.filter(is_active=True)
+                    .exclude(code__in=_HIDDEN_FROM_DROPDOWN)
+                    .order_by("code")
                     .only("id", "code", "name", "description"))
 
