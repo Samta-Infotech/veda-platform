@@ -114,7 +114,8 @@ class ConversationQueryService:
     """One assistant turn: resolve chat -> run the chatbot supervisor -> persist."""
 
     def __init__(self, user, source_id: int | None = None, tenant: str = "default",
-                 source_ids: list[int] | None = None, data_scope: dict | None = None):
+                 source_ids: list[int] | None = None, data_scope: dict | None = None,
+                 access_denied: bool = False):
         self.user = user
         self.source_id = source_id
         # Validated query SCOPE (P5) — ready source ids, primary first, resolved
@@ -126,6 +127,16 @@ class ConversationQueryService:
         # (apps.access_management.services.serialize_data_scope), forwarded verbatim
         # to the chatbot turn. None = no restriction, same as every existing caller.
         self.data_scope = data_scope
+        # Set when the view already knows (permitted_source_ids returned empty)
+        # that this caller has zero granted sources — run_turn then skips the
+        # engine entirely and yields a synthetic denial turn instead. Previously
+        # this case short-circuited as a raw HTTP 403 before a chat/message row
+        # ever existed: no history, and a shape the frontend had to special-case
+        # separately from every other kind of refusal. Routing it through the
+        # SAME run_turn/persist path means it costs no engine compute (the one
+        # thing the 403 was protecting) while looking, streaming, and saving
+        # exactly like any other turn — user's call.
+        self.access_denied = access_denied
 
     def create_conversation(self, title: str = "") -> ChatSession:
         name = (title or "").strip() or DEFAULT_CONVERSATION_TITLE
@@ -188,6 +199,12 @@ class ConversationQueryService:
         answer (smalltalk, runtime context) never emits one at all, and a real
         question's first genuine thinking event (classify_node's "Understanding
         your message...") arrives moments later on its own."""
+        if self.access_denied:
+            # No thinking/engine events at all — this never reaches the pipeline,
+            # so there is nothing to progress-report. Same event contract
+            # (content -> explainability -> usage) as every other terminal turn.
+            yield from self._access_denied_events()
+            return
         session_id = str(chat.pk)
         kwargs = dict(tenant=self.tenant, source_id=self.source_id,
                       source_ids=self.source_ids, request_id=request_id,
@@ -303,6 +320,32 @@ class ConversationQueryService:
                    "data": {"code": CODE_MODEL_ERROR, "message": MSG_MODEL_ERROR}}
             return None
         return result
+
+    def _access_denied_events(self):
+        """The synthetic terminal turn for ``self.access_denied`` — same wording
+        as veda_core's own access-denied refusal (``veda.feedback.
+        ACCESS_DENIED_WHY``/``_WHAT``) for consistency with a partial-access
+        denial (some sources granted, the specific one asked about isn't) that
+        reaches that path INSIDE the engine. Duplicated here rather than
+        imported: the api tier never imports veda_core directly (see
+        InferenceClient's own docstring) — this is the source-level denial,
+        decided entirely from RBAC grants before the engine is ever called, so
+        there is no shared module to import from without crossing that
+        boundary. No suggestions, same reasoning as the engine-side branch:
+        naming other resources here would itself be a leak."""
+        why = MESSAGES["chat"]["access_denied_why"]
+        what = MESSAGES["chat"]["access_denied_what"]
+        yield {"event": "content",
+              "data": {"type": "markdown", "content": f"{why} {what}", "is_summary": True}}
+        yield {"event": "explainability", "data": {
+            "version": "1.0",
+            "understanding": {"summary": why},
+            "why": why,
+            "what_would_help": what,
+            "suggestions": [],
+        }}
+        yield {"event": "usage", "data": {
+            "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0}}
 
     def _build_reply_events(self, response: dict):
         res0 = response.get("engine_result") or {}

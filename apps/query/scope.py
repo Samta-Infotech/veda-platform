@@ -43,6 +43,40 @@ _FALLBACK_DEFAULT_SOURCE_ID = "1"
 _UNRESOLVED = object()
 
 
+class QueryScopeError(Exception):
+    """A request's scope could not be resolved to something usable. Raised
+    instead of silently substituting a different source — see the two
+    subclasses for why silent substitution is the thing being avoided."""
+
+    code = "SCOPE_ERROR"
+    message = "The requested data source is not accessible."
+
+
+class SourceAccessDenied(QueryScopeError):
+    """The client pinned a real, ready source the caller's RBAC grants don't
+    reach. Found live: a caller with access to source A pinned source B (no
+    access) and got a real answer back from source A with zero indication the
+    pin had been silently swapped — confusing, even though nothing leaked."""
+
+    code = "SOURCE_ACCESS_DENIED"
+    message = "You do not have access to the requested data source."
+
+
+class NoReadySource(QueryScopeError):
+    """RBAC permits at least one source, but none of them are ready right now
+    (e.g. mid-reingestion). Distinct from the true empty-system dev fallback
+    (`permitted is None`) — there, falling back to
+    ``VEDA_DEFAULT_SOURCE_ID``/``_FALLBACK_DEFAULT_SOURCE_ID`` is fine, nothing
+    was ever narrowed. Once RBAC HAS narrowed the set, that hardcoded id is not
+    guaranteed to be a real, connected source (found live: it resolves to a
+    never-connected source with no host configured — silently substituting it
+    sent a query into an OperationalError that surfaced as a confusing
+    "LLM_UNAVAILABLE" instead of the real, simple reason)."""
+
+    code = "NO_READY_SOURCE"
+    message = "None of your permitted data sources are ready right now."
+
+
 def resolve_query_scope(data, tenant, user=None, effective=_UNRESOLVED) -> list[int]:
     """The validated query scope (list of source ids, primary first) — §6.2, P5.
 
@@ -75,13 +109,20 @@ def resolve_query_scope(data, tenant, user=None, effective=_UNRESOLVED) -> list[
         ValueError: if ``VEDA_DEFAULT_SOURCE_ID`` is set to a non-integer. This is
             a deployment misconfiguration and fails loudly on purpose rather than
             silently querying an unintended source.
+        SourceAccessDenied: the request pinned a real, ready source that RBAC
+            does not permit — never silently substituted for a different one.
+        NoReadySource: RBAC permits at least one source but none is ready right
+            now — never silently substituted for the hardcoded dev fallback,
+            which is not guaranteed to even be a real, connected source once
+            RBAC has narrowed anything.
     """
     default_source_id = int(os.environ.get(ENV_DEFAULT_SOURCE_ID, _FALLBACK_DEFAULT_SOURCE_ID))
-    ready_source_ids = _ready_source_ids()
+    all_ready_ids = _ready_source_ids()
 
     permitted = permitted_source_ids(user, effective)
-    if permitted is not None:
-        ready_source_ids = [i for i in ready_source_ids if i in permitted]
+    ready_source_ids = (
+        [i for i in all_ready_ids if i in permitted] if permitted is not None
+        else all_ready_ids)
     ready_set = set(ready_source_ids)
 
     requested_ids = _requested_source_ids(data)
@@ -91,17 +132,37 @@ def resolve_query_scope(data, tenant, user=None, effective=_UNRESOLVED) -> list[
         scope = [i for i in requested_ids if i in ready_set] if ready_set else requested_ids
         if scope:
             return list(dict.fromkeys(scope))
+        # Nothing usable from the pin — WHY matters, so a permission denial is
+        # never silently read as "just use the default instead" (found live: a
+        # caller pinned a source they lack access to and got a real answer from
+        # a DIFFERENT source with no indication the pin had been swapped out).
+        if permitted is not None and any(i in all_ready_ids for i in requested_ids):
+            logger.warning("query scope: requested sources %s exist and are ready, "
+                           "but are outside this caller's RBAC grants (tenant=%s)",
+                           requested_ids, tenant)
+            raise SourceAccessDenied()
         logger.info("query scope: requested sources %s are not ready; falling back to "
                     "the tenant default scope (tenant=%s)", requested_ids, tenant)
 
-    # No valid request pin → default to all ready sources (plan default), else the
-    # dev fallback so inference always receives a context. Note: if RBAC narrowed
-    # ready_source_ids to nothing, this still falls back to the dev default rather
-    # than returning an empty scope — the caller (the view) is responsible for
-    # answering "you have access to nothing" as a 403 BEFORE calling this when
-    # that matters; this function's contract ("always returns a non-empty scope so
-    # the context seam always gets a source") does not change.
-    return ready_source_ids or [default_source_id]
+    if ready_source_ids:
+        return ready_source_ids
+    if permitted:
+        # RBAC granted at least one REAL source (`permitted` is non-empty) and
+        # none of them are ready right now. Distinct from `permitted == set()`
+        # (zero access anywhere) — that case is the calling view's job to answer
+        # as a 403 (via `permitted_source_ids` directly, BEFORE this function is
+        # even called — see test_gate1_authorization.py), and its fallback to
+        # the hardcoded dev default below is this function's own pre-existing,
+        # intentional contract, unchanged here. THIS branch is the one that
+        # actually changed: the hardcoded dev fallback is NOT a safe substitute
+        # for a permitted-but-not-ready source — it may not even be a real,
+        # connected source (found live: it resolved to one with no host
+        # configured, producing a raw DB OperationalError that surfaced to the
+        # caller as a confusing "LLM_UNAVAILABLE").
+        raise NoReadySource()
+    # `permitted` is None (no RBAC in play) or an empty set (zero access —
+    # deferred to the caller, see above): the true dev fallback, unchanged.
+    return [default_source_id]
 
 
 def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
@@ -171,6 +232,35 @@ def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
     for name in source_names:
         query |= Q(name__iexact=name)
     return set(Source.objects.filter(query).values_list("id", flat=True))
+
+
+def query_execute_allowed(user, effective=_UNRESOLVED) -> bool:
+    """Whether ``query.execute`` is granted — the coarse "may this caller use
+    the query feature at all" gate, deliberately orthogonal to ``data.read``
+    (``permitted_source_ids``, above): ``data.read`` decides WHICH sources are
+    visible, this decides IF the query surface is usable at all. Global by
+    design (checked with no ``resource_path``) — unlike ``data.read``,
+    ``query.execute`` was never meant to be granted per-source.
+
+    Previously defined (``PermissionCode.QUERY_EXECUTE``, seeded by migration)
+    but never checked anywhere — granting or revoking it had zero effect. This
+    is the fix: both HTTP entry points (``QueryView``, ``ConversationQueryView``)
+    now call this alongside ``permitted_source_ids``, so a caller needs BOTH a
+    global ``query.execute`` ALLOW and a source-level ``data.read`` ALLOW to get
+    an answer — either one missing refuses the same as before (a caller with
+    ``data.read`` but no ``query.execute`` used to get a real answer; it no
+    longer does).
+
+    Returns ``True`` (no restriction) when ``effective`` is ``None`` — RBAC off,
+    or no user — same convention as ``permitted_source_ids``.
+    """
+    if effective is _UNRESOLVED:
+        if user is None:
+            return True
+        effective = resolve_effective_permissions(user)
+    if effective is None:
+        return True
+    return effective.allows(PermissionCode.QUERY_EXECUTE)
 
 
 def _ready_source_ids() -> list[int]:

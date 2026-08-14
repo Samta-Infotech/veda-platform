@@ -29,7 +29,13 @@ except ImportError:  # keep importable without DRF
 
 from .inference_client import InferenceClient, InferenceUnavailable
 from .models import QueryLog
-from .scope import permitted_source_ids, resolve_query_scope
+from .scope import (
+    NoReadySource,
+    SourceAccessDenied,
+    permitted_source_ids,
+    query_execute_allowed,
+    resolve_query_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -50,6 +56,8 @@ _STATUS_FORBIDDEN = "forbidden"
 # requirement). Same copy regardless of WHY nothing was permitted, so the
 # response itself carries no signal an attacker could use to enumerate scope.
 _FORBIDDEN_MESSAGE = "You do not have permission to access this resource."
+_NO_READY_SOURCE_MESSAGE = ("None of your permitted data sources are ready right now. "
+                            "Please try again shortly or contact your admin.")
 
 
 class QueryView(APIView):
@@ -76,6 +84,15 @@ class QueryView(APIView):
 
         effective = resolve_effective_permissions(user)
 
+        # The coarse "may this caller use the query feature at all" gate — see
+        # query_execute_allowed's own docstring for why this previously had zero
+        # effect (defined, seeded, grantable — never actually checked).
+        if not query_execute_allowed(user, effective):
+            logger.warning("query denied: user_id=%s lacks query.execute",
+                           getattr(user, "pk", None))
+            return Response({"status": _STATUS_FORBIDDEN, "error": _FORBIDDEN_MESSAGE},
+                            status=403)
+
         # Authenticated + RBAC active but permitted NOTHING -> fail closed with a
         # generic 403 BEFORE any scope resolution or inference call, never a
         # leaked resource/table/column name. `permitted is None` means "no
@@ -91,7 +108,21 @@ class QueryView(APIView):
         # validated against the ready-source registry — an optional request subset is
         # intersected with ownership, never trusted verbatim (§6.2). `source_id` is the
         # primary (first) member, kept for the single-source execution/audit path.
-        source_ids = resolve_query_scope(data, tenant, user=user, effective=effective)
+        # Once RBAC has narrowed anything, an unusable pin/permitted-set raises rather
+        # than silently substituting a source the caller didn't ask for (see
+        # SourceAccessDenied/NoReadySource's own docstrings for the live repro).
+        try:
+            source_ids = resolve_query_scope(data, tenant, user=user, effective=effective)
+        except SourceAccessDenied:
+            logger.warning("query denied: user_id=%s pinned a source outside "
+                           "their RBAC grants", getattr(user, "pk", None))
+            return Response({"status": _STATUS_FORBIDDEN, "error": _FORBIDDEN_MESSAGE},
+                            status=403)
+        except NoReadySource:
+            logger.warning("query: user_id=%s has no ready permitted source",
+                           getattr(user, "pk", None))
+            return Response({"status": "unavailable", "error": _NO_READY_SOURCE_MESSAGE},
+                            status=503)
         source_id = source_ids[0]
         # Gate 1 (User Story 3, Task 15): the table/column allow-payload for the
         # now-resolved scope, forwarded across the HTTP boundary alongside it —

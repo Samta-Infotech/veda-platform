@@ -36,7 +36,12 @@ from django.test import override_settings  # noqa: E402
 from apps.access_management import resource_path as rp  # noqa: E402
 from apps.access_management.gate import MODE_ENFORCE, MODE_OFF  # noqa: E402
 from apps.access_management.models import Effect, Permission, Role, RolePermission, UserRole  # noqa: E402
-from apps.query.scope import permitted_source_ids, resolve_query_scope  # noqa: E402
+from apps.query.scope import (  # noqa: E402
+    NoReadySource,
+    SourceAccessDenied,
+    permitted_source_ids,
+    resolve_query_scope,
+)
 from apps.sources.models import Dialect, Source  # noqa: E402
 
 ADMIN_PASSWORD = "admin-correct-horse-staple"
@@ -194,14 +199,20 @@ def test_partial_access_narrows_to_the_granted_source_only(member, read_perm):
     assert resolve_query_scope({}, "default", user=member) == [crm.id]
 
 
-def test_a_request_pin_outside_the_granted_scope_falls_back_to_the_granted_scope(member, read_perm):
+def test_a_request_pin_outside_the_granted_scope_is_refused_not_silently_swapped(member, read_perm):
+    """Found live: silently substituting the granted scope for a denied pin gave
+    a real answer from a DIFFERENT source than the one asked about, with zero
+    indication of the swap. Now raises instead — the caller must be told the
+    pin was denied, not quietly redirected."""
     crm = _source("crm")
     billing = _source("billing")
     role = _role_for(member)
     _grant(role, read_perm, _source_path("crm"))
 
-    # billing is ready, but not granted — pinning it must not leak access to it.
-    assert resolve_query_scope({"source_id": billing.id}, "default", user=member) == [crm.id]
+    # billing is ready, but not granted — pinning it must be refused, not swapped.
+    with pytest.raises(SourceAccessDenied):
+        resolve_query_scope({"source_id": billing.id}, "default", user=member)
+    # A pin the caller IS granted still resolves normally.
     assert resolve_query_scope({"source_id": crm.id}, "default", user=member) == [crm.id]
 
 
@@ -270,10 +281,14 @@ def test_not_ready_source_stays_excluded_even_with_a_grant(member, read_perm):
     the ingestion pipeline hasn't marked ready. ``permitted_source_ids`` itself
     doesn't know about readiness (that's ``_ready_source_ids``'s job), so it
     correctly permits the source; ``resolve_query_scope`` is what must still
-    exclude it via the ready-set intersection."""
+    exclude it via the ready-set intersection — and now raises ``NoReadySource``
+    rather than silently substituting the hardcoded dev-default source (found
+    live: that default is not guaranteed to be a real, connected source once
+    RBAC has narrowed the set to something specific)."""
     not_ready = _source("crm", ready=False)
     role = _role_for(member)
     _grant(role, read_perm, _source_path("crm"))
 
     assert not_ready.id in permitted_source_ids(member)
-    assert resolve_query_scope({}, "default", user=member) == [1]  # falls back — see above
+    with pytest.raises(NoReadySource):
+        resolve_query_scope({}, "default", user=member)
