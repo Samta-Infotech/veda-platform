@@ -31,7 +31,6 @@ from apps.query.scope import (
     NoReadySource,
     SourceAccessDenied,
     permitted_source_ids,
-    query_execute_allowed,
     resolve_query_scope,
 )
 
@@ -109,28 +108,18 @@ class ConversationQueryView(APIView):
 
         effective = resolve_effective_permissions(user)
 
-        # The coarse "may this caller use the query feature at all" gate,
-        # checked BEFORE the source-level one below — orthogonal to data.read,
-        # see query_execute_allowed's own docstring for why this previously had
-        # zero effect (defined, seeded, grantable — never actually checked).
-        #
-        # Both this and the permitted-sources check below used to return a raw
-        # HTTP 403 here — no chat/message row ever created, nothing in history,
-        # a shape the frontend had to special-case apart from every other kind
-        # of refusal. User's call: route these through the SAME turn/persist
-        # path as a real answer instead (see ConversationQueryService.
-        # access_denied) — still zero engine compute (that's what the early
-        # return protects), but now it streams, and it saves to history like
-        # any other turn.
-        if not query_execute_allowed(user, effective):
-            logger.warning("conversation query denied: user_id=%s lacks query.execute",
-                           user.pk)
-            return self._denied_turn_response(user, data, rid)
-
         # Authenticated + RBAC active but permitted NOTHING -> fail closed
         # BEFORE any scope resolution or engine call, never a leaked
         # resource/table/column name. `permitted is None` means "no narrowing at
         # all" (RBAC off, or staff) — not this branch.
+        #
+        # This used to return a raw HTTP 403 here — no chat/message row ever
+        # created, nothing in history, a shape the frontend had to special-case
+        # apart from every other kind of refusal. User's call: route this
+        # through the SAME turn/persist path as a real answer instead (see
+        # ConversationQueryService.access_denied) — still zero engine compute
+        # (that's what the early return protects), but now it streams, and it
+        # saves to history like any other turn.
         permitted = permitted_source_ids(user, effective)
         if permitted is not None and not permitted:
             logger.warning("conversation query denied: user_id=%s has no permitted sources",
@@ -179,8 +168,8 @@ class ConversationQueryView(APIView):
         return self._json_response(service, chat, data["message"], rid)
 
     def _denied_turn_response(self, user, data, rid):
-        """A source-level RBAC denial (missing query.execute, or zero permitted
-        sources), rendered as a real turn instead of a raw HTTP error — see
+        """A source-level RBAC denial (zero permitted sources), rendered as a
+        real turn instead of a raw HTTP error — see
         ConversationQueryService.access_denied's own docstring for why. No
         source_ids/data_scope: access_denied short-circuits run_turn before
         either would ever be read.

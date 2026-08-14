@@ -33,7 +33,6 @@ from .scope import (
     NoReadySource,
     SourceAccessDenied,
     permitted_source_ids,
-    query_execute_allowed,
     resolve_query_scope,
 )
 
@@ -83,15 +82,6 @@ class QueryView(APIView):
         # test harness).
 
         effective = resolve_effective_permissions(user)
-
-        # The coarse "may this caller use the query feature at all" gate — see
-        # query_execute_allowed's own docstring for why this previously had zero
-        # effect (defined, seeded, grantable — never actually checked).
-        if not query_execute_allowed(user, effective):
-            logger.warning("query denied: user_id=%s lacks query.execute",
-                           getattr(user, "pk", None))
-            return Response({"status": _STATUS_FORBIDDEN, "error": _FORBIDDEN_MESSAGE},
-                            status=403)
 
         # Authenticated + RBAC active but permitted NOTHING -> fail closed with a
         # generic 403 BEFORE any scope resolution or inference call, never a
