@@ -234,35 +234,6 @@ def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
     return set(Source.objects.filter(query).values_list("id", flat=True))
 
 
-def query_execute_allowed(user, effective=_UNRESOLVED) -> bool:
-    """Whether ``query.execute`` is granted — the coarse "may this caller use
-    the query feature at all" gate, deliberately orthogonal to ``data.read``
-    (``permitted_source_ids``, above): ``data.read`` decides WHICH sources are
-    visible, this decides IF the query surface is usable at all. Global by
-    design (checked with no ``resource_path``) — unlike ``data.read``,
-    ``query.execute`` was never meant to be granted per-source.
-
-    Previously defined (``PermissionCode.QUERY_EXECUTE``, seeded by migration)
-    but never checked anywhere — granting or revoking it had zero effect. This
-    is the fix: both HTTP entry points (``QueryView``, ``ConversationQueryView``)
-    now call this alongside ``permitted_source_ids``, so a caller needs BOTH a
-    global ``query.execute`` ALLOW and a source-level ``data.read`` ALLOW to get
-    an answer — either one missing refuses the same as before (a caller with
-    ``data.read`` but no ``query.execute`` used to get a real answer; it no
-    longer does).
-
-    Returns ``True`` (no restriction) when ``effective`` is ``None`` — RBAC off,
-    or no user — same convention as ``permitted_source_ids``.
-    """
-    if effective is _UNRESOLVED:
-        if user is None:
-            return True
-        effective = resolve_effective_permissions(user)
-    if effective is None:
-        return True
-    return effective.allows(PermissionCode.QUERY_EXECUTE)
-
-
 def _ready_source_ids() -> list[int]:
     """Ready sources, ascending. An unreadable registry (no migrations yet, DB
     down) degrades to "unknown ownership" rather than failing the request — the
