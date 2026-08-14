@@ -344,6 +344,12 @@ class AuthService:
         # (bootstrap, or promoted directly in the database) must never be locked
         # out of its own platform by a missing RBAC row, and last-admin protection
         # already guarantees at least one is_staff account exists.
+        #
+        # is_superuser (``is_admin: true``) does NOT bypass this — user's explicit
+        # call: an admin-app account still needs a real role assigned, same as
+        # anyone else. "May log in" always means "has a role" (or is_staff),
+        # never "is_superuser" alone — keeps is_admin purely a which-frontend
+        # flag, never a login shortcut.
         if not user.is_staff and not UserRole.objects.filter(user=user).exists():
             logger.warning("auth login refused: no role assigned user_id=%s "
                            "username=%s %s", user.pk, username, self._log_context())
