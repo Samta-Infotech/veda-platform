@@ -27,7 +27,13 @@ from .services import (
     MSG_MODEL_ERROR,
 )
 from .turn_events import TurnEventAccumulator
-from apps.query.scope import permitted_source_ids, resolve_query_scope
+from apps.query.scope import (
+    NoReadySource,
+    SourceAccessDenied,
+    permitted_source_ids,
+    query_execute_allowed,
+    resolve_query_scope,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -103,23 +109,55 @@ class ConversationQueryView(APIView):
 
         effective = resolve_effective_permissions(user)
 
-        # Authenticated + RBAC active but permitted NOTHING -> fail closed with a
-        # generic 403 BEFORE any scope resolution or engine call, never a leaked
+        # The coarse "may this caller use the query feature at all" gate,
+        # checked BEFORE the source-level one below — orthogonal to data.read,
+        # see query_execute_allowed's own docstring for why this previously had
+        # zero effect (defined, seeded, grantable — never actually checked).
+        #
+        # Both this and the permitted-sources check below used to return a raw
+        # HTTP 403 here — no chat/message row ever created, nothing in history,
+        # a shape the frontend had to special-case apart from every other kind
+        # of refusal. User's call: route these through the SAME turn/persist
+        # path as a real answer instead (see ConversationQueryService.
+        # access_denied) — still zero engine compute (that's what the early
+        # return protects), but now it streams, and it saves to history like
+        # any other turn.
+        if not query_execute_allowed(user, effective):
+            logger.warning("conversation query denied: user_id=%s lacks query.execute",
+                           user.pk)
+            return self._denied_turn_response(user, data, rid)
+
+        # Authenticated + RBAC active but permitted NOTHING -> fail closed
+        # BEFORE any scope resolution or engine call, never a leaked
         # resource/table/column name. `permitted is None` means "no narrowing at
         # all" (RBAC off, or staff) — not this branch.
         permitted = permitted_source_ids(user, effective)
         if permitted is not None and not permitted:
             logger.warning("conversation query denied: user_id=%s has no permitted sources",
                            user.pk)
-            return _forbidden_response()
+            return self._denied_turn_response(user, data, rid)
 
         # Resolve the query SCOPE server-side exactly like /api/v1/query (§6.2, P5):
         # all READY sources by default, an optional request pin intersected with the
-        # ready registry, VEDA_DEFAULT_SOURCE_ID only as the last-resort fallback.
-        # This keeps chat multi-source (federation-capable) and immune to a stale
-        # default pointing at a source with no connection (e.g. an empty-host row).
-        source_ids = resolve_query_scope(request.data, tenant=DEFAULT_TENANT, user=user,
-                                         effective=effective)
+        # ready registry. VEDA_DEFAULT_SOURCE_ID is the last-resort fallback ONLY
+        # when RBAC was never narrowing anything (no user / RBAC off) — once RBAC
+        # HAS narrowed the set, resolve_query_scope raises rather than silently
+        # substituting a source the caller didn't ask for and might not even be
+        # connected (found live: a denied pin silently answered from a different
+        # source with no indication of the swap; a temporarily-not-ready permitted
+        # source fell back to a never-connected, empty-host row and surfaced as a
+        # confusing "LLM_UNAVAILABLE").
+        try:
+            source_ids = resolve_query_scope(request.data, tenant=DEFAULT_TENANT, user=user,
+                                             effective=effective)
+        except SourceAccessDenied:
+            logger.warning("conversation query denied: user_id=%s pinned a source "
+                           "outside their RBAC grants", user.pk)
+            return _forbidden_response()
+        except NoReadySource:
+            logger.warning("conversation query: user_id=%s has no ready permitted source",
+                           user.pk)
+            return api.error(MESSAGES["chat"]["no_ready_source"], status.HTTP_503_SERVICE_UNAVAILABLE)
         # Gate 1 (User Story 3, Task 15): same allow-payload as /api/v1/query,
         # threaded through the chat turn to call_engine_node (chatbot/nodes.py) —
         # None (RBAC off / staff) means no narrowing, exactly as before this change.
@@ -134,6 +172,25 @@ class ConversationQueryView(APIView):
             return api.error(MESSAGES["chat"]["not_found"], status.HTTP_404_NOT_FOUND)
         logger.info("conversation query chat loaded/created chat_id=%s request_id=%s", chat.pk, rid)
 
+        service.save_user_message(chat, data["message"])
+
+        if data["stream"]:
+            return self._stream_response(service, chat, data["message"], rid)
+        return self._json_response(service, chat, data["message"], rid)
+
+    def _denied_turn_response(self, user, data, rid):
+        """A source-level RBAC denial (missing query.execute, or zero permitted
+        sources), rendered as a real turn instead of a raw HTTP error — see
+        ConversationQueryService.access_denied's own docstring for why. No
+        source_ids/data_scope: access_denied short-circuits run_turn before
+        either would ever be read.
+        """
+        service = ConversationQueryService(user=user, access_denied=True)
+        try:
+            chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
+        except ChatNotFound:
+            logger.warning("conversation query: chat_id=%s not found", data["chat_id"])
+            return api.error(MESSAGES["chat"]["not_found"], status.HTTP_404_NOT_FOUND)
         service.save_user_message(chat, data["message"])
 
         if data["stream"]:

@@ -109,6 +109,16 @@ MESSAGES = {
         # Gate 1 (User Story 3, Task 17): generic on purpose — never names a
         # resource, table, column, or any internal RBAC detail.
         "access_denied": "You do not have permission to access this resource.",
+        # Same wording as veda_core's own access-denied refusal
+        # (veda.feedback.ACCESS_DENIED_WHY/_WHAT) — duplicated rather than
+        # imported, since the api tier never imports veda_core directly. Used
+        # for the CHAT-TURN version of a source-level denial (persisted to
+        # history, streamed like any other turn) — "access_denied" above stays
+        # the raw-HTTP-403 copy for any caller that still hits that path.
+        "access_denied_why": "You don't have permission to access this data.",
+        "access_denied_what": "Contact your Admin to request access.",
+        "no_ready_source": ("None of your permitted data sources are ready right now. "
+                            "Please try again shortly or contact your admin."),
         "llm_unavailable": ("The AI assistant is temporarily unavailable. "
                              "Please try again in a moment."),
         "model_error": "Something went wrong while generating a response. Please try again.",
