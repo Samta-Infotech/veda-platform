@@ -30,7 +30,8 @@ RUN pip install -r /app/requirements/inference.txt
 # api/worker stack so this image can ALSO run the Celery ingest worker — ingestion
 # needs Django + celery ALONGSIDE torch, and no other image has both. Kept as a
 # separate, small layer so the heavy torch install above stays cached on rebuild.
-RUN pip install "django>=4.2,<5.1" djangorestframework celery django-environ
+RUN pip install "django>=4.2,<5.1" djangorestframework celery django-environ \
+        "djangorestframework-simplejwt[crypto]>=5.3" django-cors-headers
 
 COPY . /app
 

@@ -192,7 +192,55 @@ class CatalogDiscoveryService:
                 if column_path not in expected:
                     expected[column_path] = (table_path, column.id)
 
+        # Document sources (files) have no SchemaTable/SchemaColumn rows — their
+        # content lives in the engine's own doc_chunks store (veda_engine), one row
+        # per ingested document. Read it directly (same raw-psycopg2-to-veda_engine
+        # pattern as storage_adapters.writer._build_lite_sm_from_graph) rather than
+        # mirroring it into a Django table nobody else needs.
+        elif kind == "files":
+            for doc_id, doc_name in self._document_rows(source.pk):
+                doc_path = self._safe_path(report, kind, source.name, doc_name)
+                if doc_path is None:
+                    continue
+                if doc_path not in expected:
+                    expected[doc_path] = (source_path, doc_id)
+
         return expected
+
+    @staticmethod
+    def _document_rows(source_id: int) -> list[tuple]:
+        """(doc_id, doc_name) for every document ingested for this source, read live
+        from the engine's doc_chunks store (veda_engine) — Django owns no mirrored
+        copy of this. Best-effort: an unreachable engine store degrades to "no
+        document children this run" rather than failing the whole catalog sync.
+        """
+        import os
+
+        import psycopg2
+
+        dsn = dict(
+            host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
+            port=int(os.environ.get("VEDA_INTERNAL_PORT", "6432")),
+            dbname=os.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),
+            user=os.environ.get("VEDA_INTERNAL_USER", "veda"),
+            password=os.environ.get(
+                "VEDA_INTERNAL_PASSWORD", os.environ.get("POSTGRES_PASSWORD", "change-me")),
+        )
+        try:
+            conn = psycopg2.connect(**dsn)
+        except Exception:
+            logger.warning("catalog discovery: doc_chunks unreachable for source_id=%s",
+                           source_id)
+            return []
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT doc_id, doc_name FROM doc_chunks WHERE source_id = %s",
+                    [str(source_id)],
+                )
+                return cur.fetchall()
+        finally:
+            conn.close()
 
     @staticmethod
     def _safe_path(report: DiscoveryReport, *parts: str) -> str | None:
