@@ -8,6 +8,9 @@ unauthenticated request gets a `401`.
 For the `usage` (token count) field details, see `TOKEN_USAGE_API_CONTRACT.md`
 — this doc focuses on the full request/response shape of the two endpoints.
 
+For how to obtain and refresh the token you authenticate with, see
+`AUTH_API_CONTRACT.md`.
+
 ---
 
 ## 1. `POST /api/v1/conversations/query`
