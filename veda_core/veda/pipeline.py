@@ -1631,6 +1631,16 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             fb = _feedback("clarify", msg=_msg)
             log_route(_route + ".salvage_clarify", query, (time.time() - start) * 1000)
             return _done(0, "clarify", msg=_msg, feedback=fb)
+        # The dropped qualifier itself may be an innocent word ("exist") that has
+        # nothing to do with RBAC — but if the SQL this query would have run was
+        # already reaching into a table/column RBAC restricts, that's the real
+        # reason to refuse, and the user should hear "access denied", not a
+        # generic clarify prompt that reads as if the table doesn't exist.
+        _restricted_here = restricted_names(sm, _ambient_ctx())
+        if any(t in _sql_tabs for t in _restricted_here["tables"]):
+            fb = _feedback("access_denied")
+            log_route(_route + ".access_denied", query, (time.time() - start) * 1000)
+            return _done(0, "access_denied", missing=missing, feedback=fb)
         fb = _feedback("qualifier_dropped", missing=missing)
         log_route(_route + ".qualifier_dropped", query, (time.time() - start) * 1000)
         return _done(0, "qualifier_dropped", missing=missing, feedback=fb)

@@ -50,14 +50,18 @@ from rest_framework_simplejwt.settings import api_settings as jwt_settings  # no
 
 from config.urls import urlpatterns as root_urlpatterns  # noqa: E402
 from apps.authentication.services import (  # noqa: E402
+    AccountInactive,
     AccountLocked,
     AuthService,
+    CODE_ACCOUNT_INACTIVE,
     CODE_ACCOUNT_LOCKED,
     CODE_INVALID_CREDENTIALS,
     CODE_INVALID_TOKEN,
+    CODE_NO_ROLE_ASSIGNED,
     InvalidCredentials,
     InvalidRefreshToken,
     LEGACY_ACCESS_TOKEN,
+    NoRoleAssigned,
     _RotatableRefreshToken,
 )
 
@@ -290,6 +294,10 @@ def test_login_rejects_wrong_password(client, user):
 
 @override_settings(VEDA_JWT_AUTH=True)
 def test_login_rejects_inactive_user(client):
+    """A correct password against a deactivated account gets its own clear
+    error (AccountInactive), not the generic invalid-credentials bucket —
+    user's call: VEDA is an internal admin tool, so a real deactivated user
+    deserves a clear reason rather than a confusing "invalid credentials"."""
     inactive = get_user_model().objects.create_user(
         username="carol", password=PASSWORD, is_staff=True)
     inactive.is_active = False
@@ -298,7 +306,12 @@ def test_login_rejects_inactive_user(client):
     response = _login(client, "carol", PASSWORD)
 
     assert response.status_code == 401
-    assert response.json()["code"] == CODE_INVALID_CREDENTIALS
+    assert response.json()["code"] == CODE_ACCOUNT_INACTIVE
+
+    # A WRONG password against the same deactivated account still can't tell
+    # you the account exists — only a password that actually matches does.
+    wrong_password = _login(client, "carol", "not-the-password")
+    assert wrong_password.json()["code"] == CODE_INVALID_CREDENTIALS
 
 
 # ---------------------------------------------------------------------------
@@ -308,19 +321,17 @@ def test_login_rejects_inactive_user(client):
 
 @override_settings(VEDA_JWT_AUTH=True)
 def test_login_does_not_leak_whether_an_account_exists(client, user):
-    """Unknown username, wrong password and inactive account must be one
-    indistinguishable response — otherwise login is an account oracle."""
-    inactive = get_user_model().objects.create_user(
-        username="dave", password=PASSWORD, is_staff=True)
-    inactive.is_active = False
-    inactive.save(update_fields=["is_active"])
+    """Unknown username and a wrong password for a real one must still be one
+    indistinguishable response — that pairing is the classic account oracle.
 
+    A deactivated account is deliberately EXCLUDED from that bucket (user's
+    call, see AccountInactive) — it gets its own response, checked separately
+    in test_login_rejects_inactive_user."""
     unknown = _login(client, "nobody-here", PASSWORD)
     wrong_password = _login(client, "alice", "wrong-password")
-    disabled = _login(client, "dave", PASSWORD)
 
-    assert unknown.status_code == wrong_password.status_code == disabled.status_code == 401
-    assert unknown.json() == wrong_password.json() == disabled.json()
+    assert unknown.status_code == wrong_password.status_code == 401
+    assert unknown.json() == wrong_password.json()
 
 
 @override_settings(VEDA_JWT_AUTH=True)
