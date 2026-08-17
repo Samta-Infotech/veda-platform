@@ -698,6 +698,37 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     # ── SQL → DETERMINISTIC engine (the correctness brain) ────────────────────
     if intent == "sql":
         sm, cols = _load_semantic_model()
+
+        # Gate 1 shortcut: this request's primary source has NO queryable table at
+        # all (RBAC narrowed it to zero relational tables — e.g. a role granted
+        # only a filesystem/datalake source — or the scope is genuinely
+        # non-relational). Retrieval/SQL-gen can only ever fail here (there is
+        # nothing for it to anchor to), so running the full pipeline just to reach
+        # the same "no" wastes 5-40s of embedding/LLM calls and, worse, surfaces a
+        # confusing "'X' doesn't match any value in this data" instead of the real
+        # reason.
+        if not sm.get("tables"):
+            # classify()'s doc-intent override (_DOC_REF_RE) is a FIXED word list —
+            # it can never be complete (a new document's own subject-matter vocabulary,
+            # e.g. "maintenance" for maintenance_policy.docx, isn't a generic word like
+            # "policy"/"document" and was never going to be hardcoded in advance).
+            # Rather than add words one incident at a time, ask the real signal
+            # instead: if this scope HAS a document source, actually retrieve against
+            # it and trust content similarity, not a keyword guess. Only fall through
+            # to the clean access_denied refusal below if that ALSO finds nothing
+            # genuinely relevant.
+            if _scope_has_doc_source():
+                from query.rag_layer import run_rag_layer
+                rag = run_rag_layer(query, source_ids=None, verbose=verbose, on_event=on_event)
+                _MIN_SIM = 0.35  # a real topical match, not a coincidental near-miss
+                if not getattr(rag, "error", None) and rag.confidence >= _MIN_SIM:
+                    return "rag", rag
+
+            from veda.feedback import explain_failure
+            fb = explain_failure("access_denied", sm)
+            _emit(on_event, "answer", "No permitted database in scope")
+            return "deterministic", {"ok": False, "status": "access_denied", "feedback": fb}
+
         from veda.pipeline import run_query
         _head_t0 = time.time()
         res = precomputed_sql if isinstance(precomputed_sql, dict) \
