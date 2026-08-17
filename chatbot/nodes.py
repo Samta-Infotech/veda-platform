@@ -70,6 +70,23 @@ _REFERENTIAL_HINTS = re.compile(
     re.IGNORECASE,
 )
 
+# Stricter sibling of _REFERENTIAL_HINTS, for the "purely referential, nothing
+# to resolve it against" backstop below ONLY — anchored so the referential word
+# must be the last substantive thing in the message (a dangling pronoun: "what
+# about this?", "show me the other one"), not a determiner heading its own
+# self-contained noun phrase ("this maintenance policy for asset 21" names its
+# own referent; there is nothing to resolve). _REFERENTIAL_HINTS itself stays
+# unanchored where it's used elsewhere (line ~293) — a false positive there
+# only costs one extra cheap LLM gate call, never a dropped query, so it can
+# afford to stay broad. This one gates a hard downgrade to smalltalk, so it
+# must not fire on a question that is already complete on its own.
+_BARE_REFERENTIAL_RE = re.compile(
+    r"\b(that|this|it|those|these|same|again|more|other|another|previous|"
+    r"above|below|instead|also|too|earlier|before|last one|the one)\b"
+    r"(\s+one)?\s*[.,!?]*\s*$",
+    re.IGNORECASE,
+)
+
 def _depends_on_history(message: str, history: list) -> bool:
     """Generic (non-keyword) second opinion for a "smalltalk" verdict when prior
     turns exist AND the message contains at least some referential language
@@ -334,7 +351,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         action = "followup"
 
     if (action in ("followup", "answer") and not frame.get("entity")
-            and _REFERENTIAL_HINTS.search(message) and not _DATA_QUESTION_HINTS.search(message)):
+            and _BARE_REFERENTIAL_RE.search(message) and not _DATA_QUESTION_HINTS.search(message)):
         # Universal backstop, independent of HOW `action` got here (the LLM's
         # own direct verdict, OR any override above): a message that is
         # PURELY referential ("other", "that", "it", ...) with no data-
