@@ -201,10 +201,11 @@ def _source_scope(effective: EffectivePermissions, source_id: int) -> SourceData
         for t in open_tables if t.substrate_id in table_names
     ]
 
-    # A table's own path having no ALLOW does not mean it is unreachable — a caller
-    # may grant only specific columns without ever granting the table itself, so
-    # every non-open table's columns are checked directly rather than gating on a
-    # table-level allow first.
+    # Under strict hierarchy the source is already allowed here (we are past the
+    # _fully_open source check), so every column inherits ALLOW from it unless a
+    # DENY carves it out — each non-open table's columns are checked directly via
+    # allows() so a per-column DENY narrows the table to exactly its surviving
+    # columns (and a table with none left is omitted below).
     if other_tables:
         columns = list(CatalogResource.objects
                        .filter(parent_path__in=[t.path for t in other_tables],

@@ -152,13 +152,27 @@ def test_absence_of_a_grant_is_denial_not_a_default_allow(member, read):
     """The single most important property. A user with SOME permissions must still be
     denied the ones nobody granted."""
     role = _role_for(member)
-    _grant(role, read, "db:crm:employee")
+    _grant(role, read, "db:crm")  # source-level allow, so the table is reachable
 
     effective = _resolve(member)
 
     assert effective.allows("data.read", "db:crm:employee") is True
     assert effective.allows("data.read", "db:other:table") is False
     assert effective.allows("user.manage") is False
+
+
+def test_a_table_allow_without_a_source_allow_grants_nothing(member, read):
+    """Strict hierarchy (2026-08): the source is the gate. A grant on a table
+    (or column) with no source-level allow above it reaches nothing — the model
+    is "allow the source, refine DOWN with denies", never "allow-list a table
+    from an ungranted source"."""
+    role = _role_for(member)
+    _grant(role, read, "db:crm:employee")  # table only — no db:crm allow
+
+    effective = _resolve(member)
+
+    assert effective.allows("data.read", "db:crm:employee") is False
+    assert effective.allows("data.read", "db:crm") is False
 
 
 def test_an_anonymous_or_missing_user_resolves_to_nothing():

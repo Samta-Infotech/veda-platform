@@ -123,7 +123,10 @@ def _role_for(user, name="Analyst"):
 
 
 def _source_path(source_name):
-    return rp.build("db", source_name, "employee")
+    # A SOURCE-level path (2 segments). Strict hierarchy (2026-08): only a
+    # source-level allow makes a source reachable, so a grant meant to open a
+    # source must be at this level, not a deeper table path.
+    return rp.build("db", source_name)
 
 
 # ---------------------------------------------------------------------------

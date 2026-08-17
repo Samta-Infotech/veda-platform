@@ -460,14 +460,22 @@ class CatalogService:
 
     @staticmethod
     def _resolve_effect(path: str, grants: dict[str, str]) -> str | None:
-        """The grant that governs ``path``: itself, else its nearest granted ancestor.
+        """The effective decision this tree node shows — and it MUST match what
+        ``resolver.allows`` would actually enforce, or the admin UI lies about
+        access (found live 2026-08: a parent DENY + child ALLOW showed as ALLOW
+        in the tree while the query was correctly denied).
 
-        A grant on a parent covers every descendant (ADR §3.2's SELF_AND_DESCENDANTS)
-        until a more specific grant overrides it closer to the leaf — so this walks
-        from ``path`` outward and stops at the first match, most specific first.
+        Same rule as the resolver (strict hierarchy + deny-wins):
+          * any DENY on the prefix chain  -> DENY (unpierceable, any depth)
+          * else the SOURCE-level ancestor allowed -> ALLOW (cascades down)
+          * else -> None (not allowed: a table/column allow with no source-level
+            allow above it grants nothing, so the tree must not paint it green)
         """
-        for candidate in reversed(resource_path.prefixes(path)):
-            if candidate in grants:
-                return grants[candidate]
+        chain = resource_path.prefixes(path)
+        chain_effects = [grants[c] for c in chain if c in grants]
+        if Effect.DENY in chain_effects:
+            return Effect.DENY
+        if chain and grants.get(chain[0]) == Effect.ALLOW:
+            return Effect.ALLOW
         return None
 

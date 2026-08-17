@@ -109,18 +109,6 @@ def read_perm():
     return Permission.objects.get(code="data.read")
 
 
-@pytest.fixture
-def execute_perm():
-    return Permission.objects.get(code="query.execute")
-
-
-def _grant_full_query_access(role, read_perm, execute_perm, resource_path):
-    """The two grants a real "may query this source" role needs post-fix:
-    data.read on the specific resource, plus the global query.execute gate."""
-    _grant(role, read_perm, resource_path)
-    _grant(role, execute_perm, "")
-
-
 def _client_as(user):
     client = Client()
     client.force_login(user)
@@ -144,7 +132,9 @@ def _role_for(user, name="Analyst"):
 
 
 def _source_path(source_name):
-    return rp.build("db", source_name, "employee")
+    # SOURCE-level path (2 segments). Strict hierarchy (2026-08): only a
+    # source-level allow opens a source, so a grant meant to open one must be here.
+    return rp.build("db", source_name)
 
 
 def _post_json(client, url, body):
@@ -191,28 +181,10 @@ def test_query_403_body_leaks_no_resource_names(member):
 
 @mock.patch("apps.query.inference_client.InferenceClient.run_hybrid_query",
            return_value=_FAKE_INFERENCE_PAYLOAD)
-def test_query_data_read_alone_without_query_execute_is_refused(mock_run, member, read_perm):
-    """query.execute was previously defined, seeded, and grantable but never
-    actually checked — data.read alone was sufficient to get a real answer.
-    This pins the fix: data.read without the separate, global query.execute
-    grant must now be refused."""
-    _source("crm")
-    role = _role_for(member)
-    _grant(role, read_perm, _source_path("crm"))  # data.read only — no query.execute
-    client = _client_as(member)
-
-    resp = _post_json(client, QUERY_URL, {"query": "how many rows"})
-
-    assert resp.status_code == 403
-    mock_run.assert_not_called()
-
-
-@mock.patch("apps.query.inference_client.InferenceClient.run_hybrid_query",
-           return_value=_FAKE_INFERENCE_PAYLOAD)
-def test_query_full_access_is_authorized(mock_run, member, read_perm, execute_perm):
+def test_query_full_access_is_authorized(mock_run, member, read_perm):
     crm = _source("crm")
     role = _role_for(member)
-    _grant_full_query_access(role, read_perm, execute_perm, _source_path("crm"))
+    _grant(role, read_perm, _source_path("crm"))
     client = _client_as(member)
 
     resp = _post_json(client, QUERY_URL, {"query": "how many rows"})
@@ -223,11 +195,11 @@ def test_query_full_access_is_authorized(mock_run, member, read_perm, execute_pe
 
 @mock.patch("apps.query.inference_client.InferenceClient.run_hybrid_query",
            return_value=_FAKE_INFERENCE_PAYLOAD)
-def test_query_partial_access_is_authorized_and_scoped_to_the_granted_source(mock_run, member, read_perm, execute_perm):
+def test_query_partial_access_is_authorized_and_scoped_to_the_granted_source(mock_run, member, read_perm):
     crm = _source("crm")
     _source("billing")  # not granted
     role = _role_for(member)
-    _grant_full_query_access(role, read_perm, execute_perm, _source_path("crm"))
+    _grant(role, read_perm, _source_path("crm"))
     client = _client_as(member)
 
     resp = _post_json(client, QUERY_URL, {"query": "how many rows"})
@@ -239,7 +211,7 @@ def test_query_partial_access_is_authorized_and_scoped_to_the_granted_source(moc
 
 @mock.patch("apps.query.inference_client.InferenceClient.run_hybrid_query",
            return_value=_FAKE_INFERENCE_PAYLOAD)
-def test_query_multi_role_union_is_authorized(mock_run, member, read_perm, execute_perm):
+def test_query_multi_role_union_is_authorized(mock_run, member, read_perm):
     crm = _source("crm")
     billing = _source("billing")
     role_a = Role.objects.create(name="A", is_active=True)
@@ -248,7 +220,6 @@ def test_query_multi_role_union_is_authorized(mock_run, member, read_perm, execu
     UserRole.objects.create(user=member, role=role_b)
     _grant(role_a, read_perm, _source_path("crm"))
     _grant(role_b, read_perm, _source_path("billing"))
-    _grant(role_a, execute_perm, "")
     client = _client_as(member)
 
     resp = _post_json(client, QUERY_URL, {"query": "how many rows"})
@@ -288,11 +259,11 @@ def test_query_rbac_disabled_is_authorized_with_zero_grants(mock_run, member):
 
 @mock.patch("apps.chat.services.run_chat_turn", side_effect=_fake_run_chat_turn)
 def test_conversation_query_no_permissions_is_a_persisted_denial_turn_not_a_raw_403(mock_run, member):
-    """User's call: a source-level denial (zero permitted sources, same as
-    missing query.execute) is rendered as a real turn — persisted, same 200 +
-    response shape as any other answer — rather than a raw HTTP error with no
-    chat/message row and nothing in history. The engine must still never be
-    called; that's the actual thing being protected, not the status code."""
+    """User's call: a source-level denial (zero permitted sources) is rendered
+    as a real turn — persisted, same 200 + response shape as any other answer
+    — rather than a raw HTTP error with no chat/message row and nothing in
+    history. The engine must still never be called; that's the actual thing
+    being protected, not the status code."""
     _source("crm")
     client = _client_as(member)
 
@@ -313,10 +284,10 @@ def test_conversation_query_no_permissions_is_a_persisted_denial_turn_not_a_raw_
 
 
 @mock.patch("apps.chat.services.run_chat_turn", side_effect=_fake_run_chat_turn)
-def test_conversation_query_full_access_is_authorized(mock_run, member, read_perm, execute_perm):
+def test_conversation_query_full_access_is_authorized(mock_run, member, read_perm):
     _source("crm")
     role = _role_for(member)
-    _grant_full_query_access(role, read_perm, execute_perm, _source_path("crm"))
+    _grant(role, read_perm, _source_path("crm"))
     client = _client_as(member)
 
     resp = _post_json(client, CONVERSATION_QUERY_URL,

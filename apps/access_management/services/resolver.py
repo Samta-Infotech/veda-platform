@@ -8,16 +8,24 @@ RESPONSIBILITY, AND WHAT IS DELIBERATELY NOT HERE
     Keeping the two apart is what lets the resolver be deployed and observed (and
     cached) before a single request's outcome changes.
 
-THE RULES IT IMPLEMENTS (ADR-0001 §3.5)
+THE RULES IT IMPLEMENTS (ADR-0001 §3.5, + strict hierarchy 2026-08)
     For a permission on a resource:
 
       1. Collect every grant whose path is a prefix-or-equal of the requested resource.
       2. If ANY is deny  -> DENY.
-      3. Else if ANY is allow -> ALLOW.
+      3. Else if the SOURCE-level ancestor (2-segment ``db:<source>`` prefix) is
+         itself allowed -> ALLOW.
       4. Else -> DENY.
 
     Two independent fail-closed rules: DENY is unpierceable at any depth, and the
-    absence of a grant is a denial.
+    absence of a *source-level* grant is a denial.
+
+    STRICT HIERARCHY (user's call): the source is the gate. Rule 3 means an ALLOW
+    on a table/column with no source-level allow above it grants NOTHING — the
+    model is "allow the source, refine DOWN with denies", not "allow-list
+    individual tables from a denied/ungranted source". ``allows()`` carries the
+    full reasoning; ``permitted_source_ids`` and the catalog tree's
+    ``_resolve_effect`` mirror it and MUST change with it.
 
 WHAT MAKES SOMETHING GRANT NOTHING
     A grant is only counted when the whole chain is live — an inactive **user**,
@@ -94,14 +102,36 @@ class EffectivePermissions:
                 names a resource (see the module docstring).
 
         Returns:
-            True only if some grant matches and none of the matching grants deny.
-            Every other outcome — no grants, unknown permission, unaddressable
-            path — is False.
+            True only if the deny/allow rules below are satisfied. Every other
+            outcome — no grants, unknown permission, unaddressable path — is False.
+
+        STRICT HIERARCHY (user's call, 2026-08): an ALLOW only takes effect if the
+        SOURCE-level ancestor (the 2-segment ``db:<source>`` prefix) is itself
+        allowed — the source is the gate. A grant deeper in the tree
+        (``db:src:table``) with no source-level allow above it grants NOTHING.
+        This makes the model "allow the source, then refine DOWN with denies",
+        NOT "allow-list individual tables from nothing". DENY is unchanged:
+        deny-wins at any depth, unpierceable.
+
+        Consistency: ``apps.query.scope.permitted_source_ids`` (the coarse
+        source gate) and ``apps.access_management.services.catalog._resolve_effect``
+        (the admin-tree display) implement the SAME rule — change all three
+        together or they drift and the tree lies about effective access.
         """
         matched = self._matching(permission_code, resource_path)
         if any(grant.effect == Effect.DENY for grant in matched):
             return False
-        return any(grant.effect == Effect.ALLOW for grant in matched)
+        if not resource_path:
+            # A non-resource-scoped permission (user.manage, query.execute, ...):
+            # there is no hierarchy to gate, any global ALLOW suffices. Unchanged.
+            return any(grant.effect == Effect.ALLOW for grant in matched)
+        # Resource-scoped: the source-level ancestor must be explicitly allowed.
+        try:
+            source_prefix = rp.prefixes(resource_path)[0]
+        except (rp.InvalidResourcePath, IndexError):
+            return False
+        return any(grant.resource_path == source_prefix and grant.effect == Effect.ALLOW
+                   for grant in matched)
 
     def denies(self, permission_code: str, resource_path: str = "") -> bool:
         """Whether an explicit DENY matches.
