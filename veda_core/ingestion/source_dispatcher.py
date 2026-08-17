@@ -168,7 +168,7 @@ def _run_schema_pipeline(
     # ── Step 5: Table Metadata Store ──────────────────────────────────────────
     t0 = time.time()
     from ingestion.vector_store import store_table_metadata
-    tm_result = store_table_metadata(inference_result, verbose=verbose)
+    tm_result = store_table_metadata(inference_result, source_id=source_id, verbose=verbose)
     ctx["tm_result"] = tm_result
     _sok(source_id,
          f"Table metadata — {tm_result.rows_written} tables, backend={tm_result.backend}",

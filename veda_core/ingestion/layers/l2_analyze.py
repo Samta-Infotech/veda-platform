@@ -29,7 +29,7 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # --- table metadata (display columns) — FATAL -----------------------------
     try:
         from ingestion.vector_store import store_table_metadata
-        tm = store_table_metadata(inference_result, verbose=verbose)
+        tm = store_table_metadata(inference_result, source_id=ctx.source_id, verbose=verbose)
         state["tm_result"] = tm
         out.append(StageOutcome("table_metadata", True, detail=(
             f"{tm.rows_written} tables, backend={tm.backend}")))

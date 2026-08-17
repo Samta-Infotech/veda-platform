@@ -201,7 +201,8 @@ def _build_rag_user_message(
         if chunk.page_num:
             loc += f", page {chunk.page_num}"
         context_parts.append(f"[{i}] ({loc})\n{chunk.text}")
-    return f"Context:\n\n{'chr(10)chr(10)'.join(context_parts)}\n\nQuestion: {query}"
+    sep = chr(10) + chr(10)
+    return f"Context:\n\n{sep.join(context_parts)}\n\nQuestion: {query}"
 
 
 def _build_hybrid_user_message(

@@ -14,8 +14,10 @@
 # Structure-aware chunking (chunk_sections) never crosses a section boundary and
 # prepends the heading breadcrumb to each chunk's embedded text
 # ("Contracts > Termination > Notice periods:\n<text>") — measurably better chunk
-# retrieval precision at zero cost. Tables with ≥ DOC_TABLE_MIN_ROWS rows become
-# derived tables (P2.3); smaller/ragged tables stay as chunk text.
+# retrieval precision at zero cost. Every table is rendered as chunk text too
+# (DocTable.is_derived_table()/ParsedDoc.derived_tables() mark tables with
+# ≥ DOC_TABLE_MIN_ROWS rows for a separate "tabular lane" that was never built —
+# no caller exists anywhere in the repo — so table size makes no difference here).
 #
 # Optional deps: pymupdf4llm (PDF), python-docx (DOCX). Absent → the caller falls
 # back to the flat connectors.document extractors.
@@ -234,20 +236,52 @@ def _word_chunks(text: str, size: int, overlap: int) -> List[str]:
     return out
 
 
+def _table_row_texts(table: DocTable) -> List[str]:
+    """Render each DocTable row as its own 'header: value, header: value' line —
+    generic key:value form so a row's terms co-occur in a single embeddable chunk
+    (e.g. a row naming "Rent" and its fee lands in the same chunk as "900"), without
+    assuming which column is the label. Blank header cells are dropped per-cell.
+
+    One chunk PER ROW, not one chunk for the whole table: joining every row into a
+    single chunk makes that one chunk mention every category name at once, which
+    then falsely out-scores a genuinely on-topic passage in a DIFFERENT document
+    for any query naming one of those categories (observed live: a query about
+    another document's "financial categories" retrieved this table's chunk instead,
+    because it alone listed every category the query asked about)."""
+    lines = []
+    for row in table.rows:
+        pairs = [f"{h.strip()}: {v.strip()}" for h, v in zip(table.header, row) if h.strip()]
+        if pairs:
+            lines.append(", ".join(pairs))
+    return lines
+
+
 def chunk_sections(parsed: ParsedDoc, chunk_size: int = DOC_CHUNK_SIZE,
                    chunk_overlap: int = DOC_CHUNK_OVERLAP) -> List[dict]:
     """Structure-aware chunks that never cross a section boundary and carry the
     heading path both as embedded-text prefix and as metadata. Returns dicts:
-    {text, embed_text, section_path, section_level, chunk_index}."""
+    {text, embed_text, section_path, section_level, chunk_index}.
+
+    Emits chunks for both a section's paragraph text AND its tables (rendered via
+    _table_text) — the "tabular lane" once envisioned for large tables was never
+    built (no caller of ParsedDoc.derived_tables() exists anywhere in the repo), so
+    every table is inlined as chunk text regardless of row count; that beats the
+    previous behavior of silently dropping all table content."""
     out: List[dict] = []
     idx = 0
     for sec in parsed.sections:
-        if not sec.text:
-            continue
         prefix = "" if sec.path in ("", "(root)") else f"{sec.path}:\n"
-        for seg in _word_chunks(sec.text, chunk_size, chunk_overlap):
-            out.append({"text": seg, "embed_text": prefix + seg,
-                        "section_path": "" if sec.path == "(root)" else sec.path,
-                        "section_level": sec.level, "chunk_index": idx})
-            idx += 1
+        if sec.text:
+            for seg in _word_chunks(sec.text, chunk_size, chunk_overlap):
+                out.append({"text": seg, "embed_text": prefix + seg,
+                            "section_path": "" if sec.path == "(root)" else sec.path,
+                            "section_level": sec.level, "chunk_index": idx})
+                idx += 1
+        for table in sec.tables:
+            for row_text in _table_row_texts(table):
+                for seg in _word_chunks(row_text, chunk_size, chunk_overlap):
+                    out.append({"text": seg, "embed_text": prefix + seg,
+                                "section_path": "" if sec.path == "(root)" else sec.path,
+                                "section_level": sec.level, "chunk_index": idx})
+                    idx += 1
     return out
