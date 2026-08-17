@@ -552,7 +552,19 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
     # `cols` when absent — never clobbers a pipeline that already set it.
     if "cols" not in res0 and res0.get("columns"):
         res0["cols"] = res0["columns"]
-    return res0, res0.get("status", "error")
+    status = res0.get("status")
+    if status is None:
+        # RAG/hybrid/nosql heads carry no pipeline-level status of their own
+        # (veda_core/veda/pipeline.py::_done, which mints "answered"/"exec_error"/
+        # "access_denied"/etc., is a SQL/Tier-1/Tier-2-only concept) — their res0
+        # is just {answer, chunks, citations, ...} with no "status" key at all, so
+        # the old `res0.get("status", "error")` always fell through to "error" and
+        # a real answer got discarded as a generic clarify. Fall back to the
+        # SubResult-level status (item0["status"], "ok"|"refused"|"error") ONLY
+        # when res0 has none of its own — the docstring above still holds for
+        # every route that DOES set one.
+        status = "answered" if item0.get("status") == "ok" else "error"
+    return res0, status
 
 
 def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:

@@ -311,3 +311,43 @@ def filter_nosql_collections(collections, source_id, ctx):
         if fields:  # a collection with zero reachable fields is not addressable
             kept.append(dataclasses.replace(coll, inferred_fields=fields))
     return kept
+
+
+def filter_doc_chunks(chunks, ctx):
+    """The document-retrieval mirror of ``filter_nosql_collections``:
+    ``chunks`` (``ingestion.chunk_embedder.ChunkRetrievalResult``s, each already
+    carrying its own ``source_id``/``doc_name``) narrowed to what
+    ``ctx.allowed_resources`` permits — a document ~= a NoSQL collection (a leaf;
+    documents have no column-level grain beneath them, unlike a db table). The
+    producer of this same per-document allow-list is
+    ``apps.access_management.services.data_scope``'s ``files``-kind branch of
+    ``_source_scope`` (``TableScope(name=doc_name, columns=None)`` per allowed
+    document).
+
+    Returns ``chunks`` UNCHANGED when there is nothing to restrict (including an
+    empty list) — same contract as every other function in this module. Apply
+    this to the OVER-FETCHED candidate list ``retrieve_top_k_chunks`` returns,
+    before truncating to the caller's requested ``top_k``: same reasoning as
+    ``filter_retrieval_results`` — the shared retrieval query stays RBAC-
+    oblivious, only the per-request result list is narrowed."""
+    if ctx is None or getattr(ctx, "allowed_resources", None) is None or not chunks:
+        return chunks
+
+    open_sources, table_index = _index(ctx)
+
+    def sid_of(chunk):
+        try:
+            return int(chunk.source_id)
+        except (TypeError, ValueError):
+            return chunk.source_id
+
+    if all(sid_of(c) in open_sources for c in chunks):
+        return chunks  # nothing restricted among these chunks' sources — zero-cost pass-through
+
+    def ok(chunk) -> bool:
+        sid = sid_of(chunk)
+        if sid in open_sources:
+            return True
+        return (sid, chunk.doc_name) in table_index
+
+    return [c for c in chunks if ok(c)]

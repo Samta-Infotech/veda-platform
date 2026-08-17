@@ -158,7 +158,7 @@ def compute_data_scope(user, source_ids, effective=UNRESOLVED
 def _source_scope(effective: EffectivePermissions, source_id: int) -> SourceDataScope:
     root = (CatalogResource.objects
             .filter(source_id=source_id, parent_path="", is_active=True)
-            .only("path").first())
+            .only("path", "kind").first())
     if root is None:
         # No catalog projection for this source (discovery never ran / found
         # nothing) — nothing is addressable, so nothing can be enumerated. Fail
@@ -173,6 +173,23 @@ def _source_scope(effective: EffectivePermissions, source_id: int) -> SourceData
                   .only("path", "substrate_id"))
     if not tables:
         return SourceDataScope(open=False, tables=())
+
+    if root.kind == "files":
+        # Document sources: each child IS a leaf (no columns beneath it, unlike a
+        # db table) — and a document has no SchemaTable/SchemaColumn row of its own
+        # (see apps.access_management.services.catalog._document_rows, which reads
+        # doc names live from the engine's doc_chunks store instead of mirroring
+        # them into a Django table). So the allowed name comes straight off the
+        # resource path's own last segment, not a substrate lookup.
+        allowed_docs = [
+            rp.segments(t.path)[-1] for t in tables
+            if effective.allows(PermissionCode.DATA_READ, t.path)
+        ]
+        if not allowed_docs:
+            return SourceDataScope(open=False, tables=())
+        return SourceDataScope(
+            open=False,
+            tables=tuple(TableScope(name=name, columns=None) for name in allowed_docs))
 
     table_names = _substrate_names("SchemaTable", [t.substrate_id for t in tables])
 

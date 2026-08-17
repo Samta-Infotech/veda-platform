@@ -324,6 +324,30 @@ def run_chunk_embedder(
 # Public entry point — query time
 # =============================================================================
 
+def _try_current_context():
+    """The ambient ``RequestContext``, or ``None`` — tries both module names a
+    caller may have imported this under (same landmine ``veda_hybrid.py``'s
+    ``_scope_source_ids`` already works around: ``veda_core.context`` and a bare
+    ``context`` can be two distinct module objects with independent ContextVars,
+    depending on which sys.path entry resolved the import first)."""
+    import importlib
+    for modname in ("veda_core.context", "context"):
+        try:
+            ctx = importlib.import_module(modname).try_current()
+            if ctx is not None:
+                return ctx
+        except Exception:
+            continue
+    return None
+
+
+# RAG_TOP_K is small (query-facing result count); over-fetch by this factor so
+# RBAC filtering (rbac_filter.filter_doc_chunks, applied after this query) has
+# enough same-similarity-order candidates to still fill top_k once denied
+# documents' chunks are dropped, without changing the query itself per caller.
+_RBAC_OVERFETCH_MULTIPLIER = 4
+
+
 def retrieve_top_k_chunks(
     query_vector:    np.ndarray,
     source_ids:      List[str] = None,
@@ -389,6 +413,12 @@ def retrieve_top_k_chunks(
         _ef = _resolve_ef_search(source_ids[0] if source_ids else None)
         cur.execute("BEGIN")
         cur.execute(f"SET LOCAL hnsw.ef_search = {int(_ef)}")
+        # Over-fetch: rbac_filter.filter_doc_chunks (applied below, after this
+        # query, on the candidate list — same pattern as filter_retrieval_results)
+        # may drop some of these on a restricted scope, so ask the shared,
+        # RBAC-oblivious query for more than top_k up front rather than starving
+        # the caller's final result count.
+        fetch_limit = top_k * _RBAC_OVERFETCH_MULTIPLIER
         if source_ids:
             placeholders = ",".join(["%s"] * len(source_ids))
             cur.execute(f"""
@@ -400,7 +430,7 @@ def retrieve_top_k_chunks(
                 {temporal_clause}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s;
-            """, [vec_str] + source_ids + temporal_params + [vec_str, top_k])
+            """, [vec_str] + source_ids + temporal_params + [vec_str, fetch_limit])
         else:
             cur.execute(f"""
                 SELECT chunk_id, source_id, doc_id, doc_name,
@@ -411,7 +441,7 @@ def retrieve_top_k_chunks(
                 {temporal_clause}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s;
-            """, [vec_str] + temporal_params + [vec_str, top_k])
+            """, [vec_str] + temporal_params + [vec_str, fetch_limit])
         rows = cur.fetchall()
         try: cur.execute("COMMIT")
         except Exception: pass
@@ -450,6 +480,13 @@ def retrieve_top_k_chunks(
         )
         for row in rows
     ]
+
+    # RBAC (Gate 1): narrow the over-fetched candidate list to what the caller's
+    # data-scope actually permits, THEN cap to the requested top_k — mirrors
+    # veda.rbac_filter.filter_retrieval_results' own reasoning (the shared query
+    # above stays RBAC-oblivious; only this per-request result list is narrowed).
+    from veda.rbac_filter import filter_doc_chunks
+    results = filter_doc_chunks(results, _try_current_context())[:top_k]
 
     if not results and _IN_MEMORY_CHUNKS:
         if verbose:
