@@ -236,17 +236,24 @@ def _word_chunks(text: str, size: int, overlap: int) -> List[str]:
     return out
 
 
-def _table_text(table: DocTable) -> str:
-    """Render a DocTable's rows as one 'header: value, header: value' line per row —
-    generic key:value form so any row's terms co-occur in a single embeddable chunk
+def _table_row_texts(table: DocTable) -> List[str]:
+    """Render each DocTable row as its own 'header: value, header: value' line —
+    generic key:value form so a row's terms co-occur in a single embeddable chunk
     (e.g. a row naming "Rent" and its fee lands in the same chunk as "900"), without
-    assuming which column is the label. Blank header cells are dropped per-cell."""
+    assuming which column is the label. Blank header cells are dropped per-cell.
+
+    One chunk PER ROW, not one chunk for the whole table: joining every row into a
+    single chunk makes that one chunk mention every category name at once, which
+    then falsely out-scores a genuinely on-topic passage in a DIFFERENT document
+    for any query naming one of those categories (observed live: a query about
+    another document's "financial categories" retrieved this table's chunk instead,
+    because it alone listed every category the query asked about)."""
     lines = []
     for row in table.rows:
         pairs = [f"{h.strip()}: {v.strip()}" for h, v in zip(table.header, row) if h.strip()]
         if pairs:
             lines.append(", ".join(pairs))
-    return "\n".join(lines)
+    return lines
 
 
 def chunk_sections(parsed: ParsedDoc, chunk_size: int = DOC_CHUNK_SIZE,
@@ -271,12 +278,10 @@ def chunk_sections(parsed: ParsedDoc, chunk_size: int = DOC_CHUNK_SIZE,
                             "section_level": sec.level, "chunk_index": idx})
                 idx += 1
         for table in sec.tables:
-            table_text = _table_text(table)
-            if not table_text:
-                continue
-            for seg in _word_chunks(table_text, chunk_size, chunk_overlap):
-                out.append({"text": seg, "embed_text": prefix + seg,
-                            "section_path": "" if sec.path == "(root)" else sec.path,
-                            "section_level": sec.level, "chunk_index": idx})
-                idx += 1
+            for row_text in _table_row_texts(table):
+                for seg in _word_chunks(row_text, chunk_size, chunk_overlap):
+                    out.append({"text": seg, "embed_text": prefix + seg,
+                                "section_path": "" if sec.path == "(root)" else sec.path,
+                                "section_level": sec.level, "chunk_index": idx})
+                    idx += 1
     return out

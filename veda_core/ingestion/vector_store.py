@@ -471,12 +471,22 @@ def get_fk_adjacency(
 #       table_id         TEXT PRIMARY KEY,
 #       table_name       TEXT NOT NULL,
 #       display_col_id   TEXT,
-#       display_col_name TEXT
+#       display_col_name TEXT,
+#       source_id        TEXT NOT NULL DEFAULT ''
 #   )
 #
 # Called independently from main.py after run_semantic_type_inference().
 # Provides get_display_columns() for query-time injection in semantic_layer.py.
 # Encoder-independent — plain metadata store.
+#
+# Scoped by source_id: this table is shared across every ingested source, so a
+# bare TRUNCATE on each run would wipe every OTHER source's rows too (observed
+# live: ingesting catalog_parquet right after invoices_csv silently erased
+# invoices_csv's just-written rows, and homzhub's from an earlier run — nothing
+# actually reads source_id when there's exactly one row per table_id, but a
+# global TRUNCATE + reinsert makes each ingestion destroy every other source's
+# metadata). DELETE WHERE source_id = this source before reinserting, same as
+# the fk_adjacency / other per-source engine stores.
 # =============================================================================
 
 _TABLE_METADATA_STORE: List[dict] = []   # in-memory fallback
@@ -493,10 +503,12 @@ class TableMetadataStoreResult:
 
 def store_table_metadata(
     inference_result,
+    source_id: str = "",
     verbose: bool = False,
 ) -> TableMetadataStoreResult:
     """
-    Persists display_col_map from InferenceResult into table_metadata store.
+    Persists display_col_map from InferenceResult into table_metadata store,
+    scoped to `source_id` — only this source's prior rows are replaced.
 
     Called independently from main.py after run_semantic_type_inference().
     Zero coupling to encoder mode or vector dimensions.
@@ -505,6 +517,9 @@ def store_table_metadata(
     ----------
     inference_result : InferenceResult
         Output of run_semantic_type_inference(). Contains display_col_map.
+    source_id : str
+        The source these tables belong to. Empty string is treated as its own
+        scope (dev / single-source callers that never pass one).
     verbose : bool
 
     Returns
@@ -514,11 +529,13 @@ def store_table_metadata(
     global _TABLE_METADATA_STORE
 
     display_col_map = getattr(inference_result, "display_col_map", {})
+    source_id = str(source_id or "")
 
     if verbose:
         logger.debug(
-            "Storing display columns... entries=%d backend=%s",
+            "Storing display columns... entries=%d backend=%s source_id=%s",
             len(display_col_map), "pgvector" if PSYCOPG2_AVAILABLE else "in_memory_fallback",
+            source_id,
         )
 
     t0 = time.time()
@@ -529,6 +546,7 @@ def store_table_metadata(
             "table_name":       table_name,
             "display_col_id":   col_id,
             "display_col_name": col_name,
+            "source_id":        source_id,
         }
         for table_id, (col_id, col_name, table_name) in display_col_map.items()
     ]
@@ -545,24 +563,39 @@ def store_table_metadata(
                                 table_id         TEXT PRIMARY KEY,
                                 table_name       TEXT NOT NULL,
                                 display_col_id   TEXT,
-                                display_col_name TEXT
+                                display_col_name TEXT,
+                                source_id        TEXT NOT NULL DEFAULT ''
                             );
                         """)
-                        # Truncate + reinsert — deterministic per ingestion run
-                        cur.execute(f"TRUNCATE TABLE {TABLE_METADATA_TABLE_NAME};")
+                        # Migration for pre-existing tables from before source_id existed.
+                        cur.execute(f"""
+                            ALTER TABLE {TABLE_METADATA_TABLE_NAME}
+                                ADD COLUMN IF NOT EXISTS source_id TEXT NOT NULL DEFAULT '';
+                        """)
+                        # Delete + reinsert THIS SOURCE's rows only — other sources' rows
+                        # are untouched (see module docstring for the bug this replaces).
+                        cur.execute(
+                            f"DELETE FROM {TABLE_METADATA_TABLE_NAME} WHERE source_id = %s;",
+                            (source_id,),
+                        )
                         # F5: batched insert — was one execute() per table row.
                         from psycopg2.extras import execute_values
                         _tm_rows = [
                             (row["table_id"], row["table_name"],
-                             row["display_col_id"], row["display_col_name"])
+                             row["display_col_id"], row["display_col_name"], row["source_id"])
                             for row in rows
                         ]
                         if _tm_rows:
                             execute_values(
                                 cur,
                                 f"""INSERT INTO {TABLE_METADATA_TABLE_NAME}
-                                    (table_id, table_name, display_col_id, display_col_name)
-                                    VALUES %s""",
+                                    (table_id, table_name, display_col_id, display_col_name, source_id)
+                                    VALUES %s
+                                    ON CONFLICT (table_id) DO UPDATE SET
+                                        table_name = EXCLUDED.table_name,
+                                        display_col_id = EXCLUDED.display_col_id,
+                                        display_col_name = EXCLUDED.display_col_name,
+                                        source_id = EXCLUDED.source_id""",
                                 _tm_rows,
                             )
             finally:
@@ -570,15 +603,16 @@ def store_table_metadata(
             backend = "pgvector"
         except Exception as e:
             logger.warning("pgvector failed (%s) — using in-memory fallback", e)
-            _TABLE_METADATA_STORE = rows
+            _TABLE_METADATA_STORE = [r for r in _TABLE_METADATA_STORE if r["source_id"] != source_id] + rows
             backend = "in_memory_fallback"
     else:
-        _TABLE_METADATA_STORE = rows
+        _TABLE_METADATA_STORE = [r for r in _TABLE_METADATA_STORE if r["source_id"] != source_id] + rows
         backend = "in_memory_fallback"
 
     duration = round(time.time() - t0, 4)
 
-    logger.info("Table metadata stored: %d rows, backend=%s, duration=%ss", len(rows), backend, duration)
+    logger.info("Table metadata stored: %d rows, backend=%s, source_id=%s, duration=%ss",
+                len(rows), backend, source_id, duration)
 
     return TableMetadataStoreResult(
         rows_written = len(rows),
@@ -595,6 +629,10 @@ def get_display_columns(
     Returns display column info for the given table_ids.
 
     Called by semantic_layer.py Step 4b to inject display columns.
+
+    table_id is the primary key (globally unique per table regardless of
+    source), so no source scoping is needed here — the caller already knows
+    which table_ids are in its own result set.
 
     Parameters
     ----------
