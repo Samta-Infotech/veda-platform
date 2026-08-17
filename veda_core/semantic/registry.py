@@ -75,14 +75,25 @@ def query_tokens(query: str) -> set:
 def _reg_scope():
     """(source_id, tenant) for the registry cache / redis key. Mirrors
     veda_hybrid._sm_scope so the SQL head and the fast path agree on scope: prefers
-    the ambient per-request context, falling back to the env pin (single-source dev)."""
-    try:
-        from context import try_current
-        ctx = try_current()
-        if ctx is not None:
-            return (str(ctx.source_id), str(ctx.tenant))
-    except Exception:
-        pass
+    the ambient per-request context, falling back to the env pin (single-source dev).
+
+    Tries BOTH context module names, same as veda_hybrid._current_ctx() (see that
+    function's own docstring): the engine is imported both as bare `context`
+    (cwd=veda_core) and as `veda_core.context` (inference tier, PYTHONPATH=/app),
+    which Python loads as TWO module objects with SEPARATE thread-locals. The
+    inference middleware sets the scope on `veda_core.context`, so trying only the
+    bare `context` name here silently missed it and every fast-path lookup fell
+    back to the env pin (source 1) regardless of the actual request's source —
+    observed live: a docs_contracts-scoped request's FastPath matched a
+    homzhub-only metric and generated SQL against a table outside its own scope."""
+    import importlib
+    for modname in ("veda_core.context", "context"):
+        try:
+            ctx = importlib.import_module(modname).try_current()
+            if ctx is not None:
+                return (str(ctx.source_id), str(ctx.tenant))
+        except Exception:
+            continue
     return (os.environ.get("VEDA_SM_SOURCE_ID", "1"),
             os.environ.get("VEDA_SM_TENANT", "default"))
 

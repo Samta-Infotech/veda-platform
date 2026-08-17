@@ -366,9 +366,24 @@ def warm() -> dict:
     # publish them to redis keyed by (source, tenant) so the query tier reads them
     # scope-keyed instead of from a shared flat file (the one remaining un-scoped
     # query-time read). Best-effort; a miss leaves the file fallback intact.
+    #
+    # Only a relational source's ingestion ever COMPILES these files (the semantic-
+    # layer stage — source_dispatcher.py's document/datalake pipelines never run
+    # it), so for any other kind, publish_registry() would read whatever relational
+    # source's concepts/dimensions/metrics happen to be sitting in that shared
+    # on-disk dir and publish THEM under this source's key — the exact cross-source
+    # leak that made a homzhub-only metric fast-path-match a docs_contracts-scoped
+    # query after a re-ingest (see assembler.publish_empty_registry's docstring for
+    # the full incident). Publish an explicit empty registry instead: a Redis HIT
+    # that reads back as "genuinely nothing here", not a miss that falls through to
+    # those same stale files.
     try:
-        counts["registry_bytes"] = assembler.publish_registry(
-            ctx.source_id, ctx.tenant, os.path.dirname(sm_file))
+        if _is_relational_source(ctx.source_id):
+            counts["registry_bytes"] = assembler.publish_registry(
+                ctx.source_id, ctx.tenant, os.path.dirname(sm_file))
+        else:
+            counts["registry_bytes"] = assembler.publish_empty_registry(
+                ctx.source_id, ctx.tenant)
     except Exception:
         counts["registry_bytes"] = 0
     assembler.publish_rehydrate(ctx.source_id, ctx.tenant, scope="all")

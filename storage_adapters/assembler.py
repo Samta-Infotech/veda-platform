@@ -130,6 +130,38 @@ def publish_registry(
     return len(payload)
 
 
+def publish_empty_registry(source_id: int, tenant: str, redis_url: str | None = None) -> int:
+    """Publish an EXPLICITLY empty fast-path registry for (source, tenant) — for a
+    tabular/doc source, which never runs the semantic-layer compile stage that
+    produces concepts.json/dimensions.json/metrics.json (only relational ingestion
+    does; see source_dispatcher.py's per-kind pipeline table). Those files on disk
+    are therefore some OTHER (relational) source's own artifact from its last
+    ingestion — publish_registry() reads them with no source-awareness at all, so
+    calling it for a non-relational source would silently publish a DIFFERENT
+    source's concepts/metrics under this one's key (observed live: docs_contracts'
+    registry carried homzhub's `accounts_generalledger` concept after a re-ingest,
+    which then made a homzhub-only metric fast-path-match a query scoped only to
+    docs_contracts, generate SQL against a table outside that scope, get rejected,
+    and surface as an unhelpful generic "Could you clarify?" instead of a real
+    answer or a clean refusal).
+
+    Publishing a real-but-empty blob (rather than skipping the publish entirely)
+    matters: semantic.registry's on-disk fallback fires on a Redis MISS, so an
+    absent key would still leak those same stale files right back in. An explicit
+    empty blob is a Redis HIT — `is_ready()` reads it as `False` (no concepts, no
+    metrics) and every fast-path matcher naturally no-ops, falling through to the
+    full pipeline instead of using a resolved scope that lies about its content."""
+    import json
+    import os
+
+    import redis as _redis
+
+    payload = json.dumps({"concepts": {}, "dimensions": {}, "metrics": {}})
+    url = redis_url or os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
+    _redis.Redis.from_url(url).set(registry_redis_key(source_id, tenant), payload)
+    return len(payload)
+
+
 def rehydrate_channel(source_id: int, tenant: str, scope: str = "all") -> str:
     return f"veda:rehydrate:{source_id}:{tenant}:{scope}"
 
