@@ -204,39 +204,45 @@ def test_source_allow_plus_a_redundant_deeper_allow_stays_fully_open(member, rea
 # Restricted: table- and column-level enumeration
 # ---------------------------------------------------------------------------
 
-def test_table_level_grant_without_source_grant_enumerates_that_table_only(member, read_perm):
+def test_a_table_level_allow_without_a_source_allow_grants_nothing(member, read_perm):
+    """Strict hierarchy (2026-08): a table allow with no source-level allow above
+    it reaches nothing — the source is the gate. (Old model: this enumerated the
+    one table; that "allow-list a table from nothing" mode is gone.)"""
     source = _crm_source()
     role = _role_for(member)
-    _grant(role, read_perm, _path("employee"))
+    _grant(role, read_perm, _path("employee"))  # table only, no db:crm allow
 
     scope = compute_data_scope(member, [source.id])[source.id]
     assert scope.open is False
-    assert [t.name for t in scope.tables] == ["Employee"]
-    assert scope.tables[0].columns is None  # whole table granted, no column carve-out
+    assert scope.tables == ()
 
 
-def test_ungranted_table_is_omitted_entirely(member, read_perm):
+def test_source_allow_with_a_table_deny_omits_the_denied_table(member, read_perm):
+    """The strict-hierarchy way to hide a table: allow the source, deny the one
+    table. The denied table must not appear; the rest stay open."""
     source = _crm_source()
     role = _role_for(member)
-    _grant(role, read_perm, _path("employee"))
-    # No grant at all on "department" -> must not appear.
+    _grant(role, read_perm, _path())                              # source allow
+    _grant(role, read_perm, _path("department"), effect=Effect.DENY)
 
     scope = compute_data_scope(member, [source.id])[source.id]
     assert {t.name for t in scope.tables} == {"Employee"}
 
 
-def test_column_level_grants_list_exactly_the_granted_columns(member, read_perm):
+def test_source_allow_with_column_denies_lists_the_surviving_columns(member, read_perm):
+    """Column carve-out under strict hierarchy: allow the source, deny the
+    columns to hide — the table then lists exactly the columns that survive."""
     source = _crm_source()
     role = _role_for(member)
-    _grant(role, read_perm, _path("employee", "id"))
-    _grant(role, read_perm, _path("employee", "name"))
-    # "salary" ungranted.
+    _grant(role, read_perm, _path())                                  # source allow
+    _grant(role, read_perm, _path("employee", "salary"), effect=Effect.DENY)
 
     scope = compute_data_scope(member, [source.id])[source.id]
-    assert len(scope.tables) == 1
-    table = scope.tables[0]
-    assert table.name == "Employee"
-    assert set(table.columns) == {"id", "name"}
+    by_name = {t.name: t for t in scope.tables}
+    # Employee is enumerated (has a column deny); its surviving columns are id/name.
+    assert set(by_name["Employee"].columns) == {"id", "name"}
+    # Department has no carve-out, so it stays fully open (columns=None).
+    assert by_name["Department"].columns is None
 
 
 def test_a_table_with_zero_reachable_columns_is_omitted(member, read_perm):

@@ -891,6 +891,37 @@ def test_a_closer_grant_overrides_a_further_ancestor(tree):
     assert child["is_allowed"] is False
 
 
+def test_parent_deny_beats_a_child_allow_in_the_tree(tree):
+    """Strict hierarchy / deny-wins (2026-08): the tree MUST match what the
+    resolver enforces. A source DENY + a re-allowed table used to paint the
+    table green (closest-grant-wins) while the query was correctly denied —
+    the admin UI lied about access. Now the tree shows DENY, matching reality."""
+    from apps.access_management.models import Effect
+
+    role = _role_with_grants(
+        ("db:crm", Effect.DENY), ("db:crm:employee", Effect.ALLOW))
+
+    child = CatalogService().get_tree(parent_path="db:crm", role_id=role.pk)["resources"][0]
+
+    assert child["path"] == "db:crm:employee"
+    assert child["effect"] == "DENY"
+    assert child["is_allowed"] is False
+
+
+def test_a_table_allow_without_a_source_allow_is_not_shown_allowed(tree):
+    """Strict hierarchy: the source is the gate. A table allow with no
+    source-level allow above it grants nothing, so the tree must not paint it
+    green (old model showed it allowed via closest-grant-wins)."""
+    from apps.access_management.models import Effect
+
+    role = _role_with_grants(("db:crm:employee", Effect.ALLOW))  # table only, no db:crm
+
+    child = CatalogService().get_tree(parent_path="db:crm", role_id=role.pk)["resources"][0]
+
+    assert child["path"] == "db:crm:employee"
+    assert child["is_allowed"] is False
+
+
 def test_global_grants_do_not_leak_into_the_tree_overlay(tree):
     """A blank-path (global) grant answers 'may this role use data.read at all', not
     'is this specific node allowed' — it must not make every node look granted."""

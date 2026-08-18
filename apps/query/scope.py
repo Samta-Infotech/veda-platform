@@ -20,7 +20,12 @@ import os
 from django.db.models import Q
 from apps.access_management.codes import PermissionCode
 from apps.access_management.models import Effect
-from apps.access_management.resource_path import InvalidResourcePath, source_of
+from apps.access_management.resource_path import (
+    MIN_SEGMENTS,
+    InvalidResourcePath,
+    segments,
+    source_of,
+)
 from apps.sources.models import Source
 from apps.access_management.services import resolve_effective_permissions
 
@@ -183,10 +188,17 @@ def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
     path names that source (``resource_path.source_of(path)`` matches). This counts
     raw ALLOW grants, not resolved allow/deny outcomes: "is this source reachable
     at all" only needs "is there at least one live path into it" — the deny-wins
-    precision that matters for a SPECIFIC table/column check is Gate 1's
-    table/column phase (a later change), not this source-level coarse filter. A
-    source with an ALLOW on one table and a DENY on another still correctly stays
-    in scope here; the DENY is enforced later, once the specific resource is known.
+    precision that matters for a SPECIFIC table/column check is the resolver's
+    table/column phase, not this source-level coarse filter. A source with an
+    ALLOW on one table and a DENY on another still correctly stays in scope here;
+    the DENY is enforced later, once the specific resource is known.
+
+    STRICT HIERARCHY (user's call, 2026-08): only a SOURCE-level (2-segment
+    ``db:<source>``) ALLOW makes a source reachable — mirrors ``resolver.allows``,
+    where a table/column allow with no source-level allow grants nothing. A
+    role with ONLY a deeper grant therefore has zero reachable sources and is
+    denied upfront (the caller's "permitted nothing -> 403/denied-turn" gate),
+    rather than reaching the engine only to have every table denied.
 
     A blank (global) resource path never counts — ADR §3.4/resolver docstring:
     a permission with no resource path is not resource-scoped, so it does not
@@ -217,6 +229,11 @@ def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
         if grant.effect != Effect.ALLOW or grant.is_global:
             continue
         try:
+            # Strict hierarchy: only a SOURCE-level allow (the bare 2-segment
+            # db:<source> path) opens a source. A deeper table/column allow
+            # without a source allow reaches nothing (see resolver.allows).
+            if len(segments(grant.resource_path)) != MIN_SEGMENTS:
+                continue
             source_names.add(source_of(grant.resource_path))
         except InvalidResourcePath:
             continue  # a stored grant should always be canonical; never trust it blindly
