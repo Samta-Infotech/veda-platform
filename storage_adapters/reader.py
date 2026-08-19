@@ -14,6 +14,10 @@ from dataclasses import dataclass
 from typing import Any, List, Optional
 
 from veda_core import context
+import psycopg2
+import hashlib
+import re
+import json as _json
 
 
 @dataclass
@@ -40,7 +44,6 @@ def _connection():
     global _CONN
     if _CONN is not None and _CONN.closed == 0:
         return _CONN
-    import psycopg2
     _CONN = psycopg2.connect(
         host=os.environ.get("PGBOUNCER_HOST", "pgbouncer"),
         port=int(os.environ.get("PGBOUNCER_PORT", "6432")),
@@ -296,8 +299,6 @@ def verified_cache_lookup(qvec: List[float], threshold: float = 0.85) -> Optiona
 
 
 def _query_hash(query: str) -> str:
-    import hashlib
-    import re
     norm = re.sub(r"\s+", " ", (query or "").strip().lower())
     return hashlib.sha256(norm.encode("utf-8")).hexdigest()[:64]
 
@@ -326,7 +327,6 @@ def save_verified_query(query: str, qvec: List[float], sql: str, columns=None) -
     via INSERT … ON CONFLICT (source, tenant, query_hash) DO NOTHING — never
     read-modify-write. Publishes a cache-entry fan-out so peers warm it (§8.4). Skip rules
     (existence/fast-path/temporal never cached) stay in the caller (pipeline.py)."""
-    import json as _json
 
     source_id, tenant = _scope()
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"

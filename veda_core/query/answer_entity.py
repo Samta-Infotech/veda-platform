@@ -40,6 +40,7 @@ try:
 except Exception:                                    # pragma: no cover
     def _sing(w: str) -> str:
         return w[:-1] if len(w) > 3 and w.endswith("s") else w
+from veda.generation import _resolve_display_column
 
 # wh-words that request a PERSON as the answer. Closed-class function words — grammar,
 # not a domain list. ("by whom" is covered: "whom" is in the set.)
@@ -55,7 +56,6 @@ DisplayResolver = Callable[[str, dict], Optional[str]]
 
 
 def _default_display_resolver(table: str, sm: dict) -> Optional[str]:
-    from veda.generation import _resolve_display_column
     return _resolve_display_column(table, sm)
 
 

@@ -23,6 +23,7 @@ from typing import Optional, List
 import config
 from semantic import registry as reg
 from query.intent import QueryIntent, Filter, validate_intent, build_sql
+import datetime as _dt
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _ROUTE_LOG = os.path.join(_ROOT, "logs", "route_log.jsonl")
@@ -856,7 +857,6 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
             metric = reg.get_metric(entity["default_metric"])
             tdim = (metric or {}).get("allowed_time_dimension")
             if metric and tdim and not metric.get("grain_suspect"):
-                import datetime as _dt
                 unit = mcmp.group(1)
                 today = _dt.date.today()
                 if unit == "month":

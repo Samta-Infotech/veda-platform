@@ -13,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 import veda_core  # noqa: F401 — path shim
 from veda_core.context import RequestContext, current, set_context
+from contextvars import copy_context
+from inference.concurrency import run_in_threadpool_with_context
 
 
 def test_fail_closed():
@@ -23,7 +25,6 @@ def test_fail_closed():
             return "NO_RAISE"
         except RuntimeError:
             return "RAISED"
-    from contextvars import copy_context
     assert copy_context().run(_probe) == "RAISED", "current() must fail closed when unset"
     print("[1] fail-closed: current() raises when unset  ✓")
 
@@ -34,8 +35,6 @@ def test_interleaved_no_cross_read():
     barrier = threading.Barrier(2)
 
     def worker(sid, tenant):
-        from contextvars import copy_context
-
         def _run():
             set_context(RequestContext(source_id=sid, tenant=tenant))
             barrier.wait(timeout=5)            # force interleave after both set
@@ -53,7 +52,6 @@ def test_interleaved_no_cross_read():
 
 def test_offload_carries_context():
     """run_in_threadpool_with_context must run fn under a copy of the set context."""
-    from inference.concurrency import run_in_threadpool_with_context
 
     async def _drive():
         set_context(RequestContext(source_id=7, tenant="gamma"))

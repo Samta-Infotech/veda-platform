@@ -17,6 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import veda.pipeline as pipeline
 
 TABLE = "accounts_paymenttransaction"
 ALL_COLS = [f"{TABLE}.{c}" for c in (
@@ -57,7 +58,6 @@ class _FakeEngine:
 
 def _quiet_pipeline_deps(monkeypatch, retrieval_results):
     import config
-    import veda.pipeline as pipeline
 
     monkeypatch.setattr(pipeline, "verified_cache_lookup", lambda q: (None, 0.0))
     monkeypatch.setattr(pipeline, "get_engine", lambda sm: _FakeEngine(retrieval_results))

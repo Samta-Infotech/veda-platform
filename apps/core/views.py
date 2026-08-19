@@ -18,6 +18,7 @@ from contextlib import closing
 
 from django.db.models import Avg, Count
 from django.http import HttpResponse, JsonResponse
+from apps.query.models import QueryLog
 
 logger = logging.getLogger(__name__)
 
@@ -68,7 +69,6 @@ _REDIS_CHECKS = (
 def metrics(request) -> HttpResponse:
     """Prometheus text metrics (§6.3): per-status + per-route latency, refusal-rate,
     cache hit/miss, PgBouncer connections in use. Dependency-free."""
-    from apps.query.models import QueryLog
 
     metric_lines: list[str] = []
     total, answered = _append_status_counters(metric_lines, QueryLog)

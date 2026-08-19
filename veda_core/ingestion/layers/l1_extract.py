@@ -9,6 +9,7 @@ import os
 from typing import Dict, List
 
 from ingestion.contracts import SourceContext, StageOutcome
+from ingestion.db_abstraction import get_client_connection
 
 
 def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOutcome]:
@@ -121,7 +122,6 @@ def _distinct_sampler(ctx: SourceContext):
         conn.connect()
         return lambda t, c, n: conn.sample_column_values(t, c, n)
     # relational: one client connection reused across columns
-    from ingestion.db_abstraction import get_client_connection
     client = get_client_connection(ctx.source_id)
     cur = client.cursor()
 

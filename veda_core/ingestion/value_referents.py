@@ -41,6 +41,11 @@ import os
 import re
 from collections import defaultdict
 from typing import Dict, List, Optional, Set, Tuple
+import argparse
+import sys
+import psycopg2
+from query.join_planner import load_graph
+from veda.runtime import _internal_db_config, _load_scoped_sm
 
 MAX_REFERENTS_PER_VALUE = 24      # cap fan-out for values reused across many columns
 MAX_CLOSURE_EDGES_PER_TABLE = 32  # cap FK fan-in per lookup table
@@ -66,7 +71,6 @@ def _norm(v) -> str:
 
 
 def _load_graph_edges() -> List[dict]:
-    from query.join_planner import load_graph
     from config import artifact_path
     g = load_graph(artifact_path("veda_relationship_graph.json"))
     return g.get("edges", [])
@@ -255,8 +259,6 @@ def load_value_referents() -> dict:
 
 
 def main() -> None:
-    import argparse
-    import sys
     sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
     ap = argparse.ArgumentParser()
     ap.add_argument("--source-id", type=int, default=None)
@@ -274,8 +276,6 @@ def main() -> None:
         except Exception as e:
             print(f"[value_referents] source DB unavailable ({e}) — broad closure")
 
-    from veda.runtime import _internal_db_config, _load_scoped_sm
-    import psycopg2
     db = _internal_db_config()
     conn = psycopg2.connect(host=db["host"], port=db["port"], dbname=db["database"],
                             user=db["user"], password=db["password"])

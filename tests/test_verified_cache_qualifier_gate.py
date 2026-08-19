@@ -31,6 +31,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import veda.pipeline as pipeline
 
 # The exact corrupted (query, sql) pair found live in substrate_verifiedquerycache.
 _BAD_QUERY = "Which of our properties on the market are priced above 10,000?"
@@ -52,7 +53,6 @@ def _quiet_pipeline_deps(monkeypatch, cached=None):
     already has no coverage for this bug (see module docstring) and is
     exercised on its own in other tests."""
     import config
-    import veda.pipeline as pipeline
 
     monkeypatch.setattr(pipeline, "verified_cache_lookup", lambda q: cached or (None, 0.0))
     monkeypatch.setattr(pipeline, "get_engine", lambda sm: _FakeEngine())

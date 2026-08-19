@@ -28,6 +28,7 @@ try:
     }
 except Exception:
     _REG_FILES = {}
+import importlib
 
 # Per-(source, tenant) registry cache. The query tier is a warm worker that serves
 # N ready sources, so the registries must be scope-keyed exactly like the semantic
@@ -86,7 +87,6 @@ def _reg_scope():
     back to the env pin (source 1) regardless of the actual request's source —
     observed live: a docs_contracts-scoped request's FastPath matched a
     homzhub-only metric and generated SQL against a table outside its own scope."""
-    import importlib
     for modname in ("veda_core.context", "context"):
         try:
             ctx = importlib.import_module(modname).try_current()

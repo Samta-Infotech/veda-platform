@@ -40,6 +40,7 @@ from .retrieval_cache import RetrievalCache
 from .sparse_ranker import SparseRanker
 from .signal_builder import SignalBuilder
 from .rrf_merger import RRFMerger
+from concurrent.futures import ThreadPoolExecutor
 
 logger = get_logger(__name__)
 
@@ -292,7 +293,6 @@ class RetrievalEnginePhase3:
         # only, never the fused result.
         # Signal 1 encodes the RAW query (WP1); enriched tokens feed only the
         # sparse (Signal 2) and value (Signal 5) signals.
-        from concurrent.futures import ThreadPoolExecutor
 
         def _run_signal1():
             signal1 = []

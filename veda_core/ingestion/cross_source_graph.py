@@ -50,6 +50,8 @@ from ingestion.db_abstraction import (
 )
 from ingestion import graph_persist as GP
 from utils.logger import get_logger
+import numpy as np
+import uuid
 
 logger = get_logger(__name__)
 
@@ -158,7 +160,6 @@ def _exact_containment(child: "SketchRow", parent: "SketchRow"):
     cv, pv = child.vhashes(), parent.vhashes()
     if cv is None or pv is None:
         return None
-    import numpy as np
     inter = int(np.intersect1d(cv, pv, assume_unique=True).size)
     nc, npar = int(cv.size), int(pv.size)
     union = nc + npar - inter
@@ -305,7 +306,6 @@ def _delete_tenant_edges(tenant_source_ids: List[str]) -> int:
 
 
 def _to_graph_edges(edge_dicts: List[dict]) -> List[GP.GraphEdge]:
-    import uuid
     out: List[GP.GraphEdge] = []
     for e in edge_dicts:
         out.append(GP.GraphEdge(

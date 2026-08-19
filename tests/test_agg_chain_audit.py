@@ -12,6 +12,7 @@ import os, sys, json
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _VC = os.path.join(_ROOT, "veda_core")
 sys.path.insert(0, _VC)
+from veda.planning import _resolve_agg_chain
 _GRAPH = json.load(open(os.path.join(_VC, "data", "veda_relationship_graph.json")))
 
 
@@ -34,7 +35,6 @@ def _uses_audit_edge(hops):
 
 def _chain(anchor, tgt, flag):
     import config
-    from veda.planning import _resolve_agg_chain
     old = getattr(config, "AGG_CHAIN_EXCLUDE_AUDIT", False)
     config.AGG_CHAIN_EXCLUDE_AUDIT = flag
     try:

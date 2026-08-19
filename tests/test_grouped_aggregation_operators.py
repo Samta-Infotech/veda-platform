@@ -26,6 +26,12 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from veda.planning import aggregate_operator
+from veda.planning import grouped_mode
+from query.superlative_plan import try_grouped_plan
+import statistics
+from veda.result_analyzer import analyze_result
+from veda.result_analyzer import detect_patterns, ColumnStat
 
 _SM_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                         "veda_core", "data", "veda_semantic_model.json")
@@ -55,13 +61,11 @@ def sm():
     ("list properties in the UAE", None),
 ])
 def test_aggregate_operator_is_canonical(query, expected):
-    from veda.planning import aggregate_operator
     assert aggregate_operator(query) == expected
 
 
 def test_aggregate_operator_prefers_longer_phrase():
     # "how much" (SUM) must not be shadowed by any bare token; "how many" is COUNT.
-    from veda.planning import aggregate_operator
     assert aggregate_operator("how much revenue per type") == "SUM"
     assert aggregate_operator("how many payments per type") == "COUNT"
 
@@ -71,32 +75,27 @@ def test_aggregate_operator_prefers_longer_phrase():
 # is intentionally left to the counting machinery.
 # ---------------------------------------------------------------------------
 def test_grouped_mode_preserves_avg():
-    from veda.planning import grouped_mode
     assert grouped_mode("average carpet area per project") == {"grouped": True, "op": "AVG"}
 
 
 def test_grouped_mode_legacy_sum_unchanged():
-    from veda.planning import grouped_mode
     # the old measure_agg trigger words still route, now normalized to SUM
     assert grouped_mode("how much does each type contribute") == {"grouped": True, "op": "SUM"}
     assert grouped_mode("total amount per type") == {"grouped": True, "op": "SUM"}
 
 
 def test_grouped_mode_requires_grouping_word():
-    from veda.planning import grouped_mode
     # an aggregate with no grouping word is NOT a grouped breakdown
     assert grouped_mode("average carpet area") is None
 
 
 def test_grouped_mode_count_falls_through():
-    from veda.planning import grouped_mode
     # COUNT-per-dimension needs no measure column → handled elsewhere, not here
     assert grouped_mode("count of leads per source") is None
     assert grouped_mode("how many leads per source") is None
 
 
 def test_grouped_mode_yields_to_superlative():
-    from veda.planning import grouped_mode
     # interrogative ranking ("which … highest …") is owned by the superlative planner
     assert grouped_mode("which project has the highest carpet area") is None
 
@@ -117,7 +116,6 @@ def _semantic_type(sm, table, col):
     ("maximum carpet_area_sqft per project", "MAX"),
 ])
 def test_grouped_planner_preserves_operator_and_groups_by_display_dimension(sm, query, op):
-    from query.superlative_plan import try_grouped_plan
     r = try_grouped_plan(query, sm)
     assert r is not None and not isinstance(r, tuple), f"expected a plan for {query!r}, got {r!r}"
     sql = r.sql
@@ -144,7 +142,6 @@ def test_ambiguous_measure_yields_grounded_clarify(sm):
     # "carpet area" matches two distinct measure columns (carpet_area vs
     # carpet_area_sqft, different units) → refuse-over-guess grounded clarify,
     # NOT a silent guess. This is correct escalation, not a regression.
-    from query.superlative_plan import try_grouped_plan
     r = try_grouped_plan("average carpet area per project", sm)
     assert isinstance(r, tuple) and r[0] == "clarify"
     assert "carpet_area" in r[1] and "carpet_area_sqft" in r[1]
@@ -156,9 +153,6 @@ def test_ambiguous_measure_yields_grounded_clarify(sm):
 # the headline uses, never a 200-row-sample mean.
 # ---------------------------------------------------------------------------
 def test_patterns_use_full_population_not_sample():
-    import statistics
-    from veda.result_analyzer import analyze_result
-
     # 260 rows: the first 200 (the old sample window) are all 100.0; the tail
     # (rows 200-259) is where a single extreme outlier lives. Under 200-row
     # sampling the outlier is invisible AND the mean would be exactly 100.0;
@@ -182,7 +176,6 @@ def test_patterns_use_full_population_not_sample():
 
 
 def test_missing_values_wording_not_sampled():
-    from veda.result_analyzer import detect_patterns, ColumnStat
     stats = [ColumnStat(name="note", kind="categorical", role="dimension")]
     rows = [{"note": None} for _ in range(8)] + [{"note": "x"} for _ in range(2)]
     pats = detect_patterns("DETAIL_TABLE", stats, rows, filters=[], measures=[])

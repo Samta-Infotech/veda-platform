@@ -13,6 +13,13 @@ import pytest
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from veda.result_analyzer import _column_stats
+from veda.result_analyzer import _looks_like_identifier
+from veda.result_analyzer import classify_column_role
+from veda.result_analyzer import detect_patterns
+import veda.result_analyzer as ra
+from veda.result_analyzer import analytics_summary
+from query.result_explainer import validate_follow_up_questions
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +27,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ---------------------------------------------------------------------------
 
 def _stats_for(columns, rows):
-    from veda.result_analyzer import _column_stats
     return _column_stats(columns, rows, max_rows=200)
 
 
@@ -31,13 +37,11 @@ def _stats_for(columns, rows):
 # ---------------------------------------------------------------------------
 
 def test_engine_side_camelcase_identifier_detected():
-    from veda.result_analyzer import _looks_like_identifier
     for name in ("AccountID", "CustomerId", "orderID", "buildId", "account_id", "id"):
         assert _looks_like_identifier(name), f"{name!r} should be an identifier"
 
 
 def test_engine_side_lowercase_words_ending_in_id_not_flagged():
-    from veda.result_analyzer import _looks_like_identifier
     for word in ("paid", "valid", "grid", "hybrid", "android", "avoid", "solid"):
         assert not _looks_like_identifier(word), f"{word!r} must NOT be an identifier"
 
@@ -45,7 +49,6 @@ def test_engine_side_lowercase_words_ending_in_id_not_flagged():
 def test_engine_side_camelcase_identifier_excluded_from_column_stats_role():
     """End-to-end through classify_column_role (no semantic_type available —
     the degraded/structural path federated/nosql results actually take)."""
-    from veda.result_analyzer import classify_column_role
     values = [f"acc-{i}" for i in range(5)]
     role = classify_column_role("AccountID", values, kind="categorical")
     assert role == "identifier"
@@ -54,7 +57,6 @@ def test_engine_side_camelcase_identifier_excluded_from_column_stats_role():
 def test_dominance_suppressed_when_sql_already_filters_that_column():
     """The trivial-insight guard: 'DEBIT is the dominant entry type' must NOT
     be emitted when the executed SQL itself says WHERE entry_type = 'DEBIT'."""
-    from veda.result_analyzer import detect_patterns
     rows = [{"entry_type": "DEBIT", "amount": i * 10} for i in range(9)] + \
            [{"entry_type": "CREDIT", "amount": 5}]
     stats = _stats_for(["entry_type", "amount"], rows)
@@ -68,7 +70,6 @@ def test_dominance_suppressed_when_sql_already_filters_that_column():
 
 
 def test_missing_values_pattern():
-    from veda.result_analyzer import detect_patterns
     rows = [{"name": f"u{i}", "last_login": None if i < 6 else "2026-01-01"}
             for i in range(10)]
     stats = _stats_for(["name", "last_login"], rows)
@@ -78,7 +79,6 @@ def test_missing_values_pattern():
 
 
 def test_trend_growth_pattern():
-    from veda.result_analyzer import detect_patterns
     rows = [{"month": f"2026-0{m}", "revenue": 1000 * m} for m in range(1, 5)]
     stats = _stats_for(["month", "revenue"], rows)
     pats = detect_patterns("TREND", stats, rows, filters=[], measures=["revenue"])
@@ -86,7 +86,6 @@ def test_trend_growth_pattern():
 
 
 def test_ranking_top_gap_pattern():
-    from veda.result_analyzer import detect_patterns
     rows = [{"name": "a", "total": 1000}, {"name": "b", "total": 100},
             {"name": "c", "total": 90}]
     stats = _stats_for(["name", "total"], rows)
@@ -95,7 +94,6 @@ def test_ranking_top_gap_pattern():
 
 
 def test_identifier_columns_never_produce_patterns():
-    from veda.result_analyzer import detect_patterns
     rows = [{"user_id": None} for _ in range(10)]
     stats = _stats_for(["user_id"], rows)
     assert detect_patterns("DETAIL_TABLE", stats, rows, filters=[], measures=[]) == []
@@ -127,7 +125,6 @@ _SM = {
 
 def _ctx(monkeypatch, sql="SELECT entry_type, SUM(amount) AS total FROM accounts_generalledger "
                           "GROUP BY entry_type LIMIT 100"):
-    import veda.result_analyzer as ra
     monkeypatch.setattr(ra, "_related_entities",
                         lambda table, cap=8: ["accounts_paymenttransaction"] if table else [])
     rows = [{"entry_type": "DEBIT", "total": 900}, {"entry_type": "CREDIT", "total": 100},
@@ -156,7 +153,6 @@ def test_chart_candidates_grouped_shape(monkeypatch):
 
 
 def test_analytics_summary_is_json_safe(monkeypatch):
-    from veda.result_analyzer import analytics_summary
     ctx = _ctx(monkeypatch)
     wire = analytics_summary(ctx)
     encoded = json.dumps(wire)   # must not raise
@@ -172,7 +168,6 @@ def test_analytics_summary_is_json_safe(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_follow_up_validation_drops_invented_concepts(monkeypatch):
-    from query.result_explainer import validate_follow_up_questions
     ctx = _ctx(monkeypatch)
     kept = validate_follow_up_questions([
         "Break down by entry type",                      # result column — grounded
@@ -185,8 +180,6 @@ def test_follow_up_validation_drops_invented_concepts(monkeypatch):
 
 
 def test_follow_up_validation_empty_input():
-    from query.result_explainer import validate_follow_up_questions
-
     class _Bare:
         columns, table, primary_entity = [], None, None
         available_measures, available_dimensions, related_entities = [], [], []

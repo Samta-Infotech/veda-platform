@@ -21,6 +21,11 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from veda.planning import build_existence_sql
+from veda.generation import generate_join_sql
+import slm
+import unittest.mock as mock
+from veda.generation import generate_sql
 
 ANCHOR = "worklists_incident"
 CHILD = "worklists_comment"
@@ -48,14 +53,12 @@ _SM = {"columns": {
 def test_build_existence_sql_without_kwargs_keeps_select_star():
     """Regression guard: omitting the new optional params must reproduce
     today's exact SQL for any existing/other caller."""
-    from veda.planning import build_existence_sql
     sql, tables = build_existence_sql(ANCHOR, _EDGES, "exists_list")
     assert sql == (f'SELECT a.* FROM "{ANCHOR}" a WHERE EXISTS '
                   f'(SELECT 1 FROM "{CHILD}" b WHERE b."incident_id" = a."id") LIMIT 100')
 
 
 def test_build_existence_sql_with_kwargs_projects_business_columns():
-    from veda.planning import build_existence_sql
     results = [_FakeResult(f"{ANCHOR}.title", 0.9)]
     sql, tables = build_existence_sql(ANCHOR, _EDGES, "exists_list", sm=_SM,
                                       results=results, query="incidents with comments",
@@ -68,7 +71,6 @@ def test_build_existence_sql_with_kwargs_projects_business_columns():
 def test_build_existence_sql_count_mode_unaffected():
     """The COUNT(*) mode never had an a.* problem and must stay untouched
     regardless of whether the new kwargs are passed."""
-    from veda.planning import build_existence_sql
     results = [_FakeResult(f"{ANCHOR}.title", 0.9)]
     sql, tables = build_existence_sql(ANCHOR, _EDGES, "exists_count", sm=_SM,
                                       results=results, query="how many incidents have comments",
@@ -79,7 +81,6 @@ def test_build_existence_sql_count_mode_unaffected():
 def test_generate_join_sql_omits_recommended_block_without_results():
     """Regression guard: no `results` -> byte-for-byte the old prompt (no
     Recommended Projection section at all)."""
-    from veda.generation import generate_join_sql
     alias_map = {"t0": ANCHOR, "t1": CHILD}
     sm = {"columns": {f"{ANCHOR}.title": {}, f"{CHILD}.body": {}}}
     captured = {}
@@ -88,15 +89,12 @@ def test_generate_join_sql_omits_recommended_block_without_results():
         captured["user"] = user
         return "SELECT t0.title FROM x"
 
-    import slm
-    import unittest.mock as mock
     with mock.patch.object(slm, "call_slm", fake_call_slm):
         generate_join_sql("incidents and comments", "FROM x", alias_map, sm, None)
     assert "Recommended Projection" not in captured["user"]
 
 
 def test_generate_join_sql_renders_per_alias_recommended_projection():
-    from veda.generation import generate_join_sql
     alias_map = {"t0": ANCHOR, "t1": "users_user"}
     sm = {"columns": {
         f"{ANCHOR}.title": {"importance_class": "HIGH"},
@@ -112,8 +110,6 @@ def test_generate_join_sql_renders_per_alias_recommended_projection():
         captured["user"] = user
         return "SELECT t0.title FROM x"
 
-    import slm
-    import unittest.mock as mock
     with mock.patch.object(slm, "call_slm", fake_call_slm):
         generate_join_sql("incidents and their handler names", "FROM x", alias_map, sm, None,
                           results=results)
@@ -135,9 +131,6 @@ def test_generate_sql_rules_never_reference_recommended_projection_when_absent()
     `recommended_projection` argument was merely non-empty — a caller passing
     a list equal to `columns` (nothing to narrow) must not get Rules text
     that references a section the prompt doesn't contain."""
-    from veda.generation import generate_sql
-    import unittest.mock as mock
-    import slm
 
     captured = {}
 

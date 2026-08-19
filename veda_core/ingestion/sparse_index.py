@@ -20,6 +20,8 @@ from typing import Optional
 from config import (
     COLUMN_SPARSE_TABLE, TABLE_SPARSE_TABLE, BIENCODER_PASSAGE_PREFIX,
 )
+from ingestion.biencoder import _load_retrieval_docs, _passage_text, _get_pg_conn
+from ingestion import m3_encoder
 
 
 @dataclass
@@ -62,8 +64,6 @@ def build_sparse_index(inference_result, source_id: str, verbose: bool = False) 
     """
     t0 = time.time()
     # Reuse the biencoder's exact passage-text construction so dense + sparse agree.
-    from ingestion.biencoder import _load_retrieval_docs, _passage_text, _get_pg_conn
-    from ingestion import m3_encoder
 
     try:
         conn = _get_pg_conn()

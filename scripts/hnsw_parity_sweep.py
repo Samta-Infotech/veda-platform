@@ -15,6 +15,7 @@ import os
 import sys
 
 import psycopg2
+from veda_core.config import BGE_MODEL_NAME, BGE_DEVICE
 
 K = 20
 QUERIES = [
@@ -74,7 +75,6 @@ def populate():
 def encode(queries):
     """Encode queries with the same BGE model retrieval uses (config.BGE_MODEL_NAME)."""
     from sentence_transformers import SentenceTransformer
-    from veda_core.config import BGE_MODEL_NAME, BGE_DEVICE
     model = SentenceTransformer(BGE_MODEL_NAME, device=BGE_DEVICE)
     vecs = model.encode(queries, normalize_embeddings=True)
     return [("[" + ",".join(str(float(x)) for x in v) + "]") for v in vecs]

@@ -22,6 +22,7 @@ import re
 import statistics
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional
+import urllib.request
 
 # query runner contract: query:str -> dict with (at least) keys
 #   status, table, sql, usage{prompt/completion/total_tokens}, latency_ms
@@ -198,7 +199,6 @@ def inference_run_query_fn(inference_url: str, source_id: Optional[int] = None,
     """Build a runner that POSTs each query to the inference tier and normalizes the
     MultiResult wire shape ({result:{items:[{result:{...}}]}}) to the flat
     {status, table, sql, usage, latency_ms} the scorer expects."""
-    import urllib.request
 
     def _run(query: str) -> Dict[str, Any]:
         body = json.dumps({"query": query, "source_id": source_id,

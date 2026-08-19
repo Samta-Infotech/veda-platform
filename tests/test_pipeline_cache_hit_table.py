@@ -11,11 +11,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import veda.pipeline as pipeline
 
 
 def test_cache_hit_table_is_real_name_not_placeholder(monkeypatch):
-    import veda.pipeline as pipeline
-
     monkeypatch.setattr(pipeline, "verified_cache_lookup",
                         lambda query: ("SELECT COUNT(*) FROM ledger", 0.97))
     monkeypatch.setattr(pipeline, "execute_sql", lambda sql, params: (["count"], [(42,)], None))
@@ -35,7 +34,6 @@ def test_cache_hit_table_is_real_name_not_placeholder(monkeypatch):
 def test_cache_hit_table_multi_table_picks_deterministically_not_placeholder(monkeypatch):
     """A cached query spanning more than one table: still never the placeholder
     string — picks a real table name deterministically (first alphabetically)."""
-    import veda.pipeline as pipeline
 
     # A subquery (not a JOIN) references two tables without tripping the
     # separate join-FK-backing gate (ast_readonly_parameterized_fanout) —

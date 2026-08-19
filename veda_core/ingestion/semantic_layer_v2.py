@@ -51,6 +51,13 @@ from ingestion import data_profiler
 from ingestion import glossary_builder
 import urllib.request
 import urllib.error
+import hashlib
+from types import SimpleNamespace
+from ingestion.semantic_type_inference import _layer_a, _layer_b, _layer_c
+from collections import defaultdict
+from ingestion.deterministic_metadata import compute_deterministic
+from ingestion.deterministic_metadata import _GENERIC_ALIASES
+from collections import Counter
 
 logger = get_logger(__name__)
 
@@ -268,7 +275,6 @@ class ColumnMetadata:
 # a successful full build (see _clear_checkpoint at the end of run_full_semantic_layer).
 # ---------------------------------------------------------------------------
 def _schema_fingerprint(schema_dict: Dict[str, Any]) -> str:
-    import hashlib
     parts = []
     for tname in sorted(schema_dict):
         cols = schema_dict[tname].get("columns", [])
@@ -603,8 +609,6 @@ Output ONLY JSON array, no explanation.
 def _det_semantic_type(col_name, data_type, is_pk, is_fk, cardinality):
     """Deterministic semantic_type via the authoritative 3-layer rule engine
     (reused from semantic_type_inference — no duplication)."""
-    from types import SimpleNamespace
-    from ingestion.semantic_type_inference import _layer_a, _layer_b, _layer_c
     sc = SimpleNamespace(col_name=col_name, data_type=(data_type or "").lower(),
                          is_pk=bool(is_pk), is_fk=bool(is_fk), cardinality=cardinality or 0)
     for layer in (_layer_a, _layer_b, _layer_c):
@@ -675,7 +679,6 @@ def _build_edge_index(graph: Dict[str, Any]) -> Tuple[Dict, Dict]:
     """
     if "index" in _REL_GRAPH_CACHE:
         return _REL_GRAPH_CACHE["index"]
-    from collections import defaultdict
     edges_by_col: Dict[Tuple[str, str], List[Dict]] = defaultdict(list)
     neigh: Dict[str, Dict[str, Tuple[str, float]]] = defaultdict(dict)  # table -> {other: (col, weight)}
 
@@ -797,7 +800,6 @@ def stage4_column_understanding(
     are sanitized per column before anything reaches the LLM. If the LLM call
     fails, deterministic-only records are still returned (always usable).
     """
-    from ingestion.deterministic_metadata import compute_deterministic
 
     profiling = profiling or {}
     table_domain = (table_metadata.primary_entity or table_name.replace("_", " ")).strip()
@@ -896,7 +898,6 @@ Output ONLY a JSON array, no explanation."""
         # business concepts (editor_name → User), not just table ownership.
         final_domain = col_domain if (col_domain and (fk_domain or llm_conf >= 0.5)) else table_domain
 
-        from ingestion.deterministic_metadata import _GENERIC_ALIASES
         base_aliases = d["base_aliases"]
         extra = [a.lower().strip() for a in (llm.get("extra_aliases") or []) if isinstance(a, str)]
         # filter generic single-token aliases from the LLM too
@@ -964,8 +965,6 @@ def build_domain_synonyms(
         {synonym: [table.col, ...]}
     """
     logger.info("Post-Processing 1: Building domain synonyms...")
-
-    from ingestion.deterministic_metadata import _GENERIC_ALIASES
 
     SKIP_SUFFIX = ('_history', '_log', '_audit', '_archive', '_temp')
     AUDIT_PATTERNS = ('_created_', '_updated_', '_modified_', '_deleted_')
@@ -1469,7 +1468,6 @@ def run_full_semantic_layer(
 
     # POST-PASS A: alias precision filter — drop aliases shared by too many
     # columns (they hurt precision). Each column keeps its specific full phrase.
-    from collections import Counter
     alias_freq = Counter(a for col in all_columns for a in set(col.aliases))
     freq_threshold = max(8, int(0.10 * max(len(all_columns), 1)))
     dropped_generic = 0

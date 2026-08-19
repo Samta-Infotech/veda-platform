@@ -2,6 +2,7 @@
 from django.contrib import admin
 
 from .models import IngestionJob, IngestionStage
+from .tasks import task_ingest_source
 
 
 class IngestionStageInline(admin.TabularInline):
@@ -19,7 +20,6 @@ class IngestionJobAdmin(admin.ModelAdmin):
 
     @admin.action(description="Re-ingest source")
     def reingest(self, request, queryset):
-        from .tasks import task_ingest_source
         n = 0
         for job in queryset:
             task_ingest_source.delay(source_id=job.source_id, tenant=job.tenant, force=True)

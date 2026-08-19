@@ -51,6 +51,12 @@ from apps.access_management.services import (  # noqa: E402
     RoleNotFound,
     RoleService,
 )
+from apps.access_management.views.roles import public_fields as _role_public_fields
+from unittest import mock
+from apps.access_management.views import RoleCreateView, RoleDetailView, RoleListView, RoleUpdateView
+from apps.access_management.views import RoleDeleteView
+from apps.core.models import TimeStampedModel
+from datetime import timedelta
 
 CREATE_URL = "/api/v1/roles/create"
 DETAIL_URL = "/api/v1/roles/detail"
@@ -319,7 +325,6 @@ def test_detail_returns_one_role(admin_client):
 
     assert response.status_code == 200
     assert response.json()["message"] == "Role retrieved successfully."
-    from apps.access_management.views.roles import public_fields as _role_public_fields
     data = response.json()["data"]
     assert data == {**_role_public_fields(role), "permission_ids": data["permission_ids"]}
     assert data["permission_ids"] == []
@@ -713,7 +718,6 @@ def test_update_validates_the_new_name(admin_client, role_id, name):
 def test_update_writes_only_the_submitted_columns(admin_client, role_id):
     """``update_fields`` is what stops a partial update clobbering a column another
     request changed concurrently. ``updated_at`` rides along by design."""
-    from unittest import mock
 
     real_save = Role.save
     captured = {}
@@ -794,7 +798,6 @@ def test_service_update_requires_at_least_one_field(role_id):
 def test_an_unattributable_integrity_error_is_not_reported_as_a_conflict():
     """Reporting an unexplained constraint failure as "name already taken" would send
     an administrator chasing a role that does not exist."""
-    from unittest import mock
 
     with mock.patch.object(Role.objects, "create",
                            side_effect=IntegrityError("CHECK constraint failed: other")):
@@ -810,13 +813,6 @@ def test_an_unattributable_integrity_error_is_not_reported_as_a_conflict():
 def test_routes_are_wired():
     from django.urls import resolve
 
-    from apps.access_management.views import (
-        RoleCreateView,
-        RoleDetailView,
-        RoleListView,
-        RoleUpdateView,
-    )
-
     assert resolve(CREATE_URL).func.view_class is RoleCreateView
     assert resolve(DETAIL_URL).func.view_class is RoleDetailView
     assert resolve(LIST_URL).func.view_class is RoleListView
@@ -825,8 +821,6 @@ def test_routes_are_wired():
 
 def test_delete_resolves_to_the_delete_view():
     from django.urls import resolve
-
-    from apps.access_management.views import RoleDeleteView
 
     assert resolve(DELETE_URL).func.view_class is RoleDeleteView
 
@@ -894,7 +888,6 @@ def test_role_model_is_reachable_from_the_app_models_namespace():
 def test_role_reuses_the_shared_timestamp_base():
     """created_at/updated_at come from apps.core.models.TimeStampedModel rather than
     being re-declared — the abstraction already existed."""
-    from apps.core.models import TimeStampedModel
 
     assert issubclass(Role, TimeStampedModel)
 
@@ -1032,7 +1025,6 @@ def test_a_grants_only_update_still_bumps_updated_at(role_id):
     Backdates updated_at via .update() (bypasses auto_now) rather than sleeping, so
     the assertion does not depend on wall-clock/DB timestamp precision.
     """
-    from datetime import timedelta
 
     from django.utils import timezone
 

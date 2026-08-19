@@ -12,11 +12,13 @@ import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "mlflow_observability"))
+from evaluate import load_golden
+from evaluate import tables_used
+from evaluate import evaluate_golden
 
 
 # ── load_golden ────────────────────────────────────────────────────────────────
 def test_load_golden_skips_blank_and_bad_lines(tmp_path):
-    from evaluate import load_golden
     p = tmp_path / "g.jsonl"
     p.write_text(
         json.dumps({"id": "g1", "query": "how many x", "gold_tables": ["t_x"]}) + "\n"
@@ -32,7 +34,6 @@ def test_load_golden_skips_blank_and_bad_lines(tmp_path):
 
 # ── tables_used ─────────────────────────────────────────────────────────────────
 def test_tables_used_from_sql_and_primary_table():
-    from evaluate import tables_used
     er = {"table": "assets_asset",
           "sql": 'SELECT a.x FROM assets_asset a JOIN assets_project b ON a.pid=b.id'}
     assert tables_used(er) == {"assets_asset", "assets_project"}
@@ -100,7 +101,6 @@ def test_aggregate_metrics():
 
 # ── evaluate_golden (injected stub runner — no SLM) ──────────────────────────────
 def test_evaluate_golden_with_stub_runner():
-    from evaluate import evaluate_golden
     cases = [{"query": "how many payments", "gold_tables": ["accounts_paymenttransaction"]},
              {"query": "list assets", "gold_tables": ["assets_asset"]}]
 
@@ -115,7 +115,6 @@ def test_evaluate_golden_with_stub_runner():
 
 
 def test_evaluate_golden_runner_error_is_isolated():
-    from evaluate import evaluate_golden
     cases = [{"query": "boom", "gold_tables": ["t"]},
              {"query": "ok", "gold_tables": []}]
 

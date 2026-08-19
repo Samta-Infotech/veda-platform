@@ -529,7 +529,6 @@ def compile_all(write: bool = True) -> dict:
 
 
 def _main():
-    import sys
     dry = "--dry-run" in sys.argv
     r = compile_all(write=not dry)
     m = r["manifest"]["stats"]

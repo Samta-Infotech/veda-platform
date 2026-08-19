@@ -39,6 +39,8 @@ try:
     _GRAPH_FILE = os.path.join(_ROOT, getattr(_cfg, "UNIFIED_GRAPH_FILE", "data/veda_unified_graph.json"))
 except Exception:
     _GRAPH_FILE = os.path.join(_ROOT, "data", "veda_unified_graph.json")
+from retrieval.query_enrichment import _singularize
+import re as _re
 
 
 class UnifiedGraph:
@@ -95,7 +97,6 @@ class UnifiedGraph:
         """Column node ids a free-text term maps to: via SYNONYM/ALIAS edges, or a
         direct column-name match. Plural-aware (reuses the project singularizer so
         'handlers' matches the alias 'handler'). Ordered, deduped, deterministic."""
-        from retrieval.query_enrichment import _singularize
         out: List[str] = []
         t = term.strip().lower()
         # exact first, then singular form (only if different) — never invent variants here.
@@ -174,7 +175,6 @@ class UnifiedGraph:
         """Graph-suggested column names ('table.col') to ADD to a retrieval candidate set.
         Pure names (no engine-specific result type) so any caller can wrap them. Returns
         (seed_terms, added_names, synonyms_map). Deterministic; never raises here."""
-        import re as _re
         seen = set(have_cols)
         seeds: List[str] = []
         added: List[str] = []

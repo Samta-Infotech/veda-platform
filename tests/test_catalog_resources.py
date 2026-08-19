@@ -48,6 +48,12 @@ from apps.access_management.services import (  # noqa: E402
     CatalogService,
     ResourceNotFound,
 )
+from apps.sources.models import Dialect
+from apps.sources.models import Source
+from apps.access_management.views import CatalogDetailView, CatalogListView
+from io import StringIO
+from apps.access_management.models import Permission, Role, RolePermission
+from apps.access_management.models import Effect
 
 LIST_URL = "/api/v1/catalog/list"
 DETAIL_URL = "/api/v1/catalog/detail"
@@ -76,7 +82,6 @@ def test_every_source_dialect_has_a_mapped_kind():
     diverging: adding a dialect without a kind makes that source unaddressable, so
     nothing under it could ever be granted.
     """
-    from apps.sources.models import Dialect
 
     assert set(Dialect.values) == set(rp.KIND_BY_DIALECT), (
         "every Source.dialect needs a kind in resource_path.KIND_BY_DIALECT "
@@ -211,8 +216,6 @@ def _isolated(_database):
 
 @pytest.fixture
 def source():
-    from apps.sources.models import Source
-
     return Source.objects.create(
         name="crm_postgres", dialect="postgres", connector_type="relational")
 
@@ -428,8 +431,6 @@ def test_unaddressable_names_are_reported_not_silently_dropped(source):
 
 
 def test_discovery_fails_closed_on_an_unmapped_dialect():
-    from apps.sources.models import Source
-
     exotic = Source.objects.create(
         name="mystery", dialect="quantumdb", connector_type="x")
 
@@ -440,7 +441,6 @@ def test_discovery_fails_closed_on_an_unmapped_dialect():
 
 def test_sync_all_skips_an_unmappable_source_and_continues(populated_source):
     """One bad source must not stop the rest of the catalog from being correct."""
-    from apps.sources.models import Source
 
     Source.objects.create(name="mystery", dialect="quantumdb", connector_type="x")
 
@@ -684,15 +684,11 @@ def test_endpoints_are_get_only(admin_client, url):
 def test_routes_are_wired():
     from django.urls import resolve
 
-    from apps.access_management.views import CatalogDetailView, CatalogListView
-
     assert resolve(LIST_URL).func.view_class is CatalogListView
     assert resolve(DETAIL_URL).func.view_class is CatalogDetailView
 
 
 def test_sync_catalog_command_runs(populated_source):
-    from io import StringIO
-
     from django.core.management import call_command
 
     out = StringIO()
@@ -703,8 +699,6 @@ def test_sync_catalog_command_runs(populated_source):
 
 
 def test_sync_catalog_command_reports_unaddressable_resources(source):
-    from io import StringIO
-
     from django.core.management import call_command
 
     _add_table(source, "weird:name")
@@ -749,7 +743,6 @@ def _role_with_grants(*grants):
 
     ``grants`` is ``(resource_path, effect)`` pairs, e.g. ``("db:crm", Effect.ALLOW)``.
     """
-    from apps.access_management.models import Permission, Role, RolePermission
 
     role = Role.objects.create(name="Tree Test Role")
     data_read = Permission.objects.get(code="data.read")
@@ -850,8 +843,6 @@ def test_without_a_role_id_no_effect_or_is_allowed_fields_are_added(tree):
 
 
 def test_role_with_no_grants_shows_everything_denied(tree):
-    from apps.access_management.models import Effect
-
     role = _role_with_grants()
     result = CatalogService().get_tree(role_id=role.pk)
 
@@ -864,7 +855,6 @@ def test_a_grant_on_a_root_covers_its_descendants(tree):
     """The central regression: a grant two levels above a node must still resolve,
     not just an exact-path match. Paths in this codebase are ':'-delimited, so this
     pins the walk against a '.'-based implementation silently never matching."""
-    from apps.access_management.models import Effect
 
     role = _role_with_grants(("db:crm", Effect.ALLOW))
 
@@ -879,7 +869,6 @@ def test_a_grant_on_a_root_covers_its_descendants(tree):
 def test_a_closer_grant_overrides_a_further_ancestor(tree):
     """'Allow the whole database except this one table' — the nearer, more specific
     grant must win over the broader one further up the tree."""
-    from apps.access_management.models import Effect
 
     role = _role_with_grants(
         ("db:crm", Effect.ALLOW), ("db:crm:employee", Effect.DENY))
@@ -896,7 +885,6 @@ def test_parent_deny_beats_a_child_allow_in_the_tree(tree):
     resolver enforces. A source DENY + a re-allowed table used to paint the
     table green (closest-grant-wins) while the query was correctly denied —
     the admin UI lied about access. Now the tree shows DENY, matching reality."""
-    from apps.access_management.models import Effect
 
     role = _role_with_grants(
         ("db:crm", Effect.DENY), ("db:crm:employee", Effect.ALLOW))
@@ -912,7 +900,6 @@ def test_a_table_allow_without_a_source_allow_is_not_shown_allowed(tree):
     """Strict hierarchy: the source is the gate. A table allow with no
     source-level allow above it grants nothing, so the tree must not paint it
     green (old model showed it allowed via closest-grant-wins)."""
-    from apps.access_management.models import Effect
 
     role = _role_with_grants(("db:crm:employee", Effect.ALLOW))  # table only, no db:crm
 
@@ -925,7 +912,6 @@ def test_a_table_allow_without_a_source_allow_is_not_shown_allowed(tree):
 def test_global_grants_do_not_leak_into_the_tree_overlay(tree):
     """A blank-path (global) grant answers 'may this role use data.read at all', not
     'is this specific node allowed' — it must not make every node look granted."""
-    from apps.access_management.models import Effect
 
     role = _role_with_grants(("", Effect.ALLOW))
 

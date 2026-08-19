@@ -59,6 +59,7 @@ try:
     _DUCKDB_AVAILABLE = True
 except ImportError:
     _DUCKDB_AVAILABLE = False
+import re
 
 
 def _new_duckdb_conn():
@@ -360,7 +361,6 @@ class TabularFileConnector(BaseConnector):
 
 def _slug(name: str) -> str:
     """Filesystem/identifier-safe sheet slug."""
-    import re
     return re.sub(r"[^0-9a-zA-Z]+", "_", str(name)).strip("_").lower() or "sheet"
 
 

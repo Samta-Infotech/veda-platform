@@ -23,6 +23,8 @@ from config import (
     VEDA_INTERNAL_DB,
 )
 from ingestion.column_text import build_enriched_column_text
+import psycopg2
+from ingestion import m3_encoder
 
 # ---------------------------------------------------------------------------
 # Dense encoding is done by the shared BGE-M3 singleton (ingestion/m3_encoder.py) —
@@ -32,7 +34,6 @@ from ingestion.column_text import build_enriched_column_text
 
 
 def _get_pg_conn():
-    import psycopg2
     cfg = VEDA_INTERNAL_DB
     return psycopg2.connect(
         host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
@@ -146,7 +147,6 @@ def run_biencoder_ingestion(
     Falls back gracefully if model or DB unavailable.
     """
     t0 = time.time()
-    from ingestion import m3_encoder
 
     try:
         conn = _get_pg_conn()

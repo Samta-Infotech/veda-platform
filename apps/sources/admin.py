@@ -2,6 +2,7 @@
 from django.contrib import admin
 
 from .models import Source, SourceConnectionProfile
+from apps.ingestion.tasks import task_ingest_source
 
 
 @admin.register(Source)
@@ -15,7 +16,6 @@ class SourceAdmin(admin.ModelAdmin):
         """Enqueue task_ingest_source for each selected source on the `ingestion`
         queue (processed by the ingest-worker). Works for first-time ingestion and
         re-ingestion alike."""
-        from apps.ingestion.tasks import task_ingest_source
         n = 0
         for src in queryset:
             task_ingest_source.delay(source_id=src.pk, tenant="default", force=True)

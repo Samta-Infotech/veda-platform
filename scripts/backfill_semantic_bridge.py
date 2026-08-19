@@ -59,6 +59,9 @@ else:
 from ingestion.db_abstraction import (           # noqa: E402
     INTERNAL_DB_AVAILABLE, get_internal_connection, release_internal_connection,
 )
+from ingestion.graph_embedder import embed_graph_nodes
+from ingestion.value_embedder import embed_source_values
+from ingestion.entity_linker import link_entities
 
 
 def _log(msg: str) -> None:
@@ -93,7 +96,6 @@ def _filter(ids: List[str], keep: Optional[set]) -> List[str]:
 def phase_embed(structured: List[str]) -> None:
     """Embed column/table nodes into graph_node_embeddings for each structured source
     (the missing piece). Idempotent: embed_graph_nodes scoped-deletes per source."""
-    from ingestion.graph_embedder import embed_graph_nodes
     _log(f"EMBED: {len(structured)} structured source(s): {structured}")
     for sid in structured:
         t = time.time()
@@ -142,7 +144,6 @@ def phase_values(structured: List[str], tenant: str) -> None:
     """Build the Tier B value index (entity_value_embeddings) for each structured source
     that has sampled CATEGORY/FREE_TEXT values in column_values. Idempotent:
     embed_source_values scoped-deletes per source."""
-    from ingestion.value_embedder import embed_source_values
     _log(f"VALUES: building value index for {len(structured)} structured source(s)")
     for sid in structured:
         sampled = _reconstruct_sampled_columns(sid)
@@ -188,7 +189,6 @@ def phase_relink(document: List[str], tenant: str) -> None:
     """Re-run entity linking for each document source over its existing chunks — creates
     the exact + semantic_about + semantic_value_of edges. Idempotent: link_entities
     scoped-deletes the source's chunk/entity edges first."""
-    from ingestion.entity_linker import link_entities
     _log(f"RELINK: {len(document)} document source(s): {document}")
     for sid in document:
         chunks = _reconstruct_chunks(sid)

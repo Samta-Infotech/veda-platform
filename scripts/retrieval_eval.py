@@ -36,6 +36,9 @@ _REPO = Path(__file__).resolve().parents[1]
 # for the best-effort Django context in _setup_django.
 sys.path.insert(0, str(_REPO))
 sys.path.insert(0, str(_REPO / "veda_core"))
+from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+from query.retrieval_select import select_retrieval
+from context import RequestContext, set_context
 
 
 def _git_sha() -> str:
@@ -154,8 +157,6 @@ def _pair_key(a: str, b: str) -> frozenset:
 def _load_discovered_cross_edges():
     """[{pair: frozenset, tier, jaccard, containment, a, b}] for every persisted
     cross_source_fk edge, labelled 'table.col@src' on both ends."""
-    from ingestion.db_abstraction import (
-        get_internal_connection, release_internal_connection)
     conn = get_internal_connection()
     out = []
     try:
@@ -220,8 +221,6 @@ def eval_entity_linking(labels_path: Path) -> dict:
     labels = {}
     for row in _load_golden(labels_path):
         labels[str(row["name"]).lower()] = bool(row.get("is_bridge"))
-    from ingestion.db_abstraction import (
-        get_internal_connection, release_internal_connection)
     conn = get_internal_connection()
     admitted = {}
     try:
@@ -258,7 +257,6 @@ def eval_subgraph_coverage(golden: list[dict], all_source_ids: list[str],
                            name_by_id: dict) -> dict:
     """For each multi-source query, fraction of expected_sources whose columns/chunks
     appear in the retrieved subgraph (retrieval run across ALL ready sources)."""
-    from query.retrieval_select import select_retrieval
     id_by_name = {v: k for k, v in name_by_id.items()}
     rows, covs = [], []
     for g in golden:
@@ -315,7 +313,6 @@ def eval_federated_e2e(tenant: str) -> dict:
 
 def run_cross_source(args) -> int:
     _setup_django()
-    from context import RequestContext, set_context
     set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant))
 
     golden_path = Path(args.golden)
@@ -393,10 +390,7 @@ def main() -> int:
         return run_cross_source(args)
 
     _setup_django()
-    from context import RequestContext, set_context  # veda_core/context.py
     set_context(RequestContext(source_id=args.source_id, tenant=args.tenant))
-
-    from query.retrieval_select import select_retrieval
 
     golden_path = Path(args.golden)
     if not golden_path.exists():

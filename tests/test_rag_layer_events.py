@@ -12,16 +12,19 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from ingestion.chunk_embedder import ChunkRetrievalResult
+import query.rag_layer as rag_mod
+import veda_hybrid
+import connectors.base as connectors_mod
+import query.nosql_builder as nosql_builder_mod
 
 
 def _fake_chunk(name="doc.pdf", sim=0.8):
-    from ingestion.chunk_embedder import ChunkRetrievalResult
     return ChunkRetrievalResult(chunk_id="c1", source_id="s1", doc_id="d1", doc_name=name,
                                 chunk_index=0, text="some passage text", page_num=1, similarity=sim)
 
 
 def _stub_rag_deps(monkeypatch):
-    import query.rag_layer as rag_mod
     monkeypatch.setattr(rag_mod, "_encode_rag_query", lambda query, verbose=False: [0.1, 0.2])
     monkeypatch.setattr(rag_mod, "retrieve_top_k_chunks", lambda **k: [_fake_chunk()])
     monkeypatch.setattr(rag_mod, "_call_ollama", lambda system, user: "The answer is X.")
@@ -66,7 +69,6 @@ def test_run_rag_layer_on_event_callback_exception_never_propagates(monkeypatch)
 
 
 def test_run_hybrid_layer_emits_retrieve_and_synthesize_events(monkeypatch):
-    import query.rag_layer as rag_mod
     monkeypatch.setattr(rag_mod, "_encode_rag_query", lambda query, verbose=False: [0.1, 0.2])
     monkeypatch.setattr(rag_mod, "retrieve_top_k_chunks", lambda **k: [_fake_chunk()])
     monkeypatch.setattr(rag_mod, "_call_ollama", lambda system, user: "Fused answer.")
@@ -107,10 +109,7 @@ class _FakeNosqlConn:
 
 
 def test_run_nosql_emits_build_event(monkeypatch):
-    import veda_hybrid
     import config as config_mod
-    import connectors.base as connectors_mod
-    import query.nosql_builder as nosql_builder_mod
 
     monkeypatch.setattr(config_mod, "get_source", lambda sid: {"type": "nosql", "engine": "mongodb"})
     monkeypatch.setattr(connectors_mod, "build_connector", lambda src: _FakeNosqlConn())
@@ -128,10 +127,7 @@ def test_run_nosql_emits_build_event(monkeypatch):
 
 
 def test_run_nosql_on_event_none_never_raises(monkeypatch):
-    import veda_hybrid
     import config as config_mod
-    import connectors.base as connectors_mod
-    import query.nosql_builder as nosql_builder_mod
 
     monkeypatch.setattr(config_mod, "get_source", lambda sid: {"type": "nosql", "engine": "mongodb"})
     monkeypatch.setattr(connectors_mod, "build_connector", lambda src: _FakeNosqlConn())

@@ -31,6 +31,19 @@ import pytest
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _ROOT)                       # repo root (apps.chat.visualization)
 sys.path.insert(0, os.path.join(_ROOT, "veda_core"))
+from veda.result_analyzer import ColumnStat
+from veda.planning import aggregate_operator
+from veda.planning import grouped_mode
+from query.superlative_plan import try_grouped_plan
+from veda.generation import _resolve_display_column
+from veda.execution_state import ExecutionState
+from query.retrieval_v2 import _merge_seed_candidates
+import slm
+import query.result_explainer as re_mod
+from query.result_explainer import _answer_numbers_grounded
+from veda.result_analyzer import _column_stats
+from query.result_explainer import _summary_mode
+from veda.business_explain import extract_sql_facts
 
 _SM_PATH = os.path.join(_ROOT, "veda_core", "data", "veda_semantic_model.json")
 
@@ -75,7 +88,6 @@ SCHEMA_NO_DISPLAY = {
 
 
 def _stat(name, kind, role):
-    from veda.result_analyzer import ColumnStat
     return ColumnStat(name=name, kind=kind, role=role)
 
 
@@ -90,12 +102,10 @@ def _stat(name, kind, role):
     ("count of orders per entity", "COUNT"),
 ])
 def test_1_operator_normalization_is_canonical_and_schema_free(query, op):
-    from veda.planning import aggregate_operator
     assert aggregate_operator(query) == op
 
 
 def test_1_grouped_mode_preserves_measure_operator_not_count():
-    from veda.planning import grouped_mode
     assert grouped_mode("average amount per entity") == {"grouped": True, "op": "AVG"}
     assert grouped_mode("total amount per entity") == {"grouped": True, "op": "SUM"}
     # COUNT-per-dimension is intentionally NOT the measure planner's job
@@ -108,7 +118,6 @@ def test_1_LIMITATION_bare_by_is_not_a_grouping_trigger():
     so a very common phrasing like 'total revenue by region' does NOT route to the
     deterministic grouped planner — it falls through to the LLM path (still validated).
     Documented here so a future grammar change is a conscious decision."""
-    from veda.planning import grouped_mode
     assert grouped_mode("total amount by entity") is None
     assert grouped_mode("total amount per entity") is not None
 
@@ -119,7 +128,6 @@ def test_1_deterministic_planner_preserves_operator_and_groups_by_category():
     # CATEGORY column, never an IDENTIFIER.
     with open(_SM_PATH) as f:
         sm = json.load(f)
-    from query.superlative_plan import try_grouped_plan
     r = try_grouped_plan("average carpet_area_sqft per project", sm)
     assert r is not None and not isinstance(r, tuple)
     assert "AVG(" in r.sql and "SUM(" not in r.sql
@@ -132,7 +140,6 @@ def test_1_deterministic_planner_preserves_operator_and_groups_by_category():
 def test_1_ambiguous_measure_clarifies_not_guesses():
     with open(_SM_PATH) as f:
         sm = json.load(f)
-    from query.superlative_plan import try_grouped_plan
     r = try_grouped_plan("average carpet area per project", sm)  # two carpet columns
     assert isinstance(r, tuple) and r[0] == "clarify"
 
@@ -141,7 +148,6 @@ def test_1_ambiguous_measure_clarifies_not_guesses():
 # 2. DISPLAY VS IDENTIFIER SEMANTICS
 # ===========================================================================
 def test_2_display_resolution_is_metadata_driven_both_schemas():
-    from veda.generation import _resolve_display_column
     assert _resolve_display_column("sales", SCHEMA_A) == "entity_name"
     # anti-convention: no _name suffix, resolved via analytics_role=DIMENSION+CATEGORY
     assert _resolve_display_column("ledger", SCHEMA_B) == "friendly_caption"
@@ -175,7 +181,6 @@ def test_2_identifier_grouping_without_request_is_flagged():
 
 def test_2C_no_display_available_no_invented_column():
     # No CATEGORY column exists → resolver returns None (never fabricates a name).
-    from veda.generation import _resolve_display_column
     assert _resolve_display_column("t", SCHEMA_NO_DISPLAY) is None
 
 
@@ -183,13 +188,11 @@ def test_2C_no_display_available_no_invented_column():
 # 3. TIER-1 -> TIER-2 PROVENANCE
 # ===========================================================================
 def test_3_execution_state_has_provenance_fields():
-    from veda.execution_state import ExecutionState
     es = ExecutionState()
     assert hasattr(es, "candidate_fields") and hasattr(es, "rerank_query")
 
 
 def test_3_seed_merge_preserves_semantic_type_and_score():
-    from query.retrieval_v2 import _merge_seed_candidates
     seeds = [
         {"table_name": "sales", "col_name": "entity_name", "score": 0.8,
          "semantic_type": "CATEGORY", "rrf_score": 0.4, "cross_encoder_score": 0.8,
@@ -304,8 +307,6 @@ def test_5_display_columns_exclude_identifier():
 # 6. SUMMARY ANALYTICS  (SLM stubbed)
 # ===========================================================================
 def _capture(monkeypatch, query, cols, rows, **kw):
-    import slm
-    import query.result_explainer as re_mod
     seen = {}
     monkeypatch.setattr(slm, "call_slm",
                         lambda p, **k: (seen.update(p=p, np=k.get("num_predict")) or "Stub."))
@@ -353,7 +354,6 @@ def test_6F_no_pattern_no_fake_finding(monkeypatch):
 
 
 def test_6G_numeric_grounding_rejects_ungrounded_number():
-    from query.result_explainer import _answer_numbers_grounded
     facts = {"row_count": 3, "metrics": {"amount": {"sum": 1500, "mean": 500}}}
     assert _answer_numbers_grounded("Total amount is 1500.", facts, [])
     assert not _answer_numbers_grounded("Total amount is 9999.", facts, [])
@@ -379,7 +379,6 @@ def test_7_both_paths_use_same_bounded_population(monkeypatch):
     rows = [{"v": 100.0} for _ in range(100)] + [{"v": 999.0} for _ in range(50)]
     facts_mean = re_mod._numeric_aggregates(["v"], rows)["v"]["mean"]
     # analyzer measure stat over same bound
-    from veda.result_analyzer import _column_stats
     assert facts_mean == 100.0            # bounded to first 100 → 100.0, no full/sample mix
 
 
@@ -399,7 +398,6 @@ def test_7_bounded_metrics_are_flagged_as_partial(monkeypatch):
 
 def test_7_full_result_metrics_not_flagged_partial():
     # under the bound → exact metrics, no partial flag
-    import query.result_explainer as re_mod
     facts = re_mod._extract_facts(["v"], [{"v": 1.0} for _ in range(10)])
     assert "metrics_partial" not in facts
 
@@ -458,7 +456,6 @@ def test_8_recommender_and_analyzer_agree_on_identifier_no_chart():
 def test_9A_avg_per_entity_full_chain(monkeypatch):
     # AVG recognized -> CATEGORY dim -> roles -> display_columns -> analytical summary
     # -> leader/laggard -> chart candidate. Anti-convention schema (Schema B).
-    from veda.planning import aggregate_operator
     from veda.result_analyzer import analyze_result, analytics_summary
     assert aggregate_operator("average metric per caption") == "AVG"
     rows = [{"friendly_caption": n, "metric_value": v} for n, v in [("A", 900), ("B", 300)]]
@@ -471,7 +468,6 @@ def test_9A_avg_per_entity_full_chain(monkeypatch):
     assert set(summ["display_columns"]) == {"friendly_caption", "metric_value"}
     assert {p.kind for p in ctx.patterns} >= {"leader", "laggard"}
     assert summ["chart_candidates"] and summ["chart_candidates"][0]["type"] == "bar"
-    from query.result_explainer import _summary_mode
     assert _summary_mode(ctx.result_shape, ctx.row_count) == "analytical"
 
 
@@ -495,7 +491,6 @@ def test_9B_topN_ranking_chain():
 
 def test_9B_ranked_aggregate_does_not_double_count_measures():
     # Root-cause guard for BUG-1: an aggregate repeated in SELECT + ORDER BY counts once.
-    from veda.business_explain import extract_sql_facts
     f = extract_sql_facts("SELECT c, SUM(v) AS v FROM t GROUP BY c ORDER BY SUM(v) DESC LIMIT 3")
     assert f["aggregations"] == [("SUM", "v")]
     # genuine multi-measure query is still multi-measure (real PIVOTs survive)
@@ -538,7 +533,6 @@ def test_9D_explicit_identifier_end_to_end():
     (SCHEMA_B, "ledger", "object_key", "friendly_caption", "metric_value"),
 ])
 def test_10_equivalent_decisions_across_schemas(sm, table, idcol, dispcol, meas):
-    from veda.generation import _resolve_display_column
     from veda.semantic_validation import validate_analytical_semantics as V
     from veda.result_analyzer import analyze_result, analytics_summary
     # display resolves to the CATEGORY column, whatever it is named

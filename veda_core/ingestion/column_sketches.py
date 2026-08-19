@@ -47,6 +47,8 @@ try:
     _DATASKETCH_AVAILABLE = True
 except ImportError:
     _DATASKETCH_AVAILABLE = False
+import numpy as np
+import psycopg2
 
 
 def _new_minhash(num_perm: int, hashvalues=None):
@@ -127,7 +129,6 @@ def pack_value_hashes(value_norms: Iterable[str],
     hs = {_value_hash(v) for v in value_norms if v}
     if not hs or len(hs) > cap:
         return None
-    import numpy as np
     return np.array(sorted(hs), dtype=np.uint64).tobytes()
 
 
@@ -135,7 +136,6 @@ def unpack_value_hashes(blob: bytes):
     """Rehydrate a packed value-hash blob to a numpy uint64 array (None if empty)."""
     if not blob:
         return None
-    import numpy as np
     return np.frombuffer(blob, dtype=np.uint64)
 
 
@@ -159,7 +159,6 @@ def compute_sketch(values: Iterable[str], num_perm: int = MINHASH_NUM_PERM
             mh.update(nv.encode("utf-8"))
     if not seen:
         return None, 0, None
-    import numpy as np
     return (mh.hashvalues.astype(np.uint64).tobytes(), len(seen),
             pack_value_hashes(seen))
 
@@ -168,7 +167,6 @@ def sketch_from_bytes(blob: bytes, num_perm: int = MINHASH_NUM_PERM):
     """Rehydrate a datasketch MinHash from stored hashvalue bytes (Phase 4 read)."""
     if not _DATASKETCH_AVAILABLE or not blob:
         return None
-    import numpy as np
     hv = np.frombuffer(blob, dtype=np.uint64).copy()  # datasketch mutates; need writable
     return _new_minhash(num_perm, hashvalues=hv)
 
@@ -205,7 +203,6 @@ def persist_sketches(rows: List[dict], source_id: str, tenant: str) -> int:
     datasketch/psycopg2 is unavailable so ingestion never fails on this stage."""
     if not (_DATASKETCH_AVAILABLE and PSYCOPG2_AVAILABLE) or not rows:
         return 0
-    import psycopg2
     conn = get_internal_connection()
     written = 0
     try:

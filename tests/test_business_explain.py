@@ -6,6 +6,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from veda.business_explain import build_explain
+from veda.business_explain import build_refusal_explain
+from veda.feedback import explain_failure
 
 
 def test_extract_sql_facts_matches_private_extract():
@@ -54,7 +57,6 @@ def test_extract_sql_facts_invalid_sql_returns_safe_empty_shape():
 # ---------------------------------------------------------------------------
 
 def test_build_explain_omits_visualization_key_by_default():
-    from veda.business_explain import build_explain
     out = build_explain(sql="SELECT id FROM ledger", table="ledger", sm=None)
     assert "visualization" not in out
 
@@ -63,7 +65,6 @@ def test_build_explain_includes_validated_visualization():
     """Reasoning is deterministic/standardized (Final Polish, Section 9) — the
     SLM's own free-text "reason" is NOT surfaced verbatim; a known chart type
     always gets the same, LLM-free phrasing."""
-    from veda.business_explain import build_explain
     sm = {"columns": {"ledger.total": {"business_role": "Total Amount"}}}
     out = build_explain(
         sql='SELECT payer_name, SUM(amount) AS total FROM ledger GROUP BY payer_name',
@@ -79,7 +80,6 @@ def test_build_explain_includes_validated_visualization():
 
 
 def test_build_explain_unknown_chart_type_falls_back_to_slm_reason():
-    from veda.business_explain import build_explain
     out = build_explain(
         sql='SELECT a FROM t', table="t", sm=None,
         visualization={"type": "scatter", "x_axis": None, "y_axis": None,
@@ -130,7 +130,6 @@ def test_extract_sql_facts_placeholder_index_out_of_range_degrades_to_none():
 
 
 def test_build_explain_filter_value_resolved_with_params():
-    from veda.business_explain import build_explain
     out = build_explain(
         sql="SELECT id FROM ledger WHERE entry_type = %s", table="ledger", sm=None,
         params=["DEBIT"],
@@ -145,7 +144,6 @@ def test_build_explain_filter_value_none_without_params_unchanged():
     """Regression guard: existing callers of build_explain() that don't pass
     `params` (every caller before this fix) see the exact same None-value
     behavior as before — this fix is additive/opt-in only."""
-    from veda.business_explain import build_explain
     out = build_explain(sql="SELECT id FROM ledger WHERE entry_type = %s",
                         table="ledger", sm=None)
     applied = out["filters"]["applied"]
@@ -161,7 +159,6 @@ def test_build_explain_filter_value_none_without_params_unchanged():
 
 def test_build_explain_confidence_key_always_present_and_none():
     """Item 2: schema-only placeholder — never a computed/fake number."""
-    from veda.business_explain import build_explain
     out = build_explain(sql="SELECT id FROM ledger", table="ledger", sm=None)
     assert "confidence" in out
     assert out["confidence"] is None
@@ -170,7 +167,6 @@ def test_build_explain_confidence_key_always_present_and_none():
 def test_build_explain_timeline_defaults_to_empty_list():
     """Item 3: omitting `timeline` must not change any existing caller's output
     shape beyond adding this one always-present, empty-by-default key."""
-    from veda.business_explain import build_explain
     out = build_explain(sql="SELECT id FROM ledger", table="ledger", sm=None)
     assert out["timeline"] == []
 
@@ -178,7 +174,6 @@ def test_build_explain_timeline_defaults_to_empty_list():
 def test_build_explain_timeline_relays_ticks_verbatim_in_order():
     """Item 3: timeline is a passive relay of the run's own _tick() checkpoints
     — same messages, same order, no re-derivation."""
-    from veda.business_explain import build_explain
     ticks = [("schema_linking", "Using ledger for this"),
              ("sql_planning", "Narrowing to that time period"),
              ("output", "Done — here's your answer")]
@@ -193,7 +188,6 @@ def test_build_explain_timeline_relays_ticks_verbatim_in_order():
 def test_build_explain_existing_fields_unaffected_by_new_keys():
     """Regression guard: adding confidence/timeline must not change any
     existing field's value for a caller that predates both."""
-    from veda.business_explain import build_explain
     sm = {"columns": {"ledger.total": {"business_role": "Total Amount"}}}
     out = build_explain(
         sql='SELECT payer_name, SUM(amount) AS total FROM ledger GROUP BY payer_name',
@@ -212,14 +206,11 @@ def test_build_refusal_explain_returns_none_without_feedback():
     """Item 1: no feedback dict (e.g. FEEDBACK_ENABLED=False, or the
     invalid/exec_error _done() call sites that never build one) -> None,
     same "no explain" signal the answered path already uses."""
-    from veda.business_explain import build_refusal_explain
     assert build_refusal_explain("no_table", None) is None
     assert build_refusal_explain("invalid", {}) is None
 
 
 def test_build_refusal_explain_no_table():
-    from veda.business_explain import build_refusal_explain
-    from veda.feedback import explain_failure
     fb = explain_failure("no_table", {}, candidates=["ledger", "invoice"])
     out = build_refusal_explain("no_table", fb)
     assert out["version"] == "1.0"
@@ -233,8 +224,6 @@ def test_build_refusal_explain_no_table():
 def test_build_refusal_explain_qualifier_dropped():
     """A second, differently-shaped refusal status — proves the fix isn't
     special-cased to just one status."""
-    from veda.business_explain import build_refusal_explain
-    from veda.feedback import explain_failure
     fb = explain_failure("qualifier_dropped", {"columns": {"ledger.status": {}}},
                          missing="pending")
     out = build_refusal_explain("qualifier_dropped", fb)
@@ -251,7 +240,6 @@ def test_build_explain_understanding_breakdown_is_additive():
     """`summary` (the single prose sentence) must stay byte-identical; the
     new `breakdown` list is assembled from the same operations/filter_phrases
     already computed, not a new derivation."""
-    from veda.business_explain import build_explain
     sm = {"columns": {"ledger.status": {"business_role": "Status"}}}
     out = build_explain(
         sql="SELECT status, COUNT(*) AS n FROM ledger WHERE status = 'open' "
@@ -274,6 +262,5 @@ def test_build_explain_understanding_breakdown_empty_for_bare_list():
     """No aggregation/grouping/ordering/limit/filter -> operations defaults
     to a single 'List <dataset>' entry, filter_phrases is empty -> breakdown
     is that one phrase, matching `operations` exactly."""
-    from veda.business_explain import build_explain
     out = build_explain(sql="SELECT id FROM ledger", table="ledger", sm=None)
     assert out["understanding"]["breakdown"] == ["List records"]

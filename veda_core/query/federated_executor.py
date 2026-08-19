@@ -45,6 +45,8 @@ FED_ROW_LIMIT = int(os.environ.get("FED_ROW_LIMIT", "10000"))
 
 
 import re as _re
+import sqlglot
+from sqlglot import exp
 _IDENT_RE = _re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # safe SQL identifier (group_by key)
 
 
@@ -72,8 +74,6 @@ def validate_federated_sql(sql: str, allowed_catalogs: set) -> dict:
     """Firewall: SELECT-only single statement, and every referenced catalog is in
     scope. Returns {catalogs: set, tables: set}. Raises FederatedError on violation.
     Mirrors the single-source AST gate (veda.validation) with catalog awareness."""
-    import sqlglot
-    from sqlglot import exp
     try:
         trees = sqlglot.parse(sql, read="duckdb")
     except Exception as e:

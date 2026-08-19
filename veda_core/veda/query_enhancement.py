@@ -20,6 +20,8 @@ import re
 import difflib
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Set, Tuple
+from retrieval.query_enrichment import _singularize
+from veda.validation import _gate_strip
 
 # Conservative caps — over-expansion floods the retrieval vector and hurts precision
 # (correctness > recall, so under-expand rather than over-expand).
@@ -122,11 +124,9 @@ def enhance_query(query: str, sm: dict, prev_query: Optional[str] = None) -> Que
     if not query or not sm:
         return enh
     idx = _build_indexes(sm)
-    from retrieval.query_enrichment import _singularize
 
     # Gate-strip command / grammar / temporal words so they never drive expansion
     # ("show", "to", "last month") — only CONTENT tokens do.
-    from veda.validation import _gate_strip
     gate = _gate_strip()
     content = [w for w in re.findall(r"[a-z]+", query.lower())
                if len(w) > 2 and w not in gate]

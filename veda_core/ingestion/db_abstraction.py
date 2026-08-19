@@ -55,6 +55,7 @@ try:
     _PSYCOPG2_AVAILABLE = True
 except ImportError:
     _PSYCOPG2_AVAILABLE = False
+import sqlite3
 
 # Public availability flag — replaces PSYCOPG2_AVAILABLE in all files
 INTERNAL_DB_AVAILABLE: bool = _PSYCOPG2_AVAILABLE
@@ -316,7 +317,6 @@ def _connect_mysql(src: dict):
 
 
 def _connect_sqlite(src: dict):
-    import sqlite3
     path = src.get("path") or src.get("dbname", ":memory:")
     conn = sqlite3.connect(path)
     conn.row_factory = sqlite3.Row

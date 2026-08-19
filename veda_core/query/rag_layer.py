@@ -41,6 +41,7 @@ from config import (
     HYBRID_MAX_RESULT_ROWS,
     TOP_K_TO_LLM,
 )
+from slm import call_slm
 
 
 def _emit(on_event, phase, message, **extra):
@@ -176,7 +177,6 @@ _HYBRID_SYSTEM_PROMPT = (
 
 def _call_ollama(system_prompt: str, user_message: str) -> str:
     """Single SLM call with configurable system prompt (§10 seam)."""
-    from slm import call_slm
     return call_slm(
         user_message,
         system=system_prompt,

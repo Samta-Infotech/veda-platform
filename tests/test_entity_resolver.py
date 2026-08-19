@@ -11,6 +11,7 @@ import os, sys, json
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "veda_core"))
+from query.entity_resolver import resolve_entities
 _SM = json.load(open(os.path.join(_ROOT, "veda_core", "data", "veda_semantic_model.json")))
 
 
@@ -22,7 +23,6 @@ class _R:
 
 
 def _resolve(query, results=None):
-    from query.entity_resolver import resolve_entities
     return resolve_entities(query, results, _SM, [])
 
 

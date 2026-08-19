@@ -45,6 +45,9 @@ from utils.logger import get_logger
 
 logger = get_logger(__name__)
 from utils.logger import get_logger
+from ingestion import m3_encoder
+import importlib
+from veda.rbac_filter import filter_doc_chunks
 
 logger = get_logger(__name__)
 
@@ -190,7 +193,6 @@ def _create_doc_chunks_table(cursor) -> None:
 def _embed_chunks(texts: List[str]) -> np.ndarray:
     """Embeds a list of texts using the shared BGE-M3 singleton (WP3, 1024-dim,
     already L2-normalized)."""
-    from ingestion import m3_encoder
     return m3_encoder.encode_dense(texts)
 
 
@@ -330,7 +332,6 @@ def _try_current_context():
     ``_scope_source_ids`` already works around: ``veda_core.context`` and a bare
     ``context`` can be two distinct module objects with independent ContextVars,
     depending on which sys.path entry resolved the import first)."""
-    import importlib
     for modname in ("veda_core.context", "context"):
         try:
             ctx = importlib.import_module(modname).try_current()
@@ -485,7 +486,6 @@ def retrieve_top_k_chunks(
     # data-scope actually permits, THEN cap to the requested top_k — mirrors
     # veda.rbac_filter.filter_retrieval_results' own reasoning (the shared query
     # above stays RBAC-oblivious; only this per-request result list is narrowed).
-    from veda.rbac_filter import filter_doc_chunks
     results = filter_doc_chunks(results, _try_current_context())[:top_k]
 
     if not results and _IN_MEMORY_CHUNKS:

@@ -13,6 +13,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from veda.semantic_validation import validate_analytical_semantics
+from veda.semantic_validation import user_requested_identifier
+from veda.semantic_validation import has_errors
 
 
 # --- two schemas with DIFFERENT naming conventions, same business semantics -----
@@ -48,7 +51,6 @@ SCHEMA_B = {
 
 
 def _validate(query, sql, sm, graph=None):
-    from veda.semantic_validation import validate_analytical_semantics
     return validate_analytical_semantics(query, sql, sm, graph=graph)
 
 
@@ -135,7 +137,6 @@ def test_explicit_identifier_request_suppresses_warning():
 
 
 def test_user_requested_identifier_helper():
-    from veda.semantic_validation import user_requested_identifier
     assert user_requested_identifier("list the project codes")
     assert user_requested_identifier("show entity id and amount")
     assert not user_requested_identifier("average amount per entity")
@@ -175,7 +176,6 @@ def test_plain_detail_query_clean():
 
 
 def test_has_errors_helper():
-    from veda.semantic_validation import has_errors
     assert has_errors([{"severity": "error"}, {"severity": "warning"}])
     assert not has_errors([{"severity": "warning"}])
     assert not has_errors([])

@@ -21,6 +21,7 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from semantic import registry as reg
+import re as _re
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -190,7 +191,6 @@ def build_sql(intent: QueryIntent):
         (SUM/AVG/MAX/MIN over a value column) reference a column the AST fanout
         validator must see in the allowed set — otherwise it rejects it as an
         unknown column (the grain pk covers COUNT, not the measure column)."""
-        import re as _re
         inner = _re.sub(r"^[A-Za-z_]+\s*\((.*)\)$", r"\1", (expr or "").strip())
         return [c for c in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", inner)
                 if c.upper() != "DISTINCT"]

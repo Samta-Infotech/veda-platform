@@ -13,6 +13,7 @@ from dataclasses import dataclass
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "veda_core"))
+from veda.generation import _deterministic_single_table_sql
 
 
 @dataclass
@@ -22,7 +23,6 @@ class _T:
 
 
 def _build(query, table, cols, temporal=None, time_col=None, proj=None):
-    from veda.generation import _deterministic_single_table_sql
     return _deterministic_single_table_sql(query, table, cols, temporal or _T(),
                                            time_col, proj if proj is not None else cols[:2])
 

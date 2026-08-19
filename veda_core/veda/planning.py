@@ -5,6 +5,13 @@ from veda.generation import _resolve_display_column, generate_join_sql
 from veda.routing import _name_toks, recommended_projection
 from veda.runtime import IMPORTANCE_WEIGHTS, JOIN_CONFIDENCE_FLOOR, get_graph
 from veda.validation import qualifier_completeness
+from collections import deque
+from retrieval.query_enrichment import _singularize
+from semantic import registry as reg
+import re as _re
+from retrieval.query_enrichment import _singularize as _sg_ep
+from query.join_planner import _adjacency, _shortest_path
+from collections import Counter as _Counter
 
 
 def existence_mode(query):
@@ -341,7 +348,6 @@ def _resolve_agg_chain(anchor, tgt, graph, max_hops=6):
     join-tree search uses (an unnamed bridge entity like 'asset' is the normal case
     here, not a query-named table). Returns an ordered hop list — each hop a dict of
     near/far table+column — or None if no such safe path exists within `max_hops`."""
-    from collections import deque
     try:
         from config import AGG_CHAIN_EXCLUDE_AUDIT as _agg_skip_audit
     except Exception:
@@ -521,7 +527,6 @@ def _semantic_bridge_prefer(query, sm, graph, anchor, targets):
     assetkey (score 0) → assetuser preferred. This is exactly the signal FK-count alone
     can't see. Only acts when there IS a semantic winner; ties / no-match → empty (falls
     back to existing behavior, so no regression on queries this doesn't apply to)."""
-    from retrieval.query_enrichment import _singularize
     entity_toks = set()
     for e in [anchor, *(targets or [])]:
         if e:
@@ -569,7 +574,6 @@ def _match_measure_metric(query):
     avg_assets_asset_carpet_area), so 'AVERAGE X PER Y' reuses the SAME compiled
     metric→table→column→function knowledge the single-table measure path already
     trusts, instead of inventing new column-resolution vocabulary."""
-    from semantic import registry as reg
     hits = reg.match_metric_labels(query.lower())
     return hits[0][0] if hits else None
 
@@ -584,7 +588,6 @@ def build_measure_by_entity_sql(anchor, metric, chain, sm, ranked=False):
     instead of COUNT(DISTINCT pk). `chain=[]` means the metric already lives on the
     anchor table (plain single-table GROUP BY); returns (None, set()) if the metric's
     expression can't be parsed into a function+column (never emits a guess)."""
-    import re as _re
     m = _re.match(r'^(\w+)\(\s*(?:DISTINCT\s+)?[\w]+\.(\w+)\s*\)$', metric["expression"], _re.I)
     if not m:
         return None, set()
@@ -619,7 +622,6 @@ def _resolve_entity_phrase(phrase, graph_tables, junctions):
     `phrase` must be a subset of the table's segmented name tokens, preferring the
     SMALLEST such table (most specific match, so a generic word doesn't get pulled
     toward an unrelated, more-specific-sounding table). None if nothing matches."""
-    from retrieval.query_enrichment import _singularize as _sg_ep
     toks = {_sg_ep(w) for w in phrase.split() if len(w) > 2}
     if not toks:
         return None
@@ -641,7 +643,6 @@ def _try_measure_by_entity(query, sm, all_cols, graph, junctions):
     try_multitable flow) when the phrasing doesn't match, the metric/anchor can't be
     resolved, or the metric is already on the anchor's own table (the single-table
     path's job) — never a wrong guess."""
-    import re as _re
     metric = _match_measure_metric(query)
     if metric is None:
         return None
@@ -703,9 +704,6 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
         t = r.col_id.split(".")[0]
         imp = (cols_meta.get(r.col_id, {}) or {}).get("importance_class", "MEDIUM")
         score[t] = max(score.get(t, 0.0), r.final_score * IMPORTANCE_WEIGHTS.get(imp, 0.6))
-    import re as _re
-    from query.join_planner import _adjacency, _shortest_path
-    from retrieval.query_enrichment import _singularize
 
     ranked = [t for t in sorted(score, key=score.get, reverse=True) if t in graph_tables][:8]
     # Self-join exception to the two-table minimum: a single retrieved table whose
@@ -1031,9 +1029,7 @@ def build_from_entities(query, sm, all_cols, tf, anchor, targets, results=None):
     recommended_projection()'s "user intent" signal is shape-specific and no-ops
     safely (its own try/except) when col_id isn't the "table.col" format it expects
     — the display-column and HIGH-importance signals still apply in full."""
-    import re as _re
     from veda.routing import _name_toks
-    from retrieval.query_enrichment import _singularize
     graph = get_graph()
     if not graph.get("tables") or anchor not in set(graph.get("tables", [])):
         return {"action": "fallback"}
@@ -1152,7 +1148,6 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
     _changed = True
     while _changed and _pruned:
         _changed = False
-        from collections import Counter as _Counter
         _deg = _Counter()
         for _e in _pruned:
             _deg[_e["source_table"]] += 1
@@ -1206,7 +1201,6 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
         # The SUBJECT (anchor we return) is the entity named EARLIEST in the query
         # ("counterparties with annotations" → counterparties). Singularize so
         # "counterparties" matches the "counterparty" table token.
-        from retrieval.query_enrichment import _singularize
         qwords = [_singularize(w) for w in re.findall(r"[a-z]+", query.lower())]
         def _first_pos(t):
             # superset of the legacy underscore tokens: segmentation-aware entity

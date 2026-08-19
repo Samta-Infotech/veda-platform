@@ -33,6 +33,8 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 from starlette.testclient import TestClient  # noqa: E402
 
 import inference.main as main_mod  # noqa: E402
+import veda.runtime as runtime_mod
+import json
 
 
 @dataclass
@@ -57,7 +59,6 @@ class _StubEngine:
 def _client_with_stubbed_engine(monkeypatch):
     # get_engine/_load_scoped_sm are imported locally inside the route function
     # (`from veda.runtime import ...`), so patch them at the source module.
-    import veda.runtime as runtime_mod
     monkeypatch.setattr(runtime_mod, "get_engine", lambda sm=None: _StubEngine())
     monkeypatch.setattr(runtime_mod, "_load_scoped_sm", lambda: dict(_SM))
 
@@ -78,7 +79,6 @@ def test_retrieve_with_no_data_scope_header_returns_every_candidate(monkeypatch)
 
 def test_retrieve_with_a_restrictive_data_scope_header_narrows_the_results(monkeypatch):
     client = _client_with_stubbed_engine(monkeypatch)
-    import json
     data_scope = json.dumps({"1": {"open": False, "tables": {"employee": ["id"]}}})
 
     resp = client.post("/v1/retrieve",

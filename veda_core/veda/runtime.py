@@ -2,6 +2,10 @@
 import os, re, sys, time, json, logging, threading
 import numpy as np
 from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL, BIENCODER_TABLE_TABLE
+from veda_core import context
+import psycopg2
+from psycopg2 import sql as _sql
+from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
 
 
 # L7 execution target = the client source DB. Resolved LAZILY from the DB `Source`
@@ -18,7 +22,6 @@ def get_db_config() -> dict:
     falls back to the injected source (config.get_primary_relational_source), whose
     VEDA_SOURCE_* env the ingesting worker itself populated from the same Source row.
     Either way the Source table is the origin — no hardcoded creds, no static .env."""
-    from veda_core import context
     if context.try_current() is not None:
         from storage_adapters import reader
         return reader.source_connection()
@@ -79,8 +82,6 @@ def _encode_query(query):
 
 
 def _pg():
-    import psycopg2
-    from psycopg2 import sql as _sql
     cfg = get_db_config()
     conn = psycopg2.connect(host=cfg["host"], port=cfg["port"],
                             dbname=cfg["database"], user=cfg["user"],
@@ -174,7 +175,6 @@ def _engine_scope():
     carrying that scope's merged semantic model + sparse/signal state. The models
     (BGE-M3 etc.) are shared singletons, so an engine entry is index state, not
     model weights (see ENGINE_CACHE_MAX)."""
-    from veda_core import context
     ctx = context.try_current()
     if ctx is None:
         return ("_global", frozenset())
@@ -242,7 +242,6 @@ def _load_scoped_sm():
     """This scope's semantic model for building the engine's BM25/signals. A single-
     source scope returns that source's model unchanged (byte-identical to the pre-P5
     path); a multi-source scope returns the merged namespace (`_merge_scoped_sms`)."""
-    from veda_core import context
     ctx = context.try_current()
     if ctx is None:
         from config import SEMANTIC_MODEL_FILE
@@ -267,7 +266,6 @@ def get_engine(sm=None):
     if eng is not None:
         _ENGINES[scope] = _ENGINES.pop(scope)   # touch → most-recently-used (move to end)
         return eng
-    from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
     try:
         from config import RETRIEVAL_CACHE_ENABLED
     except Exception:

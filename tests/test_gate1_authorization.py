@@ -44,6 +44,7 @@ from apps.access_management import resource_path as rp  # noqa: E402
 from apps.access_management.gate import MODE_ENFORCE, MODE_OFF  # noqa: E402
 from apps.access_management.models import Effect, Permission, Role, RolePermission, UserRole  # noqa: E402
 from apps.sources.models import Dialect, Source  # noqa: E402
+from apps.chat.models import ChatMessage, MessageType
 
 ADMIN_PASSWORD = "admin-correct-horse-staple"
 QUERY_URL = "/api/v1/query"
@@ -277,7 +278,6 @@ def test_conversation_query_no_permissions_is_a_persisted_denial_turn_not_a_raw_
     assert "permission" in body["summary"].lower()
 
     # And it really did land in history — not just in the response body.
-    from apps.chat.models import ChatMessage, MessageType
     messages = ChatMessage.objects.filter(session_id=body["chat_id"]).order_by("created_at")
     assert [m.type for m in messages] == [MessageType.USER, MessageType.ASSISTANT]
     assert "permission" in messages[1].content.lower()

@@ -64,6 +64,15 @@ from apps.authentication.services import (  # noqa: E402
     NoRoleAssigned,
     _RotatableRefreshToken,
 )
+from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
+from unittest import mock
+from apps.authentication.views import _error_response
+from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
+import jwt as pyjwt
+from datetime import timedelta
+from rest_framework_simplejwt.tokens import AccessToken
+import apps.chat.serializers as chat_serializers
+import apps.chat.views as chat_views
 
 LOGIN_URL = "/api/v1/auth/login"
 REFRESH_URL = "/api/v1/auth/refresh"
@@ -212,7 +221,6 @@ def test_login_display_name_falls_back_to_username(client):
 def test_login_records_the_refresh_token_as_outstanding(client, user):
     """Rotation and revocation both key off OutstandingToken, so a login that
     did not record its jti would mint an unrevocable refresh token."""
-    from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
 
     _login(client, "alice", PASSWORD)
 
@@ -255,8 +263,6 @@ def test_login_with_flag_off_returns_the_legacy_payload(client, user):
 
 @override_settings(VEDA_JWT_AUTH=False)
 def test_login_with_flag_off_creates_no_token_rows(client, user):
-    from rest_framework_simplejwt.token_blacklist.models import OutstandingToken
-
     _login(client, "alice", PASSWORD)
 
     assert not OutstandingToken.objects.exists()
@@ -466,7 +472,6 @@ def test_login_survives_a_cache_blip_between_incr_and_set(user):
     on the same ``try``. A cache fault must degrade to "no lockout", never to a
     server error.
     """
-    from unittest import mock
 
     with mock.patch("apps.authentication.services.cache") as broken:
         broken.get.return_value = 0
@@ -480,7 +485,6 @@ def test_login_survives_a_cache_blip_between_incr_and_set(user):
 def test_lockout_fails_open_when_the_cache_is_unreachable(user):
     """A redis-cache outage must degrade to "no lockout", never to "nobody can
     log in" — the per-IP throttles still apply in that state."""
-    from unittest import mock
 
     with mock.patch("apps.authentication.services.cache") as broken:
         broken.get.side_effect = ConnectionError("redis down")
@@ -527,7 +531,6 @@ def test_auth_error_detail_never_reaches_the_client():
     """``AuthError`` renders its curated class-level message, never the exception
     argument — so a future ``raise InvalidCredentials(f"no user {username}")``
     debugging aid cannot leak onto the wire."""
-    from apps.authentication.views import _error_response
 
     response = _error_response(InvalidCredentials("user 'alice' has no usable password"))
 
@@ -597,8 +600,6 @@ def test_refresh_invalidates_the_old_token(client, user):
 
 @override_settings(VEDA_JWT_AUTH=True)
 def test_refresh_blacklists_the_spent_token(client, user):
-    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
-
     _, refresh_token = _tokens(client)
     spent_jti = _RotatableRefreshToken(refresh_token)["jti"]
 
@@ -654,7 +655,6 @@ def test_concurrent_refresh_of_one_token_yields_exactly_one_winner(client, user)
 def test_concurrent_refresh_second_caller_is_rejected_end_to_end(client, user):
     """The same race through the public API: the loser gets a 401, never a second
     valid token family."""
-    from unittest import mock
 
     _, refresh_token = _tokens(client)
     service = AuthService()
@@ -690,7 +690,6 @@ def test_refresh_rejects_a_forged_signature(client, user):
     """JWT forgery: a token whose payload was re-signed with the wrong key must be
     refused — and must NOT be able to trigger a revocation of the real user's
     sessions (verification precedes any state change)."""
-    import jwt as pyjwt
 
     _, real = _tokens(client)
     claims = pyjwt.decode(real, options={"verify_signature": False})
@@ -705,8 +704,6 @@ def test_refresh_rejects_a_forged_signature(client, user):
 
 @override_settings(VEDA_JWT_AUTH=True)
 def test_refresh_rejects_an_expired_token(client, user):
-    from datetime import timedelta
-
     _, refresh_token = _tokens(client)
     token = _RotatableRefreshToken(refresh_token)
     token.set_exp(from_time=token.current_time - timedelta(days=30), lifetime=timedelta(days=1))
@@ -745,7 +742,6 @@ def test_refresh_rejects_a_deleted_user(client, user):
 def test_rejecting_an_inactive_user_does_not_spend_the_token(client, user):
     """No pointless write on the reject path — and re-enabling the account
     restores the session rather than silently having burnt its token."""
-    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 
     _, refresh_token = _tokens(client)
     user.is_active = False
@@ -759,7 +755,6 @@ def test_rejecting_an_inactive_user_does_not_spend_the_token(client, user):
 def test_refresh_failures_are_indistinguishable(client, user):
     """Garbage, forged, expired, wrong-type and already-spent must all look the
     same, so a captured token cannot be probed for its status."""
-    import jwt as pyjwt
 
     access, spent = _tokens(client)
     _refresh(client, spent)
@@ -778,7 +773,6 @@ def test_refresh_failures_are_indistinguishable(client, user):
 def test_refresh_is_inert_while_the_flag_is_off(user):
     """A token minted while the flag was on must not be spendable after it is
     turned off — least of all in exchange for a placeholder access token."""
-    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 
     with override_settings(VEDA_JWT_AUTH=True):
         refresh_token = AuthService().login("alice", PASSWORD)["refresh_token"]
@@ -816,7 +810,6 @@ def test_password_change_revokes_existing_refresh_tokens(client, user):
 def test_password_change_does_not_spend_the_token(client, user):
     """Reject without a write, like the inactive-user path — the token is already
     worthless, so there is nothing to burn."""
-    from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken
 
     _, refresh_token = _tokens(client)
     user.set_password("a-brand-new-password")
@@ -924,10 +917,6 @@ def test_protected_endpoint_rejects_a_refresh_token(client, user):
 
 @override_settings(**_JWT_STACK)
 def test_protected_endpoint_rejects_an_expired_access_token(client, user):
-    from datetime import timedelta
-
-    from rest_framework_simplejwt.tokens import AccessToken
-
     token = AccessToken.for_user(user)
     token.set_exp(from_time=token.current_time - timedelta(hours=2),
                   lifetime=timedelta(hours=1))
@@ -937,8 +926,6 @@ def test_protected_endpoint_rejects_an_expired_access_token(client, user):
 
 @override_settings(**_JWT_STACK)
 def test_protected_endpoint_rejects_a_forged_access_token(client, user):
-    import jwt as pyjwt
-
     access, _ = _tokens(client)
     claims = pyjwt.decode(access, options={"verify_signature": False})
     forged = pyjwt.encode(claims, "attacker-key-padded-to-32-bytes-min", algorithm="HS256")
@@ -1139,8 +1126,6 @@ def test_routes_are_wired():
 def test_chat_app_no_longer_serves_auth():
     """The dummy login was MOVED, not copied — a second implementation drifting
     behind the real one is exactly the duplication this refactor removes."""
-    import apps.chat.serializers as chat_serializers
-    import apps.chat.views as chat_views
 
     assert not hasattr(chat_views, "LoginView")
     assert not hasattr(chat_views, "_authenticate_login")

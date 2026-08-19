@@ -37,6 +37,13 @@ from config import (
     GRAPH_PPR_MAX_NODES,
     GRAPH_CHUNK_SCORE_FACTOR,
 )
+from ingestion.graph_persist import GRAPH_EDGES_TABLE
+import numpy as np
+import scipy.sparse as sp
+from ingestion.graph_embedder import embed_text_bge, retrieve_graph_seeds
+from ingestion.graph_persist import get_neighbors, get_nodes
+from ingestion.chunk_embedder import ChunkRetrievalResult
+from ingestion.vector_store import RetrievalResult
 
 
 # =============================================================================
@@ -59,7 +66,6 @@ def _ppr_key(source_ids: Optional[List[str]]) -> tuple:
 
 def _load_all_edges(source_ids: Optional[List[str]]):
     """Full (src, dst, weight) edge list for the scope — one query per (source, process)."""
-    from ingestion.graph_persist import GRAPH_EDGES_TABLE
     from ingestion.db_abstraction import (
         INTERNAL_DB_AVAILABLE, get_internal_connection, release_internal_connection,
     )
@@ -115,8 +121,6 @@ def _get_transition(source_ids: Optional[List[str]]):
     if not edges:
         _PPR_CACHE[key] = {"ids": [], "idx": {}, "PT": None}
         return _PPR_CACHE[key]
-    import numpy as np
-    import scipy.sparse as sp
 
     node_set = set()
     for s, d, _w in edges:
@@ -144,7 +148,6 @@ def _ppr_scores(seeds, source_ids: Optional[List[str]]) -> Dict[str, float]:
     tr = _get_transition(source_ids)
     if tr is None or not tr["ids"] or tr["PT"] is None:
         return {}
-    import numpy as np
     idx, PT, n = tr["idx"], tr["PT"], len(tr["ids"])
     p0 = np.zeros(n, dtype=np.float64)
     for (nid, _t, sim) in seeds:
@@ -267,9 +270,6 @@ def run_graph_retrieval(
     """
     t0 = time.time()
     seed_top_k = seed_top_k or GRAPH_SEED_TOP_K
-
-    from ingestion.graph_embedder import embed_text_bge, retrieve_graph_seeds
-    from ingestion.graph_persist import get_neighbors, get_nodes
 
     qvec = embed_text_bge(query)
     seeds = retrieve_graph_seeds(qvec, top_k=seed_top_k, source_ids=source_ids)
@@ -476,7 +476,6 @@ def run_graph_retrieval(
     tables: List[SubgraphNode] = []
 
     # Build ChunkRetrievalResult objects for chunks
-    from ingestion.chunk_embedder import ChunkRetrievalResult
 
     for nid, sub in visited.items():
         if sub.node_type == "column":
@@ -532,7 +531,6 @@ def run_graph_retrieval(
 # =============================================================================
 
 def _subgraph_to_retrieval_results(column_nodes: List[SubgraphNode]) -> list:
-    from ingestion.vector_store import RetrievalResult
     out = []
     for n in column_nodes:
         out.append(RetrievalResult(

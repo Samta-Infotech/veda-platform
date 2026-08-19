@@ -11,6 +11,12 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 from veda_core import context
+from storage_adapters import assembler
+import os
+import psycopg2
+from storage_adapters.assembler import SemanticModelAssembler
+import json
+from veda_core.ingestion.lite_semantic_model import build_lite_sm
 
 
 def _scope() -> dict:
@@ -97,7 +103,6 @@ def store_semantic_model(sm: dict, version: str | None = None) -> None:
     """Persist the assembled semantic-model dict into the Sm* substrate (§8a) for the
     current (source, tenant), then publish it to redis for the inference tier. Called
     by the ingestion semantic-layer stage with the semantic_layer_v2 output."""
-    from storage_adapters import assembler
 
     ctx = context.current()
     assembler.persist(sm, source_id=ctx.source_id, tenant=ctx.tenant, version=version)
@@ -120,9 +125,6 @@ def sync_from_engine(internal_dsn: dict | None = None) -> dict:
     and value samples. Used by the ingestion warm stage so Django genuinely owns
     the structured substrate after a run (§3.2). Idempotent. Returns row counts.
     """
-    import os
-
-    import psycopg2
 
     ctx = context.current()
     dsn = internal_dsn or dict(
@@ -220,7 +222,6 @@ def _sync_glossary_from_sm(source_id, tenant) -> int:
     """Mirror sm.domain_synonyms → Synonym rows for admin ownership (the read path uses
     sm directly). Returns count."""
     from apps.substrate.models import Synonym
-    from storage_adapters.assembler import SemanticModelAssembler
 
     sm, _ = SemanticModelAssembler.assemble(source_id, tenant)
     scope = dict(source_id=source_id, tenant=tenant)
@@ -245,8 +246,6 @@ def _sync_graph_from_engine(cur, ctx):
     """Mirror the engine's unified KG (graph_nodes/graph_edges) into Django GraphNode/
     GraphEdge (§6.5) for the current scope. Also registers the relationship-graph artifact.
     Returns (n_nodes, n_edges)."""
-    import json
-    import os
 
     from apps.substrate.models import GraphArtifact, GraphEdge, GraphNode
 
@@ -302,11 +301,7 @@ def _build_lite_sm_from_graph(source_id, tenant) -> dict:
     """Deterministic per-source semantic model from the engine's graph_nodes columns
     (per-source correct) — for tabular/doc sources that don't run the relational
     semantic layer. Mirrors scripts/backfill_semantic_model.py."""
-    import os
 
-    import psycopg2
-
-    from veda_core.ingestion.lite_semantic_model import build_lite_sm
     dsn = dict(
         host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
         port=int(os.environ.get("VEDA_INTERNAL_PORT", "6432")),
@@ -333,10 +328,6 @@ def warm() -> dict:
     produced into the Sm* substrate, sync the structural substrate from the engine
     store, then publish the assembled sm to redis-cache + the rehydrate fan-out (§8.4)
     so every inference replica reloads. Returns row counts."""
-    import json
-    import os
-
-    from storage_adapters import assembler
 
     ctx = context.current()
     # Persist the semantic model produced by the ingestion subprocess into Django (§8a).
@@ -397,8 +388,6 @@ def _persist_hnsw_tuning(ctx, data_dir: str):
     newest `SubstrateVersion` row for this (source, tenant). Query-time reads it
     via `storage_adapters.reader._resolve_ef_search` (env override → this row →
     the global default). Best-effort — a missing file or row changes nothing."""
-    import json
-    import os
 
     try:
         path = os.path.join(data_dir, "veda_hnsw.json")

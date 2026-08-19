@@ -61,6 +61,7 @@ from .. import resource_path as rp
 from ..codes import PermissionCode
 from ..models import CatalogResource, Effect
 from .resolver import EffectivePermissions, PermissionResolver
+from apps.substrate.models import SchemaColumn, SchemaTable
 
 
 @dataclass(frozen=True)
@@ -255,7 +256,6 @@ def _substrate_names(model_name: str, substrate_ids) -> dict:
     ids = [i for i in substrate_ids if i is not None]
     if not ids:
         return {}
-    from apps.substrate.models import SchemaColumn, SchemaTable
 
     model = SchemaTable if model_name == "SchemaTable" else SchemaColumn
     return dict(model.objects.all_tenants().filter(id__in=ids).values_list("id", "name"))

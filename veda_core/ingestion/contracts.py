@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+import os
 
 
 @dataclass
@@ -43,7 +44,6 @@ class SourceContext:
 
         This is the single place the engine learns *which* source it is running
         for — no config-file registry, no re-derivation of "primary" (§3.1)."""
-        import os
         from config import get_source, artifact_scope
 
         src = get_source()

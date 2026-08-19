@@ -26,6 +26,7 @@ import sys
 
 sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "veda_core"))
+from veda.result_analyzer import analyze_result, analytics_summary
 
 
 def _col(t, n, st, ar):
@@ -38,7 +39,6 @@ def _recommender():
 
 
 def _analytics(sql, cols, rows, sm, table):
-    from veda.result_analyzer import analyze_result, analytics_summary
     ctx = analyze_result("q", sql, cols, rows, sm=sm, table=table)
     return ctx, analytics_summary(ctx)
 

@@ -17,6 +17,8 @@
 
 import re
 from typing import Any, Dict, List, Optional, Tuple
+import sqlglot
+from sqlglot import exp
 
 _PRIMARY_ENTITY_RE = re.compile(r"^(?:a|an)\s+(.+?)\.?$", re.IGNORECASE)
 
@@ -125,8 +127,6 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     for safe execution. Without `params`, every filter's value would come back
     None (a placeholder has no exp.Literal to find) — `params` lets filter
     values be resolved back by position for explainability/memory purposes."""
-    import sqlglot
-    from sqlglot import exp
 
     out = {"entities": [], "filters": [], "aggregations": [], "groupings": [],
            "orderings": [], "distinct": False, "limit": None, "aliases": {}}

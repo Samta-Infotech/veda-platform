@@ -18,6 +18,10 @@
 import re
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple
+import sqlglot
+from sqlglot import exp
+from veda.validation import _gate_strip
+from retrieval.query_enrichment import _singularize
 
 
 @dataclass
@@ -36,8 +40,6 @@ def extract_sql_ir(sql: str) -> SqlIR:
     """Parse generated SQL into a comparable IR. Predicates inside EXISTS/subqueries
     are skipped — in VEDA those are deterministic (the planner's semi-join), not LLM
     output, so they can't be hallucinated."""
-    import sqlglot
-    from sqlglot import exp
     ir = SqlIR()
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
@@ -109,15 +111,12 @@ def extract_sql_ir(sql: str) -> SqlIR:
 # Licensing — is each SQL element backed by the query?
 # ---------------------------------------------------------------------------
 def _content_tokens(query: str):
-    from veda.validation import _gate_strip
-    from retrieval.query_enrichment import _singularize
     gate = _gate_strip()
     return {_singularize(w) for w in re.findall(r"[a-z]+", query.lower())
             if len(w) > 2 and w not in gate and _singularize(w) not in gate}
 
 
 def _toks(name: str):
-    from retrieval.query_enrichment import _singularize
     return {_singularize(t) for t in re.split(r"[_\s]+", name.lower()) if len(t) > 2}
 
 

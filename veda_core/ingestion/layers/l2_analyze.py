@@ -8,6 +8,7 @@ from __future__ import annotations
 from typing import Dict, List
 
 from ingestion.contracts import SourceContext, StageOutcome
+from ingestion.layers import l1_extract
 
 
 def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOutcome]:
@@ -38,7 +39,6 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
         return out
 
     # --- value sampling (L1-extract, sequenced here — needs inference_result) --
-    from ingestion.layers import l1_extract
     out.append(l1_extract.run_value_sampling(ctx, state, verbose=verbose))
     # --- cross-source MinHash sketch pass (needs inference_result; P2.4/P4.2) ----
     out.append(l1_extract.run_sketch_pass(ctx, state, verbose=verbose))

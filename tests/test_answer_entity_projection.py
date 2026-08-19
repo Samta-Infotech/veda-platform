@@ -16,6 +16,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import query.answer_entity as answer_entity
+import veda.graph_guard as graph_guard
+import veda.pipeline as pipeline
 
 TABLE = "worklists_incident"
 TARGET = "users_user"
@@ -55,9 +58,6 @@ class _FakeEngine:
 
 def test_answer_entity_projection_mode_no_longer_uses_select_star(monkeypatch):
     import config
-    import query.answer_entity as answer_entity
-    import veda.graph_guard as graph_guard
-    import veda.pipeline as pipeline
 
     results = [_FakeResult(f"{TABLE}.title", 0.9), _FakeResult(f"{TABLE}.status", 0.85)]
 

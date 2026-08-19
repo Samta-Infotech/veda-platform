@@ -47,6 +47,15 @@ from apps.access_management.services import (  # noqa: E402
     UsernameTaken,
     UserService,
 )
+from importlib import import_module
+import logging
+from unittest import mock
+from apps.access_management.services import UserService as Svc
+from apps.access_management.services import CODE_USER_NOT_FOUND
+from apps.core.api import error, invalid_payload, success
+from apps.access_management.views import UserCreateView, UserDetailView, UserListView, UserUpdateView
+from apps.access_management import serializers, services, views
+from apps.access_management.services.base import AccessManagementError
 
 CREATE_URL = "/api/v1/users/create"
 DETAIL_URL = "/api/v1/users/detail"
@@ -390,7 +399,6 @@ def test_migration_refuses_to_run_over_pre_existing_duplicate_emails():
     The index is dropped for the duration so the offending rows can be created at
     all; the surrounding fixture rolls everything back.
     """
-    from importlib import import_module
 
     from django.apps import apps as django_apps
     from django.db import connection
@@ -503,7 +511,6 @@ def test_password_is_never_logged(admin_client, caplog):
     starts logging ``serializer.errors`` (which carries the rejected password's
     validator messages) or the payload.
     """
-    import logging
 
     distinctive = "31415926535"          # numeric-only -> fails the policy
     with caplog.at_level(logging.DEBUG):
@@ -521,9 +528,6 @@ def test_a_non_uniqueness_integrity_error_is_not_reported_as_a_conflict(admin_cl
     Telling an admin "that user already exists" when no such user exists sends them
     hunting for a row that is not there. Only real, verifiable conflicts get 409.
     """
-    from unittest import mock
-
-    from apps.access_management.services import UserService as Svc
 
     with mock.patch.object(type(get_user_model().objects), "create_user",
                            side_effect=IntegrityError("CHECK constraint failed: something_else")):
@@ -546,7 +550,6 @@ def test_no_user_is_left_behind_when_creation_fails():
     the same call raises, which is exactly the shape of the next phase's work
     (role assignment joining this same transaction).
     """
-    from unittest import mock
 
     User = get_user_model()
     before = User.objects.count()
@@ -882,8 +885,6 @@ def test_detail_never_exposes_the_password_hash(admin_client):
 
 
 def test_detail_of_a_missing_user_is_404(admin_client):
-    from apps.access_management.services import CODE_USER_NOT_FOUND
-
     response = _detail(admin_client, user_id=999_999)
 
     assert response.status_code == 404
@@ -985,8 +986,6 @@ def test_update_returns_no_data(admin_client, target):
 
 
 def test_update_of_a_missing_user_is_404(admin_client):
-    from apps.access_management.services import CODE_USER_NOT_FOUND
-
     response = _update(admin_client, user_id=999_999, first_name="Nobody")
 
     assert response.status_code == 404
@@ -1080,7 +1079,6 @@ def test_update_requires_staff(plain_user, target):
 def test_update_writes_only_the_submitted_columns(admin_client, target):
     """``update_fields`` is what stops a partial update clobbering a column another
     request changed concurrently."""
-    from unittest import mock
 
     User = get_user_model()
     real_save = User.save
@@ -1097,8 +1095,6 @@ def test_update_writes_only_the_submitted_columns(admin_client, target):
 
 
 def test_service_update_requires_at_least_one_field(target):
-    from apps.access_management.services import UserService as Svc
-
     with pytest.raises(ValueError):
         Svc().update_user(target)
 
@@ -1207,7 +1203,6 @@ def test_update_role_ids_guard_does_not_apply_to_a_non_admin_user(admin_client, 
 def test_core_api_omits_absent_envelope_keys():
     """``data``/``code`` must be ABSENT, not null, when not supplied — clients check
     for key presence, and logout deliberately answers with no ``data``."""
-    from apps.core.api import error, invalid_payload, success
 
     assert success("ok").data == {"status_code": 200, "message": "ok"}
     assert success("ok", {"a": 1}).data == {"status_code": 200, "message": "ok",
@@ -1258,13 +1253,6 @@ def test_auth_endpoints_keep_their_documented_envelope():
 def test_routes_are_wired():
     from django.urls import resolve
 
-    from apps.access_management.views import (
-        UserCreateView,
-        UserDetailView,
-        UserListView,
-        UserUpdateView,
-    )
-
     assert resolve(CREATE_URL).func.view_class is UserCreateView
     assert resolve(DETAIL_URL).func.view_class is UserDetailView
     assert resolve(LIST_URL).func.view_class is UserListView
@@ -1275,7 +1263,6 @@ def test_package_layout_re_exports_its_public_names():
     """The app is split into serializers/services/views packages so roles and
     permissions can land beside users. Callers must keep importing from the PACKAGE,
     so a name can move between modules without breaking them."""
-    from apps.access_management import serializers, services, views
 
     assert services.UserService is not None
     assert services.AccessManagementError is not None
@@ -1284,7 +1271,6 @@ def test_package_layout_re_exports_its_public_names():
     assert views.UserDetailView is not None
     assert views.public_fields is not None
     # The shared base really is shared, not duplicated per domain.
-    from apps.access_management.services.base import AccessManagementError
 
     assert services.AccessManagementError is AccessManagementError
 

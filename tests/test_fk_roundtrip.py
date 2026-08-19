@@ -16,10 +16,10 @@ invocation to actually exercise the round-trip.
 """
 import os
 import uuid
+import pytest
 
 
 def test_fk_roundtrip():
-    import pytest
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
     try:
         import django

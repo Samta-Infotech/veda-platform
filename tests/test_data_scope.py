@@ -38,6 +38,7 @@ from apps.access_management.services.catalog import CatalogDiscoveryService  # n
 from apps.access_management.services.data_scope import compute_data_scope  # noqa: E402
 from apps.sources.models import Dialect, Source  # noqa: E402
 from apps.substrate.models import SchemaColumn, SchemaTable  # noqa: E402
+from apps.access_management import resource_path as rp
 
 ADMIN_PASSWORD = "admin-correct-horse-staple"
 TENANT = "default"
@@ -132,7 +133,6 @@ def _crm_source(with_catalog=True):
 
 
 def _path(*parts):
-    from apps.access_management import resource_path as rp
     return rp.build("db", "crm", *parts)
 
 
@@ -278,7 +278,6 @@ def test_multiple_sources_are_each_scoped_independently(member, read_perm):
 
     role = _role_for(member)
     _grant(role, read_perm, _path())  # fully open on crm
-    from apps.access_management import resource_path as rp
     _grant(role, read_perm, rp.build("db", "billing"))  # fully open on billing too
 
     scope = compute_data_scope(member, [crm.id, billing.id])
