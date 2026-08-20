@@ -180,14 +180,19 @@ def _source_scope(effective: EffectivePermissions, source_id: int) -> SourceData
         # db table) — and a document has no SchemaTable/SchemaColumn row of its own
         # (see apps.access_management.services.catalog._document_rows, which reads
         # doc names live from the engine's doc_chunks store instead of mirroring
-        # them into a Django table). So the allowed name comes straight off the
-        # resource path's own last segment, not a substrate lookup.
-        allowed_docs = [
-            rp.segments(t.path)[-1] for t in tables
-            if effective.allows(PermissionCode.DATA_READ, t.path)
-        ]
-        if not allowed_docs:
+        # them into a Django table). The path segment is addressing only — a raw
+        # filename outside the resource-path charset (spaces, e.g. "Employee
+        # Handbook.pdf") is sanitized when the path is built (see
+        # CatalogDiscoveryService._sanitize_doc_segment), so it is NOT the real
+        # doc_name; resolve it back via substrate_id (the doc_id) the same way a
+        # db table/column path resolves back to its SchemaTable/SchemaColumn.name.
+        allowed = [t for t in tables if effective.allows(PermissionCode.DATA_READ, t.path)]
+        if not allowed:
             return SourceDataScope(open=False, tables=())
+        doc_names = _document_names([t.substrate_id for t in allowed])
+        allowed_docs = [
+            doc_names.get(t.substrate_id) or rp.segments(t.path)[-1] for t in allowed
+        ]
         return SourceDataScope(
             open=False,
             tables=tuple(TableScope(name=name, columns=None) for name in allowed_docs))
@@ -259,3 +264,49 @@ def _substrate_names(model_name: str, substrate_ids) -> dict:
 
     model = SchemaTable if model_name == "SchemaTable" else SchemaColumn
     return dict(model.objects.all_tenants().filter(id__in=ids).values_list("id", "name"))
+
+
+def _document_names(doc_ids) -> dict:
+    """``{doc_id: real doc_name}`` for the given document ids, read live from the
+    engine's doc_chunks store (veda_engine) — the files-kind mirror of
+    ``_substrate_names``, since a document has no SchemaTable/SchemaColumn row to
+    resolve through. Best-effort: an unreachable engine store degrades to an empty
+    map (caller falls back to the sanitized path segment) rather than failing the
+    whole scope computation."""
+    import os
+    from uuid import UUID
+
+    import psycopg2
+
+    ids = [str(i) for i in doc_ids if i is not None]
+    if not ids:
+        return {}
+    dsn = dict(
+        host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
+        port=int(os.environ.get("VEDA_INTERNAL_PORT", "6432")),
+        dbname=os.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),
+        user=os.environ.get("VEDA_INTERNAL_USER", "veda"),
+        password=os.environ.get(
+            "VEDA_INTERNAL_PASSWORD", os.environ.get("POSTGRES_PASSWORD", "change-me")),
+    )
+    try:
+        conn = psycopg2.connect(**dsn)
+    except Exception:
+        return {}
+    try:
+        with conn.cursor() as cur:
+            placeholders = ",".join(["%s"] * len(ids))
+            cur.execute(
+                f"SELECT DISTINCT doc_id, doc_name FROM doc_chunks WHERE doc_id IN ({placeholders})",
+                ids,
+            )
+            rows = cur.fetchall()
+    finally:
+        conn.close()
+    out = {}
+    for doc_id, doc_name in rows:
+        try:
+            out[UUID(str(doc_id))] = doc_name
+        except (ValueError, AttributeError):
+            out[doc_id] = doc_name
+    return out

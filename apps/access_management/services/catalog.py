@@ -201,13 +201,31 @@ class CatalogDiscoveryService:
         # mirroring it into a Django table nobody else needs.
         elif kind == "files":
             for doc_id, doc_name in self._document_rows(source.pk):
-                doc_path = self._safe_path(report, kind, source.name, doc_name)
+                doc_path = self._safe_path(report, kind, source.name,
+                                           self._sanitize_doc_segment(doc_name))
                 if doc_path is None:
                     continue
                 if doc_path not in expected:
                     expected[doc_path] = (source_path, doc_id)
 
         return expected
+
+    @staticmethod
+    def _sanitize_doc_segment(doc_name: str) -> str:
+        """Best-effort real filename -> valid resource-path segment (lowercase
+        letters, digits, '_', '.', '-'). A raw filename ("Employee Handbook.pdf")
+        would otherwise make `_safe_path` skip the document entirely — ingested and
+        answerable, but with no grantable path, so per-document RBAC silently denies
+        it to every non-fully-open role forever (observed live: "Samta-Employee
+        Handbook April_2026.pdf" — the space is outside the allowed charset).
+
+        The sanitized segment is addressing only, never treated as the document's
+        real name: data_scope.py resolves the path back to the true `doc_name` via
+        `substrate_id` (the doc_id stored alongside this path), the same way a
+        SchemaTable/SchemaColumn path resolves back to its substrate row."""
+        import re as _re
+        segment = _re.sub(r"[^a-z0-9_.\-]+", "-", doc_name.strip().lower()).strip("-")
+        return segment or "doc"
 
     @staticmethod
     def _document_rows(source_id: int) -> list[tuple]:

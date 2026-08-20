@@ -147,6 +147,21 @@ def _encode_rag_query(
         return None
 
 
+def _encode_rag_query_sparse(query: str, verbose: bool = False) -> Optional[dict]:
+    """Learned-sparse (lexical) weights for the same raw query _encode_rag_query dense-
+    encodes — passed to retrieve_top_k_chunks() to re-rank its dense candidate pool
+    against rare/distinctive terms dense similarity alone under-weights (e.g. "POSH").
+    None on any failure — the caller degrades to dense-only ranking, unchanged from
+    before this signal existed."""
+    try:
+        from ingestion import m3_encoder
+        return m3_encoder.encode_sparse([query])[0]
+    except Exception as e:
+        if verbose:
+            print(f"  [RAG] sparse encoding failed: {e}")
+        return None
+
+
 # =============================================================================
 # Ollama synthesis call
 # =============================================================================
@@ -391,6 +406,7 @@ def run_rag_layer(
             duration_ms=round((time.time() - t0) * 1000, 2),
             error="Query embedding failed — BGE-M3 not loaded",
         )
+    query_sparse = _encode_rag_query_sparse(query, verbose=verbose)
 
     # Retrieve chunks (with temporal filter — Improvement 1)
     chunks = retrieve_top_k_chunks(
@@ -399,6 +415,7 @@ def run_rag_layer(
         top_k           = top_k,
         temporal_filter = temporal_filter,
         verbose         = verbose,
+        query_sparse    = query_sparse,
     )
 
     if not chunks:
@@ -499,6 +516,7 @@ def run_hybrid_layer(
             confidence=0.0, duration_ms=round((time.time() - t0) * 1000, 2),
             error="Query embedding failed — BGE-M3 not loaded",
         )
+    query_sparse = _encode_rag_query_sparse(query, verbose=verbose)
 
     # Step 2 — Retrieve doc chunks (with temporal filter)
     doc_chunks = retrieve_top_k_chunks(
@@ -507,6 +525,7 @@ def run_hybrid_layer(
         top_k           = RAG_TOP_K,
         temporal_filter = temporal_filter,
         verbose         = verbose,
+        query_sparse    = query_sparse,
     )
 
     if verbose:

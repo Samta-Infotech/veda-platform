@@ -206,6 +206,11 @@ BIENCODER_TABLE_TABLE = "table_embeddings_v2"
 # supply the sparse half of the WP4 table prior.
 COLUMN_SPARSE_TABLE = "column_sparse_v1"
 TABLE_SPARSE_TABLE  = "table_sparse_v1"
+# Document chunks get the same learned-sparse signal as columns/tables — dense-only
+# cosine similarity under-weights rare, distinctive terms a query names verbatim (e.g.
+# "POSH" scored 0.425 while unrelated sections scored 0.50+ on a 165-chunk document,
+# missing the one section that actually answered the question). Keyed by chunk_id.
+CHUNK_SPARSE_TABLE  = "chunk_sparse_v1"
 # Safety cap on the query-time sparse fit() fallback: encoding every retrieval_document
 # live is only acceptable for a tiny dev model. Above this, the engine skips the sparse
 # signal (degrade, don't hang) and expects a persisted column_sparse_v1 instead.
@@ -218,6 +223,7 @@ VEDA_INTERNAL_TABLES = {
     # Learned-sparse stores
     COLUMN_SPARSE_TABLE,
     TABLE_SPARSE_TABLE,
+    CHUNK_SPARSE_TABLE,
     # Metadata stores
     "fk_adjacency",
     "table_metadata",

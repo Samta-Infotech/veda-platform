@@ -28,6 +28,7 @@ import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+import math
 import time
 import numpy as np
 from dataclasses import dataclass, field
@@ -186,6 +187,29 @@ def _create_doc_chunks_table(cursor) -> None:
     """)
 
 
+def _ensure_chunk_sparse_table(cursor) -> None:
+    """Learned-sparse (lexical) weights for document chunks — the doc-chunk mirror of
+    ingestion/sparse_index.py's column_sparse_v1/table_sparse_v1. Dense cosine similarity
+    alone under-weights a rare, distinctive term a query names verbatim: on a 165-chunk
+    document, the one section actually discussing "POSH" scored 0.425 while several
+    unrelated sections scored 0.50+ purely on generic phrasing overlap, so it never
+    reached the top-k and the query was answered as "not in the document" even though it
+    was. This table lets retrieve_top_k_chunks() re-rank the dense candidate pool with a
+    lexical signal, the same two-signal idea sparse_ranker.py already uses for columns."""
+    from config import CHUNK_SPARSE_TABLE
+    cursor.execute(f"""
+        CREATE TABLE IF NOT EXISTS {CHUNK_SPARSE_TABLE} (
+            chunk_id  TEXT PRIMARY KEY,
+            source_id TEXT NOT NULL,
+            weights   JSONB
+        );
+    """)
+    cursor.execute(f"""
+        CREATE INDEX IF NOT EXISTS idx_{CHUNK_SPARSE_TABLE}_source
+        ON {CHUNK_SPARSE_TABLE} (source_id);
+    """)
+
+
 # =============================================================================
 # Embedding helper
 # =============================================================================
@@ -257,6 +281,18 @@ def run_chunk_embedder(
             stats           = {"error": str(e)},
         )
 
+    # Learned-sparse (lexical) weights alongside the dense embeddings — see
+    # _ensure_chunk_sparse_table's docstring for why dense-only similarity misses rare,
+    # distinctive terms. Best-effort: a failure here degrades to dense-only retrieval,
+    # it must never fail the ingestion the way a dense-embedding failure does above.
+    try:
+        from ingestion import m3_encoder
+        sparse_weights = m3_encoder.encode_sparse(texts)
+    except Exception as e:
+        if verbose:
+            print(f"  ⚠ sparse encoding failed ({e}) — chunks stored dense-only")
+        sparse_weights = None
+
     if INTERNAL_DB_AVAILABLE:
         try:
             conn = get_internal_connection()
@@ -287,6 +323,26 @@ def run_chunk_embedder(
                                 ))
                             except Exception:
                                 skipped += 1
+
+                        if sparse_weights is not None:
+                            import json as _json
+                            from config import CHUNK_SPARSE_TABLE
+                            _ensure_chunk_sparse_table(cur)
+                            cur.execute(
+                                f"DELETE FROM {CHUNK_SPARSE_TABLE} WHERE source_id = %s;",
+                                (source_id,),
+                            )
+                            for chunk, w in zip(chunks, sparse_weights):
+                                try:
+                                    cur.execute(f"""
+                                        INSERT INTO {CHUNK_SPARSE_TABLE}
+                                            (chunk_id, source_id, weights)
+                                        VALUES (%s, %s, %s)
+                                        ON CONFLICT (chunk_id) DO UPDATE SET
+                                            weights = EXCLUDED.weights;
+                                    """, (chunk.chunk_id, chunk.source_id, _json.dumps(w)))
+                                except Exception:
+                                    pass
             finally:
                 release_internal_connection(conn)
             backend = "pgvector"
@@ -348,6 +404,127 @@ def _try_current_context():
 # documents' chunks are dropped, without changing the query itself per caller.
 _RBAC_OVERFETCH_MULTIPLIER = 4
 
+# RRF constant. The usual k=60 (sparse_ranker.py / retrieval_select.py) is tuned for
+# deep candidate lists over large corpora, where a 1-2 position rank gap is noise; a
+# per-document RAG corpus here is two orders of magnitude smaller (dozens-low hundreds
+# of chunks), so k=60 flattens rank position almost to nothing — a chunk absent from
+# the dense pool (sentinel rank = pool size) barely loses ground even against a chunk
+# ranked #1-3 by sparse alone (observed live: a chunk sparse-ranked #3 for "POSH" still
+# lost to weaker-but-dense-present chunks under k=60). A smaller k lets rank position
+# actually decide ties at this scale.
+_SPARSE_RRF_K = 10.0
+
+# Hard cap on how many of a scope's sparse rows a single query will load and score in
+# Python. A per-document RAG corpus here is small (dozens–low hundreds of chunks per
+# source, same order of magnitude as SPARSE_FIT_MAX_DOCS elsewhere in this codebase);
+# this is a safety backstop against an unexpectedly huge source, not a tuned limit.
+_SPARSE_SCAN_CAP = 4000
+
+
+def _sparse_candidates(source_ids, query_sparse: dict, limit: int, verbose: bool = False) -> list:
+    """Independently score EVERY chunk's persisted sparse weights against the query's
+    (bounded by _SPARSE_SCAN_CAP), returning the top `limit` as ChunkRetrievalResult
+    (similarity=0.0 — these are ranked by sparse score alone, dense similarity was never
+    computed for them). This is a SEPARATE retrieval pass, not a re-score of the dense
+    candidate pool: a chunk the dense cosine search ranks outside its own fetch window
+    (e.g. a short, keyword-dense passage that dense similarity under-weights) can still
+    be found here and unioned in — RRF-fusing only the dense pool's own members can
+    never rescue a chunk dense similarity excluded before fusion even runs."""
+    if not query_sparse:
+        return []
+    try:
+        from config import CHUNK_SPARSE_TABLE
+        conn = get_internal_connection()
+        try:
+            with conn.cursor(cursor_factory=DICT_CURSOR) as cur:
+                if source_ids:
+                    placeholders = ",".join(["%s"] * len(source_ids))
+                    cur.execute(f"""
+                        SELECT dc.chunk_id, dc.source_id, dc.doc_id, dc.doc_name,
+                               dc.chunk_index, dc.text, dc.page_num, cs.weights
+                        FROM {CHUNK_SPARSE_TABLE} cs
+                        JOIN {DOC_CHUNKS_TABLE_NAME} dc ON dc.chunk_id = cs.chunk_id
+                        WHERE dc.source_id IN ({placeholders})
+                        LIMIT %s
+                    """, list(source_ids) + [_SPARSE_SCAN_CAP])
+                else:
+                    cur.execute(f"""
+                        SELECT dc.chunk_id, dc.source_id, dc.doc_id, dc.doc_name,
+                               dc.chunk_index, dc.text, dc.page_num, cs.weights
+                        FROM {CHUNK_SPARSE_TABLE} cs
+                        JOIN {DOC_CHUNKS_TABLE_NAME} dc ON dc.chunk_id = cs.chunk_id
+                        LIMIT %s
+                    """, [_SPARSE_SCAN_CAP])
+                rows = cur.fetchall()
+        finally:
+            release_internal_connection(conn)
+    except Exception as e:
+        if verbose:
+            print(f"  [ChunkRetrieval] sparse scan unavailable ({e}) — dense-only")
+        return []
+
+    # Corpus IDF over THIS scan: BGE-M3's learned-sparse weights rate a token's semantic
+    # importance in isolation, not its rarity in THIS specific corpus — "Samta"/"policy"
+    # score heavily on nearly every chunk of an HR handbook, since they genuinely are
+    # important words, and that alone let two irrelevant sections outrank the one chunk
+    # actually discussing "POSH" (observed live: query's two heaviest tokens were generic
+    # company/document words present in most chunks, drowning out the 3 tokens unique to
+    # the harassment section). Down-weighting by how many chunks a token appears in reproduces
+    # classic BM25's core idea on top of the learned-sparse scores, penalizing exactly the
+    # tokens common enough to be common to every section.
+    doc_freq: dict = {}
+    for row in rows:
+        for tok in (row["weights"] or {}):
+            doc_freq[tok] = doc_freq.get(tok, 0) + 1
+    n_docs = max(len(rows), 1)
+    idf = {tok: math.log((n_docs + 1.0) / (df + 1.0)) + 1.0 for tok, df in doc_freq.items()}
+
+    def _dot(a: dict, b: dict) -> float:
+        if len(a) > len(b):
+            a, b = b, a
+        return sum(w * b[k] * idf.get(k, 1.0) for k, w in a.items() if k in b)
+
+    scored = [(_dot(query_sparse, row["weights"] or {}), row) for row in rows]
+    scored = [(s, row) for s, row in scored if s > 0.0]
+    scored.sort(key=lambda sr: sr[0], reverse=True)
+    return [
+        ChunkRetrievalResult(
+            chunk_id=row["chunk_id"], source_id=row["source_id"], doc_id=row["doc_id"],
+            doc_name=row["doc_name"], chunk_index=row["chunk_index"], text=row["text"],
+            page_num=row["page_num"], similarity=0.0,
+        )
+        for _score, row in scored[:limit]
+    ]
+
+
+def _fuse_dense_and_sparse(dense_results: list, source_ids, query_sparse: dict,
+                          limit: int, verbose: bool = False) -> list:
+    """Union the dense-fetched candidate pool with an independent sparse-side scan
+    (_sparse_candidates), then RRF-fuse the two rank orders. A chunk found by only one
+    signal keeps that signal's rank and a large (weak) rank for the other — it can still
+    win overall if its one signal ranks it very highly, but never as easily as a chunk
+    both signals agree on."""
+    sparse_results = _sparse_candidates(source_ids, query_sparse, limit, verbose=verbose)
+    if not sparse_results:
+        return dense_results
+
+    by_id = {r.chunk_id: r for r in dense_results}
+    for r in sparse_results:
+        by_id.setdefault(r.chunk_id, r)   # dense's own copy (with real similarity) wins ties
+
+    dense_rank = {r.chunk_id: i for i, r in enumerate(dense_results)}
+    sparse_rank = {r.chunk_id: i for i, r in enumerate(sparse_results)}
+    worst_dense = len(dense_results)
+    worst_sparse = len(sparse_results)
+
+    def _rrf(chunk_id: str) -> float:
+        dr = dense_rank.get(chunk_id, worst_dense)
+        sr = sparse_rank.get(chunk_id, worst_sparse)
+        return 1.0 / (_SPARSE_RRF_K + dr) + 1.0 / (_SPARSE_RRF_K + sr)
+
+    fused = sorted(by_id.values(), key=lambda r: _rrf(r.chunk_id), reverse=True)
+    return fused
+
 
 def retrieve_top_k_chunks(
     query_vector:    np.ndarray,
@@ -355,9 +532,11 @@ def retrieve_top_k_chunks(
     top_k:           int = 5,
     temporal_filter: object = None,  # TemporalFilter from temporal_parser.py
     verbose:         bool = False,
+    query_sparse:    Optional[dict] = None,
 ) -> List[ChunkRetrievalResult]:
     """
-    Cosine similarity search over the doc_chunks table.
+    Cosine similarity search over the doc_chunks table, optionally re-ranked against a
+    learned-sparse (lexical) signal via an independent scan (see _fuse_dense_and_sparse).
 
     Called by query/rag_layer.py at query time.
 
@@ -368,6 +547,9 @@ def retrieve_top_k_chunks(
     top_k           : number of chunks to return
     temporal_filter : TemporalFilter from L1. When set, only chunks whose
                       doc_date falls within [start, end] are retrieved.
+    query_sparse    : learned-sparse weights for the query (from
+                      ingestion.m3_encoder.encode_query()), or None to skip lexical
+                      re-ranking and use dense order alone (unchanged prior behavior).
                       None = no date filtering (default).
 
     Returns
@@ -481,6 +663,14 @@ def retrieve_top_k_chunks(
         )
         for row in rows
     ]
+
+    # Union with an INDEPENDENT lexical scan, then RRF-fuse — before RBAC narrows the
+    # pool. Re-ranking only the dense-fetched candidates can't rescue a chunk dense
+    # cosine similarity ranked outside its own fetch window in the first place; the
+    # independent sparse-side scan (_sparse_candidates) can still surface it here.
+    if query_sparse:
+        results = _fuse_dense_and_sparse(results, source_ids, query_sparse,
+                                         fetch_limit, verbose=verbose)
 
     # RBAC (Gate 1): narrow the over-fetched candidate list to what the caller's
     # data-scope actually permits, THEN cap to the requested top_k — mirrors
