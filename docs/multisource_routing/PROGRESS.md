@@ -4,10 +4,21 @@
 > what's next, any blockers. Keep it factual (an index, not a retelling).
 
 ## Status snapshot
-- **Current phase:** Phase 1 (Source Profiling & Catalog) — 1.1 done
-- **Next action:** Phase 1.2 — expose profile fields in the sources API/serializer + admin (manual entry)
+- **Current phase:** Phase 1 (Source Profiling & Catalog) — 1.1, 1.2 done
+- **Next action:** Phase 1.3 — `ingestion/source_profiler.py` post-ingest hook
 - **Flags live:** none yet (Phase 1 is additive schema, no query-path flag needed)
 - **Branch:** `feat/multisource-routing`
+
+---
+
+## 2026-08-20 — Phase 1.2: Admin manual-entry surface
+- `apps/sources/admin.py`: grouped `fieldsets` — new "Routing catalog" section holds
+  `domain_tags`/`description`/`description_generated`/`is_canonical`; connection + doc fields
+  collapsed. `description_generated` + timestamps read-only. `is_canonical` in list_display/filter.
+- No source-CREATE/EDIT API exists (`views.py` POST is a list-with-body variant), so the read
+  API contract (§5.2 `serialize_source`) is left untouched; the coordinator will read these
+  fields off the `Source` model directly. `manage.py check` clean.
+- **Next:** Phase 1.3 (profiler hook).
 
 ---
 
