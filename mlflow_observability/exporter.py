@@ -23,6 +23,7 @@ from typing import Optional
 
 from .mapper import map_record
 from .settings import Settings
+import time as _time
 
 logger = logging.getLogger("veda.mlflow.exporter")
 
@@ -112,7 +113,6 @@ class MlflowSink:
         replay); the trace's relative offsets/durations give the correct waterfall
         shape — the absolute base time is arbitrary. Best-effort by contract: any
         failure here is swallowed by the caller so run logging is never affected."""
-        import time as _time
         mlflow = self._mlflow
         client = mlflow.MlflowClient()
         spans = spec.spans

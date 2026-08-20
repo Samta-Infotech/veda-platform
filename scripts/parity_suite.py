@@ -20,6 +20,9 @@ deterministic (temperature=0, seed=0), so a matching anchor/sm yields identical 
 import json
 import os
 import sys
+from veda_hybrid import run_hybrid_query
+from veda_core.context import RequestContext, set_context, _ctx
+import veda_hybrid
 
 # Representative set spanning ladder rungs AND terminal statuses: answered (direct count,
 # aggregate) + a DETERMINISTIC ungrounded refusal ("mood is turquoise" → 0 rows) so parity
@@ -37,7 +40,6 @@ QUERIES = [
 
 
 def _reset_engine_sm():
-    import veda_hybrid
     veda_hybrid._SM["sm"] = None
     veda_hybrid._SM["cols"] = None
 
@@ -46,7 +48,6 @@ def _clear_caches():
     """Clear BOTH verified caches so legacy (file) and migrated (Django) start identical —
     otherwise a stale entry in either makes a query resolve via cache in one mode only,
     producing a spurious 'rung (cached) != ...' diff. Cache behaviour is tested separately."""
-    import os
     # file cache (legacy path)
     try:
         from veda.cache import VERIFIED_FILE
@@ -98,7 +99,6 @@ def _extract(mr):
 
 
 def _run(query):
-    from veda_hybrid import run_hybrid_query
     return _extract(run_hybrid_query(query))
 
 
@@ -136,8 +136,6 @@ def _diff(legacy, migrated):
 
 
 def main():
-    from veda_core.context import RequestContext, set_context, _ctx
-
     baseline = {}
     results = {}
     all_ok = True

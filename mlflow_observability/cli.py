@@ -22,10 +22,17 @@ import sys
 from pathlib import Path
 
 from .settings import load
+from .exporter import export_once
+from .exporter import watch
+from .exporter import MlflowSink
+from .mapper import map_record
+from .evaluate import load_golden, evaluate_golden, log_report, inference_run_query_fn
+import tempfile
+from .settings import Settings
+import mlflow
 
 
 def _cmd_export(args) -> int:
-    from .exporter import export_once
     s = load()
     stats = export_once(s, from_start=args.from_start)
     print(f"exported={stats.exported} malformed={stats.skipped_malformed} failed={stats.failed}")
@@ -33,7 +40,6 @@ def _cmd_export(args) -> int:
 
 
 def _cmd_watch(args) -> int:
-    from .exporter import watch
     watch(load())
     return 0
 
@@ -204,8 +210,6 @@ def _sample_records():
 def _cmd_demo(args) -> int:
     """Seed sample runs into the configured store so the UI can be explored
     before the engine has traced any real queries."""
-    from .exporter import MlflowSink
-    from .mapper import map_record
 
     s = load()
     sink = MlflowSink(s)
@@ -227,8 +231,6 @@ def _cmd_evaluate(args) -> int:
     routing/answer correctness + latency + tokens, and log ONE aggregate run to the
     eval experiment for trend/regression tracking. Exit 2 (CI gate) if pass_rate
     falls below --min-pass-rate."""
-    from .evaluate import (load_golden, evaluate_golden, log_report,
-                           inference_run_query_fn)
     s = load()
     cases = load_golden(args.golden)
     if not cases:
@@ -256,10 +258,6 @@ def _cmd_evaluate(args) -> int:
 def _cmd_selftest(args) -> int:
     """Write two synthetic trace records to a temp file, export them into a
     temp sqlite store, and verify both runs landed with metrics + artifacts."""
-    import tempfile
-
-    from .exporter import export_once
-    from .settings import Settings
 
     # production-exact envelope: pipeline.py calls tr.finish(status) with no
     # route argument, so real lines carry route=""
@@ -343,7 +341,6 @@ def _cmd_selftest(args) -> int:
         stats2 = export_once(s)
         assert stats2.exported == 1 and stats2.failed == 0, stats2
 
-        import mlflow
         mlflow.set_tracking_uri(s.tracking_uri)
         runs = mlflow.search_runs(experiment_names=[s.experiment])
         assert len(runs) == 3, f"expected 3 runs, got {len(runs)}"

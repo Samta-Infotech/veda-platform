@@ -18,6 +18,10 @@ import re
 import json
 import heapq
 from collections import defaultdict
+from dataclasses import dataclass
+from retrieval.query_enrichment import _singularize
+import re as _re
+from veda.routing import _name_toks
 
 RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
 
@@ -90,8 +94,6 @@ def edge_category(edge, connectors):
 _ANCHOR_CONNECTIVES = {"and", "or", "of", "to", "by"}
 
 
-from dataclasses import dataclass
-
 
 @dataclass
 class AnchorCandidate:
@@ -120,8 +122,6 @@ def score_anchors(query, candidate_tables, scores=None, graph=None, adj=None, sm
     Returns AnchorCandidate list sorted by score desc. WHOLE-token singularized
     matching (not substring), so "counterparties" matches counterparty_details, not
     investigation_and_research_counter_party."""
-    import re
-    from retrieval.query_enrichment import _singularize
     from config import ANCHOR_SCORING as W
 
     # Schema-vocabulary segmentation so concatenated names ("paymenttransaction")
@@ -419,7 +419,6 @@ def _singular(w):
 
 def _query_tokens(query):
     """Raw + singularized query tokens, so 'roles' matches edge/table token 'role'."""
-    import re as _re
     raw = {w for w in _re.findall(r"[a-z0-9]+", (query or "").lower()) if len(w) > 2}
     return raw | {_singular(w) for w in raw}
 
@@ -430,7 +429,6 @@ def _table_tokens(table):
     (assets_assetverificationdocument -> also 'asset'/'verification'/'document').
     A local import avoids a module-load-time cycle (routing.py only imports this
     module's score_anchors lazily, inside a function body)."""
-    from veda.routing import _name_toks
     return _name_toks(table)
 
 

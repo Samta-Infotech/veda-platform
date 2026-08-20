@@ -57,6 +57,8 @@ try:
     _BS4_AVAILABLE = True
 except ImportError:
     _BS4_AVAILABLE = False
+import csv as _csv
+from connectors import doc_parser as _dp
 
 
 # =============================================================================
@@ -126,7 +128,6 @@ def _extract_csv(path: "Path") -> str:
 
     No external library needed — stdlib csv only.
     """
-    import csv as _csv
     try:
         lines = []
         with open(str(path), encoding="utf-8", errors="ignore", newline="") as f:
@@ -278,7 +279,6 @@ class FilesystemDocumentConnector(BaseConnector):
         # available (PDF via pymupdf4llm, DOCX via python-docx). Chunks never cross a
         # section boundary and carry the heading path (prefixed into the embedded text
         # AND in metadata.section_path). Falls back to the flat extractors below.
-        from connectors import doc_parser as _dp
         if _dp.parser_available(ext):
             parsed = _dp.parse_document(str(path))
             if parsed is not None:

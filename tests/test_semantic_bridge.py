@@ -11,6 +11,7 @@ import os, sys, json
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _VC = os.path.join(_ROOT, "veda_core")
 sys.path.insert(0, _VC)
+from veda.planning import _semantic_bridge_prefer
 _SM = json.load(open(os.path.join(_VC, "data", "veda_semantic_model.json")))
 # Load the relationship graph by ABSOLUTE path (no module-level os.chdir — that would
 # leak cwd into sibling test modules and break their cwd-relative glossary loading).
@@ -18,7 +19,6 @@ _GRAPH = json.load(open(os.path.join(_VC, "data", "veda_relationship_graph.json"
 
 
 def _pref(query, anchor, targets):
-    from veda.planning import _semantic_bridge_prefer
     return _semantic_bridge_prefer(query, _SM, _GRAPH, anchor, targets)
 
 

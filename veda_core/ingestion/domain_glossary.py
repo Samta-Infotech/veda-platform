@@ -24,6 +24,7 @@ from typing import Dict, List, Optional
 
 from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
 from utils.logger import get_logger
+import re as _re
 
 logger = get_logger(__name__)
 
@@ -200,7 +201,6 @@ def _call_slm_for_synonyms(
     ollama_url:    str,
 ) -> Optional[Dict]:
     """Call Ollama to generate synonyms for a column."""
-    import re as _re
 
     prompt = _SLM_GLOSSARY_PROMPT.format(
         table_name    = table_name,

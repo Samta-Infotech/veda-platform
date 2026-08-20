@@ -50,6 +50,13 @@ from apps.access_management.models import (  # noqa: E402
     RolePermission,
     UserRole,
 )
+from unittest import mock
+from apps.access_management.views import RoleListView
+import apps.access_management.gate as gate_module
+from apps.access_management.urls import urlpatterns
+from apps.access_management.views import AdminView
+from rest_framework.permissions import IsAdminUser
+from rest_framework.permissions import AllowAny
 
 ROLES_LIST = "/api/v1/roles/list"
 USERS_LIST = "/api/v1/users/list"
@@ -150,7 +157,6 @@ def test_off_does_not_even_resolve(staff_client):
     (``connected_sources`` in its response), which is unrelated to the gate and
     would otherwise make this test fail for a reason it was never about.
     """
-    from unittest import mock
 
     with mock.patch("apps.access_management.gate.PermissionResolver") as resolver_cls:
         staff_client.get(ROLES_LIST)
@@ -264,9 +270,6 @@ def test_shadow_is_silent_when_it_would_have_allowed(staff, staff_client, caplog
 def test_a_view_that_declares_no_permission_is_denied(staff_client, caplog):
     """Fail closed: a view opting into the gate without saying what it needs is a bug,
     and a bug in an authorization gate must be loud, not permissive."""
-    from unittest import mock
-
-    from apps.access_management.views import RoleListView
 
     with mock.patch.object(RoleListView, "required_permission", None):
         with caplog.at_level(logging.ERROR, logger="apps.access_management.gate"):
@@ -315,7 +318,6 @@ def test_the_resolver_runs_at_most_once_per_request(staff, staff_client):
 def test_the_per_request_cache_is_on_the_request_not_a_global():
     """A module-level cache would leak one user's permissions into another's request
     under any concurrency. Pinned because it is invisible until it is catastrophic."""
-    import apps.access_management.gate as gate_module
 
     source = open(gate_module.__file__).read()
     assert "_veda_effective_permissions" in source
@@ -335,7 +337,6 @@ def test_every_routed_endpoint_declares_a_permission():
     reachable, and the abstract ``AdminView`` base is deliberately undeclared because
     it is not an endpoint.
     """
-    from apps.access_management.urls import urlpatterns
 
     routed = [(str(p.pattern), p.callback.view_class) for p in urlpatterns]
     assert routed, "no routes discovered — the check would pass vacuously"
@@ -348,7 +349,6 @@ def test_every_routed_endpoint_declares_a_permission():
 def test_the_abstract_base_declares_nothing_on_purpose():
     """``AdminView`` must NOT carry a default permission — a default is what lets a
     concrete view forget to declare one and still pass the check above."""
-    from apps.access_management.views import AdminView
 
     assert AdminView.required_permission is None
 
@@ -356,9 +356,6 @@ def test_the_abstract_base_declares_nothing_on_purpose():
 def test_the_gate_is_installed_alongside_is_admin_user():
     """Never instead of. Removing IsAdminUser here would make the gate the only
     barrier, and a bug in it would open every admin endpoint."""
-    from rest_framework.permissions import IsAdminUser
-
-    from apps.access_management.views import RoleListView
 
     assert IsAdminUser in RoleListView.permission_classes
     assert RequiresPermission in RoleListView.permission_classes
@@ -370,7 +367,5 @@ def test_the_query_endpoint_is_still_untouched():
     actually reaches customer data — is NOT yet gated; that is Gate 1's phase, and
     this test should only change when it deliberately does."""
     from django.urls import resolve
-
-    from rest_framework.permissions import AllowAny
 
     assert AllowAny in resolve("/api/v1/query").func.view_class.permission_classes

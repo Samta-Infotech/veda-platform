@@ -18,17 +18,21 @@ import time
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from veda.result_analyzer import ColumnStat
+import slm
+import query.result_explainer as re_mod
+from query.result_explainer import _summary_mode
+from veda.result_analyzer import detect_patterns
+from veda.result_analyzer import analyze_result
+import veda.result_analyzer as ra_mod
 
 
 def _stat(name, kind, role):
-    from veda.result_analyzer import ColumnStat
     return ColumnStat(name=name, kind=kind, role=role)
 
 
 def _capture_prompt(monkeypatch, query, columns, rows, **kw):
     """Run run_nl_answer with a stubbed SLM; return (prompt, num_predict, answer)."""
-    import slm
-    import query.result_explainer as re_mod
     seen = {}
 
     def _cap(p, **k):
@@ -45,14 +49,12 @@ def _capture_prompt(monkeypatch, query, columns, rows, **kw):
 # summary modes
 # ---------------------------------------------------------------------------
 def test_mode_brief_for_scalar():
-    from query.result_explainer import _summary_mode
     assert _summary_mode("SCALAR", 1) == "brief"
     assert _summary_mode("DETAIL_TABLE", 1) == "brief"
     assert _summary_mode(None, 5) == "brief"
 
 
 def test_mode_analytical_for_grouped_multirow():
-    from query.result_explainer import _summary_mode
     assert _summary_mode("GROUPED", 5) == "analytical"
     assert _summary_mode("RANKING", 10) == "analytical"
     assert _summary_mode("TREND", 12) == "analytical"
@@ -87,7 +89,6 @@ def test_grouped_prompt_is_analytical_and_richer(monkeypatch):
 # verified findings enrichment (deterministic)
 # ---------------------------------------------------------------------------
 def test_grouped_findings_leader_laggard_spread():
-    from veda.result_analyzer import detect_patterns
     stats = [_stat("region", "categorical", "dimension"), _stat("revenue", "numeric", "measure")]
     rows = [{"region": r, "revenue": v} for r, v in
             [("North", 1200), ("West", 900), ("South", 600), ("East", 300)]]
@@ -100,7 +101,6 @@ def test_grouped_findings_leader_laggard_spread():
 
 
 def test_ranking_leader_and_gap():
-    from veda.result_analyzer import detect_patterns
     stats = [_stat("customer", "categorical", "dimension"), _stat("spend", "numeric", "measure")]
     rows = [{"customer": c, "spend": v} for c, v in
             [("Acme", 5000), ("Beta", 1000), ("Gamma", 800)]]
@@ -111,7 +111,6 @@ def test_ranking_leader_and_gap():
 
 
 def test_no_findings_when_single_group():
-    from veda.result_analyzer import detect_patterns
     stats = [_stat("region", "categorical", "dimension"), _stat("revenue", "numeric", "measure")]
     rows = [{"region": "North", "revenue": 1200}]
     pats = detect_patterns("GROUPED", stats, rows, [], ["revenue"], dimensions=["region"])
@@ -121,7 +120,6 @@ def test_no_findings_when_single_group():
 
 def test_identifier_dimension_not_used_as_label():
     # dimension column is an identifier role → no leader/laggard label manufactured
-    from veda.result_analyzer import detect_patterns
     stats = [_stat("region_id", "numeric", "identifier"), _stat("revenue", "numeric", "measure")]
     rows = [{"region_id": i, "revenue": v} for i, v in [(1, 1200), (2, 300)]]
     pats = detect_patterns("GROUPED", stats, rows, [], ["revenue"], dimensions=["region_id"])
@@ -132,7 +130,6 @@ def test_identifier_dimension_not_used_as_label():
 # schema independence — role-driven, not name-driven
 # ---------------------------------------------------------------------------
 def test_findings_schema_independent():
-    from veda.result_analyzer import detect_patterns
     # anti-convention names; roles come from ColumnStat (metadata), not suffixes
     stats = [_stat("display_label", "categorical", "dimension"),
              _stat("metric_value", "numeric", "measure")]
@@ -148,7 +145,6 @@ def test_findings_schema_independent():
 # numerical grounding — every finding number traces to the result
 # ---------------------------------------------------------------------------
 def test_finding_numbers_are_grounded():
-    from veda.result_analyzer import detect_patterns
     stats = [_stat("region", "categorical", "dimension"), _stat("revenue", "numeric", "measure")]
     rows = [{"region": r, "revenue": v} for r, v in
             [("North", 1200), ("West", 900), ("South", 600)]]
@@ -166,10 +162,7 @@ def test_finding_numbers_are_grounded():
 # population consistency (RC-4) + bounded large-result scan (Phase 7)
 # ---------------------------------------------------------------------------
 def test_population_consistency_and_bound(monkeypatch):
-    import query.result_explainer as re_mod
-    from veda.result_analyzer import analyze_result
     monkeypatch.setattr(re_mod, "ANALYSIS_MAX_ROWS", 1000, raising=False)
-    import veda.result_analyzer as ra_mod
     # 1400 rows: first 1000 (the bound) are 100.0; the tail is 999.0 and must NOT
     # shift the analyzed mean — both the analyzer pattern and the summary metric scan
     # only the first 1000, so they agree.
@@ -191,7 +184,6 @@ def test_population_consistency_and_bound(monkeypatch):
 
 def test_full_population_when_under_bound():
     # under the bound → exact full-population stats (no sampling divergence)
-    import query.result_explainer as re_mod
     rows = [{"amt": v} for v in ([100.0] * 50 + [900.0] * 50)]
     facts = re_mod._numeric_aggregates(["amt"], rows)
     assert facts["amt"]["mean"] == 500.0               # full mean of all 100 rows

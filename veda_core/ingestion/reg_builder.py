@@ -52,6 +52,7 @@ try:
     TORCH_GEOMETRIC_AVAILABLE = True
 except ImportError:
     TORCH_GEOMETRIC_AVAILABLE = False
+import math
 
 
 # =============================================================================
@@ -120,7 +121,6 @@ def _normalise_row_count(row_count: int, max_rows: int = 250_000) -> float:
     """Log-normalised row count → 0.0 – 1.0."""
     if row_count <= 0:
         return 0.0
-    import math
     return min(math.log1p(row_count) / math.log1p(max_rows), 1.0)
 
 

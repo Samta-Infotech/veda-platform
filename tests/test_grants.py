@@ -51,6 +51,9 @@ from apps.access_management.services import (  # noqa: E402
     RolePermissionService,
     UserRoleService,
 )
+from apps.sources.models import Source
+from apps.access_management.views import RolePermissionGrantView, RolePermissionListView, RolePermissionRevokeView, UserRoleAssignView, UserRoleListView, UserRoleRevokeView
+from rest_framework.permissions import AllowAny
 
 ASSIGN_URL = "/api/v1/users/roles/assign"
 REVOKE_URL = "/api/v1/users/roles/revoke"
@@ -134,8 +137,6 @@ def permission():
 
 @pytest.fixture
 def resource():
-    from apps.sources.models import Source
-
     source = Source.objects.create(
         name="crm_postgres", dialect="postgres", connector_type="relational")
     CatalogResource.objects.create(
@@ -537,15 +538,6 @@ def test_read_only_endpoints_are_get_only(admin_client, url):
 def test_routes_are_wired():
     from django.urls import resolve
 
-    from apps.access_management.views import (
-        RolePermissionGrantView,
-        RolePermissionListView,
-        RolePermissionRevokeView,
-        UserRoleAssignView,
-        UserRoleListView,
-        UserRoleRevokeView,
-    )
-
     assert resolve(ASSIGN_URL).func.view_class is UserRoleAssignView
     assert resolve(REVOKE_URL).func.view_class is UserRoleRevokeView
     assert resolve(ASSIGN_LIST_URL).func.view_class is UserRoleListView
@@ -562,8 +554,6 @@ def test_nothing_is_enforced_by_these_rows_yet(admin_client, member, role, permi
     UserRole.objects.create(user=member, role=role)
     RolePermission.objects.create(role=role, permission=permission,
                                   resource_path="db:crm_postgres:employee")
-
-    from rest_framework.permissions import AllowAny
 
     query_view = resolve("/api/v1/query").func.view_class
     assert AllowAny in query_view.permission_classes

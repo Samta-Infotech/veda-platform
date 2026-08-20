@@ -28,6 +28,16 @@ import sys
 import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from apps.chat.turn_events import TurnEventAccumulator
+from apps.query import scope
+from apps.query.inference_client import InferenceClient
+from apps.query.views import QueryView
+from apps.evaluation.tasks import _report_row
+from apps.evaluation.tasks import _build_report_html
+from apps.ingestion.tasks import _StageTracker
+from apps.ingestion.tasks import STAGE_ORDER, _ENGINE_STEP_TO_STAGE, _LAYER_STAGE_TO_ROW
+from apps.ingestion.models import JobStatus
+from apps.ingestion.tasks import _build_engine_command
 
 
 def _setup_django():
@@ -62,7 +72,6 @@ def _setup_django():
 # 1. TurnEventAccumulator — the fold shared by the JSON and SSE response paths
 # ─────────────────────────────────────────────────────────────────────────────
 def _accumulator():
-    from apps.chat.turn_events import TurnEventAccumulator
     return TurnEventAccumulator()
 
 
@@ -134,8 +143,6 @@ def test_turn_accumulator_tolerates_missing_payload_keys():
 # ─────────────────────────────────────────────────────────────────────────────
 @pytest.fixture
 def scope_module(monkeypatch):
-    from apps.query import scope
-
     def _with_ready(ready):
         monkeypatch.setattr(scope, "_ready_source_ids", lambda: list(ready))
         return scope
@@ -196,7 +203,6 @@ def test_scope_never_returns_empty(scope_module, monkeypatch):
 # 3. InferenceClient SSE frame parsing
 # ─────────────────────────────────────────────────────────────────────────────
 def _frames(raw: bytes):
-    from apps.query.inference_client import InferenceClient
     return list(InferenceClient._iter_sse_frames(io.BytesIO(raw)))
 
 
@@ -230,7 +236,6 @@ def test_sse_handles_crlf_and_ignores_unterminated_tail():
 # ─────────────────────────────────────────────────────────────────────────────
 def _first_item_fields(result):
     _setup_django()
-    from apps.query.views import QueryView
     return QueryView._first_item_fields(result)
 
 
@@ -259,7 +264,6 @@ def test_eval_report_row_escapes_every_interpolated_value():
     """report_html is rendered back in Django admin, so caller-supplied query
     text and generated SQL must not be able to inject markup."""
     _setup_django()
-    from apps.evaluation.tasks import _report_row
 
     row = _report_row("D01", "DIRECT", "<script>alert(1)</script>", "ok", 12,
                       "SELECT * FROM t WHERE a < 5 AND b > 2")
@@ -272,7 +276,6 @@ def test_eval_report_row_escapes_every_interpolated_value():
 
 def test_eval_report_html_escapes_the_header_fields():
     _setup_django()
-    from apps.evaluation.tasks import _build_report_html
 
     class _Run:
         label = '<img src=x onerror=alert(1)>'
@@ -304,7 +307,6 @@ class _FakeStage:
 
 def _tracker(names):
     _setup_django()
-    from apps.ingestion.tasks import _StageTracker
     stages = {n: _FakeStage(n) for n in names}
     return _StageTracker(stages), stages
 
@@ -312,7 +314,6 @@ def _tracker(names):
 def test_engine_step_map_covers_every_step_and_only_real_stages():
     """Guards the table that replaced a per-output-line dict rebuild."""
     _setup_django()
-    from apps.ingestion.tasks import STAGE_ORDER, _ENGINE_STEP_TO_STAGE, _LAYER_STAGE_TO_ROW
 
     assert sorted(_ENGINE_STEP_TO_STAGE) == list(range(1, 13)), "engine steps 1..12"
     known = {name for _o, name, _q in STAGE_ORDER}
@@ -321,7 +322,6 @@ def test_engine_step_map_covers_every_step_and_only_real_stages():
 
 
 def test_stage_tracker_marks_status_and_timestamps():
-    from apps.ingestion.models import JobStatus
     tracker, stages = _tracker(["schema_scan"])
 
     tracker.mark(["schema_scan"], JobStatus.RUNNING)
@@ -336,7 +336,6 @@ def test_stage_tracker_marks_status_and_timestamps():
 
 
 def test_stage_tracker_ignores_unknown_stage_names():
-    from apps.ingestion.models import JobStatus
     tracker, stages = _tracker(["schema_scan"])
     tracker.mark(["not_a_stage"], JobStatus.SUCCESS)   # must not raise
     tracker.update_checkpoint("not_a_stage", x=1)      # must not raise
@@ -351,7 +350,6 @@ def test_stage_tracker_merges_checkpoint_without_dropping_keys():
 
 
 def test_step_markers_advance_stages_and_close_the_previous_one():
-    from apps.ingestion.models import JobStatus
     from apps.ingestion.tasks import _consume_engine_output
 
     tracker, stages = _tracker(["schema_scan", "fk_adjacency", "data_graph"])
@@ -370,7 +368,6 @@ def test_step_markers_advance_stages_and_close_the_previous_one():
 
 
 def test_layer_stage_events_roll_up_and_transition_rows():
-    from apps.ingestion.models import JobStatus
     from apps.ingestion.tasks import _consume_engine_output
 
     tracker, stages = _tracker(["schema_scan", "embeddings", "vector_store"])
@@ -391,7 +388,6 @@ def test_layer_stage_events_roll_up_and_transition_rows():
 def test_fatal_layer_event_marks_failed_and_is_not_overwritten_on_transition():
     """A row that went FATAL must not be flipped to SUCCESS by the next row's
     transition — the guard in _apply_stage_event."""
-    from apps.ingestion.models import JobStatus
     from apps.ingestion.tasks import _consume_engine_output
 
     tracker, stages = _tracker(["embeddings", "vector_store"])
@@ -429,7 +425,6 @@ def test_engine_command_routes_by_source_kind():
     """Relational → run_ingestion; anything else → the dispatcher, with the
     source config passed via env rather than interpolated into the program."""
     _setup_django()
-    from apps.ingestion.tasks import _build_engine_command
 
     class _Src:
         def __init__(self, kind):
@@ -455,5 +450,4 @@ def test_engine_command_routes_by_source_kind():
 
 def test_engine_command_defaults_to_relational_without_a_source():
     _setup_django()
-    from apps.ingestion.tasks import _build_engine_command
     assert "main.run_ingestion" in _build_engine_command(None, {}, skip_llm=False)

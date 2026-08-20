@@ -28,6 +28,9 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict
+from veda.planning import ratio_mode
+from query.resolution import resolve, typed_anchor_evidence, domain_via
+from query.fast_path import FastPathResult
 
 ANCHOR_MARGIN = 0.15          # evidence lead required unless measure-hits break the tie
 MEASURE_NAME_MIN = 2          # side words must match a measure column ≥2 times to
@@ -56,7 +59,6 @@ def try_ratio_plan(query: str, sm=None):
 
 
 def _try(query: str, sm=None):
-    from veda.planning import ratio_mode
     rm = ratio_mode(query)
     if not rm:
         return None
@@ -69,8 +71,6 @@ def _try(query: str, sm=None):
             if (" " in _w and _w in ql) or re.search(rf"\b{re.escape(_w)}\b", ql):
                 return None
 
-    from query.resolution import resolve, typed_anchor_evidence, domain_via
-    from query.fast_path import FastPathResult
     if sm is None:
         from veda.runtime import _load_scoped_sm
         sm = _load_scoped_sm()

@@ -31,6 +31,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
                                 "veda_core"))
 
 from veda.rbac_filter import filter_doc_chunks  # noqa: E402
+from ingestion import chunk_embedder
+import numpy as np
 
 
 def _ctx(source_ids, allowed_resources):
@@ -144,8 +146,6 @@ def _fake_conn(rows):
 
 
 def test_retrieve_top_k_chunks_applies_rbac_filter_and_truncates_to_top_k():
-    from ingestion import chunk_embedder
-
     rows = _fake_rows(["msa.pdf", "denied.docx", "msa.pdf", "denied.docx", "msa.pdf",
                        "denied.docx", "msa.pdf", "denied.docx"])
     ctx = _ctx([3], ((3, (False, (("msa.pdf", None),))),))
@@ -156,7 +156,6 @@ def test_retrieve_top_k_chunks_applies_rbac_filter_and_truncates_to_top_k():
          mock.patch.object(chunk_embedder, "release_internal_connection"), \
          mock.patch("storage_adapters.reader._resolve_ef_search", return_value=40), \
          mock.patch.object(chunk_embedder, "_try_current_context", return_value=ctx):
-        import numpy as np
         results = chunk_embedder.retrieve_top_k_chunks(
             query_vector=np.zeros(4, dtype="float32"), source_ids=["3"], top_k=3)
 
@@ -165,8 +164,6 @@ def test_retrieve_top_k_chunks_applies_rbac_filter_and_truncates_to_top_k():
 
 
 def test_retrieve_top_k_chunks_no_context_is_unfiltered():
-    from ingestion import chunk_embedder
-
     rows = _fake_rows(["anything.pdf"])
 
     with mock.patch.object(chunk_embedder, "INTERNAL_DB_AVAILABLE", True), \
@@ -175,7 +172,6 @@ def test_retrieve_top_k_chunks_no_context_is_unfiltered():
          mock.patch.object(chunk_embedder, "release_internal_connection"), \
          mock.patch("storage_adapters.reader._resolve_ef_search", return_value=40), \
          mock.patch.object(chunk_embedder, "_try_current_context", return_value=None):
-        import numpy as np
         results = chunk_embedder.retrieve_top_k_chunks(
             query_vector=np.zeros(4, dtype="float32"), source_ids=["3"], top_k=5)
 
@@ -183,8 +179,6 @@ def test_retrieve_top_k_chunks_no_context_is_unfiltered():
 
 
 def test_retrieve_top_k_chunks_restricted_with_no_matches_returns_empty():
-    from ingestion import chunk_embedder
-
     rows = _fake_rows(["denied.docx", "denied.docx"])
     ctx = _ctx([3], ((3, (False, (("msa.pdf", None),))),))
 
@@ -195,7 +189,6 @@ def test_retrieve_top_k_chunks_restricted_with_no_matches_returns_empty():
          mock.patch("storage_adapters.reader._resolve_ef_search", return_value=40), \
          mock.patch.object(chunk_embedder, "_try_current_context", return_value=ctx), \
          mock.patch.object(chunk_embedder, "_IN_MEMORY_CHUNKS", None):
-        import numpy as np
         results = chunk_embedder.retrieve_top_k_chunks(
             query_vector=np.zeros(4, dtype="float32"), source_ids=["3"], top_k=5)
 

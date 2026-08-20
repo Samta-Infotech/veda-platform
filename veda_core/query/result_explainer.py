@@ -33,6 +33,10 @@ from config import (
     INSIGHT_ENGINE_TIMEOUT_MS,
 )
 from utils.logger import get_logger
+from decimal import Decimal
+import time
+from veda.result_analyzer import classify_result_type
+from veda.result_analyzer import CANONICAL_CHART_FOR_SHAPE, chart_confidence
 
 logger = get_logger(__name__)
 
@@ -140,7 +144,6 @@ def _collect_allowed_numbers(facts: dict, patterns: Optional[List[str]]) -> List
     allowed: List[float] = []
 
     def _walk(v):
-        from decimal import Decimal
         if isinstance(v, bool):
             return
         if isinstance(v, (int, float, Decimal)):
@@ -203,7 +206,6 @@ def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[s
 
 def _fmt_value(v):
     """Human-friendly scalar formatting (thousands separators for ints)."""
-    from decimal import Decimal
     if isinstance(v, bool):
         return "yes" if v else "no"
     if isinstance(v, Decimal):      # psycopg2 returns NUMERIC as Decimal
@@ -270,7 +272,6 @@ _FACTS_SAMPLE_ROWS = 5   # rows included in the precomputed facts payload, regar
 
 def _as_number(v):
     """Coerce a cell to float if it is (or looks like) a number, else None."""
-    from decimal import Decimal
     if isinstance(v, bool):
         return None
     if isinstance(v, (int, float)):
@@ -450,7 +451,6 @@ def run_nl_answer(
     Passed through to _extract_facts so the SLM narrates the right field instead
     of guessing (e.g. an id column) when asked to summarize a ranking.
     """
-    import time
     t0 = time.time()
 
     row_count = len(rows)
@@ -650,7 +650,6 @@ def _fallback_summary(ctx) -> str:
     would silently under-report the count for a large result set otherwise.
     Shape decided by result_analyzer.classify_result_type — the one canonical
     shape classifier — instead of a third inline row-count re-derivation."""
-    from veda.result_analyzer import classify_result_type
     result_type = classify_result_type(ctx.row_count, ctx.columns)
     if result_type == "empty":
         return "No results found."
@@ -688,7 +687,6 @@ def validate_visualization(viz: Optional[dict], ctx) -> Optional[Dict[str, Any]]
         return None
     if getattr(ctx, "result_type", None) != "multi_row":
         return None
-    from veda.result_analyzer import CANONICAL_CHART_FOR_SHAPE, chart_confidence
 
     shape = getattr(ctx, "result_shape", "SCALAR")
     canonical = CANONICAL_CHART_FOR_SHAPE.get(shape)
@@ -864,7 +862,6 @@ def run_insight_engine(ctx, verbose: bool = False, timeout: Optional[float] = No
     always comes back populated (from the same fallback template_answer/
     deterministic_fallback_answer phrasing), insights/visualization/
     follow_up_questions simply come back empty."""
-    import time
     t0 = time.time()
 
     confidence = _synthesize_confidence(ctx)

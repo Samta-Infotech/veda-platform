@@ -13,10 +13,11 @@ from __future__ import annotations
 import json
 import os
 from typing import Dict, List, Optional
+import redis
+from ingestion.db_abstraction import get_internal_connection, release_internal_connection
 
 
 def _redis_client():
-    import redis
     url = os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
     return redis.Redis.from_url(url)
 
@@ -28,7 +29,6 @@ def _key(tenant: str, source_id: str, value_norm: str) -> str:
 def mirror_values_to_redis(source_id: str = "", tenant: str = "default",
                            verbose: bool = False) -> Dict:
     """Read column_values for this source and mirror value_norm → [(table,col,raw)]."""
-    from ingestion.db_abstraction import get_internal_connection, release_internal_connection
 
     conn = get_internal_connection()
     grouped: Dict[str, List[dict]] = {}

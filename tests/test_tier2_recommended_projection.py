@@ -25,6 +25,14 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import query.envelope_slm as envelope_slm
+from ingestion.vector_store import RetrievalResult
+import query.retrieval_select as retrieval_select
+import query.slm_layer as slm_layer
+import veda_hybrid
+from query.slm_layer import _build_user_message
+from query.lg_nodes import node_select_columns
+import query.lg_nodes as lg_nodes
 
 TABLE = "customers"
 SM = {"columns": {
@@ -41,15 +49,12 @@ ALL_COLS = [f"{TABLE}.{c}" for c in
 
 
 def _stop_envelope(monkeypatch):
-    import query.envelope_slm as envelope_slm
-
     def _raise(*a, **k):
         raise RuntimeError("no network in tests")
     monkeypatch.setattr(envelope_slm, "emit_envelope", _raise)
 
 
 def _retrieval_results():
-    from ingestion.vector_store import RetrievalResult
     cols = ("id", "created_at", "updated_at", "created_by_id", "customer_name", "revenue", "status")
     return [RetrievalResult(col_id=f"{TABLE}.{c}", col_name=c, table_id="t1",
                             table_name=TABLE, semantic_type="UNKNOWN", similarity=0.5)
@@ -61,9 +66,6 @@ def test_tier2_sql_computes_and_passes_recommended_projection(monkeypatch):
     EXISTING recommended_projection() and forwards a non-empty, correctly
     narrowed result into run_slm_layer — audit columns excluded, display +
     HIGH-importance columns included."""
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
 
     _stop_envelope(monkeypatch)
     captured = {}
@@ -104,9 +106,6 @@ def test_tier2_sql_without_execution_state_uses_sel_tables_as_primary(monkeypatc
     """Cold Tier2 call (execution_state=None, no Tier1 primary_table to reuse)
     still computes a projection — falling back to select_retrieval's own
     top-ranked table (sel.tables[0]), not skipping the feature entirely."""
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
 
     _stop_envelope(monkeypatch)
     captured = {}
@@ -140,9 +139,6 @@ def test_tier2_sql_recommended_projection_never_crashes_on_missing_tables(monkey
     primary_table must degrade to None, never raise — _tier2_sql's own
     try/except around the projection block is the safety net, verified here
     end-to-end rather than just by inspection."""
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
 
     _stop_envelope(monkeypatch)
     captured = {}
@@ -176,8 +172,6 @@ def test_tier2_sql_recommended_projection_never_crashes_on_missing_tables(monkey
 # ---------------------------------------------------------------------------
 
 def test_build_user_message_renders_recommended_projection_block():
-    from query.slm_layer import _build_user_message
-
     cols = _retrieval_results()
     rec = [c for c in cols if c.col_name in ("customer_name", "revenue")]
     msg = _build_user_message("Show top customers by revenue", None, cols, [],
@@ -190,7 +184,6 @@ def test_build_user_message_renders_recommended_projection_block():
 def test_build_user_message_omits_block_when_none():
     """An existing caller that never passes recommended_projection_results
     must see a byte-for-byte unchanged prompt."""
-    from query.slm_layer import _build_user_message
 
     cols = _retrieval_results()
     msg_without = _build_user_message("Show top customers by revenue", None, cols, [])
@@ -205,14 +198,11 @@ def test_build_user_message_omits_block_when_none():
 # ---------------------------------------------------------------------------
 
 def test_node_select_columns_renders_recommended_projection_block(monkeypatch):
-    from query.lg_nodes import node_select_columns
-
     def fake_call_node(system_prompt, user_msg):
         fake_call_node.captured_user_msg = user_msg
         return {"selected_col_ids": [f"{TABLE}.revenue"], "group_by_col_id": None,
                 "order_by_col_id": None, "order_direction": "ASC"}
 
-    import query.lg_nodes as lg_nodes
     monkeypatch.setattr(lg_nodes, "_call_node", fake_call_node)
 
     top_k = [{"col_id": f"{TABLE}.{c}", "col_name": c, "table_id": "t1", "table_name": TABLE,
@@ -244,14 +234,12 @@ def test_node_select_columns_renders_recommended_projection_block(monkeypatch):
 def test_node_select_columns_omits_block_when_absent(monkeypatch):
     """No recommended_projection key at all (existing state shape, pre-this-
     change callers) must render the exact same prompt as before."""
-    from query.lg_nodes import node_select_columns
 
     def fake_call_node(system_prompt, user_msg):
         fake_call_node.captured_user_msg = user_msg
         return {"selected_col_ids": [], "group_by_col_id": None,
                 "order_by_col_id": None, "order_direction": "ASC"}
 
-    import query.lg_nodes as lg_nodes
     monkeypatch.setattr(lg_nodes, "_call_node", fake_call_node)
 
     top_k = [{"col_id": f"{TABLE}.id", "col_name": "id", "table_id": "t1", "table_name": TABLE,

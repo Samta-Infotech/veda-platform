@@ -33,6 +33,10 @@ except ImportError:  # celery not installed in this environment — keep the mod
         def _wrap(fn):
             return fn
         return _wrap
+from veda_core.context import RequestContext, set_context
+from storage_adapters import writer
+from veda_core import config
+from apps.access_management.services import CatalogDiscoveryService
 
 
 logger = logging.getLogger(__name__)
@@ -116,8 +120,6 @@ _STAGE_EVENT_FATAL = "fatal"
 @shared_task(queue="high")
 def task_warm_caches(prev=None, source_id=None, tenant="default"):
     """Sync Django substrate from the engine store + publish sm + rehydrate fan-out (§8.4)."""
-    from veda_core.context import RequestContext, set_context
-    from storage_adapters import writer
 
     set_context(RequestContext(source_id=int(source_id), tenant=str(tenant)))
     return writer.warm()
@@ -140,7 +142,6 @@ class _StageTracker:
         Unknown names are ignored — the engine may emit a layer stage that does
         not roll up to an observable row.
         """
-        from django.utils import timezone
         from apps.ingestion.models import JobStatus
 
         for name in names:
@@ -206,8 +207,6 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
 
     from apps.ingestion.models import IngestionJob, IngestionStage, JobStatus
     from apps.sources.models import Source, SourceStatus
-    from veda_core import config
-    from veda_core.context import RequestContext, set_context
 
     # A missing source_id used to silently default to 1 — which stamped every
     # internal-DB row (embeddings, graph_nodes, …) and the request context as
@@ -289,7 +288,6 @@ def _sync_catalog_if_enabled(source_id) -> None:
     if not getattr(settings, "VEDA_AUTO_SYNC_CATALOG", False):
         return
 
-    from apps.access_management.services import CatalogDiscoveryService
     from apps.sources.models import Source
 
     try:

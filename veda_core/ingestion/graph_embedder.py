@@ -37,6 +37,7 @@ from config import (
     DOC_CHUNKS_TABLE_NAME,
 )
 from utils.logger import get_logger
+from ingestion import m3_encoder
 
 logger = get_logger(__name__)
 
@@ -120,7 +121,6 @@ def _create_node_emb_table(cursor) -> None:
 def embed_text_bge(text: str) -> np.ndarray:
     """Query-time dense encode via the shared BGE-M3 singleton (WP3, 1024-dim normalized).
     Name kept for call-site stability; the model is now bge-m3, no passage prefix."""
-    from ingestion import m3_encoder
     return m3_encoder.encode_dense([text])[0]
 
 

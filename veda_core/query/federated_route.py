@@ -23,6 +23,10 @@ from query.cross_source_composer import (
 )
 from query.federated_executor import catalog_name
 from utils.logger import get_logger
+from collections import deque
+from slm._call_slm import call_slm
+import json
+from collections import Counter as _Counter
 
 logger = get_logger(__name__)
 
@@ -218,7 +222,6 @@ def _load_relational_fk_edges(source_id: str) -> List[tuple]:
 def _fk_path(t_from: str, t_to: str, edges: List[tuple], max_hops: int = 3):
     """Undirected BFS over FK edges → shortest list of (t1,c1,t2,c2) join conditions linking
     t_from to t_to, or None. Skips generic audit joins (created_by/updated_by → users_user)."""
-    from collections import deque
     adj: Dict[str, list] = {}
     for (t1, c1, t2, c2) in edges:
         if c1.endswith(("created_by_id", "updated_by_id")) or c2 == "id" and t2 == "users_user":
@@ -301,7 +304,6 @@ def _extract_sql(text: str) -> str:
 
 def _generate_federated_sql(query: str, schema_text: str, join_text: str,
                             prior_sql: str = "", prior_error: str = "") -> str:
-    from slm._call_slm import call_slm
     system = (
         "You write ONE read-only DuckDB SQL SELECT statement. Rules: use ONLY the fully-"
         "qualified table names given VERBATIM (including the src_<id>. prefix and quotes); "
@@ -354,7 +356,6 @@ _JSON_FENCE = re.compile(r"```(?:json)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 
 
 def _extract_json(text: str):
-    import json
     raw = text or ""
     m = _JSON_FENCE.search(raw)
     if m:
@@ -375,7 +376,6 @@ def _generate_federated_plan(query: str, schema_text: str, join_text: str,
     SELECT per metric (each grouped by the key AS <group_by>). Independent per-metric
     aggregation is what avoids join fan-out (double-counted SUMs) — the executor materializes
     each and FULL JOINs on the key. Returns the plan dict, or None to fall back to single-SQL."""
-    from slm._call_slm import call_slm
     system = (
         "You output a JSON query plan for a federated read-only DuckDB analysis. Output ONLY "
         "JSON: {\"group_by\": <bare column alias, e.g. \"city\", or null>, \"metrics\": "
@@ -460,7 +460,6 @@ def _unified_join_edges(hints: List[dict], kinds: Dict[str, str], rel_sid) -> Li
 
 def _bfs_join_conditions(from_tbl: str, to_tbl: str, edges: List[tuple]):
     """Shortest ordered list of join conditions (t1,c1,t2,c2) linking from_tbl→to_tbl, or None."""
-    from collections import deque
     if from_tbl == to_tbl:
         return []
     adj: Dict[str, list] = {}
@@ -527,7 +526,6 @@ def _assemble_metric_sql(group_table: str, group_col: str, group_alias: str,
 
 def _generate_structured_plan(query: str, schema_text: str, join_text: str) -> Optional[dict]:
     """SLM picks only fields (group column + per-metric agg/table/col) — no SQL, no joins."""
-    from slm._call_slm import call_slm
     system = (
         "You output a JSON analysis plan. Output ONLY JSON: {\"group_table\": <qualified table "
         "name from the list, e.g. src_2.public.\\\"assets_asset\\\">, \"group_col\": <its column "
@@ -596,7 +594,6 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
     # targets but aren't directly FK-connected (e.g. assets_amenity vs assets_asset), add the
     # source's own fk_to path between them (through intermediate tables) so a metric can reach
     # the group key. Purely additive — no effect when the targets are already one hub table.
-    from collections import Counter as _Counter
     rel_sid = next((s for s in by_source if kinds.get(s) == "postgres"), None)
     if rel_sid is not None:
         tcount = _Counter()

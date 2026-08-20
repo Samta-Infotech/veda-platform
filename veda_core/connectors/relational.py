@@ -49,6 +49,7 @@ from config import (
     VEDA_INTERNAL_TABLES,
     get_primary_relational_source,
 )
+import sqlite3
 
 
 # =============================================================================
@@ -862,7 +863,6 @@ class SQLiteConnector(RelationalConnector):
     """
 
     def _get_raw_connection(self):
-        import sqlite3
         path = self._config.get("path") or self._config.get("dbname", ":memory:")
         conn = sqlite3.connect(path)
         conn.row_factory = sqlite3.Row
@@ -877,7 +877,6 @@ class SQLiteConnector(RelationalConnector):
         PRAGMA table_info and PRAGMA foreign_key_list replace INFORMATION_SCHEMA.
         """
         self._ensure_connected()
-        import sqlite3
 
         name_to_id: Dict[str, str] = {}
         tables:     List[RawTable] = []
@@ -1076,7 +1075,6 @@ if __name__ == "__main__":
     import tempfile, os
 
     db_path = os.path.join(tempfile.gettempdir(), "veda_test.db")
-    import sqlite3
     conn = sqlite3.connect(db_path)
     conn.execute("CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, username TEXT, email TEXT);")
     conn.execute("CREATE TABLE IF NOT EXISTS orders (id INTEGER PRIMARY KEY, user_id INTEGER REFERENCES users(id), status TEXT, amount REAL);")

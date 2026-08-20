@@ -1,6 +1,8 @@
 """VEDA · L2/L3 — semantic table routing + primary-table selection."""
 import os, re, sys, time, logging, threading
 from veda.runtime import IMPORTANCE_WEIGHTS, TABLE_EMB_TABLE, _encode_query, _pg
+from retrieval.query_enrichment import _singularize
+from veda.runtime import get_graph
 
 
 def route_tables_semantic(query, top_n=6):
@@ -45,7 +47,6 @@ def select_primary_table(results, query, semantic_model, trace=None):
     override the choice — both stay visible in the trace, not overwritten).
     None (the default) is a no-op, same as every other trace-accepting call
     in this module."""
-    from retrieval.query_enrichment import _singularize
 
     routed = route_tables_semantic(query, top_n=8)   # {table: cosine} (may be empty)
 
@@ -131,7 +132,6 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
     if not ANCHOR_VET_ROUTER or not primary:
         return primary
     from query.join_planner import score_anchors
-    from veda.runtime import get_graph
     graph = get_graph()
     gtabs = set(graph.get("tables", []))
     if primary not in gtabs:
@@ -142,7 +142,6 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
     # is a group-by DIMENSION the UNIFIED GRAPH maps to a column ("for each workflow state"
     # → workflow_state), it's NOT the anchor entity — skip the override so "SLA hours for each
     # workflow state" stays on sla_config (the dimension demotion below then drops `workflow`).
-    from retrieval.query_enrichment import _singularize
     gm = re.search(r"\b(?:for each|for every|for all|per|each|every)\s+([a-z]+(?:\s+[a-z]+)?)",
                    query.lower())
     _grain_is_dim = False
@@ -174,7 +173,6 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
     cand = [t for t in sorted(score, key=score.get, reverse=True) if t in gtabs][:6]
     # Ensure name-matched tables are candidates even if retrieval ranked them low —
     # else a grain-hint table ("for each incident" → incident) can't be scored/pinned.
-    from retrieval.query_enrichment import _singularize
     qtok = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
     named = [t for t in gtabs if _name_toks(t, semantic_model) & qtok]
     cand = list(dict.fromkeys(cand + named + [primary]))
@@ -382,7 +380,6 @@ def _name_toks(table_name, sm=None):
     Schema-vocabulary segmentation (semantic/name_tokens) opens up concatenated
     names ("paymenttransaction" → payment, transaction); falls back to the plain
     underscore split on any failure or when the flag is off."""
-    from retrieval.query_enrichment import _singularize
     try:
         from semantic.name_tokens import table_tokens
         return {t for t in table_tokens(table_name, sm) if t not in _NAME_CONNECTIVES}

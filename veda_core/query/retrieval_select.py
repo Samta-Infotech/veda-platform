@@ -10,6 +10,9 @@ from dataclasses import dataclass, field
 from typing import List, Optional
 
 from config import TOP_K
+import numpy as _np
+from query.semantic_layer import SemanticLayerResult
+import re as _re
 
 
 @dataclass
@@ -122,8 +125,6 @@ def select_retrieval(
     # never loaded on the BGE-primary platform, so it always degraded to this empty
     # result — BGE + BM25 + FK + value carry retrieval (BGE overrides sl.top_k_columns
     # and sl.join_path is recomputed for the V2 columns below).
-    import numpy as _np
-    from query.semantic_layer import SemanticLayerResult
     stats["semantic_layer_skipped"] = True
     sl = SemanticLayerResult(
         query=query, query_vector=_np.zeros(0, dtype=_np.float32),
@@ -172,7 +173,6 @@ def select_retrieval(
         # (sim=0.0) cols.  The prior E4 carry-back iterated sl looking for
         # sim=0.0 cols that never exist — it was a no-op.  These three steps
         # replace it by running the injections directly here.
-        import re as _re
         from ingestion.vector_store import (
             retrieve_cols_by_name_keywords as _rcbnk,
             get_display_columns            as _gdc,

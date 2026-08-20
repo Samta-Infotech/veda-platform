@@ -38,6 +38,7 @@ from ingestion.db_abstraction import (
     release_internal_connection,
     DICT_CURSOR,
 )
+from psycopg2.extras import execute_values
 
 
 # =============================================================================
@@ -249,7 +250,6 @@ def _upsert_fk_edges(cursor, fk_edges: list) -> int:
 
     Batched via execute_values (F4) — was one INSERT per edge.
     """
-    from psycopg2.extras import execute_values
     cursor.execute(f"TRUNCATE TABLE {FK_ADJACENCY_TABLE_NAME};")
     rows = [
         (

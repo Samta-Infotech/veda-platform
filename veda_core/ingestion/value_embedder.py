@@ -48,6 +48,7 @@ from ingestion.db_abstraction import (
 from ingestion.column_sketches import normalize_value, value_class as _value_class
 from ingestion.graph_persist import col_node_id
 from utils.logger import get_logger
+from psycopg2.extras import execute_values
 
 logger = get_logger(__name__)
 
@@ -208,7 +209,6 @@ def embed_source_values(source_id: str, sampled_columns, tenant: str = "default"
         return ValueEmbedResult(0, n_cols, str(source_id), "no_model", round(time.time() - t0, 3))
     embs = _l2_normalize(np.asarray(embs, dtype=np.float32))
 
-    from psycopg2.extras import execute_values
     conn = get_internal_connection()
     written = 0
     try:

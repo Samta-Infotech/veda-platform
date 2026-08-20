@@ -57,6 +57,7 @@ from django.contrib.auth import get_user_model  # noqa: E402
 from rest_framework_simplejwt.tokens import RefreshToken  # noqa: E402
 
 from apps.access_management.models import Effect, Permission, Role, RolePermission  # noqa: E402
+from apps.access_management import resource_path as rp
 
 BASE_URL = os.environ.get("VEDA_TEST_BASE_URL", "http://localhost:8000")
 QUERY_URL = f"{BASE_URL}/api/v1/conversations/query"
@@ -170,7 +171,6 @@ def _set_grants(role, paths_effects):
 
 
 def _doc_path(name=""):
-    from apps.access_management import resource_path as rp
     parts = ["files", "docs_contracts"] + ([name] if name else [])
     return rp.build(*parts)
 

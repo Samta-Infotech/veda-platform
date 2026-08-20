@@ -18,6 +18,8 @@ work regardless of who/what produced the SQL.
 """
 import os
 import json
+import sqlglot
+from sqlglot import exp
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _GRAPH = {"v": None, "edges": None, "card": None}
@@ -58,8 +60,6 @@ def _load_graph():
 
 
 def _parse(sql):
-    import sqlglot
-    from sqlglot import exp
     try:
         return sqlglot.parse_one(sql, read="postgres"), exp
     except Exception:

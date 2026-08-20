@@ -16,6 +16,10 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+from retrieval.retrieval_engine_phase3 import RetrievalResult
+import veda.routing as routing
+from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
+from query.reranker import _precomputed_rerank_text
 
 
 class _FakeTrace:
@@ -38,7 +42,6 @@ class _FakeTrace:
 
 
 def _rr(col_id, final_score):
-    from retrieval.retrieval_engine_phase3 import RetrievalResult
     table_name, col_name = col_id.rsplit(".", 1)
     return RetrievalResult(col_id=col_id, column_name=col_name, table_name=table_name,
                            final_score=final_score)
@@ -48,7 +51,6 @@ def test_select_primary_table_records_confidence_without_vet_primary(monkeypatch
     """The actual gap found in the audit: confidence used to be recorded ONLY when
     vet_primary ran score_anchors. select_primary_table must now record it on its
     own, unconditionally, whenever it's given a trace."""
-    import veda.routing as routing
 
     monkeypatch.setattr(routing, "route_tables_semantic", lambda query, top_n=8: {})
 
@@ -72,7 +74,6 @@ def test_select_primary_table_confidence_is_not_tautological(monkeypatch):
     """Guard against the trivial bug of dividing best_score by itself (always 1.0,
     regardless of how close the runner-up was) — confidence must actually reflect
     the margin: a near-tie must score lower than a clear win."""
-    import veda.routing as routing
 
     monkeypatch.setattr(routing, "route_tables_semantic", lambda query, top_n=8: {})
     sm = {"columns": {}, "tables": {"a": {}, "b": {}}}
@@ -93,7 +94,6 @@ def test_select_primary_table_confidence_is_not_tautological(monkeypatch):
 def test_select_primary_table_no_trace_is_a_pure_noop():
     """Backward compatibility: trace=None (the default) must not change behavior
     or raise — every existing call site that doesn't pass trace keeps working."""
-    import veda.routing as routing
 
     sm = {"columns": {}, "tables": {"orders": {}}}
     results = [_rr("orders.total", 0.9)]
@@ -106,7 +106,6 @@ def test_results_from_tuples_carries_signal_scores():
     sparse_score/subgraph_score/fk_path_score/value_index_score/rrf_score/
     boosted_score, but the only constructor left them all at 0.0. They must now
     reflect each signal's real contribution."""
-    from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
 
     engine = RetrievalEnginePhase3.__new__(RetrievalEnginePhase3)  # skip heavy __init__
     results = engine._results_from_tuples(
@@ -133,7 +132,6 @@ def test_results_from_tuples_carries_signal_scores():
 def test_results_from_tuples_without_maps_defaults_to_zero():
     """Backward compatibility: the cache-hit call site (no signal maps available)
     must behave exactly as before — every *_score field at its dataclass default."""
-    from retrieval.retrieval_engine_phase3 import RetrievalEnginePhase3
 
     engine = RetrievalEnginePhase3.__new__(RetrievalEnginePhase3)
     results = engine._results_from_tuples([("orders.total", 0.42)])
@@ -151,5 +149,4 @@ def test_results_from_tuples_without_maps_defaults_to_zero():
 def test_reranker_precomputed_text_helper_still_importable():
     """Sanity check for the pipeline.py primary-rerank fix: _precomputed_rerank_text
     must be importable from query.reranker (pipeline.py now imports it directly)."""
-    from query.reranker import _precomputed_rerank_text
     assert callable(_precomputed_rerank_text)

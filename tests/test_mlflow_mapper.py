@@ -9,6 +9,9 @@ import sys
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "mlflow_observability"))
+from mapper import map_record
+from mapper import _refusal_category
+from mapper import build_spans
 
 
 def _answered_record():
@@ -24,7 +27,6 @@ def _answered_record():
 
 def test_provenance_tags_present(monkeypatch):
     monkeypatch.setenv("VEDA_GIT_SHA", "abc123def")
-    from mapper import map_record
     spec = map_record(_answered_record(), raw_line="x", environment="prod")
     assert spec.tags["veda.git_sha"] == "abc123def"
     assert spec.tags["veda.model.sql"] == "qwen2.5-coder:7b"
@@ -36,7 +38,6 @@ def test_provenance_tags_present(monkeypatch):
 
 
 def test_answered_outcome_no_refusal_category():
-    from mapper import map_record
     spec = map_record(_answered_record(), raw_line="x")
     assert spec.tags["veda.outcome"] == "answered"
     assert "veda.refusal_category" not in spec.tags
@@ -45,13 +46,11 @@ def test_answered_outcome_no_refusal_category():
 def test_git_sha_absent_when_env_unset(monkeypatch):
     for k in ("VEDA_GIT_SHA", "GIT_SHA", "SOURCE_COMMIT"):
         monkeypatch.delenv(k, raising=False)
-    from mapper import map_record
     spec = map_record(_answered_record(), raw_line="x")
     assert "veda.git_sha" not in spec.tags   # best-effort — absent, not crashing
 
 
 def test_refused_outcome_and_category():
-    from mapper import map_record
     rec = {"status": "qualifier_dropped", "refusal": "achieve",
            "full": {"query": "q", "sections": {"output": {"status": "qualifier_dropped"}}}}
     spec = map_record(rec, raw_line="y")
@@ -60,7 +59,6 @@ def test_refused_outcome_and_category():
 
 
 def test_clarify_outcome():
-    from mapper import map_record
     rec = {"status": "clarify", "full": {"query": "q", "sections": {"output": {"status": "clarify"}}}}
     spec = map_record(rec, raw_line="y")
     assert spec.tags["veda.outcome"] == "clarify"
@@ -81,13 +79,11 @@ import pytest
     ("something_new", "", "other"),
 ])
 def test_refusal_taxonomy(status, refusal, expected):
-    from mapper import _refusal_category
     assert _refusal_category(status, refusal) == expected
 
 
 def test_missing_provenance_fields_do_not_break():
     # a minimal record (no sections, no tenant/source/model) must still map cleanly
-    from mapper import map_record
     spec = map_record({"status": "answered", "full": {"query": "hi"}}, raw_line="z")
     assert spec.tags["veda.outcome"] == "answered"
     assert "veda.model.sql" not in spec.tags and "veda.tenant" not in spec.tags
@@ -107,7 +103,6 @@ def _sectioned_record():
 
 
 def test_build_spans_shape_and_ordering():
-    from mapper import build_spans
     secs = _sectioned_record()["full"]["sections"]
     spans = build_spans(secs, 2000)
     names = [s["name"] for s in spans]
@@ -124,14 +119,12 @@ def test_build_spans_shape_and_ordering():
 
 
 def test_build_spans_populated_on_map_record():
-    from mapper import map_record
     spec = map_record(_sectioned_record(), raw_line="s")
     assert spec.spans and len(spec.spans) == 6
     assert all({"name", "span_type", "start_offset_ms", "duration_ms"} <= set(s) for s in spec.spans)
 
 
 def test_build_spans_empty_when_no_timing():
-    from mapper import build_spans
     assert build_spans({}, None) == []
     assert build_spans({"retrieval": {"n_columns": 5}}, 100) == []  # no _ms → no span
     assert build_spans({"retrieval": {"_ms": 10}}, None) == []      # no total_ms → []

@@ -38,6 +38,8 @@ import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+import numpy as np
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 log = logging.getLogger("metal_embed")
 
@@ -91,7 +93,6 @@ class Models:
 
 
 def _l2(vecs):
-    import numpy as np
     a = np.asarray(vecs, dtype="float32")
     n = np.linalg.norm(a, axis=1, keepdims=True)
     n[n == 0] = 1.0

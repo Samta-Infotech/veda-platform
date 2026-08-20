@@ -10,6 +10,16 @@ from veda.rbac_filter import filter_retrieval_results, narrow_allowed, restricte
 from veda.runtime import get_engine
 from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
 from utils.logger import get_logger
+import importlib
+from veda.explain import new_trace
+from veda.execution_state import ExecutionState
+from slm._call_slm import collect_usage, usage_totals
+from query.temporal_parser import run_temporal_parser
+from veda.planning import aggregate_mode as _agg_mode, grouped_mode as _grp_mode, ratio_mode as _rat_mode, superlative_mode as _sup_mode
+from query.fast_path import try_fast_path, log_route
+import sqlglot as _sg
+from sqlglot import exp as _exp
+from veda.ir_equivalence import validate_ir_equivalence
 
 logger = get_logger(__name__)
 
@@ -19,7 +29,6 @@ def _ambient_ctx():
     veda_hybrid._current_ctx / veda.execution._scope_source_ids for why: the engine
     is imported both as bare `context` and as `veda_core.context`, which Python
     loads as two separate module objects with separate thread-locals)."""
-    import importlib
     for modname in ("veda_core.context", "context"):
         try:
             ctx = importlib.import_module(modname).try_current()
@@ -138,9 +147,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     join_constraints = None
     fanout_guard = None
     _llm_sql = False          # True only when the SQL's SELECT/WHERE was LLM-written
-    from veda.explain import new_trace
-    from veda.execution_state import ExecutionState
-    from slm._call_slm import collect_usage, usage_totals
     tr = new_trace(query)
     es = ExecutionState()
     _usage = collect_usage()
@@ -300,7 +306,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # gets no ranking hint) for every other route, unchanged from before.
     _rank_column_for_nl = None
 
-    from query.temporal_parser import run_temporal_parser
     _tp_result = run_temporal_parser(query)
     es.temporal_result = _tp_result
     tf = _tp_result.temporal_filter
@@ -325,8 +330,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     if is_existence:
         print(f"  [L4a] Existence    semi/anti-join operator detected → {existence_mode(query)}")
 
-    from veda.planning import (aggregate_mode as _agg_mode, grouped_mode as _grp_mode,
-                               ratio_mode as _rat_mode, superlative_mode as _sup_mode)
     _agg, _sup, _grp, _rat = (_agg_mode(query), _sup_mode(query), _grp_mode(query),
                               _rat_mode(query))
     if _sup:
@@ -355,7 +358,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # they never touch get_engine(), so they're fast even on a cold process). Existence
     # already has its own deterministic path. Conservative match → falls through on miss.
     from config import FAST_PATH_ENABLED
-    from query.fast_path import try_fast_path, log_route
     fp = None
     if FAST_PATH_ENABLED and not is_existence:
         try:
@@ -1454,8 +1456,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # Value validation: reject fabricated filter values (e.g. 'failed_review' on a
     # column that has no such value). Resolve each column to its table via the SQL's
     # own aliases; skip our deterministic polymorphic-predicate values.
-    import sqlglot as _sg
-    from sqlglot import exp as _exp
     skip_values = set()
     if join_constraints:
         # Only a literal sitting ON a polymorphic-predicate column (e.g.
@@ -1648,7 +1648,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
 
     # IR equivalence — refuse LLM SQL that introduced semantics the query never asked
     # for (extra filters/grouping/ordering/joins/DISTINCT). Deterministic builds skip it.
-    from veda.ir_equivalence import validate_ir_equivalence
     _skip_pred = (join_constraints or {}).get("predicate_cols", set())
     _tcols = ({k.split(".", 1)[1] for k, m in sm.get("columns", {}).items()
                if k.split(".", 1)[0] in allowed_tables

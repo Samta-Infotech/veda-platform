@@ -49,6 +49,9 @@ from apps.access_management.services import (  # noqa: E402
     NO_PERMISSIONS,
     PermissionResolver,
 )
+import dataclasses
+from apps.access_management.views import EffectivePermissionsView
+from rest_framework.permissions import AllowAny
 
 URL = "/api/v1/users/permissions/effective"
 ADMIN_PASSWORD = "admin-correct-horse-staple"
@@ -372,7 +375,6 @@ def test_a_deny_in_one_role_overrides_an_allow_in_another(member, read):
 def test_the_result_is_immutable(member, read):
     """It is an authorization answer that will be cached and shared — a caller must
     not be able to edit its own permissions after the fact."""
-    import dataclasses
 
     role = _role_for(member)
     _grant(role, read, "db:crm")
@@ -541,8 +543,6 @@ def test_endpoint_is_get_only(admin_client):
 def test_route_is_wired():
     from django.urls import resolve
 
-    from apps.access_management.views import EffectivePermissionsView
-
     assert resolve(URL).func.view_class is EffectivePermissionsView
 
 
@@ -550,8 +550,6 @@ def test_resolution_does_not_enforce_anything(member, read):
     """The resolver answers; it does not act. `/api/v1/query` is unchanged, and this
     test should only be deleted when Gate 2 deliberately changes that."""
     from django.urls import resolve as url_resolve
-
-    from rest_framework.permissions import AllowAny
 
     role = _role_for(member)
     _grant(role, read, "db:crm", Effect.DENY)

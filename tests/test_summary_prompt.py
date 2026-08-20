@@ -9,11 +9,13 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import slm as slm_mod
+import query.result_explainer as re_mod
+from query.result_explainer import _STYLE_EXEMPLAR
+from query.result_explainer import _SHAPE_GUIDANCE
 
 
 def _capture_prompt(monkeypatch, **kwargs):
-    import slm as slm_mod
-    import query.result_explainer as re_mod
     seen = {}
 
     def _fake(prompt, **kw):
@@ -41,7 +43,6 @@ def test_exemplar_is_currency_neutral(monkeypatch):
     """Gap fix: the few-shot exemplar must not anchor the model to a currency the
     data doesn't use — no $ / ₹ in the exemplar, and an explicit 'use the data's
     own currency' instruction."""
-    from query.result_explainer import _STYLE_EXEMPLAR
     assert "$" not in _STYLE_EXEMPLAR and "₹" not in _STYLE_EXEMPLAR
     prompt = _capture_prompt(monkeypatch)
     assert "currency/units/dates exactly as shown" in prompt
@@ -76,7 +77,6 @@ def test_grouped_shape_guidance(monkeypatch):
 
 
 def test_unknown_shape_adds_no_guidance_line(monkeypatch):
-    from query.result_explainer import _SHAPE_GUIDANCE
     prompt = _capture_prompt(monkeypatch, result_shape=None)
     # none of the shape-specific lines should appear when shape is unknown/None
     assert not any(line in prompt for line in _SHAPE_GUIDANCE.values())

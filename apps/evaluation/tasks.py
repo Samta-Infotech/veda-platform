@@ -18,6 +18,9 @@ except ImportError:
         def _wrap(fn):
             return fn
         return _wrap
+from apps.evaluation.models import EvalCaseResult, EvalRun
+from apps.query.inference_client import InferenceClient
+from apps.query.inference_client import InferenceUnavailable
 
 
 logger = logging.getLogger(__name__)
@@ -47,8 +50,6 @@ _SUCCESS_RATE_DECIMALS = 4
 @shared_task(queue="default")
 def task_run_eval(source_id=1, tenant="default", label="", queries=None):
     """Run the query set through inference, store EvalRun + EvalCaseResult (§6.4)."""
-    from apps.evaluation.models import EvalCaseResult, EvalRun
-    from apps.query.inference_client import InferenceClient
 
     query_set = queries or DEFAULT_QUERIES
     run = EvalRun.objects.create(
@@ -90,7 +91,6 @@ def _run_one_case(client, query_text: str, source_id, tenant) -> tuple[str, str,
     detail in the ``sql`` slot, matching the existing report/``details`` shape) so
     the run still produces a complete, comparable scorecard.
     """
-    from apps.query.inference_client import InferenceUnavailable
 
     started = time.time()
     status, sql = _ERROR_STATUS, ""

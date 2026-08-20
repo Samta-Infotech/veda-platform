@@ -36,6 +36,11 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 import time
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional
+from ingestion.schema_scanner import run_schema_scanner
+from ingestion.vector_store import store_fk_adjacency
+from ingestion.semantic_type_inference import run_semantic_type_inference
+from ingestion.vector_store import store_table_metadata
+from ingestion.reg_builder import run_reg_builder
 
 
 # =============================================================================
@@ -97,7 +102,6 @@ def _run_schema_pipeline(
 
     # ── Step 1: Schema Scanner ────────────────────────────────────────────────
     t0 = time.time()
-    from ingestion.schema_scanner import run_schema_scanner
     scan_result = run_schema_scanner(raw_schema=raw_schema_dict, verbose=verbose)
     ctx["scan_result"] = scan_result
     _sok(source_id,
@@ -112,7 +116,6 @@ def _run_schema_pipeline(
 
     # ── Step 2: FK Adjacency Store ────────────────────────────────────────────
     t0 = time.time()
-    from ingestion.vector_store import store_fk_adjacency
     fk_result = store_fk_adjacency(scan_result, verbose=verbose)
     ctx["fk_result"] = fk_result
     _sok(source_id,
@@ -143,7 +146,6 @@ def _run_schema_pipeline(
 
     # ── Step 4: Semantic Type Inference ───────────────────────────────────────
     t0 = time.time()
-    from ingestion.semantic_type_inference import run_semantic_type_inference
     inference_result = run_semantic_type_inference(scan_result=scan_result, verbose=verbose)
     ctx["inference_result"] = inference_result
     stats = inference_result.stats
@@ -167,7 +169,6 @@ def _run_schema_pipeline(
 
     # ── Step 5: Table Metadata Store ──────────────────────────────────────────
     t0 = time.time()
-    from ingestion.vector_store import store_table_metadata
     tm_result = store_table_metadata(inference_result, source_id=source_id, verbose=verbose)
     ctx["tm_result"] = tm_result
     _sok(source_id,
@@ -193,7 +194,6 @@ def _run_schema_pipeline(
 
     # ── Step 7: REG Builder ───────────────────────────────────────────────────
     t0 = time.time()
-    from ingestion.reg_builder import run_reg_builder
     graph = run_reg_builder(inference_result=inference_result, verbose=verbose)
     ctx["graph"] = graph
     _sok(source_id,
@@ -353,7 +353,6 @@ def _run_tabular_cross_source(connector, source_config: dict, verbose: bool) -> 
     """Post-schema steps for a file-backed tabular source (Cross-source plan):
     materialize Parquet (P2.2), sketch join keys via the connector (P2.4), and run
     tenant-wide cross_source_fk discovery (P4.2). Each step is best-effort."""
-    import os
     source_id = str(source_config["id"])
     tenant = os.environ.get("VEDA_TENANT", "default")
     try:

@@ -16,6 +16,9 @@ before diffing). The assembled dict is cached in Redis + process memory keyed by
 from __future__ import annotations
 
 from typing import Any, Tuple
+import json
+import os
+import redis as _redis
 
 # sm top-level keys, in the legacy file's order.
 _SM_KEYS = ("version", "tables", "columns", "retrieval_documents", "domain_synonyms", "concept_graph")
@@ -71,10 +74,6 @@ def publish_sm(source_id: int, tenant: str, redis_url: str | None = None) -> int
     inference tier (Django-free) can load it without touching the ORM (§8a
     "cached in Redis + inference process memory"). Returns the byte length written.
     """
-    import json
-    import os
-
-    import redis as _redis
 
     sm, _cols = SemanticModelAssembler.assemble(source_id, tenant)
     payload = json.dumps(sm)
@@ -107,10 +106,6 @@ def publish_registry(
     Best-effort: a missing file contributes an empty registry rather than failing the
     warm stage. Returns the byte length written (0 if nothing was published).
     """
-    import json
-    import os
-
-    import redis as _redis
 
     blob: dict = {}
     for name in ("concepts", "dimensions", "metrics"):
@@ -151,10 +146,6 @@ def publish_empty_registry(source_id: int, tenant: str, redis_url: str | None = 
     empty blob is a Redis HIT — `is_ready()` reads it as `False` (no concepts, no
     metrics) and every fast-path matcher naturally no-ops, falling through to the
     full pipeline instead of using a resolved scope that lies about its content."""
-    import json
-    import os
-
-    import redis as _redis
 
     payload = json.dumps({"concepts": {}, "dimensions": {}, "metrics": {}})
     url = redis_url or os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
@@ -170,10 +161,6 @@ def publish_rehydrate(source_id: int, tenant: str, scope: str = "all") -> int:
     """Publish a rehydrate message on the redis-cache pub/sub channel (§8.4) so every
     inference replica reloads the named scope (FK/glossary/KG/verified-cache/sm) and
     bumps its in-memory substrate_version. Returns the number of subscribers reached."""
-    import json
-    import os
-
-    import redis as _redis
 
     url = os.environ.get("REDIS_CACHE_URL", "redis://redis-cache:6379/0")
     client = _redis.Redis.from_url(url)

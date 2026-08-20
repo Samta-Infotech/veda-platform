@@ -19,6 +19,7 @@ from sentence_transformers import SentenceTransformer
 from config import BGE_MODEL_NAME   # unified model (cached); was hardcoded "BAAI/bge-m3"
 from config import BIENCODER_COL_TABLE   # the 1024-dim BGE store that ensemble ingest writes
 from config import BIENCODER_QUERY_PREFIX   # WP1: query prefix, matches how passages were stored
+import os as _os
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +116,6 @@ class SemanticSearcher:
         # instead of the internal store, so retrieval ran on BM25 + 4 signals with adaptive-cutoff
         # tuned to an EMPTY Signal 1. Activating Signal 1 shifts the RRF/cutoff balance — recalibrate
         # ADAPTIVE_CUTOFF/RRF against eval traffic once there's data to tune on.
-        import os as _os
         if _os.environ.get("VEDA_ANN_VIA_ADAPTER", "1") != "0":
             try:
                 from veda_core.context import try_current

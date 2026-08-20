@@ -15,6 +15,7 @@ from __future__ import annotations
 from typing import Callable, Dict, Optional
 
 from ingestion.contracts import SourceContext, StageOutcome
+from ingestion.source_dispatcher import dispatch_ingestion
 
 
 def dispatch(
@@ -38,7 +39,6 @@ def dispatch(
 
     # Non-relational: delegate to the existing type-aware source_dispatcher, which
     # honours the passed source_config (document/nosql/datalake connectors).
-    from ingestion.source_dispatcher import dispatch_ingestion
     cfg = {
         "id": ctx.source_id, "type": ctx.type, "engine": ctx.engine,
         "enabled": True, "role": "queryable", **ctx.connection,

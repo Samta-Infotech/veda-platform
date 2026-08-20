@@ -17,6 +17,7 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import veda.pipeline as pipeline
 
 
 class _FakeEngine:
@@ -32,7 +33,6 @@ def _quiet_pipeline_deps(monkeypatch):
     and stub the two schema-linking calls themselves. Shared by both refusal
     tests below; only `vet_primary`'s return value differs between them."""
     import config
-    import veda.pipeline as pipeline
 
     monkeypatch.setattr(pipeline, "verified_cache_lookup", lambda q: (None, 0.0))
     monkeypatch.setattr(pipeline, "get_engine", lambda sm: _FakeEngine())
@@ -46,7 +46,6 @@ def _quiet_pipeline_deps(monkeypatch):
 
 
 def test_run_query_no_table_refusal_has_structured_explain(monkeypatch):
-    import veda.pipeline as pipeline
     pipeline = _quiet_pipeline_deps(monkeypatch)
     monkeypatch.setattr(pipeline, "select_primary_table", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "vet_primary", lambda *a, **k: None)
@@ -66,7 +65,6 @@ def test_run_query_clarify_refusal_has_structured_explain(monkeypatch):
     """A second, differently-reached refusal status (vet_primary's ambiguity
     gate, not schema linking finding zero candidates) — proves the fix isn't
     special-cased to a single status."""
-    import veda.pipeline as pipeline
     pipeline = _quiet_pipeline_deps(monkeypatch)
     monkeypatch.setattr(pipeline, "select_primary_table", lambda *a, **k: "ledger")
     monkeypatch.setattr(pipeline, "vet_primary",
@@ -86,7 +84,6 @@ def test_run_query_no_table_refusal_matches_prior_non_explain_fields(monkeypatch
     """Regression guard: adding `explain` must not change any of the OTHER
     fields _done() already returned for a refusal before this fix (status,
     ok, feedback, msg, trace, context)."""
-    import veda.pipeline as pipeline
     pipeline = _quiet_pipeline_deps(monkeypatch)
     monkeypatch.setattr(pipeline, "select_primary_table", lambda *a, **k: None)
     monkeypatch.setattr(pipeline, "vet_primary", lambda *a, **k: None)

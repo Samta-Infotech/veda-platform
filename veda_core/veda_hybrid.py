@@ -45,6 +45,24 @@ try:
 except Exception:  # pragma: no cover
     import logging
     logger = logging.getLogger("veda.veda_hybrid")
+import importlib
+from slm._call_slm import collect_usage, usage_totals
+from veda.explain import new_trace, use_trace
+from slm._call_slm import collect_usage as _collect_usage_l0, usage_totals as _usage_totals_l0
+import io, contextlib
+from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
+from slm._call_slm import collect_usage as _collect_usage_dc, usage_totals as _usage_totals_dc
+from concurrent.futures import ThreadPoolExecutor
+from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
+from veda.explain import current_trace as _cur_trace, bind_trace as _bind_trace
+from veda.validation import value_grounding, qualifier_completeness
+from veda.ir_equivalence import validate_ir_equivalence
+import sqlglot
+from sqlglot import exp
+from connectors.base import build_connector
+from query.nosql_builder import run_nosql_builder
+from veda.rbac_filter import filter_nosql_collections
+import types
 
 _SM = {}   # {(source_id, tenant): {"sm": dict, "cols": list}} — scope-keyed (P5)
 
@@ -58,7 +76,6 @@ def _current_ctx():
     on `veda_core.context`, so a read of bare `context` alone silently misses it and the
     SQL head falls back to source 1 (global model). Try both so the request scope is
     seen regardless of which name set it."""
-    import importlib
     for modname in ("veda_core.context", "context"):
         try:
             ctx = importlib.import_module(modname).try_current()
@@ -244,7 +261,6 @@ def _maybe_federated(query, verbose=False):
     sids = list(getattr(ctx, "source_ids", ()) or ()) if ctx is not None else []
     if len(sids) < 2:
         return None
-    from slm._call_slm import collect_usage, usage_totals
     _fed_t0 = time.time()
     _fed_calls = []
     try:
@@ -378,7 +394,6 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
     once (Tier-1's own finish() becomes a checkpoint while this scope owns the
     trace — see explain.ExplainTrace.finish). Observability only: the returned
     MultiResult is byte-identical except for the added trace_id field."""
-    from veda.explain import new_trace, use_trace, current_trace
     tr = new_trace(query, trace_id=trace_id)
     with use_trace(tr):
         _final_status = "error"
@@ -432,7 +447,6 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # captured — it runs before any collect_usage() scope opens below — so it
     # gets its own small scope here, merged into whatever result is finally
     # returned via _merge_l0_usage() at every return point past this.
-    from slm._call_slm import collect_usage as _collect_usage_l0, usage_totals as _usage_totals_l0
     _l0_calls = []
     try:
         from config import NL_SIMPLIFIER_ENABLED
@@ -500,7 +514,6 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
 
     # Deterministic head: try it directly; a clean answer is complete-by-construction.
     if intent == "sql":
-        import io, contextlib
         _emit(on_event, "sql_probe", "Trying deterministic SQL...")
         sm, cols = _load_semantic_model()
         from veda.pipeline import run_query
@@ -541,9 +554,6 @@ def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, o
     probe_trace: the captured stdout of the deterministic probe (SQL intent only). Shown
     only on the single fallback (where it explains the refusal); discarded when we split
     or refuse-as-nested (there it would be a misleading 'couldn't answer' message)."""
-    import io, contextlib
-    from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
-    from slm._call_slm import collect_usage as _collect_usage_dc, usage_totals as _usage_totals_dc
     _emit(on_event, "decompose", "Checking whether this is a compound question...")
     # Capture the decomposer's own chatter so the on-screen order stays CHRONOLOGICAL. The
     # deterministic probe ran FIRST (its trace is in probe_trace); the decomposer runs AFTER.
@@ -640,7 +650,6 @@ def _fan_out(sub_queries, verbose=False, on_event=None):
         return MultiResult(items=items)
 
     import io, sys, threading
-    from concurrent.futures import ThreadPoolExecutor
     real_stdout = sys.stdout
     buffers = {}                       # thread id → that worker's capture buffer
 
@@ -653,13 +662,11 @@ def _fan_out(sub_queries, verbose=False, on_event=None):
     # Carry the ambient (source, tenant) into the fan-out threads — worker threads
     # start with an empty contextvars context, so storage_adapters would otherwise
     # fail-closed / read the wrong tenant (§4.1). Captured in the parent, set per child.
-    from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
     _parent_ctx = _try_ctx()
     # Same carry for the ambient query trace — worker threads start with an empty
     # contextvars context, so without this each parallel sub-query's SLM calls
     # (call_slm ledger) and stage records would fall on a NullTrace instead of the
     # one query trace. bind_trace in the child re-attaches the parent's trace.
-    from veda.explain import current_trace as _cur_trace, bind_trace as _bind_trace
     _parent_trace = _cur_trace()
 
     def _one(indexed_sq):
@@ -785,7 +792,6 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                         _tr_snap.cand("tier1", "candidate_fields", _c_snap)
                 except Exception:
                     pass
-                from slm._call_slm import collect_usage, usage_totals
                 _t2_t0 = time.time()
                 _t2_calls = []
                 with collect_usage() as _t2_usage:
@@ -849,7 +855,6 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
 
     # ── HYBRID → DETERMINISTIC SQL rows ⊕ document fusion ─────────────────────
     if intent == "hybrid":
-        import types
         from veda.pipeline import run_query
         from query.rag_layer import run_hybrid_layer
         sm, cols = _load_semantic_model()
@@ -912,7 +917,6 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
 
     # ── default safety net ────────────────────────────────────────────────────
     sm, cols = _load_semantic_model()
-    from veda.pipeline import run_query
     return "deterministic", run_query(query, sm, cols, return_result=True, on_event=on_event)
 
 
@@ -983,10 +987,6 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     when the deterministic head REFUSED — often because a gate tripped — so re-answering
     with only the AST firewall (as before) let dropped-filter / fabricated-value / unrequested-
     semantics answers through. Returns (ok, reason). Mirrors veda/pipeline.py:579-619."""
-    from veda.validation import value_grounding, qualifier_completeness
-    from veda.ir_equivalence import validate_ir_equivalence
-    import sqlglot
-    from sqlglot import exp
 
     cols_meta = sm.get("columns", {})
     allowed_tables = set(allowed_tables)
@@ -1613,9 +1613,6 @@ def _run_nosql(query, source_ids, verbose=False, on_event=None):
     between the caller's outer "Querying document store..."/"NoSQL query
     executed" ticks (_dispatch_single)."""
     from config import get_source, SQL_DEFAULT_LIMIT
-    from connectors.base import build_connector
-    from query.nosql_builder import run_nosql_builder
-    from veda.rbac_filter import filter_nosql_collections
     for sid in (source_ids or []):
         try:
             src = get_source(sid)

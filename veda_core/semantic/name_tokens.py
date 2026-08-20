@@ -32,6 +32,8 @@ try:
 except Exception:  # pragma: no cover
     def _singularize(w: str) -> str:
         return w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+from veda.runtime import _load_scoped_sm
+import math
 
 
 def _flags():
@@ -58,7 +60,6 @@ def _scope_key():
 
 def _load_sm():
     """Scoped semantic model when no caller-supplied model is available."""
-    from veda.runtime import _load_scoped_sm
     return _load_scoped_sm()
 
 
@@ -181,7 +182,6 @@ def token_table_idf(sm=None):
         return {}
     idf = ent.get("idf")
     if idf is None:
-        import math
         if sm is None:
             try:
                 sm = _load_sm()

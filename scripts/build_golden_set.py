@@ -36,6 +36,9 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "veda_core"))
 sys.path.insert(0, str(_REPO))
+import sqlglot
+from sqlglot import exp
+from apps.substrate.models import VerifiedQueryCache
 
 # Temporal SQL markers → "temporal"; aggregate markers → "aggregate".
 _TEMPORAL_HINTS = ("date_trunc", "interval", "now()", "current_date", "extract(",
@@ -49,8 +52,6 @@ def _extract_gold(sql: str) -> tuple[list[str], list[str], str]:
     Mirrors validation.py's use of sqlglot exp.Table / exp.Column. Columns are qualified
     to ``table.col`` when the AST carries the table (or when the query is single-table).
     """
-    import sqlglot
-    from sqlglot import exp
 
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
@@ -130,7 +131,6 @@ def main() -> int:
     os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
     import django
     django.setup()
-    from apps.substrate.models import VerifiedQueryCache
 
     rows: list[dict] = _seed_from_parity()
     seen_queries = {r["query"].strip().lower() for r in rows}

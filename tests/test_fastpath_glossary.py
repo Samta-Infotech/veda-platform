@@ -17,6 +17,7 @@ sys.path.insert(0, os.path.join(_ROOT, "veda_core"))
 os.environ.setdefault("VEDA_SOURCE_ID", "2")
 os.environ.setdefault("HF_HUB_OFFLINE", "1")
 os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
+import re
 
 
 @pytest.fixture(scope="module")
@@ -44,7 +45,6 @@ def _set(fp, on):
 
 
 def _table_of(res):
-    import re
     sql = (getattr(res, "sql", "") or "")
     m = re.search(r'from\s+"?([a-z_]+)"?', sql, re.I)
     return m.group(1) if m else None

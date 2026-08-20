@@ -1,12 +1,14 @@
 """VEDA · L7 — read-only execution."""
 import os, re, sys, time, json, logging, threading
 from veda.runtime import get_db_config
+import importlib
+import psycopg2
+from psycopg2 import sql as _sql
 
 
 def _scope_source_ids():
     """In-scope source ids from the ambient request context (both context module names —
     see veda_hybrid._current_ctx for why)."""
-    import importlib
     for modname in ("veda_core.context", "context"):
         try:
             ctx = importlib.import_module(modname).try_current()
@@ -97,8 +99,6 @@ def execute_sql(sql, params=None):
             return _execute_duckdb(sql, params, tabular)
         # (mixed relational+tabular = federated execution — handled by the composer path.)
 
-    import psycopg2
-    from psycopg2 import sql as _sql
     from config import EXECUTION_RESULT_LIMIT
     cfg = get_db_config()
     kw = {"host": cfg["host"], "port": cfg["port"], "dbname": cfg["database"],

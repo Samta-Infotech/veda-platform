@@ -13,6 +13,7 @@ ingestion pipeline carries its own risk.
 from django.core.management.base import BaseCommand
 
 from apps.access_management.services import CatalogDiscoveryService
+from apps.sources.models import Source
 
 
 class Command(BaseCommand):
@@ -24,8 +25,6 @@ class Command(BaseCommand):
             help="Reconcile only this source. Omit to reconcile every source.")
 
     def handle(self, *args, **options):
-        from apps.sources.models import Source
-
         source_id = options["source_id"]
         sources = (Source.objects.filter(pk=source_id) if source_id is not None
                    else Source.objects.all().order_by("pk"))

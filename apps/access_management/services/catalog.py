@@ -46,6 +46,9 @@ from ..models import RolePermission
 
 from ..models import CatalogResource, Effect
 from .base import NotFoundError, paginate
+from apps.substrate.models import SchemaColumn, SchemaTable
+import os
+import psycopg2
 
 logger = logging.getLogger(__name__)
 
@@ -155,7 +158,6 @@ class CatalogDiscoveryService:
         command or Celery task does not set — so the default manager would silently
         see nothing. Same precedent as ``storage_adapters/writer.py``.
         """
-        from apps.substrate.models import SchemaColumn, SchemaTable
 
         expected: dict[str, tuple[str, object]] = {}
 
@@ -214,9 +216,6 @@ class CatalogDiscoveryService:
         copy of this. Best-effort: an unreachable engine store degrades to "no
         document children this run" rather than failing the whole catalog sync.
         """
-        import os
-
-        import psycopg2
 
         dsn = dict(
             host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),

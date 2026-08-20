@@ -26,12 +26,23 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import query.envelope_slm as envelope_slm
+from veda.execution_state import ExecutionState
+from query.retrieval_v2 import _merge_seed_candidates
+from ingestion.vector_store import RetrievalResult
+import query.temporal_parser as temporal_parser
+import query.retrieval_select as retrieval_select
+import query.slm_layer as slm_layer
+import veda_hybrid
+import inference.routes.hybrid as hybrid_route
+from query.multi_result import MultiResult, SubResult, STATUS_OK
+from dataclasses import dataclass
+from decimal import Decimal
 
 
 def _stop_envelope(monkeypatch):
     """Force the envelope fast-path to fail deterministically (no network), so
     every test below exercises the IR path via the mocked run_slm_layer."""
-    import query.envelope_slm as envelope_slm
 
     def _raise(*a, **k):
         raise RuntimeError("no network in tests")
@@ -40,8 +51,6 @@ def _stop_envelope(monkeypatch):
 
 
 def test_execution_state_is_lightweight():
-    from veda.execution_state import ExecutionState
-
     es = ExecutionState()
     assert not hasattr(es, "trace"), "ExecutionState must not carry the full trace"
     assert es.candidate_fields == []
@@ -54,9 +63,6 @@ def test_execution_state_is_lightweight():
 
 
 def test_merge_seed_candidates_adds_new_and_dedups():
-    from query.retrieval_v2 import _merge_seed_candidates
-    from ingestion.vector_store import RetrievalResult
-
     existing_col = RetrievalResult(col_id="users.email", col_name="email", table_id="t1",
                                    table_name="users", semantic_type="TEXT", similarity=0.9)
     existing_tbl = RetrievalResult(col_id="", col_name="", table_id="t1", table_name="users",
@@ -82,7 +88,6 @@ def test_merge_seed_preserves_semantic_type_provenance():
     # RC-5 handoff: enriched seeds carry semantic_type; the merge must preserve it so
     # the candidate's role (MEASURE/DIMENSION/IDENTIFIER) survives into Tier-2 instead
     # of degrading to "UNKNOWN". Seeds without the key keep the old "UNKNOWN" behavior.
-    from query.retrieval_v2 import _merge_seed_candidates
     seeds = [
         {"table_name": "sales", "col_name": "region", "score": 0.8, "semantic_type": "CATEGORY"},
         {"table_name": "sales", "col_name": "amount", "score": 0.7, "semantic_type": "MONETARY"},
@@ -96,8 +101,6 @@ def test_merge_seed_preserves_semantic_type_provenance():
 
 
 def test_merge_seed_candidates_noop_without_seeds():
-    from query.retrieval_v2 import _merge_seed_candidates
-
     cols, tbls = _merge_seed_candidates([1, 2], [3], None)
     assert cols == [1, 2] and tbls == [3]
 
@@ -109,10 +112,6 @@ def test_tier2_sql_execution_state_none_preserves_prior_behavior(monkeypatch):
     """Regression guard: execution_state=None (the default) must recompute
     temporal parsing and pass seed_candidates=None to select_retrieval, exactly
     as _tier2_sql did before this refactor."""
-    import query.temporal_parser as temporal_parser
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
 
     _stop_envelope(monkeypatch)
     calls = {"temporal": 0, "kwargs": None}
@@ -151,11 +150,6 @@ def test_tier2_sql_execution_state_none_preserves_prior_behavior(monkeypatch):
 def test_tier2_sql_reuses_execution_state(monkeypatch):
     """With a populated ExecutionState: temporal parser is NOT re-run, and
     select_retrieval receives Tier1's candidate_fields as seed_candidates."""
-    import query.temporal_parser as temporal_parser
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
-    from veda.execution_state import ExecutionState
 
     _stop_envelope(monkeypatch)
     calls = {"temporal": 0, "kwargs": None}
@@ -198,10 +192,6 @@ def test_repair_hint_seeded_from_tier1_refusal(monkeypatch):
     enabled, attempt 0 already carries Tier1's reason via the EXISTING
     _repair_hint_for mechanism — not a new retry framework."""
     import config
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
-    from veda.execution_state import ExecutionState
 
     _stop_envelope(monkeypatch)
     monkeypatch.setattr(config, "VALIDATION_REPAIR_LOOP_ENABLED", True)
@@ -244,9 +234,6 @@ def test_serialize_strips_internal_only_keys():
     inference/routes/hybrid.py::_serialize() is the ONE place every head result
     (SQL/Tier-2/RAG/hybrid/NoSQL) passes through before becoming a wire response —
     this is the actual enforcement point, not just a docstring claim."""
-    import inference.routes.hybrid as hybrid_route
-    from veda.execution_state import ExecutionState
-    from query.multi_result import MultiResult, SubResult, STATUS_OK
 
     es = ExecutionState()
     es.refusal_reason = "no_table"
@@ -273,8 +260,6 @@ def test_serialize_strips_context_even_as_a_bare_dataclass_field():
     """Belt-and-suspenders: if "context"/"trace" ever became a dataclass's OWN
     field (not just a plain-dict key), it must still be stripped — asdict() runs
     through the same dict-filtering branch, not bypassed."""
-    import inference.routes.hybrid as hybrid_route
-    from dataclasses import dataclass
 
     @dataclass
     class FakeResult:
@@ -296,8 +281,6 @@ def test_serialize_converts_decimal_to_float_not_string():
     one), so no chart was ever produced for a query whose measure was a
     NUMERIC/DECIMAL column — only INTEGER aggregates (COUNT(*)) worked,
     since those already survive as native JSON ints."""
-    import inference.routes.hybrid as hybrid_route
-    from decimal import Decimal
 
     out = hybrid_route._serialize(Decimal("423.000"))
     assert out == 423.0
@@ -308,8 +291,6 @@ def test_serialize_decimal_inside_rows_still_a_real_number():
     """Same fix, exercised through the actual nested shape a query result
     takes (rows = list of tuples with mixed types) — not just the bare
     Decimal case above."""
-    import inference.routes.hybrid as hybrid_route
-    from decimal import Decimal
 
     payload = hybrid_route._serialize({
         "cols": ["amount", "label"],
@@ -323,7 +304,6 @@ def test_serialize_decimal_inside_rows_still_a_real_number():
 def test_serialize_still_passes_through_primitives_unchanged():
     """Regression guard: the Decimal special-case must not affect the
     existing str/int/float/bool/None passthrough behavior."""
-    import inference.routes.hybrid as hybrid_route
 
     assert hybrid_route._serialize("hello") == "hello"
     assert hybrid_route._serialize(42) == 42
@@ -337,11 +317,6 @@ def test_reuse_log_does_not_overstate_query_understanding_reuse(monkeypatch, cap
     functionally consumed. query_understanding/sql_planning are populated on
     ExecutionState but not read by any Tier2 decision — the log must not claim
     otherwise, even when those fields are non-empty."""
-    import query.temporal_parser as temporal_parser
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
-    from veda.execution_state import ExecutionState
 
     _stop_envelope(monkeypatch)
     monkeypatch.setattr(retrieval_select, "select_retrieval",
@@ -367,10 +342,6 @@ def test_repair_hint_not_seeded_when_loop_disabled(monkeypatch):
     on execution_state must NOT alter the query — zero behavior change when the
     flag is off, matching the existing repair loop's own contract."""
     import config
-    import query.retrieval_select as retrieval_select
-    import query.slm_layer as slm_layer
-    import veda_hybrid
-    from veda.execution_state import ExecutionState
 
     _stop_envelope(monkeypatch)
     monkeypatch.setattr(config, "VALIDATION_REPAIR_LOOP_ENABLED", False)

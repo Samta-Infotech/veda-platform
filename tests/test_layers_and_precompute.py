@@ -10,6 +10,10 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import importlib
+from ingestion.contracts import SourceContext
+from slm import _call_slm
+from query.nl_answer import template_answer
 
 
 # ---------------------------------------------------------------------------
@@ -23,10 +27,8 @@ def test_source_context_from_env_json(monkeypatch):
         "exclude_tables": ["client_tbl"],
     }))
     monkeypatch.setenv("VEDA_TENANT", "acme")
-    import importlib
     import config
     importlib.reload(config)
-    from ingestion.contracts import SourceContext
     ctx = SourceContext.from_env()
     assert ctx.source_id == "42"
     assert ctx.tenant == "acme"
@@ -39,7 +41,6 @@ def test_get_source_hard_fails_without_env(monkeypatch):
     for k in list(os.environ):
         if k.startswith("VEDA_SOURCE"):
             monkeypatch.delenv(k, raising=False)
-    import importlib
     import config
     importlib.reload(config)
     with pytest.raises(RuntimeError):
@@ -51,7 +52,6 @@ def test_get_source_hard_fails_without_env(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_slm_backend_selection(monkeypatch):
-    from slm import _call_slm
     monkeypatch.setenv("SLM_BACKEND", "vllm")
     _call_slm.reset_backend()
     assert _call_slm.get_backend().name == "vllm"
@@ -62,7 +62,6 @@ def test_slm_backend_selection(monkeypatch):
 
 
 def test_slm_unreachable_raises_runtimeerror(monkeypatch):
-    from slm import _call_slm
     monkeypatch.setenv("SLM_BACKEND", "ollama")
     monkeypatch.setenv("SLM_OLLAMA_BASE_URL", "http://127.0.0.1:1")  # nothing listens
     _call_slm.reset_backend()
@@ -76,7 +75,6 @@ def test_slm_unreachable_raises_runtimeerror(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_nl_template_shapes():
-    from query.nl_answer import template_answer
     assert template_answer("how many users", ["count"], []) == "No results found."
     one = template_answer("how many users", ["count"], [{"count": 42}])
     assert one is not None and "42" in one

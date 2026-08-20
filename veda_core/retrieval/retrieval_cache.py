@@ -20,6 +20,7 @@ import logging
 import time
 from typing import List, Tuple, Optional, Dict
 from pathlib import Path
+import shutil
 
 logger = logging.getLogger(__name__)
 
@@ -208,7 +209,6 @@ class RetrievalCache:
             except Exception as e:
                 logger.warning(f"Redis clear failed: {e}")
         else:
-            import shutil
             try:
                 shutil.rmtree(self.cache_dir)
                 self.cache_dir.mkdir(parents=True, exist_ok=True)

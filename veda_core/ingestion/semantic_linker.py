@@ -61,6 +61,9 @@ from ingestion.db_abstraction import (
 )
 from ingestion.graph_persist import GraphEdge, GraphNode, chunk_node_id
 from utils.logger import get_logger
+from ingestion.entity_linker import _GENERIC_WORDS
+from ingestion.value_embedder import load_value_embeddings
+from ingestion.entity_linker import entity_node_id
 
 logger = get_logger(__name__)
 
@@ -301,7 +304,6 @@ def extract_candidate_spans(text: str, max_spans: int = SEMANTIC_VALUE_MAX_SPANS
     generic single words dropped, capped. Order-stable (first occurrence wins)."""
     if not text:
         return []
-    from ingestion.entity_linker import _GENERIC_WORDS
     seen: set = set()
     out: List[str] = []
     for m in list(_QUOTED_RE.finditer(text)) + list(_CAP_RUN_RE.finditer(text)):
@@ -360,7 +362,6 @@ def build_value_bridge(chunks, source_id: str, tenant: str = "default",
         return [], []
     t0 = time.time()
 
-    from ingestion.value_embedder import load_value_embeddings
     col_nodes, value_norms, displays, value_classes, val_mat = \
         load_value_embeddings(exclude_source_id=source_id)
     if not col_nodes:
@@ -389,7 +390,6 @@ def build_value_bridge(chunks, source_id: str, tenant: str = "default",
 
     matches = match_spans_to_values(span_mat, span_chunk_node, val_mat, col_nodes)
 
-    from ingestion.entity_linker import entity_node_id
     me_w = GRAPH_EDGE_WEIGHTS.get("mentions_entity", 1.2)
     vo_w = GRAPH_EDGE_WEIGHTS.get("semantic_value_of", 1.1)
     _cls_map = {"category": "term", "text": "name", "id": "id", "numeric": "id"}

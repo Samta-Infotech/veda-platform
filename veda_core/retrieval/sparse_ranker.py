@@ -21,6 +21,7 @@ import logging
 from typing import Dict, List, Tuple
 
 from config import COLUMN_SPARSE_TABLE, TABLE_SPARSE_TABLE
+from ingestion import m3_encoder
 
 logger = logging.getLogger(__name__)
 
@@ -102,7 +103,6 @@ class SparseRanker:
 
     # ── fallback: encode retrieval_documents in-memory (dev / no persisted rows) ─
     def fit(self, semantic_model: Dict) -> "SparseRanker":
-        from ingestion import m3_encoder
         rdocs = semantic_model.get("retrieval_documents", {}) or {}
         keys = list(rdocs.keys())
         texts = [rdocs[k] for k in keys]
@@ -138,7 +138,6 @@ class SparseRanker:
         return scores
 
     def _encode(self, query: str, enriched_tokens):
-        from ingestion import m3_encoder
         _, q_sparse = m3_encoder.encode_query(query)
         phrase_sparses = []
         if enriched_tokens:

@@ -28,6 +28,8 @@ from pathlib import Path
 _REPO = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_REPO / "veda_core"))
 sys.path.insert(0, str(_REPO))
+from context import RequestContext, set_context
+from veda.runtime import get_engine
 
 _SIGNALS = ["dense", "sparse", "subgraph", "fk", "value", "table_prior"]
 _LO, _HI = 0.25, 3.0
@@ -74,11 +76,9 @@ def main() -> int:
     except Exception as e:
         print(f"[warn] django.setup() failed ({e})", file=sys.stderr)
 
-    from context import RequestContext, set_context
     set_context(RequestContext(source_id=args.source_id, tenant=args.tenant))
 
     import config as _config
-    from veda.runtime import get_engine
 
     golden_path = Path(args.golden)
     golden = _load_golden(golden_path)

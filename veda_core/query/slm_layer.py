@@ -62,6 +62,7 @@ from ingestion.vector_store import RetrievalResult
 from query.semantic_layer import JoinEdge
 from query.temporal_parser import TemporalFilter
 from utils.logger import get_logger
+from slm import call_slm
 
 logger = get_logger(__name__)
 
@@ -588,7 +589,6 @@ def _call_ollama(user_message: str) -> str:
         from config import SLM_IR_MAX_TOKENS as _IR_CAP
     except Exception:
         _IR_CAP = SLM_MAX_TOKENS
-    from slm import call_slm
     return call_slm(
         user_message,
         system=_SYSTEM_PROMPT,
@@ -1265,7 +1265,6 @@ def _call_ollama_decompose(query: str) -> str:
     """Decomposer Ollama call. Mirrors _call_ollama but uses the decomposer system
     prompt and a tiny decode budget (the output is a small JSON object). Raises
     RuntimeError on network/API errors — the caller degrades to 'single'."""
-    from slm import call_slm
     return call_slm(
         query,
         system=_DECOMPOSE_SYSTEM_PROMPT,

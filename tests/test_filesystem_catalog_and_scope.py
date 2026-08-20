@@ -59,6 +59,9 @@ from apps.access_management.services.data_scope import compute_data_scope  # noq
 from apps.sources.models import Dialect, Source  # noqa: E402
 
 import chatbot.nodes as chatbot_nodes  # noqa: E402
+from apps.access_management import resource_path as rp
+from apps.access_management.models import CatalogResource
+from apps.substrate.models import SchemaColumn, SchemaTable
 
 TENANT = "default"
 
@@ -140,7 +143,6 @@ def _docs_source():
 
 
 def _path(*parts):
-    from apps.access_management import resource_path as rp
     return rp.build("files", "contracts", *parts)
 
 
@@ -161,7 +163,6 @@ def test_discovery_creates_one_child_resource_per_document():
         report = CatalogDiscoveryService().sync_source(source)
 
     assert report.created == 3  # root + 2 documents
-    from apps.access_management.models import CatalogResource
     paths = set(CatalogResource.objects.filter(source=source).values_list("path", flat=True))
     assert paths == {"files:contracts", "files:contracts:msa.pdf", "files:contracts:notes.md"}
 
@@ -171,7 +172,6 @@ def test_discovery_document_child_carries_the_engine_doc_id_as_substrate_id():
     with _mock_doc_rows(("doc-1", "msa.pdf")):
         CatalogDiscoveryService().sync_source(source)
 
-    from apps.access_management.models import CatalogResource
     row = CatalogResource.objects.get(source=source, path="files:contracts:msa.pdf")
     assert str(row.substrate_id) == "doc-1"
     assert row.parent_path == "files:contracts"
@@ -183,7 +183,6 @@ def test_discovery_with_zero_documents_creates_only_the_root():
         report = CatalogDiscoveryService().sync_source(source)
 
     assert report.created == 1
-    from apps.access_management.models import CatalogResource
     assert list(CatalogResource.objects.filter(source=source).values_list("path", flat=True)) \
         == ["files:contracts"]
 
@@ -197,7 +196,6 @@ def test_discovery_rerun_deactivates_a_document_removed_upstream():
         report = CatalogDiscoveryService().sync_source(source)
 
     assert report.deactivated == 1
-    from apps.access_management.models import CatalogResource
     notes = CatalogResource.objects.get(source=source, path="files:contracts:notes.md")
     assert notes.is_active is False
     msa = CatalogResource.objects.get(source=source, path="files:contracts:msa.pdf")
@@ -209,7 +207,6 @@ def test_db_kind_source_is_completely_unaffected_by_the_files_branch():
     guard for the exact bug this session found in vendor/table_metadata drift."""
     source = Source.objects.create(
         name="crm", dialect=Dialect.POSTGRES, connector_type="sql", ready=True)
-    from apps.substrate.models import SchemaColumn, SchemaTable
     table = SchemaTable.objects.create(source=source, tenant=TENANT, name="employee")
     SchemaColumn.objects.create(source=source, tenant=TENANT, table=table, name="id",
                                 data_type="text")

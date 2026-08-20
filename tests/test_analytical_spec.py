@@ -10,6 +10,8 @@ from typing import List, Optional
 
 _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(_ROOT, "veda_core"))
+from veda.analytical_spec import derive_spec
+from veda.analytical_spec import emit_sql
 
 
 @dataclass
@@ -40,7 +42,6 @@ _SM = {"columns": {
 
 
 def _derive(intent, anchor, query, measure_concept=None, secondaries=None):
-    from veda.analytical_spec import derive_spec
     gi = _GI(intent=intent, anchor=anchor, secondaries=secondaries or [],
              measure=_Measure(concept=measure_concept) if measure_concept else None)
     return derive_spec(gi, query, _SM)
@@ -48,7 +49,6 @@ def _derive(intent, anchor, query, measure_concept=None, secondaries=None):
 
 # ── scalar COUNT — emit_sql REUSES build_aggregate_sql (no parallel builder) ──
 def test_scalar_count():
-    from veda.analytical_spec import emit_sql
     s = _derive("count", "assets_asset", "how many properties are there")
     assert s and s.output_shape == "scalar" and s.aggregation == "count"
     sql = emit_sql(s, _SM)
@@ -57,7 +57,6 @@ def test_scalar_count():
 
 # ── scalar SUM with a grounded measure column ────────────────────────────────
 def test_scalar_sum_grounds_measure():
-    from veda.analytical_spec import emit_sql
     s = _derive("sum", "accounts_paymenttransaction",
                 "total paid amount of payment transactions", measure_concept="paid amount")
     assert s and s.aggregation == "sum" and s.measure_column == "paid_amount"
@@ -67,7 +66,6 @@ def test_scalar_sum_grounds_measure():
 
 # ── grouped GROUP BY on an anchor dimension ──────────────────────────────────
 def test_grouped_by_dimension():
-    from veda.analytical_spec import emit_sql
     s = _derive("count", "accounts_paymenttransaction",
                 "number of payment transactions by payment type")
     assert s and s.output_shape == "grouped" and s.group_keys == ["payment_type_id"]

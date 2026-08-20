@@ -28,6 +28,7 @@ import json
 import re
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
+import os as _os
 
 _KEY_OK = re.compile(r"[^A-Za-z0-9_\-./ ]+")
 
@@ -286,7 +287,6 @@ def map_record(record: Dict[str, Any], *, raw_line: str = "",
     # git_sha + exporter version come from the sidecar env (set at deploy); model
     # names come from the trace itself (pipeline._done stamps them on the output /
     # nl_summary sections). All best-effort — absent keys are simply not tagged.
-    import os as _os
     _git = _os.environ.get("VEDA_GIT_SHA") or _os.environ.get("GIT_SHA") or _os.environ.get("SOURCE_COMMIT")
     if _git:
         t["veda.git_sha"] = str(_git)[:40]

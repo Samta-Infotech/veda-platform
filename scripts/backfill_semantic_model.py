@@ -17,6 +17,8 @@ import re
 import sys
 
 import django
+import psycopg2
+from storage_adapters import assembler
 
 _TOKEN_RE = re.compile(r"[^a-z0-9]+")
 
@@ -39,7 +41,6 @@ def _agg_for(sem_type: str, data_type: str) -> list:
 
 
 def _internal_conn():
-    import psycopg2
     return psycopg2.connect(
         host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
         port=int(os.environ.get("VEDA_INTERNAL_PORT", "6432")),
@@ -111,7 +112,6 @@ def main() -> int:
     args = ap.parse_args()
 
     django.setup()   # DJANGO_SETTINGS_MODULE comes from the container env
-    from storage_adapters import assembler
 
     sids = [s.strip() for s in args.source_ids.split(",") if s.strip()]
     conn = _internal_conn()

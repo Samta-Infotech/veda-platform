@@ -45,6 +45,8 @@ try:
     BIENCODER_QUERY_AVAILABLE = True
 except ImportError:
     pass
+import psycopg2
+from query.reranker import rerank_columns, rerank_tables, RERANKER_AVAILABLE
 
 
 def _get_query_encoder():
@@ -62,7 +64,6 @@ def _get_query_encoder():
 
 
 def _get_pg_conn():
-    import psycopg2
     cfg = VEDA_INTERNAL_DB
     return psycopg2.connect(
         host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
@@ -402,7 +403,6 @@ def retrieve_v2(
     this stage's own retrieval — not appended post-hoc, and Tier2's own retrieval
     still runs regardless, so it can recover if Tier1's candidates weren't enough.
     """
-    from query.reranker import rerank_columns, rerank_tables, RERANKER_AVAILABLE
 
     fs = first_stage_retrieve(query, source_ids=source_ids, verbose=verbose)
 

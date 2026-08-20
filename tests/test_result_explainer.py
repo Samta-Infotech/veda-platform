@@ -8,6 +8,13 @@ import pytest
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import slm
+from query import result_explainer as re_mod
+from query.result_explainer import _extract_facts
+from query import result_explainer
+from connectors.base import QueryResult
+from veda.result_analyzer import analyze_result
+import json
 
 
 # ---------------------------------------------------------------------------
@@ -88,9 +95,6 @@ def _multi_row_args():
 
 
 def test_slm_path_uses_small_model(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -109,9 +113,6 @@ def test_slm_path_uses_small_model(monkeypatch):
 
 
 def test_slm_timeout_falls_back_to_deterministic(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     def fake_call_slm(prompt, **kwargs):
         raise RuntimeError("SLM unreachable: timed out")
 
@@ -123,9 +124,6 @@ def test_slm_timeout_falls_back_to_deterministic(monkeypatch):
 
 
 def test_slm_invalid_empty_response_falls_back(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda prompt, **kwargs: "   ")
     columns, rows = _multi_row_args()
     result = re_mod.run_nl_answer("list top customers", columns, rows)
@@ -134,9 +132,6 @@ def test_slm_invalid_empty_response_falls_back(monkeypatch):
 
 
 def test_semantic_metadata_enriches_prompt(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -163,9 +158,6 @@ def test_semantic_metadata_enriches_prompt(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_empty_result_never_calls_slm(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     def must_not_be_called(prompt, **kwargs):
         raise AssertionError("SLM should not be called for an empty result")
 
@@ -175,9 +167,6 @@ def test_empty_result_never_calls_slm(monkeypatch):
 
 
 def test_scalar_result_now_goes_through_slm(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -194,9 +183,6 @@ def test_scalar_result_now_goes_through_slm(monkeypatch):
 
 
 def test_scalar_slm_failure_falls_back_to_template_not_generic_count(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda prompt, **kwargs: (_ for _ in ()).throw(
         RuntimeError("SLM unreachable")))
     result = re_mod.run_nl_answer("how many open incidents", ["count"], [{"count": 137}])
@@ -206,9 +192,6 @@ def test_scalar_slm_failure_falls_back_to_template_not_generic_count(monkeypatch
 
 
 def test_rank_column_hint_reaches_the_prompt(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -226,7 +209,6 @@ def test_rank_column_hint_reaches_the_prompt(monkeypatch):
 
 
 def test_rank_column_included_even_if_outside_top_six_columns():
-    from query.result_explainer import _extract_facts
     columns = ["c1", "c2", "c3", "c4", "c5", "c6", "c7", "amount"]
     rows = [{"c1": 1, "c2": 2, "c3": 3, "c4": 4, "c5": 5, "c6": 6, "c7": 7, "amount": 999}]
     facts = _extract_facts(columns, rows, rank_column="amount")
@@ -235,9 +217,6 @@ def test_rank_column_included_even_if_outside_top_six_columns():
 
 
 def test_facts_payload_stays_compact_for_large_results(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -262,7 +241,6 @@ def test_facts_payload_stays_compact_for_large_results(monkeypatch):
 
 def test_nl_answer_shim_reexports():
     from query.nl_answer import template_answer, deterministic_fallback_answer, run_nl_answer
-    from query import result_explainer
     assert template_answer is result_explainer.template_answer
     assert deterministic_fallback_answer is result_explainer.deterministic_fallback_answer
     assert run_nl_answer is result_explainer.run_nl_answer
@@ -273,7 +251,6 @@ def test_nl_answer_shim_reexports():
 # ---------------------------------------------------------------------------
 
 def test_queryresult_carries_answer_field():
-    from connectors.base import QueryResult
     res = QueryResult(source_id="1", source_type="nosql", rows=[], row_count=0,
                       columns=[], sql_or_query="{}", duration_ms=1.0, truncated=False,
                       error=None)
@@ -289,7 +266,6 @@ def test_queryresult_carries_answer_field():
 # ---------------------------------------------------------------------------
 
 def _ctx(question="who are the top spenders", sm=None):
-    from veda.result_analyzer import analyze_result
     sql = ('SELECT payer_name, SUM(amount) AS total FROM ledger '
            'GROUP BY payer_name ORDER BY total DESC LIMIT 5')
     rows = [{"payer_name": "Alice", "total": 500}, {"payer_name": "Bob", "total": 300},
@@ -298,10 +274,6 @@ def _ctx(question="who are the top spenders", sm=None):
 
 
 def test_insight_engine_empty_result_never_calls_slm(monkeypatch):
-    import slm
-    from veda.result_analyzer import analyze_result
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: (_ for _ in ()).throw(
         AssertionError("SLM should not be called for an empty result")))
     ctx = analyze_result("nothing here", "SELECT * FROM ledger WHERE 1=0", ["id"], [],
@@ -312,10 +284,6 @@ def test_insight_engine_empty_result_never_calls_slm(monkeypatch):
 
 
 def test_insight_engine_uses_small_model_and_json_format(monkeypatch):
-    import json
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -347,9 +315,6 @@ def test_insight_engine_uses_small_model_and_json_format(monkeypatch):
 
 
 def test_insight_engine_falls_back_on_slm_failure(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: (_ for _ in ()).throw(
         RuntimeError("SLM down")))
     result = re_mod.run_insight_engine(_ctx())
@@ -359,9 +324,6 @@ def test_insight_engine_falls_back_on_slm_failure(monkeypatch):
 
 
 def test_insight_engine_falls_back_on_malformed_json(monkeypatch):
-    import slm
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: "not json at all")
     result = re_mod.run_insight_engine(_ctx())
 
@@ -369,10 +331,6 @@ def test_insight_engine_falls_back_on_malformed_json(monkeypatch):
 
 
 def test_insight_engine_drops_visualization_with_unknown_column(monkeypatch):
-    import json
-    import slm
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: json.dumps({
         "summary": "ok", "insights": [], "follow_up_questions": [],
         "visualization": {"type": "bar", "x_axis": "does_not_exist", "y_axis": "total"},
@@ -382,11 +340,6 @@ def test_insight_engine_drops_visualization_with_unknown_column(monkeypatch):
 
 
 def test_insight_engine_drops_visualization_for_non_multi_row(monkeypatch):
-    import json
-    import slm
-    from veda.result_analyzer import analyze_result
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: json.dumps({
         "summary": "137 open incidents.", "insights": [], "follow_up_questions": [],
         "visualization": {"type": "bar", "x_axis": "count", "y_axis": "count"},
@@ -398,10 +351,6 @@ def test_insight_engine_drops_visualization_for_non_multi_row(monkeypatch):
 
 
 def test_insight_engine_uses_semantic_metadata_in_prompt(monkeypatch):
-    import json
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -422,10 +371,6 @@ def test_insight_engine_uses_semantic_metadata_in_prompt(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_insight_engine_prompt_includes_precomputed_statistics(monkeypatch):
-    import json
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -439,10 +384,6 @@ def test_insight_engine_prompt_includes_precomputed_statistics(monkeypatch):
 
 
 def test_insight_engine_prompt_discourages_descriptive_summaries(monkeypatch):
-    import json
-    import slm
-    from query import result_explainer as re_mod
-
     captured = {}
     monkeypatch.setattr(slm, "call_slm", lambda p, **k: (captured.setdefault("prompt", p),
                                                          json.dumps({"summary": "ok", "insights": [],
@@ -453,11 +394,6 @@ def test_insight_engine_prompt_discourages_descriptive_summaries(monkeypatch):
 
 
 def test_insight_engine_prompt_excludes_identifier_columns_from_stats(monkeypatch):
-    import json
-    import slm
-    from veda.result_analyzer import analyze_result
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):
@@ -481,11 +417,6 @@ def test_insight_engine_prompt_excludes_identifier_columns_from_stats(monkeypatc
 # ---------------------------------------------------------------------------
 
 def test_insight_engine_confidence_from_context_weakest_link(monkeypatch):
-    import json
-    import slm
-    from veda.result_analyzer import analyze_result
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: json.dumps(
         {"summary": "ok", "insights": [], "follow_up_questions": []}))
     sql = ('SELECT payer_name, SUM(amount) AS total FROM ledger '
@@ -499,10 +430,6 @@ def test_insight_engine_confidence_from_context_weakest_link(monkeypatch):
 
 
 def test_insight_engine_confidence_defaults_to_one_when_no_inputs(monkeypatch):
-    import json
-    import slm
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: json.dumps(
         {"summary": "ok", "insights": [], "follow_up_questions": []}))
     result = re_mod.run_insight_engine(_ctx())   # no confidence_inputs supplied
@@ -510,10 +437,6 @@ def test_insight_engine_confidence_defaults_to_one_when_no_inputs(monkeypatch):
 
 
 def test_insight_engine_confidence_present_even_on_slm_failure(monkeypatch):
-    import slm
-    from veda.result_analyzer import analyze_result
-    from query import result_explainer as re_mod
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: (_ for _ in ()).throw(
         RuntimeError("down")))
     ctx = analyze_result("q", "SELECT id FROM t", ["id"], [{"id": 1}, {"id": 2}],
@@ -523,11 +446,6 @@ def test_insight_engine_confidence_present_even_on_slm_failure(monkeypatch):
 
 
 def test_insight_engine_prompt_includes_result_shape_hint(monkeypatch):
-    import json
-    import slm
-    from veda.result_analyzer import analyze_result
-    from query import result_explainer as re_mod
-
     captured = {}
 
     def fake_call_slm(prompt, **kwargs):

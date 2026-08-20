@@ -50,6 +50,10 @@ from apps.access_management.services.data_scope import (  # noqa: E402
 )
 from apps.query.inference_client import InferenceClient  # noqa: E402
 from veda_core.context import RequestContext, parse_allowed_resources  # noqa: E402
+from apps.query.inference_client import InferenceClientConfig
+import inspect
+from starlette.testclient import TestClient
+import inference.main as main_mod
 
 
 # ---------------------------------------------------------------------------
@@ -87,7 +91,6 @@ def test_serialize_is_json_encodable():
 # ---------------------------------------------------------------------------
 
 def _client():
-    from apps.query.inference_client import InferenceClientConfig
     return InferenceClient(InferenceClientConfig(base_url="http://inference.test"))
 
 
@@ -107,7 +110,6 @@ def test_run_hybrid_query_and_stream_hybrid_query_both_accept_data_scope():
     """Signature-level regression: both real call sites (QueryView,
     call_engine_node) pass ``data_scope=`` — a future refactor dropping the
     parameter from either would break at the call site, not silently no-op."""
-    import inspect
     assert "data_scope" in inspect.signature(InferenceClient.run_hybrid_query).parameters
     assert "data_scope" in inspect.signature(InferenceClient.stream_hybrid_query).parameters
 
@@ -163,10 +165,6 @@ def test_a_context_with_no_allowed_resources_field_defaults_to_none():
 # ---------------------------------------------------------------------------
 
 def _app_with_captured_context(monkeypatch):
-    from starlette.testclient import TestClient
-
-    import inference.main as main_mod
-
     captured = []
     monkeypatch.setattr(main_mod, "set_context", lambda ctx: captured.append(ctx))
     app = main_mod.create_app()

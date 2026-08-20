@@ -35,6 +35,7 @@
 # =============================================================================
 import os as _os_src
 import json as _json_src
+import os as _o
 
 # Framework-noise tables always excluded by the scanner (Django/Celery internals).
 # Client-specific exclusions live on the Source row (Source.exclude_tables) and
@@ -271,7 +272,6 @@ NUM_TABLES            = MAX_TABLES   # alias used by schema/simulate_schema.py
 def resolve_device() -> str:
     """Pick the inference device at RUNTIME, portably. Order: explicit VEDA_DEVICE env
     override → CUDA → Apple MPS → CPU. Returns 'cpu' if torch is absent (thin api image)."""
-    import os as _o
     forced = _o.environ.get("VEDA_DEVICE", "").strip().lower()
     if forced in ("cpu", "cuda", "mps"):
         return forced
@@ -289,7 +289,6 @@ def resolve_device() -> str:
 def available_memory_gb() -> float:
     """Best-effort available device/host memory in GB, read at runtime (never hardcoded).
     CUDA → free VRAM; MPS/CPU → host RAM. Falls back to a conservative 4.0 GB."""
-    import os as _o
     dev = resolve_device()
     try:
         import torch as _t
@@ -311,7 +310,6 @@ def available_memory_gb() -> float:
 def scaled_batch_size(base: int, per_gb: int = 8, cap: int = 256) -> int:
     """Scale a base batch size by a FRACTION of available memory — bigger box → bigger
     batches, small box → base. Never references a literal machine size (§P8-A)."""
-    import os as _o
     mem = available_memory_gb()
     scaled = int(base * max(1.0, (mem * 0.5) / per_gb))
     return max(base, min(scaled, cap)) if _o.environ.get("VEDA_SCALE_BATCH", "1") == "1" else base

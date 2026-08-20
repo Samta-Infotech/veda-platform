@@ -2,6 +2,8 @@
 import os, re, sys, time, json, logging, threading
 from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
 from query.ranking_parser import parse_ranking
+import urllib.request
+from slm import call_slm
 
 _DEFAULT_ROW_LIMIT = 100
 
@@ -144,7 +146,6 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
     When SINGLE_TABLE_DETERMINISTIC is on, first try the SLM-free builder for the
     safe cases (projection + date range + temporal rank); fall back to the SLM only
     when the query needs something the builder won't guess."""
-    import urllib.request
     try:
         from config import SINGLE_TABLE_DETERMINISTIC as _det_on
     except Exception:
@@ -200,7 +201,6 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
     # temperature 0 + fixed seed → greedy, reproducible decoding. SQL generation
     # must be DETERMINISTIC: the same question had been returning different WHERE
     # clauses (and different counts) run-to-run at temperature 0.1.
-    from slm import call_slm
     sql = call_slm(
         user, system=system, purpose="sql_single_table",
         temperature=0, seed=0, num_predict=256, num_ctx=2048, timeout=1200,
@@ -321,7 +321,6 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf, results=None):
     unchanged). Optional — omitting it degrades to today's behavior (no
     Recommended Projection section), same additive contract as the single-table
     generate_sql()'s own `recommended_projection` param."""
-    import urllib.request
     cols = sm.get("columns", {})
     # alias_map is occurrence-keyed: alias -> table. The same table may appear under
     # two aliases (same-table-twice / self-join) — emit one block per OCCURRENCE.
@@ -404,7 +403,6 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf, results=None):
                "columns 'just in case'. The full per-alias column lists remain usable for "
                "WHERE/JOIN/GROUP BY/ORDER BY/HAVING regardless."
                if recommended_lines else ""))
-    from slm import call_slm
     sql = call_slm(
         user, system=system, purpose="sql_join",
         temperature=0, seed=0, num_predict=320, num_ctx=3072, timeout=120,

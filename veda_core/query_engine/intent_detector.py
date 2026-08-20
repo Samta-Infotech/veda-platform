@@ -23,6 +23,7 @@ from enum import Enum
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from utils.logger import get_logger
+import re
 
 logger = get_logger(__name__)
 
@@ -92,7 +93,6 @@ class IntentDetector:
         scores = {intent: 0.0 for intent in QueryIntent}
         matched_keywords = {intent: [] for intent in QueryIntent}
 
-        import re
         for intent, keywords in self.intent_patterns.items():
             for keyword in keywords:
                 # Whole-word match for single tokens so "count" doesn't match

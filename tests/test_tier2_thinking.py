@@ -13,6 +13,8 @@ import sys
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from query.lg_nodes import _emit_step
+import query.lg_nodes as ln
 
 
 # ---------------------------------------------------------------------------
@@ -20,7 +22,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 # ---------------------------------------------------------------------------
 
 def test_emit_step_fires_with_contract():
-    from query.lg_nodes import _emit_step
     seen = []
     state = {"on_event": lambda phase, msg, extra: seen.append((phase, msg, extra))}
     _emit_step(state, "tier2_columns", "Selecting the details to include...")
@@ -28,15 +29,12 @@ def test_emit_step_fires_with_contract():
 
 
 def test_emit_step_noop_without_callback():
-    from query.lg_nodes import _emit_step
     _emit_step({}, "tier2_intent", "x")            # no on_event key
     _emit_step({"on_event": None}, "tier2_intent", "x")   # explicit None
     # nothing to assert beyond "does not raise"
 
 
 def test_emit_step_never_raises_into_node():
-    from query.lg_nodes import _emit_step
-
     def boom(phase, msg, extra):
         raise RuntimeError("callback blew up")
 
@@ -51,7 +49,6 @@ def test_emit_step_never_raises_into_node():
 def test_all_tier2_nodes_emit_a_phase(monkeypatch):
     """Drive each node with a recording on_event and a stubbed SLM so no network
     is touched — assert each fires exactly its own tier2_* phase first."""
-    import query.lg_nodes as ln
 
     # Stub the single SLM entry point every node funnels through.
     monkeypatch.setattr(ln, "_call_node", lambda *a, **k: {})

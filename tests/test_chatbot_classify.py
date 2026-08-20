@@ -159,7 +159,6 @@ def test_answer_with_data_question_hint_and_no_frame_is_not_downgraded():
     """The backstop must not fire on a genuinely self-contained question just
     because no frame happens to exist yet (e.g. the first real question of a
     session) — only on PURELY referential text with no data content."""
-    import chatbot.nodes as nodes
     assert nodes._DATA_QUESTION_HINTS.search("how many transactions are there")
 
 
@@ -217,7 +216,6 @@ def test_go_back_with_drill_stack_never_calls_llm(monkeypatch):
 
 
 def test_go_back_again_also_matches():
-    import chatbot.nodes as nodes
     assert nodes._DRILL_UP_RE.match("go back again")
     assert nodes._DRILL_UP_RE.match("Go Back")
     assert nodes._DRILL_UP_RE.match("undo that")
@@ -263,7 +261,6 @@ def test_drill_up_regex_does_not_misfire_on_real_question_containing_back():
     """Anchored whole-message match (same style as _RESET_RE) — a real
     question that merely contains 'back' or 'undo' mid-sentence must never
     match."""
-    import chatbot.nodes as nodes
     assert nodes._DRILL_UP_RE.match("how many transactions came back as failed") is None
     assert nodes._DRILL_UP_RE.match("show me the backup transactions") is None
     assert nodes._DRILL_UP_RE.match("undo transactions from last week") is None

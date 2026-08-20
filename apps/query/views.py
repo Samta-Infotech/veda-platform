@@ -35,6 +35,8 @@ from .scope import (
     permitted_source_ids,
     resolve_query_scope,
 )
+from apps.ingestion.tasks import task_ingest_source
+from apps.evaluation.tasks import task_run_eval
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +221,6 @@ class IngestTriggerView(APIView):
         source_id = data.get("source_id")
         if not source_id:
             return Response({"error": "source_id required"}, status=400)
-        from apps.ingestion.tasks import task_ingest_source
         task = task_ingest_source.delay(
             source_id=int(source_id), tenant=data.get("tenant", DEFAULT_TENANT),
             force=bool(data.get("force", False)),
@@ -237,7 +238,6 @@ class EvalTriggerView(APIView):
 
     def post(self, request):
         data = request.data if hasattr(request, "data") else {}
-        from apps.evaluation.tasks import task_run_eval
         task = task_run_eval.delay(
             source_id=int(data.get("source_id", 1)),
             tenant=data.get("tenant", DEFAULT_TENANT),

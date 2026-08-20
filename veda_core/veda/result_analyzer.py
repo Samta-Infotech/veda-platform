@@ -12,6 +12,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
+from veda.business_explain import extract_sql_facts
 
 
 # ---------------------------------------------------------------------------
@@ -569,7 +570,6 @@ def analyze_result(
     `params`: the bound values `sql`'s %s placeholders were parameterized to
     (veda/validation.py's validate_and_parameterize) — without these, filter
     values in the derived facts come back None (see business_explain._extract)."""
-    from veda.business_explain import extract_sql_facts
 
     facts = extract_sql_facts(sql or "", params=params)
     row_count = len(rows)

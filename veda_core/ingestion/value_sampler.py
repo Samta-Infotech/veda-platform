@@ -70,6 +70,7 @@ from ingestion.db_abstraction import (
     DICT_CURSOR,
 )
 from utils.logger import get_logger
+from psycopg2.extras import execute_values
 
 logger = get_logger(__name__)
 
@@ -289,7 +290,6 @@ def _store_values_pgvector(sampled_columns: List[SampledColumn]) -> int:
     value), i.e. potentially tens of thousands of round trips for a wide
     schema. Same rows, same order-independent result, one bulk statement.
     """
-    from psycopg2.extras import execute_values
     conn = get_internal_connection()
     written = 0
     try:

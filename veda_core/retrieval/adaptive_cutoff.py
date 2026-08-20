@@ -15,6 +15,7 @@
 
 import logging
 from typing import List, Tuple, Optional
+import io
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +91,6 @@ class AdaptiveCutoff:
             cliff_idx: Position of cliff (if any)
         """
         # Create simple ASCII chart
-        import io
         chart = io.StringIO()
 
         chart.write("\nScore distribution:\n")

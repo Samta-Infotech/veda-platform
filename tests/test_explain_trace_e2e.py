@@ -23,6 +23,9 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import slm._call_slm as cs
+import veda.explain as ex
+from veda.explain import ExplainTrace
 
 
 # ── 1. trace_id + ambient reuse ───────────────────────────────────────────────
@@ -69,7 +72,6 @@ class _FakeBackend:
 
 
 def test_call_slm_records_ledger_success_and_failure(monkeypatch):
-    import slm._call_slm as cs
     from veda.explain import new_trace, use_trace
 
     t = new_trace("ledger query", trace_id="led-1")
@@ -98,7 +100,6 @@ def test_call_slm_records_ledger_success_and_failure(monkeypatch):
 
 # ── 3. checkpoint vs finalize (one persisted record per query) ────────────────
 def test_finish_is_checkpoint_finalize_persists_once(tmp_path, monkeypatch):
-    import veda.explain as ex
     from veda.explain import new_trace, use_trace
 
     log = tmp_path / "explain_trace.jsonl"
@@ -120,7 +121,6 @@ def test_finish_is_checkpoint_finalize_persists_once(tmp_path, monkeypatch):
 
 # ── 4. totals block ───────────────────────────────────────────────────────────
 def test_totals_summary(monkeypatch):
-    import veda.explain as ex
     from veda.explain import new_trace, use_trace
 
     monkeypatch.setattr(ex, "_TRACE_LOG", os.devnull)
@@ -180,7 +180,6 @@ def test_record_result_stages(monkeypatch):
 
 # ── 6. verbose gating / production safety ─────────────────────────────────────
 def test_verbose_off_suppresses_heavy_lists():
-    from veda.explain import ExplainTrace
     t = ExplainTrace(query="q", verbose=False, trace_id="v-off")
     t.set("retrieval", n_columns=15)                 # scalar decision — kept
     t.cand("retrieval", "top_columns", {"col": "x", "secret_row": "PII"})  # heavy — dropped
@@ -190,7 +189,6 @@ def test_verbose_off_suppresses_heavy_lists():
 
 
 def test_verbose_on_captures_candidates():
-    from veda.explain import ExplainTrace
     t = ExplainTrace(query="q", verbose=True, trace_id="v-on")
     t.cand("rrf", "top_candidates", {"col_id": "t.c", "rrf_score": 0.5})
     assert t.to_dict()["sections"]["rrf"]["top_candidates"][0]["col_id"] == "t.c"

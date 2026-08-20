@@ -27,6 +27,8 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 
 from config import get_primary_relational_source
 from utils.logger import get_logger
+import psycopg2
+from schema.real_schema import get_real_schema
 
 logger = get_logger(__name__)
 
@@ -51,7 +53,6 @@ _MATCH_FLOOR = 0.80           # min correlation to accept a polymorphic/inferred
 
 def _conn():
     cfg = get_primary_relational_source()
-    import psycopg2
     return psycopg2.connect(host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
                             user=cfg["user"], password=cfg.get("password", ""))
 
@@ -204,7 +205,6 @@ def _polymorphic_edges(cur, tables, meta):
 def build_relationship_graph(tables=None, verbose=False):
     """Build and persist veda_relationship_graph.json for the given tables
     (default: the tables in the current semantic model)."""
-    from schema.real_schema import get_real_schema
     raw = get_real_schema()
     schema_tables = raw.get("tables", [])
     by_name = {t["table_name"]: t for t in schema_tables}

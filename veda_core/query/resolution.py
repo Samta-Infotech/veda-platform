@@ -39,6 +39,11 @@ try:
 except Exception:  # pragma: no cover
     def _singularize(w: str) -> str:
         return w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+import psycopg2
+from semantic.name_tokens import _scope_key as k
+from veda.runtime import _load_scoped_sm
+from semantic.name_tokens import table_tokens, token_table_idf
+from veda.runtime import _internal_db_config
 
 
 # ---------------------------------------------------------------------------
@@ -72,12 +77,10 @@ _SCOPES_MAX = 8
 
 
 def _scope_key():
-    from semantic.name_tokens import _scope_key as k
     return k()
 
 
 def _load_sm():
-    from veda.runtime import _load_scoped_sm
     return _load_scoped_sm()
 
 
@@ -142,7 +145,6 @@ def _scope(sm=None):
     if sm is None:
         sm = _load_sm()
     measures, dimensions = _build_col_index(sm)
-    from semantic.name_tokens import table_tokens, token_table_idf
     # column-NAME token vocabulary (no aliases): engineer-written words only —
     # the high-precision referent set the strict qualifier gate keys on.
     # Owners/counts alongside: referent_tables needs WHICH tables own a column
@@ -183,8 +185,6 @@ def _norm(v) -> str:
 
 
 def _internal_conn():
-    import psycopg2
-    from veda.runtime import _internal_db_config
     db = _internal_db_config()
     return psycopg2.connect(host=db["host"], port=db["port"], dbname=db["database"],
                             user=db["user"], password=db["password"])
@@ -259,7 +259,6 @@ def typed_anchor_evidence(query: str, sm=None, exclude_spans=()):
         user never referenced); excluded spans (e.g. a group-by dimension word)
         likewise contribute nothing
     Returns (evidence: {table: score}, why: {table: [reasons]})."""
-    from collections import defaultdict
     DIRECT_W, CLOSED_W, LABEL_W = 1.0, 0.6, 0.3
     evidence: Dict[str, float] = defaultdict(float)
     why: Dict[str, list] = defaultdict(list)

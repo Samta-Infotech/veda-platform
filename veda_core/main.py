@@ -42,6 +42,15 @@ os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import get_logger
+from ingestion.db_abstraction import get_internal_connection
+from evaluation.report import BASELINE_ESTIMATES
+from evaluation.test_queries import get_all_queries
+from ingestion.contracts import SourceContext
+from ingestion.dispatcher import dispatch
+from connectors.base import build_connector
+from ingestion.chunk_embedder import run_chunk_embedder
+from ingestion.source_dispatcher import dispatch_ingestion
+import veda_hybrid
 
 logger = get_logger(__name__)
 
@@ -62,7 +71,6 @@ def check_ingestion_status() -> dict:
     they don't gate SQL/hybrid readiness either. Return shape unchanged: {ready, checks}.
     """
     from config import SEMANTIC_MODEL_FILE, BIENCODER_COL_TABLE, DOC_CHUNKS_TABLE_NAME
-    from ingestion.db_abstraction import get_internal_connection
 
     base = os.path.dirname(os.path.abspath(__file__))
 
@@ -168,8 +176,6 @@ def _fail(label: str, error: Exception) -> None:
 def _print_query_summary(query: str, l2, l3, l4) -> None:
     """Print a compact per-query metric summary against POC baseline values."""
     from config import TOP_K, EMBEDDING_MODEL_ID
-    from evaluation.report import BASELINE_ESTIMATES
-    from evaluation.test_queries import get_all_queries
 
     W   = 64
     bar = "═" * W
@@ -274,8 +280,6 @@ def run_ingestion(verbose: bool = False, skip_llm: bool = False) -> dict:
 
     Returns the ingestion state dict (same ``{"source_id", ...}`` context contract
     the evaluation stage consumed from the old monolith)."""
-    from ingestion.contracts import SourceContext
-    from ingestion.dispatcher import dispatch
     ctx = SourceContext.from_env(skip_llm=skip_llm)
     # Prewarm the SLM once at ingest start so the first Stage-2/3/4 call doesn't pay a
     # cold model load (query runtime prewarms, but the ingestion path never did). No-op
@@ -300,8 +304,6 @@ def run_doc_ingestion(verbose: bool = False) -> None:
     For each source: connects, extracts chunks, embeds, stores in doc_chunks.
     """
     from config import get_enabled_sources
-    from connectors.base import build_connector
-    from ingestion.chunk_embedder import run_chunk_embedder
 
     doc_sources = get_enabled_sources("document")
     if not doc_sources:
@@ -382,7 +384,6 @@ def run_nosql_ingestion(verbose: bool = False) -> None:
     Schema info is printed/logged; full pgvector ingestion is Phase 5.
     """
     from config import get_enabled_sources
-    from connectors.base import build_connector
 
     nosql_sources = get_enabled_sources("nosql")
     if not nosql_sources:
@@ -437,7 +438,6 @@ def run_all_ingestion(verbose: bool = False) -> None:
       nosql                → schema inference + embedding pipeline
     """
     from config import get_enabled_sources
-    from ingestion.source_dispatcher import dispatch_ingestion
 
     sources = get_enabled_sources()
     if not sources:
@@ -520,7 +520,6 @@ def run_single_query(query: str, verbose: bool = False, debug: bool = False) -> 
 
     Requires ingestion to have been run first (vector store + semantic model populated).
     """
-    import veda_hybrid
 
     logger.info("=== Single query (hybrid): %r ===", query)
     print(f"\n  Query: '{query}'")

@@ -1,6 +1,10 @@
 """VEDA · L6 — value grounding, qualifier-completeness gate, AST validate + parameterize."""
 import os, re, sys, time, json, logging, threading
 from veda.runtime import _pg
+import sqlglot
+from sqlglot import exp
+import time as _time
+from retrieval.query_enrichment import _singularize
 
 
 def validate_and_parameterize(sql, allowed_tables, allowed_columns,
@@ -22,8 +26,6 @@ def validate_and_parameterize(sql, allowed_tables, allowed_columns,
     fanout_guard   (optional): {"parent_aliases": {alias, ...}}  (aliases of parent-side tables)
     Returns (param_sql, params, error). On any violation returns (None, None, reason).
     """
-    import sqlglot
-    from sqlglot import exp
 
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
@@ -237,7 +239,6 @@ def _is_grounded_filter_value(token, tables_in_sql, sm):
     On any error / inability to assess → True (safe: preserve the existing refusal)."""
     if not sm:
         return True
-    import time as _time
     cols_meta = sm.get("columns", {})
     in_sql = tables_in_sql or set()
     # Only DIMENSION / IDENTIFIER columns can hold a filterable value. Order them so the
@@ -336,13 +337,10 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
     global _GATE_STRIP
     if _GATE_STRIP is None:
         _GATE_STRIP = _gate_strip()
-    from retrieval.query_enrichment import _singularize
     content = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower())
                if len(w) > 2 and w not in _GATE_STRIP and _singularize(w) not in _GATE_STRIP}
     if not content:
         return True, None
-    import sqlglot
-    from sqlglot import exp
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
     except Exception:
@@ -444,8 +442,6 @@ def value_grounding(sql, resolve_table, cols_meta, skip_values=()):
 
     resolve_table(column_exp) -> table name (or None).  Returns (ok, (col, val) | None).
     """
-    import sqlglot
-    from sqlglot import exp
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
     except Exception:

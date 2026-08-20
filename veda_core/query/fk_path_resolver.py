@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from typing import Callable, Dict, List, Optional, Tuple
+from retrieval.query_enrichment import _singularize
 
 # lookup(token) -> [(table, column, value_raw), ...] — the column_values exact-grounding
 Lookup = Callable[[str], List[Tuple[str, str, str]]]
@@ -130,7 +131,6 @@ def resolve_fk_path(
     state changes" stays single-table. Without this guard a common word coincidentally
     stored as a value in a distant table (signal_levels) hijacks the query into a
     fabricated multi-hop join. Mirrors the 1-hop resolve_value_filter guard."""
-    from retrieval.query_enrichment import _singularize
     _skip = anchor_col_toks or set()
 
     # 1. EXACT-ground every token (same as value_resolver — never fuzzy/LIKE)

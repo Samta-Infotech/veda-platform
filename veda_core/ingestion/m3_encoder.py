@@ -27,6 +27,9 @@ from typing import Dict, List, Tuple
 import numpy as np
 
 from config import BGE_MODEL_NAME, BIENCODER_BATCH_SIZE, resolve_device
+import json as _json
+import urllib.request as _u
+from FlagEmbedding import BGEM3FlagModel
 
 logger = logging.getLogger(__name__)
 
@@ -52,8 +55,6 @@ _METAL_URL = os.environ.get("METAL_EMBED_URL", "").strip()
 
 
 def _metal_post(path: str, payload: dict) -> dict:
-    import json as _json
-    import urllib.request as _u
     req = _u.Request(_METAL_URL.rstrip("/") + path, data=_json.dumps(payload).encode(),
                      headers={"Content-Type": "application/json"}, method="POST")
     with _u.urlopen(req, timeout=float(os.environ.get("METAL_EMBED_TIMEOUT", "60"))) as r:
@@ -71,7 +72,6 @@ def _get_model():
         # Zero-egress: never hit the hub — weights are baked into the image.
         os.environ.setdefault("HF_HUB_OFFLINE", "1")
         os.environ.setdefault("TRANSFORMERS_OFFLINE", "1")
-        from FlagEmbedding import BGEM3FlagModel
         device = resolve_device()
         use_fp16 = device == "cuda"   # fp16 only helps on GPU; CPU/MPS stay fp32
         logger.info(f"Loading BGE-M3 ({BGE_MODEL_NAME}) on {device} (fp16={use_fp16})...")

@@ -42,6 +42,11 @@ from apps.access_management.services import (  # noqa: E402
     PermissionNotFound,
     PermissionService,
 )
+from importlib import import_module
+from apps.access_management.views import PermissionDetailView, PermissionListView
+from apps.core.models import TimeStampedModel
+from apps.access_management.models import Role, UserRole
+from apps.access_management.services import UserService
 
 LIST_URL = "/api/v1/permissions/list"
 DETAIL_URL = "/api/v1/permissions/detail"
@@ -158,7 +163,6 @@ def test_seeded_permissions_are_active_and_described():
 def test_the_seed_is_idempotent():
     """``update_or_create`` keyed on code — re-running must not duplicate rows, so a
     replayed or repeated migration is safe."""
-    from importlib import import_module
 
     from django.apps import apps as django_apps
 
@@ -174,7 +178,6 @@ def test_the_seed_is_idempotent():
 def test_the_seed_does_not_reactivate_a_disabled_permission():
     """``is_active`` is deliberately absent from the seed defaults: an operator who
     switched a capability off must not have that undone by the next deploy."""
-    from importlib import import_module
 
     from django.apps import apps as django_apps
 
@@ -390,8 +393,6 @@ def test_service_raises_a_typed_not_found():
 def test_routes_are_wired():
     from django.urls import resolve
 
-    from apps.access_management.views import PermissionDetailView, PermissionListView
-
     assert resolve(LIST_URL).func.view_class is PermissionListView
     assert resolve(DETAIL_URL).func.view_class is PermissionDetailView
 
@@ -407,8 +408,6 @@ def test_permission_model_is_distinct_from_djangos_own():
 
 
 def test_permission_reuses_the_shared_timestamp_base():
-    from apps.core.models import TimeStampedModel
-
     assert issubclass(Permission, TimeStampedModel)
 
 
@@ -418,9 +417,6 @@ def test_permission_reuses_the_shared_timestamp_base():
 
 
 def test_user_creation_and_update_with_role_ids():
-    from apps.access_management.models import Role, UserRole
-    from apps.access_management.services import UserService
-
     role1 = Role.objects.create(name="Role 1")
     role2 = Role.objects.create(name="Role 2")
 

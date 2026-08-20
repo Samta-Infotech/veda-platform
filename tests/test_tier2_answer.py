@@ -19,12 +19,14 @@ import sys
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
                                 "veda_core"))
+import slm
+from veda_hybrid import _tier2_finish
+import json
+import veda.result_analyzer as ra_mod
+import query.nl_answer as nl_answer_mod
 
 
 def test_tier2_finish_attaches_answer(monkeypatch):
-    import slm
-    from veda_hybrid import _tier2_finish
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: "Found 2 matching payments.")
     result = _tier2_finish(
         "show me the payments", sm=None,
@@ -41,8 +43,6 @@ def test_tier2_finish_has_table_and_explain_even_with_insight_engine_off(monkeyp
     Insight Engine flag — INSIGHT_ENGINE_ENABLED defaults to False, so this is
     the shape most real Tier-2 traffic actually gets today."""
     import config
-    import slm
-    from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", False)
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: "Two payments were found.")
@@ -61,8 +61,6 @@ def test_tier2_finish_has_table_and_explain_even_with_insight_engine_off(monkeyp
 
 
 def test_tier2_finish_table_derived_from_sql_entities():
-    from veda_hybrid import _tier2_finish
-
     result = _tier2_finish(
         "q", sm=None, cols=["a"], rows=[(1,)],
         sql='SELECT t.a FROM ledger t JOIN accounts a ON t.acc_id = a.id', source="tier2",
@@ -77,8 +75,6 @@ def test_tier2_finish_response_keys_match_tier1_shape(monkeypatch):
     addition and Tier-1's "trace" (an internal debug object never sent over
     SSE per apps/chat/services.py's own docstring — not part of the
     user-visible contract)."""
-    import slm
-    from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: "ok")
     result = _tier2_finish(
@@ -90,9 +86,6 @@ def test_tier2_finish_response_keys_match_tier1_shape(monkeypatch):
 
 
 def test_tier2_finish_never_raises_on_slm_failure(monkeypatch):
-    import slm
-    from veda_hybrid import _tier2_finish
-
     monkeypatch.setattr(slm, "call_slm", lambda *a, **k: (_ for _ in ()).throw(
         RuntimeError("SLM down")))
     result = _tier2_finish(
@@ -108,9 +101,6 @@ def test_tier2_finish_never_raises_on_slm_failure(monkeypatch):
 
 
 def test_tier2_finish_accepts_dict_rows():
-    import slm
-    from veda_hybrid import _tier2_finish
-
     slm.call_slm = lambda *a, **k: "One record found."
     result = _tier2_finish(
         "q", sm=None, cols=["id"], rows=[{"id": 1}], sql="SELECT id FROM t", source="envelope",
@@ -125,10 +115,7 @@ def test_tier2_finish_accepts_dict_rows():
 # ---------------------------------------------------------------------------
 
 def test_tier2_finish_insight_engine_enabled(monkeypatch):
-    import json
-    import slm
     import config
-    from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
     monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
@@ -162,7 +149,6 @@ def test_tier2_finish_insight_engine_enabled(monkeypatch):
 
 def test_tier2_finish_insight_engine_falls_back_on_failure(monkeypatch):
     import config
-    from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
     monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
@@ -170,7 +156,6 @@ def test_tier2_finish_insight_engine_falls_back_on_failure(monkeypatch):
     def _broken_analyze_result(*a, **k):
         raise RuntimeError("boom")
 
-    import veda.result_analyzer as ra_mod
     monkeypatch.setattr(ra_mod, "analyze_result", _broken_analyze_result)
 
     result = _tier2_finish(
@@ -194,18 +179,15 @@ def test_tier2_finish_answer_never_missing_even_when_both_paths_fail_outside_the
     deterministic fallback UPFRONT (mirroring veda/pipeline.py's L7b), so
     "answer" is guaranteed present regardless of where the failure occurs."""
     import config
-    from veda_hybrid import _tier2_finish
 
     monkeypatch.setattr(config, "INSIGHT_ENGINE_ENABLED", True)
     monkeypatch.setattr(config, "INSIGHT_FOLLOW_UPS_ENABLED", True, raising=False)
 
-    import veda.result_analyzer as ra_mod
     monkeypatch.setattr(ra_mod, "analyze_result",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("analysis boom")))
 
     # _tier2_finish imports run_nl_answer from the query.nl_answer shim (not
     # directly from result_explainer) — patch where it's actually looked up.
-    import query.nl_answer as nl_answer_mod
     monkeypatch.setattr(nl_answer_mod, "run_nl_answer",
                         lambda *a, **k: (_ for _ in ()).throw(RuntimeError("nl_answer boom")))
 
