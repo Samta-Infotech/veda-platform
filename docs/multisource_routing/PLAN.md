@@ -20,7 +20,7 @@ agent per source-type; SLM only for bounded ambiguity. Everything flag-gated, de
 ---
 
 ## Phase 1 — Source Profiling & Catalog
-- [ ] 1.1 Add `domain_tags` (JSON), `description` (text), `is_canonical` (bool) to `Source` model + migration
+- [x] 1.1 Add `domain_tags` (JSON), `description` (text), `description_generated` (bool), `is_canonical` (bool) to `Source` model + migration 0005 (applied)
 - [ ] 1.2 Admin/API expose the fields (manual entry allowed)
 - [ ] 1.3 `ingestion/source_profiler.py` — post-ingest hook (same point as `cross_source_graph.discover_and_persist`)
 - [ ] 1.4 Auto-generate `description` from observed schema/chunks when blank; manual entry wins

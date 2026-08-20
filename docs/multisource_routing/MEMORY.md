@@ -28,6 +28,15 @@ queries — without rebuilding the working pipelines.
    are correct; rebuilding = new bugs, no correctness gain. Only routing + profile + multi-source-
    awareness are genuinely new/wrong.
 
+## Registry is GLOBAL, not tenant-scoped (confirmed Phase 1.1)
+`Source` (`apps/sources/models.py`) has no tenant field/FK — it's a flat global registry.
+Tenant scoping happens only on substrate/data rows via `TenantScopedModel` (`apps/core/models.py`)
+and `ctx.tenant`; `_ready_source_ids` is global too. So `domain_tags`/`description`/`is_canonical`
+live directly on the `Source` row. If per-tenant canonical is ever needed, extend then — not now.
+`description_generated` (bool) is the provenance flag: profiler fills/refreshes description only
+when it's blank or was itself generated; a human-entered description is never overwritten.
+Env: use `.venv/bin/python` for `manage.py` (Django 5.0.14); system python has no Django.
+
 ## The 2 spine-blocking bugs (fix in Phase 2 FIRST)
 - `retrieval/retrieval_engine_phase3.py:48-64` — `RetrievalResult` has NO `source_id` field.
 - `query/graph_retriever.py:543` (and `retrieval_select.py:238,267`) — hardcode `source_id=""`, so

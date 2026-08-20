@@ -4,12 +4,22 @@
 > what's next, any blockers. Keep it factual (an index, not a retelling).
 
 ## Status snapshot
-- **Current phase:** Pre-implementation — planning complete, scaffolding set up
-- **Next action:** Phase 1.1 — add `domain_tags`/`description`/`is_canonical` to `Source` model + migration
-- **Flags live:** none yet
-- **Branch:** (not yet created)
+- **Current phase:** Phase 1 (Source Profiling & Catalog) — 1.1 done
+- **Next action:** Phase 1.2 — expose profile fields in the sources API/serializer + admin (manual entry)
+- **Flags live:** none yet (Phase 1 is additive schema, no query-path flag needed)
+- **Branch:** `feat/multisource-routing`
 
 ---
+
+## 2026-08-20 — Phase 1.1: Source model profile fields
+- Confirmed `Source` is a FLAT GLOBAL registry (not tenant-scoped; tenant lives on substrate
+  rows via `TenantScopedModel`, and `_ready_source_ids` is global) → profile fields go directly
+  on the `Source` row. Decision recorded in MEMORY.md.
+- Added to `apps/sources/models.py`: `domain_tags` (JSON), `description` (text),
+  `description_generated` (bool, provenance so profiler never overwrites manual), `is_canonical` (bool).
+- Generated + applied migration `0005_source_description_...`. `manage.py check` clean.
+- Env note: use `.venv/bin/python` (Django 5.0.14) for manage.py; system python has no Django.
+- **Next:** Phase 1.2 (API/admin expose).
 
 ## 2026-08-20 — Planning & scaffolding
 - Completed full architecture review grounded in codebase (3 parallel code-exploration passes).

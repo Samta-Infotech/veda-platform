@@ -5,7 +5,7 @@
 
 | # | Phase | Task | Status | Notes |
 |---|-------|------|--------|-------|
-| 1.1 | 1 | Source model fields (domain_tags/description/is_canonical) + migration | TODO | first task |
+| 1.1 | 1 | Source model fields (domain_tags/description/description_generated/is_canonical) + migration 0005 | DONE | applied to dev DB; check clean |
 | 1.2 | 1 | Admin/API expose fields | TODO | |
 | 1.3 | 1 | `source_profiler.py` post-ingest hook | TODO | reuse cross_source_graph hook point |
 | 1.4 | 1 | Auto-generate description (manual wins) | TODO | |

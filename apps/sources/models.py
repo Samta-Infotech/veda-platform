@@ -82,6 +82,27 @@ class Source(models.Model):
                   "empty = connector defaults")
     doc_recursive = models.BooleanField(default=True)
     doc_max_file_mb = models.PositiveIntegerField(null=True, blank=True)
+    # Routing catalog (multi-source routing, docs/multisource_routing/PLAN.md Phase 1).
+    # These are business-facing profile fields the query-time coordinator reads to decide
+    # which source(s) a query is relevant to — distinct from the connection fields above.
+    # The registry is global (Source is not tenant-scoped), so these live on the row itself.
+    domain_tags = models.JSONField(
+        default=list, blank=True,
+        help_text='Business domain(s) this source covers, e.g. ["finance", "sales"]. '
+                  "Used for same-domain ambiguity resolution. Manual; never auto-inferred.")
+    # Effective description used for source routing/relevance. May be entered manually at
+    # registration, or auto-generated post-ingestion when left blank (source_profiler).
+    description = models.TextField(
+        blank=True,
+        help_text="Business description of what this source contains. Manual entry wins; "
+                  "auto-generated from observed metadata only when left blank.")
+    # Provenance: True when `description` was auto-generated (profiler may refresh it on
+    # re-ingest); False when a human entered it (never overwritten by the profiler).
+    description_generated = models.BooleanField(default=False)
+    # Authoritative/canonical source for its domain. When two sources cover the same domain
+    # with no join relationship, the canonical one is picked deterministically instead of
+    # asking the SLM. Manual decision — never auto-inferred.
+    is_canonical = models.BooleanField(default=False)
     last_ingested_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
