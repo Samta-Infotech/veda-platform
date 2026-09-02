@@ -54,3 +54,6 @@ veda_core/logs/
 
 # AI Related
 .omc
+
+# Docs
+docs/multisource_routing/
