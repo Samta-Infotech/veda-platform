@@ -29,3 +29,10 @@ veda_core/schema/*.pkl
 
 evaluation/results/
 .claude/
+
+# Large data/export artifacts
+demo_bundle/
+*.tgz
+*.tar
+*.tar.gz
+*.dump
