@@ -82,6 +82,27 @@ class Source(models.Model):
                   "empty = connector defaults")
     doc_recursive = models.BooleanField(default=True)
     doc_max_file_mb = models.PositiveIntegerField(null=True, blank=True)
+    # Routing catalog (multi-source routing, docs/multisource_routing/PLAN.md Phase 1).
+    # These are business-facing profile fields the query-time coordinator reads to decide
+    # which source(s) a query is relevant to — distinct from the connection fields above.
+    # The registry is global (Source is not tenant-scoped), so these live on the row itself.
+    domain_tags = models.JSONField(
+        default=list, blank=True,
+        help_text='Business domain(s) this source covers, e.g. ["finance", "sales"]. '
+                  "Used for same-domain ambiguity resolution. Manual; never auto-inferred.")
+    # Effective description used for source routing/relevance. May be entered manually at
+    # registration, or auto-generated post-ingestion when left blank (source_profiler).
+    description = models.TextField(
+        blank=True,
+        help_text="Business description of what this source contains. Manual entry wins; "
+                  "auto-generated from observed metadata only when left blank.")
+    # Provenance: True when `description` was auto-generated (profiler may refresh it on
+    # re-ingest); False when a human entered it (never overwritten by the profiler).
+    description_generated = models.BooleanField(default=False)
+    # Authoritative/canonical source for its domain. When two sources cover the same domain
+    # with no join relationship, the canonical one is picked deterministically instead of
+    # asking the SLM. Manual decision — never auto-inferred.
+    is_canonical = models.BooleanField(default=False)
     last_ingested_at = models.DateTimeField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
@@ -200,3 +221,54 @@ class SourceConnectionProfile(models.Model):
 
     def __str__(self) -> str:
         return f"profile:{self.source.name}"
+
+
+class SourceItemType(models.TextChoices):
+    TABLE = "table", "Table"           # database / datalake
+    DATASET = "dataset", "Dataset"     # datalake (file-backed dataset)
+    DOCUMENT = "document", "Document"  # filesystem / document
+    COLLECTION = "collection", "Collection"  # nosql
+    # New source kinds add a value here — nothing else in the registry/routing changes.
+
+
+class SourceItem(models.Model):
+    """One row per top-level "thing" a source holds — a table, a dataset, a document, a collection
+    (docs/multisource_routing/SOURCE_ITEM_METADATA_DESIGN.md). A source-type-AGNOSTIC metadata layer:
+    a filesystem's documents become first-class items exactly like a datalake's tables, so routing
+    reads ONE table regardless of source kind and a new source type is just a new ``item_type``.
+
+    This indexes the kind-specific stores (columns still live in ``column_embeddings_v2``, chunks in
+    ``doc_chunks``) — it does not move data. The routing PRIOR embedding of (name+summary+topics) is
+    kept engine-side in a raw store (like the other embeddings), NOT as a pgvector column here, so
+    this model migrates cleanly on sqlite (dev) and postgres (prod) alike. Global (no tenant), mirroring
+    the global ``Source`` registry."""
+
+    source = models.ForeignKey(Source, on_delete=models.CASCADE, related_name="items")
+    item_type = models.CharField(max_length=20, choices=SourceItemType.choices)
+    # Stable id of the item WITHIN its source (table_id / doc_id / dataset path) — the join key to the
+    # kind-specific stores and to the engine-side prior embedding.
+    item_key = models.CharField(max_length=512)
+    name = models.CharField(max_length=512)                     # human name (table/file/dataset)
+    # One-line grounded semantic summary (SLM-generated over observed content) — the routing prior TEXT
+    # and what a source-level description rolls up from. Blank until profiled.
+    summary = models.TextField(blank=True)
+    topics = models.JSONField(default=list, blank=True)         # business topics/tags
+    entities = models.JSONField(default=list, blank=True)       # key entities in this item
+    # Kind-specific extras: {row_count, column_count, columns:[...]} for a table; {file_type,
+    # page_count, chunk_count} for a document; etc. Free-form so a new kind needs no schema change.
+    item_metadata = models.JSONField(default=dict, blank=True)
+    child_count = models.PositiveIntegerField(default=0)        # columns in a table / chunks in a doc
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "item_type", "item_key"], name="uq_sourceitem_natural"),
+        ]
+        indexes = [
+            models.Index(fields=["source", "item_type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.item_type}:{self.name} @ {self.source_id}"

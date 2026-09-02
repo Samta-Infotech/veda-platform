@@ -481,6 +481,7 @@ def run_hybrid_layer(
     sql_result:      object = None,    # Phase 1B: ExecutionResult from L6
     verbose:         bool = False,
     on_event:        Any = None,
+    graph_chunks:    List[ChunkRetrievalResult] = None,
 ) -> HybridResult:
     """
     Hybrid query: fuses SQL column context and document chunk context via RRF,
@@ -501,6 +502,13 @@ def run_hybrid_layer(
                        same rationale as run_rag_layer's own on_event: the
                        RRF fusion + SLM synthesis steps were previously a
                        silent black box between the caller's outer ticks.
+    graph_chunks    : chunks discovered by unified-graph traversal
+                      (GraphRetrievalResult.chunks). Merged ADDITIVELY into the
+                      cosine-retrieved set, deduped by chunk_id. These reach
+                      passages the cosine search cannot: a chunk linked to the
+                      query's entity via the graph's entity bridge, including
+                      across data sources. Cosine hits keep rank priority;
+                      graph chunks extend the tail.
     """
     t0 = time.time()
 
@@ -531,6 +539,22 @@ def run_hybrid_layer(
     if verbose:
         print(f"  Doc chunks found : {len(doc_chunks)}")
 
+    # Step 2b — Merge unified-graph chunks (ADDITIVE, never replacing).
+    # The graph reaches passages cosine ANN misses: chunks tied to the query's
+    # entities through the graph's entity bridge (chunk → entity → column),
+    # including chunks living in a DIFFERENT source than the one the query's
+    # columns came from. Appended AFTER the cosine hits so those keep rank
+    # priority — _rrf_fuse_hybrid ranks doc chunks by list position, so order
+    # here is what matters, not the (differently-scaled) similarity values.
+    if graph_chunks:
+        _seen = {c.chunk_id for c in doc_chunks}
+        _added = [c for c in graph_chunks
+                  if c.chunk_id not in _seen and (c.text or "").strip()]
+        doc_chunks = doc_chunks + _added
+        if verbose and _added:
+            print(f"  + graph chunks   : {len(_added)} "
+                  f"(from {len(graph_chunks)} graph-retrieved, deduped)")
+
     # Step 3 — RRF fusion of SQL columns + doc chunks
     top_sql_cols, top_doc_chunks = _rrf_fuse_hybrid(
         sql_columns = sql_columns,
@@ -546,9 +570,15 @@ def run_hybrid_layer(
     # When SQL ground truth is available, drop doc chunks below this similarity
     # threshold — low-relevance documents add noise that causes the LLM to
     # override a definitive SQL answer with "no information found" statements.
+    # Graph-sourced chunks are EXEMPT: their `similarity` is a PPR mass (typically
+    # « 0.50), not a cosine score, so this threshold would silently drop every one
+    # of them. They earned inclusion structurally — via an explicit entity/FK edge
+    # to the query's own entities — which is a relevance signal in its own right.
     _MIN_DOC_SIM_WITH_SQL = 0.50
     if sql_result is not None and not getattr(sql_result, "error", None):
-        filtered = [c for c in top_doc_chunks if c.similarity >= _MIN_DOC_SIM_WITH_SQL]
+        filtered = [c for c in top_doc_chunks
+                    if getattr(c, "from_graph", False)
+                    or c.similarity >= _MIN_DOC_SIM_WITH_SQL]
         if verbose and len(filtered) < len(top_doc_chunks):
             print(
                 f"  Doc chunks after SQL-filter : {len(filtered)} "

@@ -66,6 +66,27 @@ import dataclasses
 _MISSING = object()
 
 
+def _as_source_id(value):
+    """One source id, normalized to ``int`` — the type every comparison in this
+    module assumes.
+
+    Every id here is compared against ``open_sources``/``table_index`` keys built
+    from ``parse_allowed_resources``, which ints them. A source id that arrives as
+    a STRING (an ``sm`` entry's ``_source_id`` published by the assembler, a
+    hand-built ``RequestContext``) therefore compares unequal to the very entry
+    that permits it, and the table is reported as restricted for a source the
+    caller fully owns — a silent false DENIAL, not a leak, but a user-visible one.
+    ``filter_doc_chunks`` already coerced its own ids for exactly this reason;
+    this is the same coercion, applied to the one path that lacked it.
+
+    Non-numeric input is returned unchanged rather than raising: an unrecognisable
+    id then simply matches nothing, which is the fail-closed outcome."""
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return value
+
+
 def _index(ctx):
     """``ctx.allowed_resources`` unpacked into two cheap lookup structures, built
     once per call (not per candidate/table):
@@ -76,6 +97,7 @@ def _index(ctx):
     open_sources = set()
     table_index = {}
     for source_id, (is_open, tables) in ctx.allowed_resources:
+        source_id = _as_source_id(source_id)
         if is_open:
             open_sources.add(source_id)
             continue
@@ -100,9 +122,9 @@ def _table_source_id(entry: dict, ctx):
     attribute to."""
     sid = entry.get("_source_id")
     if sid is not None:
-        return sid
+        return _as_source_id(sid)
     ids = tuple(ctx.source_ids)
-    return ids[0] if ids else None
+    return _as_source_id(ids[0]) if ids else None
 
 
 def _table_allowed(open_sources, table_index, sid, table_key) -> bool:

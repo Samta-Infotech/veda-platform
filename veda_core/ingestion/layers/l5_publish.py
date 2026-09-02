@@ -15,7 +15,7 @@ from ingestion.contracts import SourceContext, StageOutcome
 def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOutcome]:
     out: List[StageOutcome] = []
 
-    from config import DERIVED_ARTIFACTS_ENABLED, UNIFIED_GRAPH_ENABLED
+    from config import DERIVED_ARTIFACTS_ENABLED
 
     if DERIVED_ARTIFACTS_ENABLED:
         # relationship graph (join planner / fast path) — non-fatal
@@ -104,16 +104,26 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     except Exception as e:
         out.append(StageOutcome("value_mirror", False, fatal=False, error=str(e)))
 
-    # unified graph (query-time GRAPH_EXPAND) — non-fatal
-    if UNIFIED_GRAPH_ENABLED:
-        try:
-            from ingestion.unified_graph_builder import build_unified_graph, write_unified_graph
-            ug = build_unified_graph()
-            path = write_unified_graph(ug)
-            out.append(StageOutcome("unified_graph", True, detail=(
-                f"{len(ug.get('nodes', []))} nodes, {len(ug.get('edges', []))} edges → {path}")))
-        except Exception as e:
-            out.append(StageOutcome("unified_graph", False, fatal=False, error=str(e)))
+    # unified graph (query-time GRAPH_EXPAND) — non-fatal, ALWAYS rebuilt.
+    # Previously gated on UNIFIED_GRAPH_ENABLED, which is the master switch for a
+    # DIFFERENT system (the Postgres graph_nodes/graph_edges graph). This JSON
+    # artifact is consumed by GRAPH_EXPAND and by query-time callers that check
+    # neither flag, so gating its BUILD on an unrelated toggle meant turning that
+    # toggle off silently froze the artifact while queries kept reading it. It is a
+    # pure stdlib transform of files already on disk (seconds), so it now carries
+    # the same "regenerated on every ingestion" contract as its DERIVED_ARTIFACTS
+    # siblings above. A failure is still non-fatal but is now printed, not swallowed.
+    try:
+        from ingestion.unified_graph_builder import build_unified_graph, write_unified_graph
+        ug = build_unified_graph()
+        path = write_unified_graph(ug)
+        out.append(StageOutcome("unified_graph", True, detail=(
+            f"{len(ug.get('nodes', []))} nodes, {len(ug.get('edges', []))} edges → {path}")))
+    except Exception as e:
+        print(f"  [L5] ⚠ unified_graph rebuild FAILED — query-time graph expansion "
+              f"will keep serving the previous (now stale) artifact: "
+              f"{type(e).__name__}: {e}")
+        out.append(StageOutcome("unified_graph", False, fatal=False, error=str(e)))
 
     # cross-source join discovery (P4.2/P4.3) — tenant-wide, runs at the END of every
     # ingestion over ALL ready sources so ingesting ANY source (re)links it to the rest

@@ -276,6 +276,41 @@ def _run_schema_pipeline(
     except Exception as e:
         _sfail(source_id, "BGE biencoder", e)
 
+    # ── Step 10: Unified graph (JSON artifact) — rebuild ONLY IF STALE ────────
+    # This pipeline serves datalake / nosql / schema-only relational runs, none of
+    # which reach the layered L5 PUBLISH stage that rebuilds the artifact. It also
+    # writes NO unified-graph input (it never calls the semantic layer — those live
+    # in l3_enrich/l5_publish), so an unconditional rebuild here would re-derive the
+    # graph from another source's flat files on every tabular/nosql ingest: pure
+    # churn that cannot add this source's tables. The staleness check makes it a
+    # self-healing no-op in the normal case, while still repairing the artifact if
+    # some other path ever leaves it behind its inputs. Non-fatal, but reported.
+    try:
+        from ingestion.unified_graph_builder import (
+            build_unified_graph, write_unified_graph, stale_inputs,
+        )
+        from config import UNIFIED_GRAPH_FILE
+        import json as _ugjson
+        try:
+            with open(UNIFIED_GRAPH_FILE) as _ugf:
+                _stale = stale_inputs(_ugjson.load(_ugf))
+        except (OSError, ValueError):
+            _stale = ["<missing>"]          # absent/corrupt → rebuild
+        if _stale:
+            t0 = time.time()
+            _ug = build_unified_graph()
+            _ugp = write_unified_graph(_ug)
+            _sok(source_id,
+                 f"Unified graph rebuilt (stale: {', '.join(_stale)}) — "
+                 f"{len(_ug.get('nodes', []))} nodes, {len(_ug.get('edges', []))} edges",
+                 time.time() - t0)
+        elif verbose:
+            print(f"  [{source_id}]    Unified graph already fresh — skipped")
+    except Exception as e:
+        _sfail(source_id, "Unified graph", e)
+        print(f"  [{source_id}]    Query-time graph expansion will keep serving "
+              f"the previous (now stale) artifact.")
+
     return ctx
 
 
