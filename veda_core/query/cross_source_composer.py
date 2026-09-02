@@ -100,6 +100,50 @@ def _resolve_source_kind(source_id: str):
     return "postgres", dsn, {}
 
 
+_PG_SCHEMA_CACHE: Dict[str, str] = {}
+
+
+def resolve_pg_schema(source_id: str) -> str:
+    """The postgres SCHEMA a relational source's tables actually live under. DuckDB's postgres ATTACH
+    exposes them at ``<catalog>.<schema>.<table>``; the catalog qualifier historically ASSUMED
+    ``public``, which is wrong when a source uses a named schema (homzhub's tables live under the
+    ``homzhub`` schema — the ``public`` assumption made every federated query to it fail with a catalog
+    error). When FEDERATED_SCHEMA_DISCOVERY_ENABLED, discover it from the source's OWN DB — the
+    non-system schema holding the most base tables — data-driven, no hardcoded schema name. Cached per
+    source_id; any failure, a non-postgres source, or the flag OFF → ``public`` (byte-identical)."""
+    sid = str(source_id)
+    try:
+        from config import FEDERATED_SCHEMA_DISCOVERY_ENABLED as _on
+    except Exception:
+        _on = False
+    if not _on:
+        return "public"
+    if sid in _PG_SCHEMA_CACHE:
+        return _PG_SCHEMA_CACHE[sid]
+    schema = "public"
+    try:
+        kind, dsn, _ = _resolve_source_kind(sid)
+        if kind == "postgres" and dsn:
+            import psycopg2
+            conn = psycopg2.connect(dsn)
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT table_schema FROM information_schema.tables "
+                        "WHERE table_type = 'BASE TABLE' "
+                        "AND table_schema NOT IN ('pg_catalog', 'information_schema') "
+                        "GROUP BY table_schema ORDER BY count(*) DESC LIMIT 1")
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        schema = row[0]
+            finally:
+                conn.close()
+    except Exception:
+        schema = "public"
+    _PG_SCHEMA_CACHE[sid] = schema
+    return schema
+
+
 def _materialized_parquet(source_id: str, source_path: str) -> Dict[str, str]:
     """{table_name: parquet_path} for a tabular source's materialized artifacts
     (written at L1, P2.2). Looks under the source's artifact tables/ dir."""

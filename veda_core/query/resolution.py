@@ -232,7 +232,15 @@ def typed_value_lookup():
     def _lookup(token: str):
         return [(r["table"], r["column"], r.get("type"), r.get("value_raw"))
                 for r in value_referents(token)["direct"]]
-    return _lookup
+    # DATALAKE_VALUE_GROUNDING_ENABLED (default OFF → returns _lookup unchanged, byte-identical): when a
+    # datalake source is in scope, also match parquet DISTINCT values sampled on demand, so a datalake
+    # filter/group token ('Kochi') grounds as a VALUE instead of refusing. Query-time only; no
+    # ingestion / column_values / shared-cache change. Best-effort — any failure keeps the base lookup.
+    try:
+        from query.datalake_values import augment_lookup
+        return augment_lookup(_lookup)
+    except Exception:
+        return _lookup
 
 
 def closed_value_tables(token: str) -> Dict[str, list]:

@@ -54,6 +54,14 @@ class RetrievalResult:
     table_name: str
     final_score: float
 
+    # Multi-source routing (Phase 2.1): source this column belongs to, so results from this
+    # (primary) RetrievalResult shape can be grouped by source downstream, matching the
+    # vector_store.RetrievalResult shape the reranker already merges with. Defaults to "" —
+    # this engine builds results from (col_id, score) tuples that don't carry it, so it stays
+    # blank unless a caller populates it; byte-identical behavior when unset. The multi-source
+    # grouping spine runs through retrieve_v2 (which populates source_id natively), not here.
+    source_id: str = ""
+
     # Signal scores (for debugging)
     semantic_score: float = 0.0
     sparse_score: float = 0.0
@@ -323,6 +331,20 @@ class RetrievalEnginePhase3:
             _f2 = _ex.submit(_run_signal2)
             signal1_semantic = _f1.result()
             signal2_sparse   = _f2.result()
+
+        # Source isolation (flag-gated via the sm marker, default OFF): Signal 1 is the ONE
+        # signal not bound to this engine's semantic_model — the shared BGE searcher queries the
+        # GLOBAL column store, so on an isolated single-source sm it re-admits other sources'
+        # columns via name collision (datalake "vendors.rating" vs homzhub "reviews_pillarrating.rating").
+        # Signals 2–5 already read this sm and are clean. Filter Signal 1 back to the sm's columns.
+        # Guard: apply ONLY if some candidate matches (DENSE_ID_REMAP on → "table.col" id-space);
+        # if none match the ids are UUIDs (unaligned) — leave Signal 1 untouched rather than nuke it.
+        # No marker (every normal, non-isolated sm) → this block is skipped → byte-identical.
+        if self.semantic_model.get("__source_isolated__") and signal1_semantic:
+            _iso_cols = self.semantic_model.get("columns", {})
+            _kept = [t for t in signal1_semantic if t[0] in _iso_cols]
+            if _kept:
+                signal1_semantic = _kept
 
         # Signal 3+4: FK subgraph + FK path bridges (merged loop, F2).
         logger.info("  - Signal 3+4: FK subgraph + FK path bridges (merged loop)...")

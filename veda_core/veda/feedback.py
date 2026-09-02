@@ -58,9 +58,10 @@ ACCESS_DENIED_WHAT = "Contact your Admin to request access."
 
 
 def _restricted_match(term, sm) -> bool:
-    """Whether ``term`` names a real table/column that RBAC removed from ``sm``
-    (see ``veda.rbac_filter.filter_sm``'s ``_rbac_restricted``), rather than
-    something that never existed at all.
+    """Whether ``term`` names a real table/column that RBAC restricts for this
+    request (``sm['_rbac_restricted']``, populated by ``pipeline.py`` from
+    ``veda.rbac_filter.restricted_names``), rather than something that never
+    existed at all.
 
     Exact (case-insensitive) match only — deliberately not the fuzzy/substring
     scoring ``_closest`` uses for suggestions. A fuzzy match here would risk

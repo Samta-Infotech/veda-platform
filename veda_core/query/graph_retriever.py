@@ -185,6 +185,9 @@ class SubgraphNode:
     table_name:    Optional[str] = None
     semantic_type: Optional[str] = None
     text:          Optional[str] = None
+    # Multi-source routing (Phase 2.2): carry the graph node's source_id so graph-derived
+    # columns can be grouped by source downstream (cross_source_composer.partition_subgraph).
+    source_id:     Optional[str] = None
 
 
 @dataclass
@@ -464,6 +467,7 @@ def run_graph_retrieval(
         sub.table_id      = meta.table_id
         sub.table_name    = meta.table_name
         sub.semantic_type = meta.semantic_type
+        sub.source_id     = meta.source_id
         if meta.node_type == "chunk":
             chunk_ref_ids.append(meta.ref_id)
 
@@ -540,6 +544,6 @@ def _subgraph_to_retrieval_results(column_nodes: List[SubgraphNode]) -> list:
             table_name    = n.table_name or "",
             semantic_type = n.semantic_type or "",
             similarity    = round(n.score, 6),
-            source_id     = "",
+            source_id     = n.source_id or "",
         ))
     return out

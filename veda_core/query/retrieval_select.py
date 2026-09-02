@@ -180,6 +180,14 @@ def select_retrieval(
             RetrievalResult                as _RR,
         )
 
+        # Multi-source routing (Phase 2.2): injected/graph columns must carry a source_id so
+        # cross_source_composer.partition_subgraph can group evidence by source (a blank
+        # source_id is silently dropped there). The bi-encoder columns already carry it
+        # (retrieve_v2), and injected columns belong to tables ALREADY in the result set — so
+        # inherit source_id from a table_id→source_id map instead of hardcoding "".
+        _tid_src = {r.table_id: r.source_id for r in l2_top_k_override
+                    if getattr(r, "table_id", None) and getattr(r, "source_id", "")}
+
         # A: keyword injection ─────────────────────────────────────────────
         # Token set = raw query words (+ singulars) + synonym-expansion parts.
         # "queue" → synonym target "workflow_state" → parts "workflow","state"
@@ -235,7 +243,7 @@ def select_retrieval(
                         table_name    = _edge.to_table_name,
                         semantic_type = "IDENTIFIER",
                         similarity    = 0.0,
-                        source_id     = "",
+                        source_id     = _tid_src.get(_edge.to_table_id, ""),
                         embedding     = None,
                     ))
                     _inj_present.add(_edge.to_col_id)
@@ -264,7 +272,7 @@ def select_retrieval(
                         table_name    = _dinfo["table_name"],
                         semantic_type = "IDENTIFIER",
                         similarity    = 0.0,
-                        source_id     = "",
+                        source_id     = _tid_src.get(_tid, ""),
                         embedding     = None,
                     ))
                     _inj_present.add(_dcid)
@@ -283,6 +291,12 @@ def select_retrieval(
             try:
                 from query.graph_retriever import _subgraph_to_retrieval_results
                 _graph_rr = _subgraph_to_retrieval_results(_graph_result.columns)
+                # Fill any blank source_id from the table_id map (Phase 2.2); graph columns from
+                # tables already in scope inherit it. Columns from NEW tables carry their own
+                # source_id off the SubgraphNode (populated in graph_retriever).
+                for _c in _graph_rr:
+                    if not getattr(_c, "source_id", "") and getattr(_c, "table_id", None):
+                        _c.source_id = _tid_src.get(_c.table_id, "")
                 _g_extra = [
                     c for c in _graph_rr
                     if c.col_id not in _inj_present

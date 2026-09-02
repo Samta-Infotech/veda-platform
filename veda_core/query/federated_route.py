@@ -42,10 +42,14 @@ _PERIPHERAL_TABLE_PATTERNS = (
 
 
 def _catalog_table(sid: str, table: str, kind: str) -> str:
-    """Fully-qualified DuckDB name: parquet views live at src_<id>.<table>; a postgres
-    ATTACH exposes its tables at src_<id>.public.<table>."""
+    """Fully-qualified DuckDB name: parquet views live at src_<id>.<table>; a postgres ATTACH exposes
+    its tables at src_<id>.<schema>.<table>. The schema is resolved via resolve_pg_schema (discovered
+    from the source's own DB when FEDERATED_SCHEMA_DISCOVERY_ENABLED, else 'public' — byte-identical)."""
     cat = catalog_name(sid)
-    return f'{cat}.public."{table}"' if kind == "postgres" else f'{cat}."{table}"'
+    if kind == "postgres":
+        from query.cross_source_composer import resolve_pg_schema
+        return f'{cat}.{resolve_pg_schema(sid)}."{table}"'
+    return f'{cat}."{table}"'
 
 
 def _selected_by_source(cols) -> Dict[str, Dict[str, list]]:
@@ -553,6 +557,100 @@ def _generate_structured_plan(query: str, schema_text: str, join_text: str) -> O
     return plan
 
 
+def _repair_max_attempts() -> int:
+    """Bounded self-repair depth (config FEDERATED_REPAIR_MAX_ATTEMPTS, default 1 = the historical
+    one-shot repair). 0 disables repair; N allows N engine-error feedback rewrites."""
+    try:
+        import config as _cfg
+        return max(0, int(getattr(_cfg, "FEDERATED_REPAIR_MAX_ATTEMPTS", 1)))
+    except Exception:
+        return 1
+
+
+def _planner_max_attempts() -> int:
+    """Bounded retry count for a classifier-dispatched planner's variance-prone SLM pick (config
+    FEDERATED_PLANNER_MAX_ATTEMPTS, default 2). Only reached via the opt-in operation classifier."""
+    try:
+        from config import FEDERATED_PLANNER_MAX_ATTEMPTS
+        return max(1, int(FEDERATED_PLANNER_MAX_ATTEMPTS))
+    except Exception:
+        return 2
+
+
+def _classifier_enabled() -> bool:
+    """Unified operation-classifier feature flag (default OFF → the legacy sequential-fallback chain
+    runs, byte-identical)."""
+    try:
+        from config import OPERATION_CLASSIFIER_ENABLED
+        return bool(OPERATION_CLASSIFIER_ENABLED)
+    except Exception:
+        return False
+
+
+def _dispatch_classified_operation(operation, *, query, by_source, hints, kinds, rel_sid,
+                                   schema_text, join_text, cols, chunks, tenant) -> dict:
+    """Run the EXISTING deterministic planner for a CLASSIFIED cross-source operation. Returns a
+    compose payload (ok) or a labelled controlled refusal — it NEVER falls through to the free-form
+    SLM-SQL chain. UNSUPPORTED / not-yet-implemented (LOOKUP_ENRICH) / any planner-failure → refuse.
+
+    Reuses (does not reimplement) semi_join_planner + the structured-plan assembly."""
+    from query.operation_classifier import (
+        OP_SEMI_JOIN, OP_AGG_AFTER_JOIN, OP_SET_INTERSECTION, OP_LOOKUP_ENRICH)
+
+    def _refuse(reason: str) -> dict:
+        return _labelled_failure({"status": "refused_federated", "operation": operation,
+                                  "reason": reason, "sources": selected_source_ids(cols)}, cols)
+
+    attempts = _planner_max_attempts()   # bounded retry over the planner's ONE variance-prone SLM pick
+
+    # SEMI_JOIN and SET_INTERSECTION share the same bounded IN-membership machinery (the SLM picks a
+    # validated key-pair; CODE assembles). SET_INTERSECTION is the same executor, labelled distinctly.
+    if operation in (OP_SEMI_JOIN, OP_SET_INTERSECTION):
+        from query.semi_join_planner import plan_semi_join
+        for _ in range(attempts):
+            sj = plan_semi_join(query, by_source, hints, kinds)
+            if sj is None:
+                continue                      # variance: re-pick the key-pair
+            sj_sql, _cand = sj
+            payload = compose_federated(query, sj_sql, cols, chunks, tenant=tenant)
+            if isinstance(payload, dict) and payload.get("status") == "ok":
+                payload["answer"] = _nl_answer(query, payload.get("result") or {})
+                payload["operation"] = operation
+                return payload
+        return _refuse(f"could not assemble a validated {operation} plan for these sources")
+
+    # AGGREGATE_AFTER_JOIN and LOOKUP_ENRICH share the structured-plan planner: both list an entity/
+    # dimension and attach an aggregated related value ("cost per city" / "vendors with their asset
+    # count"), assembled deterministically via BFS joins (the SLM picks only fields). A pure-scalar
+    # (non-aggregate) lookup has no valid metric here → the planner yields nothing → safe refuse.
+    if operation in (OP_AGG_AFTER_JOIN, OP_LOOKUP_ENRICH):
+        for _ in range(attempts):
+            struct = _generate_structured_plan(query, schema_text, join_text)
+            if struct is None:
+                continue                      # variance: re-pick group/metric fields
+            edges = _unified_join_edges(hints, kinds, rel_sid)
+            metric_sqls = []
+            for m in struct["metrics"]:
+                msql = _assemble_metric_sql(struct["group_table"], struct["group_col"],
+                                            struct["group_alias"], m, edges)
+                if msql:
+                    metric_sqls.append({"alias": m["alias"], "sql": msql})
+            # Trust ONLY when EVERY metric got a real join path (no silent dropped/NULL metric).
+            if not (metric_sqls and len(metric_sqls) == len(struct["metrics"])):
+                continue                      # some metric had no join path → re-pick
+            plan = {"group_by": struct["group_alias"], "metrics": metric_sqls}
+            payload = compose_federated_plan(query, plan, cols, chunks, tenant=tenant)
+            if isinstance(payload, dict) and payload.get("status") == "ok":
+                payload["answer"] = _nl_answer(query, payload.get("result") or {})
+                payload["operation"] = operation
+                return payload
+        return _refuse(f"could not build a validated per-entity join plan for this {operation}")
+
+    # UNSUPPORTED → controlled refusal, never free-form.
+    return _refuse("this cross-source shape is not supported by a deterministic operation yet; "
+                   "please rephrase or narrow the question")
+
+
 def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) -> Optional[dict]:
     """Attempt the federated route. Returns a compose_federated payload dict on success,
     or None to signal 'not federated — use the normal path'."""
@@ -623,6 +721,49 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
     gr = getattr(sel, "graph_result", None)
     chunks = list(getattr(gr, "chunks", None) or []) if gr is not None else []
 
+    # ── UNIFIED OPERATION CLASSIFIER (flag-gated, default OFF) ─────────────────────────────────────
+    # When ON, a bounded SLM classifies this cross-source query into ONE supported operation (closed
+    # set, validated against the structural context); CODE dispatches to the matching EXISTING
+    # deterministic planner. An UNSUPPORTED / unimplemented / planner-failure shape → a controlled
+    # refusal — the free-form SLM-SQL chain below is NEVER reached in this mode. OFF → skipped
+    # entirely; the legacy sequential-fallback chain runs byte-identical.
+    if _classifier_enabled():
+        from query.operation_classifier import (
+            classify_operation, OperationContext, FEDERATED_OPS)
+        op_ctx = OperationContext(has_relationship=bool(hints), has_documents=bool(chunks),
+                                  data_source_count=len(by_source))
+        op_dec = classify_operation(query, op_ctx, allowed_ops=FEDERATED_OPS)
+        if verbose:
+            logger.info("federated_route: operation=%s valid=%s — %s",
+                        op_dec.operation, op_dec.valid, op_dec.reason)
+        return _dispatch_classified_operation(
+            op_dec.operation, query=query, by_source=by_source, hints=hints, kinds=kinds,
+            rel_sid=rel_sid, schema_text=schema_text, join_text=join_text,
+            cols=cols, chunks=chunks, tenant=tenant)
+
+    # BOUNDED SEMI_JOIN / FILTER strategy (flag-gated, default OFF → skipped entirely). A bounded SLM
+    # picks among pre-built, grounded (output,filter) candidate key-pairs — it invents nothing; CODE
+    # assembles the semi-join SQL and runs it through the SAME federated executor (compose_federated).
+    # Deferring (NOT_SEMI_JOIN / invalid) falls straight through to the existing structured/free-form
+    # path below, unchanged. See query/semi_join_planner.py.
+    try:
+        from query.semi_join_planner import semi_join_enabled, plan_semi_join
+        if semi_join_enabled():
+            sj = plan_semi_join(query, by_source, hints, kinds)
+            if sj is not None:
+                sj_sql, _cand = sj
+                payload = compose_federated(query, sj_sql, cols, chunks, tenant=tenant)
+                if isinstance(payload, dict) and payload.get("status") == "ok":
+                    payload["answer"] = _nl_answer(query, payload.get("result") or {})
+                    payload["operation"] = "SEMI_JOIN_FILTER"
+                    return payload
+                if verbose:
+                    logger.info("federated_route: semi-join path did not execute (%s) — falling through",
+                                payload.get("status") if isinstance(payload, dict) else payload)
+    except Exception as _sje:
+        if verbose:
+            logger.info("federated_route: semi-join attempt skipped (%s)", _sje)
+
     # PREFERRED: DETERMINISTIC join-path planner. The SLM only picks the group column + each
     # metric's aggregate/table/column; CODE assembles the joins (BFS over the edge graph), so
     # even deep-indirect metrics (4-hop many-to-many) join correctly.
@@ -652,13 +793,19 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
     if plan is not None:
         multi_metric = len(plan.get("metrics") or []) > 1
         payload = compose_federated_plan(query, plan, cols, chunks, tenant=tenant)
-        if isinstance(payload, dict) and payload.get("status") == "exec_error_federated":
+        # Bounded self-repair: feed the engine error back to the SLM for a rewrite, up to the
+        # configured depth (default 1 = the historical one-shot). Stops on ok / non-error / no plan.
+        _rp = 0
+        while (isinstance(payload, dict) and payload.get("status") == "exec_error_federated"
+               and _rp < _repair_max_attempts()):
+            _rp += 1
             if verbose:
-                logger.info("federated_route: plan exec error, retry: %s", payload.get("reason"))
+                logger.info("federated_route: plan exec error, repair %d: %s", _rp, payload.get("reason"))
             plan2 = _generate_federated_plan(query, schema_text, join_text,
                                              prior_error=str(payload.get("reason")))
-            if plan2 is not None:
-                payload = compose_federated_plan(query, plan2, cols, chunks, tenant=tenant)
+            if plan2 is None:
+                break
+            payload = compose_federated_plan(query, plan2, cols, chunks, tenant=tenant)
         if isinstance(payload, dict) and payload.get("status") == "ok":
             payload["answer"] = _nl_answer(query, payload.get("result") or {})
             return payload
@@ -666,26 +813,60 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
         # SELECT, which would fan-out (double-count) or invent an unjoinable path. Fast + honest
         # beats an 85s wrong/erroring flat query. Single-metric plans may still try the flat path.
         if multi_metric:
-            return {"status": "refused_federated",
+            return _labelled_failure({"status": "refused_federated",
                     "reason": ("could not build a correct per-metric plan for this multi-metric "
                                "cross-source query — a required join path is not available. "
                                + str(payload.get("reason") or "")).strip(),
-                    "sources": selected_source_ids(cols)}
+                    "sources": selected_source_ids(cols)}, cols)
         # single-metric plan failed → fall through to the single-SQL attempt below.
 
     # FALLBACK: single flat SELECT (works for simple joins / when plan JSON couldn't be formed).
     sql = _generate_federated_sql(query, schema_text, join_text)
     if not sql or not sql.lower().lstrip().startswith("select"):
-        return {"status": "refused_federated", "reason": "no SELECT generated", "sql": sql,
-                "sources": selected_source_ids(cols)}
+        return _labelled_failure({"status": "refused_federated", "reason": "no SELECT generated",
+                                  "sql": sql, "sources": selected_source_ids(cols)}, cols)
     payload = compose_federated(query, sql, cols, chunks, tenant=tenant)
-    if isinstance(payload, dict) and payload.get("status") == "exec_error_federated":
-        sql2 = _generate_federated_sql(query, schema_text, join_text,
-                                       prior_sql=sql, prior_error=str(payload.get("reason")))
-        if sql2 and sql2.lower().lstrip().startswith("select"):
-            payload = compose_federated(query, sql2, cols, chunks, tenant=tenant)
-    if isinstance(payload, dict) and payload.get("status") == "ok":
-        payload["answer"] = _nl_answer(query, payload.get("result") or {})
+    # Bounded self-repair: rewrite from the engine error, up to the configured depth (default 1 =
+    # the historical one-shot). Stops on ok / non-error / a non-SELECT rewrite.
+    _rp = 0
+    while (isinstance(payload, dict) and payload.get("status") == "exec_error_federated"
+           and _rp < _repair_max_attempts()):
+        _rp += 1
+        sql = _generate_federated_sql(query, schema_text, join_text,
+                                      prior_sql=sql, prior_error=str(payload.get("reason")))
+        if not (sql and sql.lower().lstrip().startswith("select")):
+            break
+        payload = compose_federated(query, sql, cols, chunks, tenant=tenant)
+    if isinstance(payload, dict):
+        if _rp:
+            payload.setdefault("repair_attempts", _rp)          # diagnostic: self-repair rounds used
+        if payload.get("status") == "ok":
+            payload["answer"] = _nl_answer(query, payload.get("result") or {})
+    return _labelled_failure(payload, cols)
+
+
+def _labelled_failure(payload, cols):
+    """Attach controlled-failure labelling to a federated FAILURE payload (multi-source routing,
+    audit gaps #2/#3). A federated JOIN needs ALL its sources, so one failing is a CONTROLLED
+    failure (not a partial answer) — make that explicit, name the sources involved, and classify
+    the failure transient-vs-permanent (reusing the routing reliability classifier) so a caller can
+    tell a retryable infra blip from a permanent 'these sources can't be joined'. No-op on success."""
+    if not isinstance(payload, dict):
+        return payload
+    if payload.get("status") in ("refused_federated", "exec_error_federated", "not_federated"):
+        payload.setdefault("sources", selected_source_ids(cols))
+        reason = str(payload.get("reason") or payload.get("error") or "")
+        try:
+            from query.reliability import classify_failure, CLASS_TRANSIENT
+            cls = classify_failure(reason)
+        except Exception:
+            cls, CLASS_TRANSIENT = "permanent", "transient"
+        payload["failure_class"] = cls
+        payload["retryable"] = (cls == CLASS_TRANSIENT)
+        # A cross-source join's sources are all REQUIRED; there is no partial join. This is a
+        # controlled, labelled failure — never a silently-dropped source or a single-source guess.
+        payload.setdefault("partial", False)
+        payload.setdefault("required_sources_all", True)
     return payload
 
 

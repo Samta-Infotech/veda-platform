@@ -138,6 +138,21 @@ def _encode_rag_query(
     snake_case token into the embedding query and hurts chunk relevance. Use the raw
     query for RAG; value-expansion stays in the SQL path.
     """
+    # DUP-1 / P0 (flag-gated, default OFF): reuse the embedding the routing stage already computed for
+    # THIS exact query (embed-once ContextVar) — same model + same raw query → identical vector — so
+    # RAG retrieval skips a redundant BGE-M3 encode. Only reuses on an exact query-string match; any
+    # mismatch falls through to a fresh encode. Lazy import avoids a circular dependency at load.
+    try:
+        from config import RETRIEVAL_EMBED_REUSE_ENABLED
+        if RETRIEVAL_EMBED_REUSE_ENABLED:
+            from query.source_coordinator import _ROUTING_QV
+            cq, cv = _ROUTING_QV.get()
+            if cv is not None and cq is not None and cq == query:
+                if verbose:
+                    print("  [RAG] reused routing query embedding (embed-once)")
+                return cv
+    except Exception:
+        pass
     try:
         from ingestion import m3_encoder
         return m3_encoder.encode_dense([query])[0]
@@ -408,15 +423,30 @@ def run_rag_layer(
         )
     query_sparse = _encode_rag_query_sparse(query, verbose=verbose)
 
+    # Cross-encoder re-rank (flag-gated, default OFF). When on, fetch a larger dense+sparse candidate
+    # pool, then re-rank it down to top_k with the cross-encoder so the most relevant passage leads
+    # synthesis. OFF → fetch exactly top_k, no rerank (byte-identical).
+    try:
+        from config import RAG_CHUNK_RERANK_ENABLED, RAG_RERANK_FETCH_K
+    except Exception:
+        RAG_CHUNK_RERANK_ENABLED, RAG_RERANK_FETCH_K = False, top_k
+    _fetch_k = max(top_k, RAG_RERANK_FETCH_K) if RAG_CHUNK_RERANK_ENABLED else top_k
+
     # Retrieve chunks (with temporal filter — Improvement 1)
     chunks = retrieve_top_k_chunks(
         query_vector    = query_vec,
         source_ids      = source_ids,
-        top_k           = top_k,
+        top_k           = _fetch_k,
         temporal_filter = temporal_filter,
         verbose         = verbose,
         query_sparse    = query_sparse,
     )
+    if RAG_CHUNK_RERANK_ENABLED and chunks and len(chunks) > top_k:
+        try:
+            from query.reranker import rerank_chunks
+            chunks = rerank_chunks(query, chunks, top_k, verbose=verbose)
+        except Exception:
+            chunks = chunks[:top_k]
 
     if not chunks:
         msg = "No relevant document passages found"

@@ -75,6 +75,23 @@ def try_current() -> "RequestContext | None":
     return _ctx.get()
 
 
+# Source routing profiles (multi-source routing) — {source_id: {source_type, is_canonical,
+# domain_tags, description}} the api tier resolved from the Source registry and forwarded.
+# Kept in a SEPARATE ContextVar (not on the frozen, hashable RequestContext, which is an engine
+# cache key) so it never affects caching. Default empty → the routing coordinator simply falls
+# back to evidence-only routing (canonical/domain tie-break doesn't fire) — byte-identical when
+# unset, so every existing caller is unaffected.
+_source_profiles: ContextVar[dict] = ContextVar("veda_source_profiles", default={})
+
+
+def set_source_profiles(profiles: dict):
+    return _source_profiles.set(dict(profiles or {}))
+
+
+def current_source_profiles() -> dict:
+    return _source_profiles.get() or {}
+
+
 def parse_allowed_resources(raw: "str | None") -> "tuple | None":
     """The ``X-Veda-Data-Scope`` header value into ``RequestContext.allowed_resources``.
 
