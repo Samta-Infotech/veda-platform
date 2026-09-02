@@ -78,6 +78,49 @@ def _load(path: str) -> Optional[Any]:
         return None
 
 
+# ── freshness fingerprint ────────────────────────────────────────────────────
+# GRAPH_VERSION is a static schema-format version, so it can never answer "does
+# this graph reflect the CURRENT artifacts?". Every build therefore stamps the
+# (mtime, size) of each input it fused, letting a consumer detect that an input
+# has since been regenerated — previously a stale graph was served silently and
+# indefinitely (its siblings under DERIVED_ARTIFACTS_ENABLED promise freshness;
+# this one had no such contract).
+def _input_paths() -> Dict[str, str]:
+    return {
+        "semantic_model":     _SEMANTIC_MODEL,
+        "relationship_graph": _REL_GRAPH,
+        "concept_graph":      _CONCEPT_GRAPH,
+        "domain_synonyms":    _DOMAIN_SYN,
+        "metrics":            _METRICS,
+        "dimensions":         _DIMENSIONS,
+    }
+
+
+def _fingerprint() -> Dict[str, Any]:
+    """{name: {mtime, size}} for each input artifact. Missing inputs record None so
+    an input APPEARING later also registers as a change."""
+    fp: Dict[str, Any] = {}
+    for name, path in _input_paths().items():
+        try:
+            st = os.stat(path)
+            fp[name] = {"mtime": round(st.st_mtime, 3), "size": st.st_size}
+        except OSError:
+            fp[name] = None
+    return fp
+
+
+def stale_inputs(graph: Dict[str, Any]) -> List[str]:
+    """Names of input artifacts that changed since `graph` was built.
+    [] means fresh (also [] for a graph with no recorded fingerprint — an older
+    artifact predating this field, which we cannot judge and must not cry wolf on).
+    """
+    recorded = (graph or {}).get("inputs")
+    if not isinstance(recorded, dict) or not recorded:
+        return []
+    current = _fingerprint()
+    return sorted(k for k in recorded if current.get(k) != recorded.get(k))
+
+
 # Node id helpers — single source of truth, reused by query_graph.py.
 def table_id(t: str) -> str:  return f"table:{t}"
 def col_id(t: str, c: str) -> str:  return f"col:{t}.{c}"
@@ -85,6 +128,24 @@ def concept_id(name: str) -> str:  return f"concept:{name}"
 def metric_id(mid: str) -> str:  return f"metric:{mid}"
 def dim_id(did: str) -> str:  return f"dim:{did}"
 def syn_id(term: str) -> str:  return f"syn:{term.strip().lower()}"
+
+
+def is_prose_label(term: str) -> bool:
+    """True for a label that is a sentence/description rather than a search term.
+
+    The registry generators phrase every metric/dimension as "{agg} {label}". When the
+    label is a column's business_definition rather than its name, the result is prose —
+    "avg a sequential number assigned to each worklist quote." — which no user ever
+    types, so it only adds SYNONYM nodes that dilute term resolution.
+
+    Detection is a trailing period ONLY, deliberately. Measured against the live
+    registries: that flags 1781 of 1849 prose labels with ZERO false positives, while
+    a word-count or article-based rule would wrongly drop legitimate long phrasings
+    ("count of role module permission mapping", "is approved by owner", "has full
+    access"). The longest non-prose label is 50 chars and no truncated description
+    reaches the graph without its period, so length adds no coverage here.
+    """
+    return (term or "").strip().endswith(".")
 
 
 class _GraphAccumulator:
@@ -138,6 +199,7 @@ def build_unified_graph() -> Dict[str, Any]:
     dict (possibly small) — missing artifacts are skipped, never fatal."""
     g = _GraphAccumulator()
     warnings: List[str] = []
+    prose_skipped = 0        # description-shaped labels rejected as SYNONYM terms
 
     sm = _load(_SEMANTIC_MODEL)
     if not sm:
@@ -225,6 +287,9 @@ def build_unified_graph() -> Dict[str, Any]:
                 g.node(table_id(owner), "TABLE", owner)
                 g.edge(nid, table_id(owner), "IS_METRIC")
             for lbl in sorted(set((mrec or {}).get("labels") or [])):
+                if is_prose_label(lbl):
+                    prose_skipped += 1
+                    continue
                 sid = g.node(syn_id(lbl), "SYNONYM", lbl.strip().lower())
                 g.edge(sid, nid, "SYNONYM_OF")
 
@@ -239,6 +304,9 @@ def build_unified_graph() -> Dict[str, Any]:
                 cid = g.node(col_id(owner, colname), "COLUMN", f"{owner}.{colname}")
                 g.edge(nid, cid, "IS_DIMENSION")
             for lbl in sorted(set((drec or {}).get("labels") or [])):
+                if is_prose_label(lbl):
+                    prose_skipped += 1
+                    continue
                 sid = g.node(syn_id(lbl), "SYNONYM", lbl.strip().lower())
                 g.edge(sid, nid, "SYNONYM_OF")
 
@@ -246,6 +314,9 @@ def build_unified_graph() -> Dict[str, Any]:
     ds = _load(_DOMAIN_SYN)
     if ds:
         for term, targets in sorted(ds.items()):
+            if is_prose_label(term):
+                prose_skipped += 1
+                continue
             sid = g.node(syn_id(term), "SYNONYM", term.strip().lower())
             for tgt in targets or []:
                 if "." not in tgt:
@@ -258,6 +329,11 @@ def build_unified_graph() -> Dict[str, Any]:
 
     graph = g.to_graph()
     graph["stats"]["warnings"] = warnings
+    graph["stats"]["prose_labels_skipped"] = prose_skipped
+    # Stamp the inputs this build fused, so a consumer can detect staleness later.
+    # Captured AFTER reading them: any input rewritten mid-build shows as changed
+    # on the next check rather than being wrongly certified fresh.
+    graph["inputs"] = _fingerprint()
     return graph
 
 

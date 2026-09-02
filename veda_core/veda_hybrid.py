@@ -1314,9 +1314,32 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             sql_result = types.SimpleNamespace(
                 columns=_c, rows=[dict(zip(_c, row)) for row in _r],
                 row_count=len(_r), error=None)
+        # Unified-graph chunk retrieval for the fusion context. Without this the
+        # hybrid answer saw ONLY cosine-retrieved chunks — the graph's PPR walk
+        # (which bridges chunks to the query's entities, and reaches chunks in
+        # other sources via cross_source_fk) never influenced the synthesised
+        # text at all. Purely additive downstream + fully guarded: on any failure
+        # the fusion behaves exactly as before.
+        _graph_chunks = None
+        try:
+            from config import (UNIFIED_GRAPH_ENABLED, GRAPH_RETRIEVAL_ENABLED,
+                                GRAPH_EMBED_ENABLED)
+            if UNIFIED_GRAPH_ENABLED and GRAPH_RETRIEVAL_ENABLED and GRAPH_EMBED_ENABLED:
+                from query.graph_retriever import run_graph_retrieval
+                _gr = run_graph_retrieval(query=query, source_ids=source_ids,
+                                          verbose=verbose)
+                _graph_chunks = list(getattr(_gr, "chunks", None) or [])
+                if verbose:
+                    print(f"  [Hybrid] graph chunks: {len(_graph_chunks)}")
+        except Exception as _gce:
+            if verbose:
+                print(f"  [Hybrid] graph chunk retrieval skipped "
+                      f"({type(_gce).__name__}: {_gce})")
+
         hy = run_hybrid_layer(query, sql_columns=[], source_ids=source_ids,
                              temporal_filter=_temporal(query),
-                             sql_result=sql_result, verbose=verbose, on_event=on_event)
+                             sql_result=sql_result, verbose=verbose, on_event=on_event,
+                             graph_chunks=_graph_chunks)
         if isinstance(sqlres, dict) and sqlres.get("ok"):
             # Attach the SQL head's OWN executed rows + already-built explain
             # (Tier1's _done() computed both from real, validated SQL) — never

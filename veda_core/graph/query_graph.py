@@ -235,14 +235,52 @@ class UnifiedGraph:
         return []
 
 
-# ── module-level singleton (load once per process) ───────────────────────────
+# ── module-level singleton (load once per process, re-loaded when the file changes) ──
 _GRAPH: Optional[UnifiedGraph] = None
+_GRAPH_SIG: Optional[tuple] = None      # (mtime, size) of the loaded artifact
+_STALE_WARNED: set = set()              # fingerprints already warned about (log once)
+
+
+def _file_sig(path: str) -> Optional[tuple]:
+    """(mtime, size) of the artifact; None if it is not there."""
+    try:
+        st = os.stat(path)
+        return (round(st.st_mtime, 3), st.st_size)
+    except OSError:
+        return None
+
+
+def _warn_if_stale(data: dict, path: str) -> None:
+    """Log ONCE per (artifact, stale-input-set) when the graph predates its own inputs.
+    Silent staleness was the real hazard: expansion kept serving synonyms/metrics from
+    an older data model with nothing anywhere reporting it."""
+    try:
+        from ingestion.unified_graph_builder import stale_inputs
+        stale = stale_inputs(data)
+        if not stale:
+            return
+        key = (path, tuple(stale))
+        if key in _STALE_WARNED:
+            return
+        _STALE_WARNED.add(key)
+        print(f"  [UnifiedGraph] ⚠ STALE — rebuilt inputs since last build: "
+              f"{', '.join(stale)}. Graph expansion is serving an older data model. "
+              f"Re-run ingestion (or: python3 ingestion/unified_graph_builder.py)")
+    except Exception:
+        pass          # freshness reporting must never break a query
 
 
 def get_graph(path: str = _GRAPH_FILE, force_reload: bool = False) -> Optional[UnifiedGraph]:
-    """Return the cached UnifiedGraph; None if the artifact is missing/unreadable."""
-    global _GRAPH
-    if _GRAPH is not None and not force_reload:
+    """Return the cached UnifiedGraph; None if the artifact is missing/unreadable.
+
+    Re-loads automatically when the artifact changes on disk (one stat() per call).
+    Without this the process-level singleton pinned whatever was loaded first, so a
+    long-lived query worker kept serving the pre-ingestion graph until restarted —
+    and no caller anywhere passes force_reload=True.
+    """
+    global _GRAPH, _GRAPH_SIG
+    sig = _file_sig(path)
+    if _GRAPH is not None and not force_reload and sig == _GRAPH_SIG:
         return _GRAPH
     try:
         with open(path) as f:
@@ -250,6 +288,8 @@ def get_graph(path: str = _GRAPH_FILE, force_reload: bool = False) -> Optional[U
     except (OSError, ValueError):
         return None
     _GRAPH = UnifiedGraph(data)
+    _GRAPH_SIG = sig
+    _warn_if_stale(data, path)
     return _GRAPH
 
 

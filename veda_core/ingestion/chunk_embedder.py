@@ -131,6 +131,11 @@ class ChunkRetrievalResult:
     text:        str
     page_num:    Optional[int]
     similarity:  float
+    # True when this chunk came from unified-graph traversal (PPR over the entity
+    # bridge) rather than cosine ANN search. Its `similarity` is then a PPR mass,
+    # NOT a cosine score — the two are different scales and must not be compared
+    # against cosine thresholds. See run_hybrid_layer()'s doc-filter step.
+    from_graph:  bool = False
 
 
 # =============================================================================

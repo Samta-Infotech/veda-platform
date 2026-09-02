@@ -499,7 +499,8 @@ def run_graph_retrieval(
                 chunk_index = (meta.attrs.get("chunk_index") if meta else 0) or 0,
                 text        = ct.get("text") or "",
                 page_num    = ct.get("page_num"),
-                similarity  = round(sub.score, 6),
+                similarity  = round(sub.score, 6),   # PPR mass, not cosine
+                from_graph  = True,
             ))
 
     columns.sort(key=lambda n: n.score, reverse=True)
