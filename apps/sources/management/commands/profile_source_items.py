@@ -18,6 +18,7 @@ import urllib.request
 from django.core.management.base import BaseCommand
 from django.db import connection
 
+from apps.sources.item_profiler import _engine_connection
 from apps.sources.models import SourceItem
 
 SLM_URL = os.environ.get("VEDA_SLM_CHAT_URL", "http://192.168.1.35:11500/api/chat")
@@ -100,15 +101,20 @@ class Command(BaseCommand):
                 item.topics = topics
                 item.save(update_fields=["summary", "topics", "updated_at"])
                 vec = _embed(f"{item.name}. {summary}")
-                with connection.cursor() as cur:
-                    cur.execute(
-                        "INSERT INTO source_item_embeddings (source_id, item_type, item_key, name, "
-                        "summary, embedding, updated_at) VALUES (%s,%s,%s,%s,%s,%s,now()) "
-                        "ON CONFLICT (source_id, item_type, item_key) DO UPDATE SET "
-                        "name=EXCLUDED.name, summary=EXCLUDED.summary, embedding=EXCLUDED.embedding, "
-                        "updated_at=now()",
-                        [str(item.source_id), item.item_type, item.item_key, item.name, summary,
-                         "[" + ",".join(f"{v:.8f}" for v in vec) + "]"])
+                conn = _engine_connection()      # NOT django's `connection` — see _engine_connection
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "INSERT INTO source_item_embeddings (source_id, item_type, item_key, name, "
+                            "summary, embedding, updated_at) VALUES (%s,%s,%s,%s,%s,%s,now()) "
+                            "ON CONFLICT (source_id, item_type, item_key) DO UPDATE SET "
+                            "name=EXCLUDED.name, summary=EXCLUDED.summary, embedding=EXCLUDED.embedding, "
+                            "updated_at=now()",
+                            [str(item.source_id), item.item_type, item.item_key, item.name, summary,
+                             "[" + ",".join(f"{v:.8f}" for v in vec) + "]"])
+                    conn.commit()
+                finally:
+                    conn.close()
                 done += 1
                 if done % 20 == 0:
                     self.stdout.write(f"  ...{done} profiled")
