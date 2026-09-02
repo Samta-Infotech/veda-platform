@@ -54,7 +54,8 @@ from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
 from slm._call_slm import collect_usage as _collect_usage_dc, usage_totals as _usage_totals_dc
 from concurrent.futures import ThreadPoolExecutor
 from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
-from veda.explain import current_trace as _cur_trace, bind_trace as _bind_trace
+from veda.explain import (current_trace as _cur_trace, bind_trace as _bind_trace,
+                          record_result_stages, render_trace)
 from veda.validation import value_grounding, qualifier_completeness
 from veda.ir_equivalence import validate_ir_equivalence
 import sqlglot
@@ -254,9 +255,429 @@ def _emit(on_event, phase, message, **extra):
         pass
 
 
-def _maybe_federated(query, verbose=False):
+def _agent_to_subresult(query, ar):
+    """AgentResult → SubResult, reusing the same status contract as _to_subresult. An OK result is
+    re-shaped into the dict head-result form ({ok, cols, rows, answer, sql, ...}) so downstream
+    explain/table rendering treats it exactly like a normal answer."""
+    engine = getattr(ar, "engine", "") or "routed"
+    status = getattr(ar, "status", "")
+    if status == "ok":
+        payload = {"ok": True, **(getattr(ar, "data", {}) or {})}
+        return _to_subresult(query, engine, payload)
+    if status == "refused":
+        return SubResult(query, STATUS_REFUSED, engine, None, getattr(ar, "reason", "") or "refused")
+    return SubResult(query, STATUS_ERROR, engine, None, getattr(ar, "error", "") or "failed")
+
+
+def _multi_to_multiresult(query, out, on_event=None):
+    """Convert an independent-MULTI execution (agents run separately, then merged) into a MultiResult,
+    honouring the explicit merge policy and surfacing per-source partial failure.
+
+    - CONFLICT_DETECTED (same metric differs, no canonical) → a single REFUSED result that surfaces the
+      conflict; the values are NEVER silently blended.
+    - CANONICAL_PRIORITY (conflict, one canonical) → the canonical source's answer wins.
+    - APPEND (independent facts) → one SubResult PER source, preserving per-source identity + status;
+      a failed source becomes an error/refused item, so an incomplete answer is visibly incomplete.
+    """
+    from query.result_orchestrator import (
+        POLICY_CONFLICT_DETECTED, POLICY_CANONICAL_PRIORITY)
+    merge = out.get("merge")
+    results = out.get("results") or []
+    partial = out.get("partial") or {}
+
+    if merge is not None and merge.policy == POLICY_CONFLICT_DETECTED:
+        vals = "; ".join(f"source {v['source_id']} = {v['value']}"
+                         for v in (merge.conflict or {}).get("values", []))
+        reason = ("Sources disagree on the same value and no canonical source is set — "
+                  f"cannot choose safely: {vals}. Please clarify which source is authoritative.")
+        _emit(on_event, "answer", reason)
+        return MultiResult.single(query, STATUS_REFUSED, "conflict", refuse_reason=reason)
+
+    if merge is not None and merge.policy == POLICY_CANONICAL_PRIORITY:
+        winner = next((r for r in results
+                       if getattr(r, "source_id", "") == merge.winner_source_id
+                       and getattr(r, "status", "") == "ok"), None)
+        if winner is not None:
+            return MultiResult(items=[_agent_to_subresult(query, winner)])
+
+    # APPEND (or canonical winner not found) — one item per source, failures labelled.
+    items = [_agent_to_subresult(query, r) for r in results]
+    seen = {getattr(r, "source_id", "") for r in results}
+    for f in partial.get("failures", []):
+        if f.get("source_id") not in seen:
+            items.append(SubResult(query, STATUS_ERROR, "routed", None,
+                                   f"source {f.get('source_id')}: {f.get('error')}"))
+    if not items:
+        return None
+    return MultiResult(items=items)
+
+
+def _constrain_scope_to(source_id):
+    """Narrow the ambient request scope to a SINGLE source (the coordinator's authoritative SINGLE
+    decision). This makes `_maybe_federated` a no-op (it requires ≥2 in-scope sources) so a SINGLE
+    decision can NEVER be silently overridden by a cross-source federated answer from a DIFFERENT
+    source — the src_5.amenities_catalog mis-execution (docs/multisource_routing/ANSWER_E2E_ROOTCAUSE.md).
+    Best-effort: any failure leaves the scope untouched (falls back to legacy behaviour). Only ever
+    reached on the flag-gated authoritative-routing path, so production (flag OFF) is byte-identical."""
+    try:
+        ctx = _current_ctx()
+        if ctx is None:
+            return
+        sid = int(source_id)
+        from veda_core.context import RequestContext
+        _set_ctx(RequestContext(source_id=sid, tenant=str(getattr(ctx, "tenant", "default")),
+                                source_ids=(sid,),
+                                allowed_resources=getattr(ctx, "allowed_resources", None)))
+    except Exception:
+        pass
+
+
+def _is_datalake_source(source_id, decision, profiles):
+    """True when the routed source is a tabular datalake (parquet/CSV) — its schema lives in
+    column_embeddings_v2 + parquet files, NOT the relational semantic model."""
+    sid = str(source_id)
+    prof = (profiles or {}).get(sid, {}) or {}
+    if str(prof.get("source_type", "")).lower() == "datalake":
+        return True
+    for c in getattr(decision, "candidate_sources", []) or []:
+        if str(c.source_id) == sid and str(getattr(c, "source_type", "")).lower() == "datalake":
+            return True
+    return False
+
+
+def _augment_sm_for_datalake(sm, cols, source_id):
+    """Return a COPY of the semantic model with the datalake source's tables/columns merged in
+    (from column_embeddings_v2). The relational sm knows only the primary DB, so a correct datalake
+    SQL (e.g. `SELECT monthly_fee FROM amenities_catalog`) is otherwise rejected by the validator as
+    "references unknown column(s)" and never reaches the DuckDB executor. Scoped to ONE source so it
+    cannot bleed the datalake schema into an unrelated relational query. Best-effort: on any failure
+    the original (sm, cols) is returned unchanged, so the caller degrades to today's behaviour."""
+    try:
+        from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+        conn = get_internal_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT table_name, col_name, semantic_type FROM column_embeddings_v2 "
+                            "WHERE source_id = %s", [str(source_id)])
+                rows = cur.fetchall()
+        finally:
+            release_internal_connection(conn)
+        if not rows:
+            return sm, cols
+        new_cols = dict(sm.get("columns", {}) or {})
+        new_tables = dict(sm.get("tables", {}) or {})
+        for tbl, col, stype in rows:
+            st = stype or "DIMENSION"
+            new_cols[f"{tbl}.{col}"] = {
+                "col_name": col, "table_name": tbl, "semantic_type": st, "analytics_role": st,
+                "business_definition": f"{col} from datalake dataset {tbl}"}
+            new_tables.setdefault(tbl, {
+                "table_name": tbl, "business_purpose": f"datalake dataset {tbl}",
+                "primary_entity": tbl, "table_type": "datalake",
+                "candidate_temporal_columns": [], "candidate_measure_columns": []})
+        merged = dict(sm)
+        merged["columns"] = new_cols
+        merged["tables"] = new_tables
+        return merged, list(new_cols.keys())
+    except Exception:
+        return sm, cols
+
+
+def _run_doc_data(query, decision, profiles, on_event=None):
+    """Bounded DOCUMENT_FACT + DATA_GROUNDING (flag-gated). For a MULTI spanning exactly one DOCUMENT
+    source and one RELATIONAL data source: extract the entities the document names (grounded), query a
+    candidate data column's values, and deterministically INTERSECT. Returns a MultiResult on success,
+    or None to defer to the existing MULTI logic. Best-effort — any failure returns None."""
+    try:
+        from query.doc_data_planner import doc_data_enabled, classify, intersect
+        if not doc_data_enabled():
+            return None
+
+        def _kind(sid):
+            return str((profiles or {}).get(str(sid), {}).get("source_type", "")).lower()
+        sids = [str(s) for s in (decision.source_ids or [])]
+        doc = [s for s in sids if _kind(s) in ("document", "filesystem")]
+        dat = [s for s in sids if _kind(s) == "relational"]
+        if len(doc) != 1 or len(dat) != 1:
+            return None                     # v1: exactly one doc + one relational data source
+        doc_sid, dat_sid = doc[0], dat[0]
+
+        # 1. document chunks
+        from query.rag_layer import _encode_rag_query
+        from ingestion.chunk_embedder import retrieve_top_k_chunks
+        qv = _encode_rag_query(query)
+        if qv is None:
+            return None
+        chunks = retrieve_top_k_chunks(query_vector=qv, source_ids=[doc_sid], top_k=6) or []
+        chunk_texts = [getattr(c, "text", "") or "" for c in chunks]
+        if not any(chunk_texts):
+            return None
+
+        # 2. candidate data columns (from retrieval over the data source)
+        from query.retrieval_select import select_retrieval
+        sel = select_retrieval(query=query, source_ids=[dat_sid], intent="sql", verbose=False)
+        data_cols = []
+        seen = set()
+        for c in (getattr(sel, "columns", []) or []):
+            t, col = getattr(c, "table_name", "") or "", getattr(c, "col_name", "") or ""
+            if t and col and (t, col) not in seen:
+                seen.add((t, col))
+                data_cols.append({"source_id": dat_sid, "table": t, "col": col})
+        if not data_cols:
+            return None
+
+        # 3. bounded SLM: grounded entities + chosen data column
+        res = classify(query, chunk_texts, data_cols[:12])
+        if res is None:
+            return None
+        entities, col = res
+
+        # 4. query DISTINCT values of the chosen data column (existing execution path)
+        from veda.execution import execute_sql
+        sql = f'SELECT DISTINCT "{col["col"]}" FROM "{col["table"]}" WHERE "{col["col"]}" IS NOT NULL'
+        _cols, rows, err = execute_sql(sql, [])
+        if err or rows is None:
+            return None
+        data_values = [(r[0] if not isinstance(r, dict) else list(r.values())[0]) for r in rows]
+
+        # 5. deterministic intersection
+        matched = intersect(entities, data_values)
+        cites = sorted({(getattr(c, "doc_name", "") or "") for c in chunks if getattr(c, "doc_name", "")})
+        if matched:
+            answer = (f"{len(matched)} of the items the document names are in our data: "
+                      f"{', '.join(matched)}.")
+        else:
+            answer = ("None of the items the document names appear in our data "
+                      f"(document named: {', '.join(entities)}).")
+        _emit(on_event, "answer", answer)
+        return MultiResult.single(query, STATUS_OK, "doc_data", result={
+            "answer": answer, "rows": [[m] for m in matched], "cols": [col["col"]],
+            "sql": sql, "citations": cites, "operation": "DOCUMENT_FACT_DATA_GROUNDING",
+            "doc_entities": entities, "matched": matched})
+    except Exception:
+        return None
+
+
+def _datalake_isolated_sm(source_id):
+    """Build a DATALAKE-ONLY semantic model for a datalake SINGLE route (source isolation, flag-gated).
+
+    Unlike _augment_sm_for_datalake (which MERGES the datalake schema into the homzhub sm, so the
+    shared retrieval engine then mixes ~1900 homzhub tables into a datalake query), this returns an sm
+    containing ONLY the routed source's tables/columns — plus on-demand parquet sample_values so the
+    value-arbiter grounds datalake filter values (e.g. "Kochi") with NO homzhub column competing. The
+    caller has already _constrain_scope_to(source), so get_engine() builds a SEPARATE per-scope engine
+    (keyed on frozenset(source_ids)); the homzhub engine is never touched. Returns (sm, cols) or None
+    on any failure (caller then falls back to the merge path)."""
+    try:
+        from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+        conn = get_internal_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT table_name, col_name, semantic_type FROM column_embeddings_v2 "
+                            "WHERE source_id = %s", [str(source_id)])
+                rows = cur.fetchall()
+        finally:
+            release_internal_connection(conn)
+        if not rows:
+            return None
+        # Per-column parquet sample values (invert the datalake value sampler: token -> [(tbl,col,..,orig)]).
+        col_samples = {}
+        try:
+            from query.datalake_values import _sample_source, _sample_limit
+            _tenant = "default"
+            _ctx = _current_ctx()
+            if _ctx is not None:
+                _tenant = str(getattr(_ctx, "tenant", "default"))
+            vidx = _sample_source(str(source_id), _tenant, _sample_limit()) or {}
+            for _tok, hits in vidx.items():
+                for (tbl, col, _st, orig) in hits:
+                    col_samples.setdefault((tbl, col), [])
+                    if orig not in col_samples[(tbl, col)]:
+                        col_samples[(tbl, col)].append(orig)
+        except Exception:
+            col_samples = {}
+        tables, columns = {}, {}
+        for tbl, col, stype in rows:
+            st = stype or "DIMENSION"
+            svals = col_samples.get((tbl, col), [])
+            columns[f"{tbl}.{col}"] = {
+                "col_name": col, "table_name": tbl, "semantic_type": st, "analytics_role": st,
+                "business_definition": f"{col} from datalake dataset {tbl}",
+                "sample_values": svals}
+            tables.setdefault(tbl, {
+                "table_name": tbl, "business_purpose": f"datalake dataset {tbl}",
+                "primary_entity": tbl, "table_type": "datalake",
+                "candidate_temporal_columns": [], "candidate_measure_columns": []})
+        iso = {"version": 1, "tables": tables, "columns": columns,
+               "retrieval_documents": {}, "domain_synonyms": {}, "concept_graph": {},
+               # Marker read ONLY by the retrieval engine's Signal-1 isolation filter (retrieve()):
+               # the shared BGE searcher queries the GLOBAL column store and is the one signal not
+               # bound to this per-engine sm, so it must be filtered back to this source's columns.
+               # Present only on this flag-gated isolated sm → the normal path never sees it.
+               "__source_isolated__": True}
+        return iso, list(columns.keys())
+    except Exception:
+        return None
+
+
+def _run_coordinator(query, verbose=False, on_event=None):
+    """Multi-source routing coordinator entry (Phase 3.6 + authoritative wiring).
+
+    Off  (MULTISOURCE_ROUTING_ENABLED=0)  → returns None, no work (prod byte-identical).
+    On + SHADOW                           → computes + traces a RoutingDecision, returns None
+                                            (answer path unchanged — observe only).
+    On + not SHADOW (authoritative)       → the decision DRIVES the answer:
+        NO_MATCH / CLARIFICATION_REQUIRED → a refusal MultiResult (NO answer is generated — closes
+                                            the 'no silent guessing' gap).
+        SINGLE                            → dispatch via the source agent, mapped to a MultiResult.
+        MULTI                             → returns None so the existing federated path handles it.
+    Always best-effort: any failure returns None and the legacy path proceeds.
+    """
+    try:
+        from config import MULTISOURCE_ROUTING_ENABLED, MULTISOURCE_ROUTING_SHADOW
+    except Exception:
+        return None
+    if not MULTISOURCE_ROUTING_ENABLED:
+        return None
+    try:
+        ctx = _current_ctx()
+        sids = [str(s) for s in (getattr(ctx, "source_ids", ()) or ())] if ctx is not None else []
+        if not sids:
+            return None
+        try:
+            from veda_core.context import current_source_profiles as _csp
+        except Exception:
+            try:
+                from context import current_source_profiles as _csp
+            except Exception:
+                _csp = lambda: {}
+        _profiles = _csp() or {}
+        _tenant = str(getattr(ctx, "tenant", "default"))
+        from query.source_coordinator import plan_route, execute_decision
+        _emit(on_event, "route", "Deciding which source can answer…")
+        decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
+        try:
+            _cur_trace().set(
+                "routing", status=decision.status, mode=decision.mode,
+                source_ids=decision.source_ids, reason_code=decision.reason_code,
+                decision_method=decision.decision_method,
+                shadow=bool(MULTISOURCE_ROUTING_SHADOW))
+        except Exception:
+            pass
+        if verbose:
+            print(f"  [routing] {decision.status}/{decision.mode} sources={decision.source_ids} "
+                  f"({decision.reason_code}){' [shadow]' if MULTISOURCE_ROUTING_SHADOW else ''}")
+
+        if MULTISOURCE_ROUTING_SHADOW:
+            return None   # observe only
+
+        # ---- authoritative: the decision drives the answer ----
+        if decision.status in ("NO_MATCH", "CLARIFICATION_REQUIRED"):
+            route = "no_match" if decision.status == "NO_MATCH" else "clarify"
+            _emit(on_event, "answer", decision.reason or "Could not determine a source.")
+            return MultiResult.single(query, STATUS_REFUSED, route, refuse_reason=decision.reason)
+
+        if decision.status == "ROUTED" and decision.mode == "SINGLE":
+            _sid = decision.source_ids[0] if decision.source_ids else None
+            _stype = str((_profiles.get(str(_sid), {}) or {}).get("source_type", "") or "").strip()
+            _emit(on_event, "route",
+                  f"Routing to the {_stype} source…" if _stype else "Routing to the matched source…",
+                  source_ids=decision.source_ids, mode="single")
+            _is_dl = bool(_sid) and _is_datalake_source(_sid, decision, _profiles)
+            if _is_dl:
+                # Datalake SINGLE route: constrain retrieval to this source (so a datalake dataset
+                # whose name overlaps a relational concept — e.g. "maintenance" — does not bleed into
+                # DB tables and produce an impossible cross-source join), and make its parquet columns
+                # known to the SQL validator. See docs/multisource_routing/ANSWER_E2E_ROOTCAUSE.md.
+                _constrain_scope_to(_sid)
+            sm, cols = _load_semantic_model()
+            if _is_dl:
+                # Source isolation (flag-gated, default OFF): run over a DATALAKE-ONLY sm so retrieval/
+                # planning/validation/value-grounding see ONLY this source (no homzhub-table mixing, no
+                # shared-value collision). On OFF or any failure, fall back to the merge path below —
+                # byte-identical to prior behaviour.
+                _iso = None
+                try:
+                    from config import SOURCE_ISOLATED_RETRIEVAL_ENABLED as _iso_on
+                except Exception:
+                    _iso_on = False
+                if _iso_on:
+                    _iso = _datalake_isolated_sm(_sid)
+                if _iso is not None:
+                    sm, cols = _iso
+                else:
+                    sm, cols = _augment_sm_for_datalake(sm, cols, _sid)
+            out = execute_decision(decision, query, sm=sm, cols=cols, tenant=_tenant,
+                                   profiles=_profiles, on_event=on_event)
+            ar = (out or {}).get("result")
+            if ar is None:
+                # Authoritative SINGLE[s], but the source agent produced no result. Do NOT fall
+                # through to the cross-source federated path — it would answer from a DIFFERENT
+                # source (the src_5.amenities_catalog mis-execution). Constrain the scope to the
+                # routed source so only the single-source legacy path can answer.
+                if decision.source_ids:
+                    _constrain_scope_to(decision.source_ids[0])
+                return None
+            return MultiResult(items=[_agent_to_subresult(query, ar)])
+
+        if decision.status == "ROUTED" and decision.mode == "MULTI":
+            _emit(on_event, "route",
+                  f"Combining data across {len(decision.source_ids)} sources…",
+                  source_ids=decision.source_ids, mode="multi")
+            # DOCUMENT_FACT + DATA_GROUNDING (flag-gated, default OFF). A doc+data MULTI can't federate
+            # (a document isn't column-bearing); the existing path merges the two independently and
+            # can't intersect. Try the bounded grounding first; on None fall through unchanged.
+            _dd = _run_doc_data(query, decision, _profiles, on_event=on_event)
+            if _dd is not None:
+                return _dd
+            # Genuine join (cross_source_fk edge) → strategy 'federated': defer to the existing
+            # federated route (_maybe_federated), which already builds cross-source SQL + a MultiResult.
+            # No edge (SLM-resolved) → strategy 'independent': run each source and merge/conflict here.
+            from query.execution_planner import plan_execution, STRATEGY_INDEPENDENT
+            plan = plan_execution(decision)
+            if plan.strategy != STRATEGY_INDEPENDENT:
+                _emit(on_event, "route", "Joining data across sources…", mode="federated")
+                # Genuine join (cross_source_fk edge). Run the federated route in STRICT mode: a
+                # failure is a surfaced controlled failure of a required join, never a silent
+                # single-source fallback (gaps #2/#3). None → federation genuinely not applicable
+                # (retrieval didn't span sources) → defer to the legacy path.
+                return _maybe_federated(query, verbose=verbose, strict=True)
+            # SLM-resolved MULTI (no structural edge): the planner defaults to 'independent' (run each
+            # source + merge), which CANNOT join — so a genuine cross-source query fails. The federated
+            # executor self-discovers join hints independently of the routing edge (verified: it answers
+            # these directly), so try it FIRST (non-strict); on None fall back to independent-merge.
+            # Flag-gated, default OFF → byte-identical.
+            try:
+                from config import FEDERATE_SLM_MULTI_ENABLED as _fed_slm
+            except Exception:
+                _fed_slm = False
+            if _fed_slm:
+                fed = _maybe_federated(query, verbose=verbose, strict=False)
+                if fed is not None:
+                    return fed
+            sm, cols = _load_semantic_model()
+            out = execute_decision(decision, query, sm=sm, cols=cols, tenant=_tenant,
+                                   profiles=_profiles, on_event=on_event)
+            if not out or out.get("kind") != "independent":
+                return None
+            return _multi_to_multiresult(query, out, on_event=on_event)
+
+        # anything else → legacy path
+        return None
+    except Exception as _e:
+        if verbose:
+            print(f"  [routing] skipped ({type(_e).__name__}: {_e})")
+        return None
+
+
+def _maybe_federated(query, verbose=False, strict=False):
     """If the request scope spans ≥2 sources, try the cross-source federated route.
-    Returns a MultiResult on a federated answer/refusal, or None to use the normal path."""
+    Returns a MultiResult on a federated answer/refusal, or None to use the normal path.
+
+    ``strict`` (routing gaps #2/#3): set by the routing coordinator when a cross_source_fk edge was
+    DETERMINED (a genuine join). Then a federation failure is a CONTROLLED failure of a required
+    join and is SURFACED (with the involved sources + transient/permanent class), never silently
+    degraded to a single-source answer that would drop a source. Default False = legacy behaviour."""
     ctx = _current_ctx()
     sids = list(getattr(ctx, "source_ids", ()) or ()) if ctx is not None else []
     if len(sids) < 2:
@@ -266,8 +687,13 @@ def _maybe_federated(query, verbose=False):
     try:
         with collect_usage() as _fed_usage:
             from query.federated_route import run_federated
-            payload = run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
-                                    source_ids=sids, verbose=verbose)
+            from query.reliability import execute_federated_reliably
+            # Bounded transient-retry (flag-gated, default-OFF): same hardening the coordinator's
+            # _federated_delegate applies — this direct call-site must not be the one branch that
+            # skips it. OFF → single pass-through, byte-identical.
+            payload = execute_federated_reliably(
+                lambda: run_federated(query, tenant=str(getattr(ctx, "tenant", "default")),
+                                      source_ids=sids, verbose=verbose))
             # MUST read calls() INSIDE the with block — collect_usage().__exit__()
             # clears the thread-local buffer on exit (it's the outermost scope
             # here), so reading it after the block always returns empty. This
@@ -372,6 +798,19 @@ def _maybe_federated(query, verbose=False):
             # line) means WE can't federate right now, not that the question
             # can't be answered — degrade to the normal single-source path.
             "not installed", "unavailable", "no module named")):
+        if strict:
+            # Authoritative MULTI: a cross_source_fk edge was determined, so these sources genuinely
+            # join and are all required — a federation failure is a CONTROLLED failure, surfaced with
+            # its sources + class, NOT a silent single-source fallback (routing gaps #2/#3).
+            if verbose:
+                print(f"  [federated/strict] failed ({_reason[:80]}) — surfacing controlled failure")
+            result = {"ok": False, "status": "federated_failed",
+                      "error": payload.get("reason") or "federation failed",
+                      "sources": payload.get("sources"),
+                      "failure_class": payload.get("failure_class"),
+                      "retryable": payload.get("retryable"),
+                      "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
+            return MultiResult(items=[_to_subresult(query, "federated", result)])
         if verbose:
             print(f"  [federated] plan failed ({_reason[:80]}) — falling back to single-source")
         return None
@@ -461,8 +900,7 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
             if getattr(_l0, "was_simplified", False):
                 print(f"  [L0] Simplified: {_l0.simplified_query!r} ({_l0.duration_ms}ms)")
                 try:  # record the rewrite so downstream knows what retrieval actually got
-                    from veda.explain import current_trace as _ct_l0
-                    _ct_l0().set("query_understanding",
+                    _cur_trace().set("query_understanding",
                                  original_query=query,
                                  effective_query=_l0.simplified_query,
                                  rewrite_reason="nl_simplifier")
@@ -491,6 +929,14 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
             return _merge_extra_usage(
                 MultiResult(items=[_to_subresult(query, "runtime_context", _rc)]),
                 _l0_usage_totals)
+
+    # Multi-source routing coordinator (docs/multisource_routing/). Flag-gated default-OFF; in shadow
+    # it only traces (answer path byte-identical), and when authoritative it can drive the answer —
+    # NO_MATCH/clarify refuse WITHOUT generating an answer, SINGLE routes via its source agent. Returns
+    # None to defer to the legacy path (off / shadow / MULTI / any failure).
+    _routed = _run_coordinator(query, verbose=verbose, on_event=on_event)
+    if _routed is not None:
+        return _merge_extra_usage(_routed, _l0_usage_totals)
 
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
@@ -775,9 +1221,8 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                 # recompute). One of the most important trace events for debugging
                 # false multi-table planning / refusals.
                 try:
-                    from veda.explain import current_trace as _ct_snap
                     _es_snap = res.get("context") if isinstance(res, dict) else None
-                    _tr_snap = _ct_snap()
+                    _tr_snap = _cur_trace()
                     _cf_snap = getattr(_es_snap, "candidate_fields", None) or [] if _es_snap else []
                     _tr_snap.set(
                         "tier1",
@@ -1127,8 +1572,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     # records the final SQL shape for all Tier-2 return paths (envelope / shared
     # planner / IR). Reads the AST facts already extracted above; no re-parse.
     try:
-        from veda.explain import current_trace as _ct_sql
-        _trs = _ct_sql()
+        _trs = _cur_trace()
         _f = facts or {}
         _trs.set("sql_generation",
                  source=source,
@@ -1266,12 +1710,11 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     # visualization / explainability) into the ONE query trace so a Tier-2 answer tells
     # the same structured story as a Tier-1 one — reading only what was already computed.
     try:
-        from veda.explain import record_result_stages, current_trace
         try:
             from config import NL_SUMMARY_MODEL as _nl_model
         except Exception:
             _nl_model = None
-        current_trace().set("tier2", answered_via=source, row_count=len(rows or []))
+        _cur_trace().set("tier2", answered_via=source, row_count=len(rows or []))
         record_result_stages(
             engine=_summary_engine, cols=cols, row_count=len(rows or []),
             truncated=(len(rows or []) >= 20), ictx=_ictx, answer=result.get("answer"),
@@ -1333,8 +1776,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         sel = select_retrieval(query=query, intent="sql", verbose=verbose, seed_candidates=_seeds)
         # Tier-2 INPUT snapshot — what Tier-2 starts from (already computed above).
         try:
-            from veda.explain import current_trace as _ct_t2in
-            _ct_t2in().set(
+            _cur_trace().set(
                 "tier2",
                 available_column_count=len(getattr(sel, "columns", []) or []),
                 candidate_tables=list(getattr(sel, "tables", []) or [])[:12],
@@ -1422,8 +1864,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         # SLM. Later compared against IR-selected + SQL SELECT to reveal where extra
         # columns entered. Reuses the _rec_proj_cols already computed above.
         try:
-            from veda.explain import current_trace as _ct_proj
-            _ct_proj().set(
+            _cur_trace().set(
                 "projection",
                 recommended_count=(len(_rec_proj_cols) if _rec_proj_cols else 0),
                 recommended=[getattr(r, "col_name", None) for r in (_rec_proj_cols or [])][:30],
@@ -1471,8 +1912,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                 print(f"  [Tier2] no usable IR from SLM "
                       f"({getattr(l3, 'error', None) or 'empty ir_json'}) — keeping refusal")
                 try:
-                    from veda.explain import current_trace as _ct_irfail
-                    _ct_irfail().set("tier2", attempt=_attempt,
+                    _cur_trace().set("tier2", attempt=_attempt,
                                      ir_error=getattr(l3, "error", None) or "empty ir_json")
                 except Exception:
                     pass
@@ -1480,12 +1920,11 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             # IR GENERATION — what the SLM actually produced (the intermediate rep the
             # deterministic builder turns into SQL). Read straight off l3.ir_json.
             try:
-                from veda.explain import current_trace as _ct_ir
                 _ir = l3.ir_json or {}
                 _ir_ents = _ir.get("entities", []) or []
                 _ir_sel_cols = [c for e in _ir_ents
                                 for c in (e.get("columns") or e.get("select") or [])]
-                _ct_ir().set(
+                _cur_trace().set(
                     "tier2",
                     attempt=_attempt,
                     ir_intent=_ir.get("intent"),
@@ -1499,7 +1938,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                     ir_confidence=_ir.get("confidence"),
                     repaired=bool(_repair_hint))
                 # projection funnel: IR-selected vs the recommended projection above
-                _ct_ir().set("projection", ir_selected_count=len(_ir_sel_cols))
+                _cur_trace().set("projection", ir_selected_count=len(_ir_sel_cols))
             except Exception:
                 pass
 
@@ -1563,10 +2002,9 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
             if err:
                 try:
-                    from veda.explain import current_trace as _ct_val
-                    _ct_val().check("tier2_firewall", False, str(err)[:200])
+                    _cur_trace().check("tier2_firewall", False, str(err)[:200])
                     if _attempt < _max_repairs:
-                        _ct_val().repair("firewall", f"attempt {_attempt}", "retry")
+                        _cur_trace().repair("firewall", f"attempt {_attempt}", "retry")
                 except Exception:
                     pass
                 if _attempt < _max_repairs:
@@ -1624,10 +2062,10 @@ def _run_nosql(query, source_ids, verbose=False, on_event=None):
             collections = conn.get_nosql_schema()
             conn.disconnect()
             # Gate 1 (User Story 3, 2026-08-08 audit finding): the relational
-            # path's narrow_allowed/filter_sm don't apply here — a NoSQL source's
-            # schema is connector-native (NoSQLCollection), not sm['tables']/
-            # ['columns']. filter_nosql_collections is its mirror: a no-op
-            # without a forwarded data scope.
+            # path's narrow_allowed doesn't apply here — a NoSQL source's schema
+            # is connector-native (NoSQLCollection), not sm['tables']/['columns'].
+            # filter_nosql_collections is its mirror: a no-op without a forwarded
+            # data scope.
             collections = filter_nosql_collections(collections, int(sid), _current_ctx())
             _emit(on_event, "nosql_build", "Figuring out how to query your data")
             nb = run_nosql_builder(query=query, source_id=sid,
@@ -1701,7 +2139,6 @@ def main():
     res = run_hybrid_query(" ".join(args), verbose="--verbose" in sys.argv)
     _render_multi(res)
     if debug:
-        from veda.explain import render_trace
         for it in res.items:
             if isinstance(it.result, dict) and it.result.get("trace"):
                 print("\n" + render_trace(it.result["trace"]))

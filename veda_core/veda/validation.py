@@ -391,6 +391,28 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
                 for al in (cm.get("aliases") or []):
                     sqltoks |= _idtoks(al)
 
+    # Aggregate-verb completeness (flag-gated, default OFF): an aggregate VERB the user named
+    # ("average", "total", "mean") is realized in the SQL as an aggregate FUNCTION (AVG/SUM/…),
+    # not a literal token — so absent this, the gate false-refuses a correct AVG(col) query and it
+    # falls through to the SLM (which then asks "is 'average' a column or a value?"). Count an
+    # aggregate verb as accounted IFF the SQL's AST actually contains the matching function. Fixed
+    # SQL-semantics mapping (never a domain word list), add-only. OFF -> sqltoks untouched.
+    try:
+        from config import AGG_VERB_COMPLETENESS_ENABLED as _agg_on
+    except Exception:
+        _agg_on = False
+    if _agg_on:
+        _AGG_VERBS = {
+            exp.Avg:   {"average", "avg", "mean"},
+            exp.Sum:   {"sum", "total"},
+            exp.Count: {"count", "number", "many"},
+            exp.Max:   {"max", "maximum", "highest", "largest", "most", "greatest", "top"},
+            exp.Min:   {"min", "minimum", "lowest", "smallest", "least", "bottom"},
+        }
+        for _fn, _verbs in _AGG_VERBS.items():
+            if next(tree.find_all(_fn), None) is not None:
+                sqltoks |= {_singularize(v) for v in _verbs}
+
     def _accounted(ct):
         if ct in sqltoks:
             return True
@@ -423,6 +445,69 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
                or _is_grounded_filter_value(ct, tables_in_sql, sm)
                or _qsr_ref(ct)]
     return (not missing), (missing[0] if missing else None)
+
+
+def grouped_shape_ok(query, sql):
+    """Grouped-intent shape guard (flag-gated, default OFF). A query asking for a per-group breakdown
+    ("how many X by Y", "distribution of X", "X per Y", "breakdown") must be answered by SQL that GROUPs.
+    When the SLM returns a PURE PROJECTION instead (SELECT cols … LIMIT — no GROUP BY, no aggregate, no
+    WHERE), it cannot answer the grouped question and the NL summariser fabricates a distribution
+    ("62% in Singapore") from a plain row list — silent-wrong. Return False (→ refuse) ONLY when the
+    query is grouped AND the SQL is a pure projection. The presence of a GROUP BY, an aggregate, OR a
+    WHERE means a legitimate shape → True (so a "by <person>" filter is never mis-guarded). Grammar
+    signal vs AST, no threshold. Returns True when the flag is off or on any parse issue."""
+    try:
+        from config import GROUPED_SHAPE_GUARD_ENABLED as _on
+    except Exception:
+        _on = False
+    if not _on or not sql:
+        return True
+    ql = " " + (query or "").lower().strip() + " "
+    grouped = any(s in ql for s in (" by ", " per ", " each ", "distribution",
+                                    "breakdown", "broken down", "grouped"))
+    if not grouped:
+        return True
+    try:
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return True                                  # don't block on a parse issue
+    if tree.find(exp.Group) is not None:
+        return True                                  # already grouped → fine
+    if tree.find(exp.AggFunc) is not None:
+        return True                                  # an aggregate (COUNT/SUM/…) → legitimate shape
+    if tree.find(exp.Where) is not None:
+        return True                                  # a filter ("by <person>") → not a group mismatch
+    return False                                     # grouped intent, pure projection → refuse
+
+
+def distinct_shape_ok(query, sql):
+    """Uniqueness-intent shape guard (flag-gated, default OFF). A query asking for uniqueness
+    ("how many UNIQUE owners", "how many DISTINCT cities", "how many DIFFERENT tenants") must be
+    answered by SQL that de-duplicates — `COUNT(DISTINCT owner)`, `SELECT DISTINCT city`, or a
+    GROUP BY. When the SLM drops the DISTINCT and returns a plain `COUNT(*)` / bare projection, it
+    answers a DIFFERENT question (total rows, not distinct values) and the NL summariser reports
+    that total as if it were the unique count — silent-wrong. Return False (→ refuse) ONLY when the
+    query signals uniqueness AND the SQL has neither a DISTINCT nor a GROUP BY. Grammar signal vs
+    AST, no threshold. Returns True when the flag is off or on any parse issue."""
+    try:
+        from config import DISTINCT_SHAPE_GUARD_ENABLED as _on
+    except Exception:
+        _on = False
+    if not _on or not sql:
+        return True
+    ql = " " + (query or "").lower().strip() + " "
+    unique_intent = any(s in ql for s in (" unique ", " distinct ", " different "))
+    if not unique_intent:
+        return True
+    try:
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return True                                  # don't block on a parse issue
+    if tree.find(exp.Distinct) is not None:
+        return True                                  # SELECT DISTINCT / COUNT(DISTINCT …) → correct shape
+    if tree.find(exp.Group) is not None:
+        return True                                  # GROUP BY de-duplicates → legitimate
+    return False                                     # uniqueness intent, no de-dup → refuse
 
 
 def value_grounding(sql, resolve_table, cols_meta, skip_values=()):

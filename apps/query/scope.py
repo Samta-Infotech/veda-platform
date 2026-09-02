@@ -170,6 +170,31 @@ def resolve_query_scope(data, tenant, user=None, effective=_UNRESOLVED) -> list[
     return [default_source_id]
 
 
+def source_profiles_for(source_ids) -> dict:
+    """Routing profiles for the given (already-authorised) source ids, keyed by str(source_id):
+    ``{sid: {source_type, is_canonical, domain_tags, description}}``. Forwarded to the engine's
+    multi-source routing coordinator (canonical/domain tie-break). Best-effort — a lookup failure
+    returns {} so a query is never blocked on profile metadata."""
+    try:
+        ids = [int(s) for s in (source_ids or [])]
+    except (TypeError, ValueError):
+        return {}
+    if not ids:
+        return {}
+    try:
+        out: dict = {}
+        for s in Source.objects.filter(pk__in=ids):
+            out[str(s.pk)] = {
+                "source_type": s.source_kind(),
+                "is_canonical": bool(s.is_canonical),
+                "domain_tags": list(s.domain_tags or []),
+                "description": s.description or "",
+            }
+        return out
+    except Exception:
+        return {}
+
+
 def permitted_source_ids(user, effective=_UNRESOLVED) -> set[int] | None:
     """Which source ids ``user`` has ``data.read`` on, or ``None`` for "no
     narrowing" (RBAC off, staff bypass, or no user to check) — the PUBLIC, single

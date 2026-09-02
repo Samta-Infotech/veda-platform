@@ -8,7 +8,8 @@ from veda.planning import existence_mode, try_multitable
 from veda.routing import recommended_projection, select_primary_table, vet_primary
 from veda.rbac_filter import filter_retrieval_results, narrow_allowed, restricted_names
 from veda.runtime import get_engine
-from veda.validation import qualifier_completeness, validate_and_parameterize, value_grounding
+from veda.validation import (qualifier_completeness, validate_and_parameterize, value_grounding,
+                             grouped_shape_ok, distinct_shape_ok)
 from utils.logger import get_logger
 import importlib
 from veda.explain import new_trace
@@ -464,6 +465,20 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                 _grounded_ok = True
                     except Exception:
                         _grounded_ok = False
+                    # A metric-derived pick (route "metric.*") is grounded by the METRIC-LABEL match
+                    # itself: match_metric_labels only returns a metric whose labels (built from that
+                    # column/table) the query named, so the pick carries its own typed evidence — the
+                    # metric grounding. The retrieval evidence probe can't see it because the user
+                    # named the MEASURE ("average rent"), not the table ENTITY, so it wrongly reads as
+                    # zero-evidence. Don't demote a metric pick for the blindness it was built to fix.
+                    # Flag-gated: OFF -> this exemption is skipped, byte-identical to the prior guard.
+                    if not _grounded_ok:
+                        try:
+                            from config import AGG_VERB_COMPLETENESS_ENABLED as _agg_ex
+                            if _agg_ex and str(getattr(fp, "route", "")).startswith("metric."):
+                                _grounded_ok = True
+                        except Exception:
+                            pass
                     if not _grounded_ok:
                         print(f"  [FastPath] demoted: no typed evidence for "
                               f"{sorted(fp.tables)[:3]} — full pipeline")
@@ -578,6 +593,13 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 _have_tabs = {r.table_name for r in results}
                 _seeds, _added, _syn = suggest_expansions(
                     query, _have_cols, _have_tabs, max_add=GRAPH_EXPAND_MAX)
+                # Source isolation (marker-gated, default OFF): suggest_expansions reaches over the
+                # GLOBAL unified FK/synonym graph, so on an isolated single-source sm it re-admits
+                # other sources' tables (a datalake "vendors" pulls homzhub worklists_quote/reviews_*).
+                # Drop additions outside this sm's tables. No marker (normal path) → untouched.
+                if sm.get("__source_isolated__"):
+                    _iso_tabs = set((sm.get("tables") or {}).keys())
+                    _added = [n for n in _added if n.split(".", 1)[0] in _iso_tabs]
                 for _name in _added:
                     _tt, _cc = _name.split(".", 1)
                     results.append(_RR(col_id=_name, column_name=_cc,
@@ -1645,6 +1667,81 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         log_route(_route + ".qualifier_dropped", query, (time.time() - start) * 1000)
         return _done(0, "qualifier_dropped", missing=missing, feedback=fb)
     print("  [L6b] Qualifier    ✓  every named qualifier is represented in the SQL")
+
+    # Grouped-intent shape guard (flag-gated): an LLM-written PURE PROJECTION for a "how many X by Y" /
+    # "distribution" query can't answer the grouping, and the NL summariser then fabricates a
+    # distribution ("62% in Singapore"). Refuse instead of answering wrong. Deterministic grouped SQL
+    # carries a GROUP BY and passes; a filter ("by <person>") carries a WHERE and passes.
+    if _llm_sql and not grouped_shape_ok(query, sql):
+        _gmsg = ("This asks for a per-group breakdown, but the query I built lists rows without "
+                 "grouping them — please name the column to group by (e.g. 'by city').")
+        fb = _feedback("clarify", msg=_gmsg)
+        log_route(_route + ".grouped_shape_mismatch", query, (time.time() - start) * 1000)
+        return _done(0, "clarify", msg=_gmsg, feedback=fb) if return_result else 0
+
+    # Uniqueness-intent shape guard (flag-gated): an LLM query for "how many UNIQUE/DISTINCT X" that
+    # drops the DISTINCT and returns a plain COUNT(*) answers total rows, not distinct values — the
+    # summariser then reports that total as the unique count. Refuse. Correct SQL carries a
+    # COUNT(DISTINCT …)/SELECT DISTINCT or a GROUP BY and passes.
+    if _llm_sql and not distinct_shape_ok(query, sql):
+        _dmsg = ("This asks for a count of distinct values, but the query I built counts rows without "
+                 "de-duplicating — please confirm the column to count distinct values of.")
+        fb = _feedback("clarify", msg=_dmsg)
+        log_route(_route + ".distinct_shape_mismatch", query, (time.time() - start) * 1000)
+        return _done(0, "clarify", msg=_dmsg, feedback=fb) if return_result else 0
+
+    # Intent↔SQL referent alignment (flag-gated): a generalized comparator (Option B, increment 1) — SQL
+    # that groups/anchors on a schema element the question does NOT refer to (a per-time breakdown grouped
+    # by a non-temporal column; a superlative anchored on the wrong table) answers a different question.
+    # Refuse. Runs on EVERY produced SQL — LLM, verified-cache replay, AND the DETERMINISTIC path — because
+    # each can misalign: #14 (cache replay), #13 ("leads per month" grouped by lead_stage) is produced by
+    # the deterministic join planner, disproving "deterministic is aligned by construction". The check is a
+    # no-op when the flag is off or the referents align, so running it universally is byte-identical-safe.
+    if sql:
+        from veda.intent_sql_alignment import alignment_ok as _align_ok
+        _ok_align, _align_why = _align_ok(query, sql, sm)
+        if not _ok_align:
+            _amsg = (f"{_align_why}. Please rephrase or confirm the exact column to use.")
+            fb = _feedback("clarify", msg=_amsg)
+            log_route(_route + ".intent_sql_misalignment", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_amsg, feedback=fb) if return_result else 0
+
+    # Aggregate-OMISSION guard (flag-gated, Increment 3A): a scalar-aggregate intent ("how many"/"total"/
+    # "average") answered by SQL with NO aggregate call returns a row list reported as the figure (the
+    # "how many projects → 100" silent-wrong). Refuse. Runs on every produced SQL; no-op when off/aligned.
+    if sql:
+        from veda.intent_sql_alignment import aggregate_presence_ok as _agg_ok
+        _ok_agg, _agg_why = _agg_ok(query, sql, sm)
+        if not _ok_agg:
+            fb = _feedback("clarify", msg=_agg_why)
+            log_route(_route + ".aggregate_omission", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_agg_why, feedback=fb) if return_result else 0
+
+    # DIMENSION referent alignment (flag-gated, increment 2): the SQL GROUP BY column must belong to the
+    # CATEGORY/DIMENSION candidates of the SQL's tables whose name matches the requested dimension phrase.
+    # REFUSE (grouped outside the family, "by city" → country) or CLARIFY (≥2 acceptable candidates, e.g.
+    # "leads by status" → furnishing_status | loe_status — never pick arbitrarily). ALIGNED / NOT_APPLICABLE
+    # proceed. Runs on every produced SQL path; no-op when off / not applicable → byte-identical-safe.
+    if sql:
+        from veda.intent_sql_alignment import (
+            dimension_alignment as _dim_align, DIM_REFUSE, DIM_CLARIFY)
+        _dim_out, _dim_why = _dim_align(query, sql, sm)
+        if _dim_out in (DIM_REFUSE, DIM_CLARIFY):
+            fb = _feedback("clarify", msg=_dim_why)
+            log_route(_route + (".dimension_misalignment" if _dim_out == DIM_REFUSE
+                                else ".dimension_ambiguous"),
+                      query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_dim_why, feedback=fb) if return_result else 0
+
+    # Canonical-QueryIntent SHADOW measurement (flag-gated, OBSERVE-ONLY, Phase 1). When the fast-path
+    # DECLINED (fp is None) but preserved a QueryIntent, compare it to the final SQL's referents and LOG
+    # field-level agreement. Never rejects/alters SQL or the response — pure measurement. Fully guarded.
+    if fp is None and sql:
+        try:
+            from veda.canonical_intent_shadow import record_shadow
+            record_shadow(query, sql, sm)
+        except Exception:
+            pass
 
     # IR equivalence — refuse LLM SQL that introduced semantics the query never asked
     # for (extra filters/grouping/ordering/joins/DISTINCT). Deterministic builds skip it.

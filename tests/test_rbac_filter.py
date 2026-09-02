@@ -1,15 +1,18 @@
 """Coverage for Gate 1 (User Story 3) Task 16 — engine-side RBAC filtering.
 
-  veda_core/veda/rbac_filter.py :: filter_sm, filter_retrieval_results, narrow_allowed
+  veda_core/veda/rbac_filter.py :: restricted_names, filter_retrieval_results,
+                                   narrow_allowed, filter_nosql_collections
 
 Pure functions, no Django, no heavy ML deps — runs against ``veda_core`` on
 ``sys.path`` directly, matching how the inference tier imports it.
 
-The core safety property under test: ``filter_sm``/``filter_retrieval_results``
-NEVER get called on the object handed to ``get_engine()`` (see the module
-docstring and ``veda_hybrid.py::_load_semantic_model``'s own comment) — that
-invariant is enforced by review/design, not by a unit test here; this file only
-covers the filtering logic itself.
+The core safety property under test: ``filter_retrieval_results`` NEVER gets
+called on the object handed to ``get_engine()`` (see the module docstring and
+``veda_hybrid.py::_load_semantic_model``'s own comment) — that invariant is
+enforced by review/design, not by a unit test here; this file only covers the
+filtering logic itself. The shared semantic model is deliberately NOT
+pre-filtered (see the module docstring): ``restricted_names`` reports what RBAC
+restricts for the feedback path, and ``narrow_allowed`` is the actual gate.
 
 ``narrow_allowed`` additionally closes the real gap found by the 2026-08-08
 production audit: candidate filtering alone does not stop a forbidden
@@ -34,8 +37,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 from veda.rbac_filter import (  # noqa: E402
     filter_nosql_collections,
     filter_retrieval_results,
-    filter_sm,
     narrow_allowed,
+    restricted_names,
 )
 from veda.validation import validate_and_parameterize  # noqa: E402
 
@@ -61,94 +64,66 @@ def _sm(tables=None, columns=None, docs=None):
 
 
 # ---------------------------------------------------------------------------
-# filter_sm
+# restricted_names — the bare names RBAC restricts, feeding veda.feedback so a
+# refusal can say "access denied" (real-but-restricted) vs "no such table". The
+# per-request enforcement itself is narrow_allowed + filter_retrieval_results
+# (below); restricted_names shares the same allow/deny helpers, so these cases
+# also cover that shared logic (open source, table/column restriction, absent
+# source, multi-source qualified names).
 # ---------------------------------------------------------------------------
 
-def test_no_ctx_is_identity():
+def test_no_ctx_restricts_nothing():
     sm = _sm(tables={"t": {}})
-    assert filter_sm(sm, None) is sm
+    assert restricted_names(sm, None) == {"tables": [], "columns": []}
 
 
-def test_ctx_with_no_allowed_resources_is_identity():
+def test_ctx_with_no_allowed_resources_restricts_nothing():
     sm = _sm(tables={"t": {}})
     ctx = _ctx([1], None)
-    assert filter_sm(sm, ctx) is sm
+    assert restricted_names(sm, ctx) == {"tables": [], "columns": []}
 
 
-def test_open_source_keeps_everything():
+def test_open_source_restricts_nothing():
     sm = _sm(
         tables={"employee": {}, "department": {}},
         columns={"employee.id": {}, "employee.salary": {}, "department.id": {}},
     )
     ctx = _ctx([1], ((1, (True, ())),))
-    out = filter_sm(sm, ctx)
-    assert set(out["tables"]) == {"employee", "department"}
-    assert set(out["columns"]) == {"employee.id", "employee.salary", "department.id"}
+    assert restricted_names(sm, ctx) == {"tables": [], "columns": []}
 
 
-def test_restricted_source_keeps_only_listed_tables():
+def test_restricted_source_reports_the_unlisted_table():
     sm = _sm(
         tables={"employee": {}, "department": {}},
         columns={"employee.id": {}, "department.id": {}},
     )
     ctx = _ctx([1], ((1, (False, (("employee", None),))),))  # employee: whole table open
-    out = filter_sm(sm, ctx)
-    assert set(out["tables"]) == {"employee"}
-    assert set(out["columns"]) == {"employee.id"}
+    out = restricted_names(sm, ctx)
+    assert out["tables"] == ["department"]
+    assert out["columns"] == ["id"]  # department.id, bare
 
 
-def test_restricted_table_keeps_only_listed_columns():
+def test_restricted_table_reports_the_unlisted_column():
     sm = _sm(
         tables={"employee": {}},
         columns={"employee.id": {}, "employee.name": {}, "employee.salary": {}},
     )
     ctx = _ctx([1], ((1, (False, (("employee", ("id", "name")),))),))
-    out = filter_sm(sm, ctx)
-    assert set(out["tables"]) == {"employee"}
-    assert set(out["columns"]) == {"employee.id", "employee.name"}
+    out = restricted_names(sm, ctx)
+    assert out["tables"] == []
+    assert out["columns"] == ["salary"]
 
 
-def test_restricted_source_records_the_dropped_table_bare_name():
-    """``_rbac_restricted`` exists so a downstream refusal can tell "real but
-    restricted" apart from "doesn't exist" — see veda.feedback._restricted_match."""
-    sm = _sm(
-        tables={"employee": {}, "department": {}},
-        columns={"employee.id": {}, "department.id": {}},
-    )
-    ctx = _ctx([1], ((1, (False, (("employee", None),))),))
-    out = filter_sm(sm, ctx)
-    assert out["_rbac_restricted"]["tables"] == ["department"]
-    assert out["_rbac_restricted"]["columns"] == ["id"]  # department.id, bare
-
-
-def test_restricted_table_records_the_dropped_column_bare_name():
-    sm = _sm(
-        tables={"employee": {}},
-        columns={"employee.id": {}, "employee.name": {}, "employee.salary": {}},
-    )
-    ctx = _ctx([1], ((1, (False, (("employee", ("id", "name")),))),))
-    out = filter_sm(sm, ctx)
-    assert out["_rbac_restricted"]["tables"] == []
-    assert out["_rbac_restricted"]["columns"] == ["salary"]
-
-
-def test_nothing_restricted_leaves_the_marker_empty():
-    sm = _sm(tables={"employee": {}}, columns={"employee.id": {}})
-    ctx = _ctx([1], ((1, (True, ())),))  # source fully open
-    out = filter_sm(sm, ctx)
-    assert out["_rbac_restricted"] == {"tables": [], "columns": []}
-
-
-def test_source_absent_from_allowed_resources_is_denied():
-    sm = _sm(tables={"employee": {}}, columns={"employee.id": {}})
+def test_source_absent_from_allowed_resources_is_reported_restricted():
     ctx = _ctx([1, 2], ((1, (True, ())),))  # source 2 never mentioned at all
-    out = filter_sm(sm, ctx)
-    assert out["tables"] == {"employee": sm["tables"]["employee"]}  # source 1's table, untouched
-    # a second-source table would be denied — simulate via _source_id tag:
+    # source 1's table is open -> nothing restricted:
+    sm1 = _sm(tables={"employee": {}}, columns={"employee.id": {}})
+    assert restricted_names(sm1, ctx) == {"tables": [], "columns": []}
+    # a second-source table is denied (simulate via _source_id tag):
     sm2 = _sm(tables={"other": {"_source_id": 2}}, columns={"other.id": {"_source_id": 2}})
-    out2 = filter_sm(sm2, ctx)
-    assert out2["tables"] == {}
-    assert out2["columns"] == {}
+    out2 = restricted_names(sm2, ctx)
+    assert out2["tables"] == ["other"]
+    assert out2["columns"] == ["id"]
 
 
 def test_multi_source_merged_qualified_table_name_is_resolved_correctly():
@@ -161,28 +136,17 @@ def test_multi_source_merged_qualified_table_name_is_resolved_correctly():
                  "src2.employee.salary": {"_source_id": 2}},
     )
     ctx = _ctx([2], ((2, (False, (("employee", ("id",)),))),))
-    out = filter_sm(sm, ctx)
-    assert set(out["tables"]) == {"src2.employee"}
-    assert set(out["columns"]) == {"src2.employee.id"}
+    out = restricted_names(sm, ctx)
+    # id is allowed, salary is restricted; the qualified table itself stays allowed.
+    assert out["tables"] == []
+    assert out["columns"] == ["salary"]
 
 
-def test_retrieval_documents_follow_their_column_or_table():
-    sm = _sm(
-        tables={"employee": {}, "department": {}},
-        columns={"employee.id": {}, "employee.salary": {}},
-        docs={"employee.salary": {"chunk": "x"}, "department": {"chunk": "y"}},
-    )
-    ctx = _ctx([1], ((1, (False, (("employee", ("id",)),))),))  # salary denied, employee id ok
-    out = filter_sm(sm, ctx)
-    # employee.salary denied -> its doc must drop; department table denied -> its doc must drop.
-    assert out["retrieval_documents"] == {}
-
-
-def test_never_mutates_the_input():
+def test_restricted_names_never_mutates_the_input():
     sm = _sm(tables={"employee": {}}, columns={"employee.id": {}})
     original_tables = sm["tables"]
     ctx = _ctx([1], ((1, (False, (("employee", ("id",)),))),))
-    filter_sm(sm, ctx)
+    restricted_names(sm, ctx)
     assert sm["tables"] is original_tables
     assert sm["tables"] == {"employee": {}}
 
@@ -360,7 +324,7 @@ def test_narrow_allowed_end_to_end_forbidden_table_from_fk_expansion_is_rejected
 
 
 # ---------------------------------------------------------------------------
-# filter_nosql_collections — the NoSQL mirror of filter_sm (2026-08-08 audit:
+# filter_nosql_collections — NoSQL schema narrowing (2026-08-08 audit:
 # _run_nosql had no RBAC filtering at all, unlike the relational path)
 # ---------------------------------------------------------------------------
 

@@ -221,3 +221,54 @@ class SourceConnectionProfile(models.Model):
 
     def __str__(self) -> str:
         return f"profile:{self.source.name}"
+
+
+class SourceItemType(models.TextChoices):
+    TABLE = "table", "Table"           # database / datalake
+    DATASET = "dataset", "Dataset"     # datalake (file-backed dataset)
+    DOCUMENT = "document", "Document"  # filesystem / document
+    COLLECTION = "collection", "Collection"  # nosql
+    # New source kinds add a value here — nothing else in the registry/routing changes.
+
+
+class SourceItem(models.Model):
+    """One row per top-level "thing" a source holds — a table, a dataset, a document, a collection
+    (docs/multisource_routing/SOURCE_ITEM_METADATA_DESIGN.md). A source-type-AGNOSTIC metadata layer:
+    a filesystem's documents become first-class items exactly like a datalake's tables, so routing
+    reads ONE table regardless of source kind and a new source type is just a new ``item_type``.
+
+    This indexes the kind-specific stores (columns still live in ``column_embeddings_v2``, chunks in
+    ``doc_chunks``) — it does not move data. The routing PRIOR embedding of (name+summary+topics) is
+    kept engine-side in a raw store (like the other embeddings), NOT as a pgvector column here, so
+    this model migrates cleanly on sqlite (dev) and postgres (prod) alike. Global (no tenant), mirroring
+    the global ``Source`` registry."""
+
+    source = models.ForeignKey(Source, on_delete=models.CASCADE, related_name="items")
+    item_type = models.CharField(max_length=20, choices=SourceItemType.choices)
+    # Stable id of the item WITHIN its source (table_id / doc_id / dataset path) — the join key to the
+    # kind-specific stores and to the engine-side prior embedding.
+    item_key = models.CharField(max_length=512)
+    name = models.CharField(max_length=512)                     # human name (table/file/dataset)
+    # One-line grounded semantic summary (SLM-generated over observed content) — the routing prior TEXT
+    # and what a source-level description rolls up from. Blank until profiled.
+    summary = models.TextField(blank=True)
+    topics = models.JSONField(default=list, blank=True)         # business topics/tags
+    entities = models.JSONField(default=list, blank=True)       # key entities in this item
+    # Kind-specific extras: {row_count, column_count, columns:[...]} for a table; {file_type,
+    # page_count, chunk_count} for a document; etc. Free-form so a new kind needs no schema change.
+    item_metadata = models.JSONField(default=dict, blank=True)
+    child_count = models.PositiveIntegerField(default=0)        # columns in a table / chunks in a doc
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["source", "item_type", "item_key"], name="uq_sourceitem_natural"),
+        ]
+        indexes = [
+            models.Index(fields=["source", "item_type"]),
+        ]
+
+    def __str__(self) -> str:
+        return f"{self.item_type}:{self.name} @ {self.source_id}"

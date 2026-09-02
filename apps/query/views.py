@@ -34,6 +34,7 @@ from .scope import (
     SourceAccessDenied,
     permitted_source_ids,
     resolve_query_scope,
+    source_profiles_for,
 )
 from apps.ingestion.tasks import task_ingest_source
 from apps.evaluation.tasks import task_run_eval
@@ -121,6 +122,10 @@ class QueryView(APIView):
         # None (RBAC off / staff) means the inference tier applies no narrowing,
         # exactly as before this change.
         data_scope = serialize_data_scope(compute_data_scope(user, source_ids, effective=effective))
+        # Multi-source routing profiles (source_type/is_canonical/domain_tags/description) for the
+        # authorised scope — forwarded so the engine's routing coordinator can apply the canonical/
+        # domain tie-break. Best-effort; {} when the flag/feature is unused.
+        source_profiles = source_profiles_for(source_ids)
 
         request_id = getattr(request, "request_id", "")
         started = time.time()
@@ -128,7 +133,7 @@ class QueryView(APIView):
         try:
             payload = client.run_hybrid_query(query, source_id=source_id, tenant=tenant,
                                               source_ids=source_ids, request_id=request_id,
-                                              data_scope=data_scope)
+                                              data_scope=data_scope, source_profiles=source_profiles)
         except InferenceUnavailable as exc:
             latency = int((time.time() - started) * 1000)
             logger.warning("inference unavailable request_id=%s tenant=%s source_id=%s: %s",

@@ -195,6 +195,19 @@ VEDA_RBAC_MODE = os.environ.get("VEDA_RBAC_MODE", "off")
 # succeeded must never be turned into a failure by a catalog-projection problem.
 VEDA_AUTO_SYNC_CATALOG = os.environ.get("VEDA_AUTO_SYNC_CATALOG", "0") == "1"
 
+# Multi-source routing (docs/multisource_routing/, Phase 1.3): after a source is ingested,
+# auto-generate a grounded `Source.description` from its observed substrate schema, for the
+# query-time routing coordinator. Default OFF — additive and consumed only by the (not-yet-live)
+# coordinator, but gated per the "prod stays byte-identical until opted in" convention. The hook
+# is never allowed to fail an ingestion job (mirrors VEDA_AUTO_SYNC_CATALOG).
+SOURCE_PROFILER_ENABLED = os.environ.get("SOURCE_PROFILER_ENABLED", "0") == "1"
+
+# Multi-source routing (docs/multisource_routing/): after ingestion, build the uniform SourceItem
+# layer (tables/documents/datasets) and profile each item — SLM one-line summary + BGE-M3 embedding
+# into `source_item_embeddings`, the query-time routing PRIOR. Default OFF; never fails an ingestion
+# job (mirrors SOURCE_PROFILER_ENABLED). Needs the SLM chat + Metal embed endpoints reachable.
+SOURCE_ITEM_PROFILER_ENABLED = os.environ.get("SOURCE_ITEM_PROFILER_ENABLED", "0") == "1"
+
 # Login lockout (apps.authentication.services). TWO counters, deliberately:
 #
 #   * VEDA_AUTH_LOGIN_MAX_FAILURES — per (account, client-IP). Trips a HARD refusal

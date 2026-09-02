@@ -419,3 +419,39 @@ def rerank_tables(
 ) -> List[RetrievalResult]:
     """Re-scores table candidates using real table text (column names), not doubled name."""
     return _rerank(query, candidates, top_n, is_table=True, verbose=verbose)
+
+def rerank_chunks(query: str, chunks: list, top_n: int, verbose: bool = False) -> list:
+    """Cross-encoder re-rank of document CHUNKS for the RAG path (RAG chunk retrieval was dense+sparse
+    only — the reranker was wired to the SQL column path, never the doc path). Scores each (query,
+    chunk.text) pair with the same cross-encoder used elsewhere, returns the top_n by score. Best-
+    effort: on any failure (model unavailable, remote error) the input order is preserved and the
+    first top_n returned — so RAG never regresses to worse-than-today, only improves when rerank runs.
+
+    ``chunks``: objects with a ``.text`` attribute (e.g. ChunkRetrievalResult). Returned list is a
+    re-ordered subset of the SAME objects (their fields untouched); each also gets a ``rerank_score``
+    attribute set for observability when possible."""
+    if not chunks:
+        return chunks
+    try:
+        reranker = _get_reranker()
+        if reranker is None:
+            return chunks[:top_n]
+        pairs = [(query, (getattr(c, "text", "") or "")) for c in chunks]
+        scores = reranker.predict(pairs)
+        if not scores or len(scores) != len(chunks):
+            return chunks[:top_n]
+        for c, s in zip(chunks, scores):
+            try:
+                setattr(c, "rerank_score", float(s))
+            except Exception:
+                pass
+        order = sorted(range(len(chunks)), key=lambda i: float(scores[i]), reverse=True)
+        out = [chunks[i] for i in order[:top_n]]
+        if verbose:
+            logger.info("rerank_chunks: %d → %d (top score %.4f)", len(chunks), len(out),
+                        float(scores[order[0]]) if scores else 0.0)
+        return out
+    except Exception as e:  # noqa: BLE001
+        if verbose:
+            logger.info("rerank_chunks: failed (%s) — keeping dense order", e)
+        return chunks[:top_n]

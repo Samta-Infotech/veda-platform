@@ -17,6 +17,7 @@ import os
 import re
 import json
 import time
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Optional, List
 
@@ -35,6 +36,10 @@ _SUM_VERBS      = ("sum of", "total ")
 _AVG_VERBS      = ("average ", "avg ", "mean ")
 _LIST_VERBS     = ("list", "show", "what are", "which", "distinct", "unique",
                    "possible", "available")
+# Single-word list-verb tokens that can spuriously match a table concept (e.g. "list" ↔ a
+# list_of_values catalog), read as a false second entity. Stripped when resolving the entity for a
+# bare "list all <entity>" so the verb itself doesn't masquerade as an entity.
+_LIST_VERB_TOKENS = frozenset({"list", "show", "which", "distinct", "unique", "available"})
 # Words that imply a relationship to ANOTHER entity → a real join → fall through.
 # "per" and "each" are NOT here — they're grouping prepositions ("sum of X per/each Y"),
 # handled by the group_dim/vals_hit/bucket checks below; treating them as a blanket join
@@ -325,6 +330,93 @@ def _ground_measure_col(table, meas_toks, cols):
     return best
 
 
+def _live_ground_dim_value(table, tokens, sm):
+    """Fast-path LIVE dimension-value grounding (flag-gated, default OFF). When the sampled value-store
+    (column_values) can't ground a named filter value, probe the entity table's OWN DIMENSION columns
+    against the LIVE source DB with an EXACT, read-only, bounded match — the value-store misses most
+    real values because ingestion samples only a fraction. Returns (col_name, raw_value) ONLY when
+    EXACTLY ONE dimension column contains the value (ambiguous → None; nothing → None). EXACT match (not
+    substring) is the disambiguator: 'Mumbai' hits city_name='Mumbai', never a project_name that merely
+    STARTS with 'Mumbai'. `raw_value` is the LIST of every distinct DB casing of the value in that column
+    ('Nagpur','nagpur') so the emitted `col IN (...)` filter is case-complete. Best-effort: any error →
+    None (caller falls through unchanged, byte-identical)."""
+    try:
+        from config import FASTPATH_LIVE_DIM_GROUNDING_ENABLED as _on
+    except Exception:
+        _on = False
+    if not _on or not tokens:
+        return None
+    try:
+        cols = sm.get("columns", {})
+        dim_cols = [cid.split(".", 1)[1] for cid, c in cols.items()
+                    if cid.split(".", 1)[0] == table
+                    and (c.get("analytics_role") or "").upper() == "DIMENSION"]
+        if not dim_cols:
+            return None
+        dim_cols = dim_cols[:60]                      # bound the probe breadth
+        import os as _os
+        _schema = _os.environ.get("VEDA_SOURCE_SCHEMA", "public")
+        from veda.runtime import _pg
+        conn = _pg()
+
+        def _casings(col, tok):
+            """Every distinct DB casing of `tok` in `col` (so col IN (...) is case-complete)."""
+            with conn.cursor() as cur:
+                try:
+                    cur.execute(
+                        f'SELECT DISTINCT CAST("{col}" AS TEXT) FROM "{_schema}"."{table}" '
+                        f'WHERE LOWER(CAST("{col}" AS TEXT)) = %s LIMIT 20', (tok,))
+                    return [r[0] for r in cur.fetchall() if r[0] is not None]
+                except Exception:
+                    conn.rollback()
+                    return []
+
+        # For each residual token, find which DIMENSION column(s) hold it EXACTLY. A token grounded to
+        # exactly one column is a filter; a token in two+ columns is genuinely ambiguous → skip (refuse).
+        for _tok in sorted(tokens):
+            _t = str(_tok).strip().lower()
+            if len(_t) < 2:
+                continue
+            hits = []                                 # (col_name, raw_value)
+            with conn.cursor() as cur:
+                for _col in dim_cols:
+                    q = (f'SELECT CAST("{_col}" AS TEXT) FROM "{_schema}"."{table}" '
+                         f'WHERE LOWER(CAST("{_col}" AS TEXT)) = %s LIMIT 1')
+                    try:
+                        cur.execute(q, (_t,))
+                        row = cur.fetchone()
+                    except Exception:
+                        conn.rollback()               # keep the connection usable for the next probe
+                        continue
+                    if row and row[0] is not None:
+                        hits.append((_col, row[0]))
+            if len(hits) == 1:
+                return (hits[0][0], _casings(hits[0][0], _t))   # unique column → (col, [casings])
+            if len(hits) > 1:
+                # Value lives in several dimension columns (e.g. "Nagpur" is a city AND, for a few
+                # rows, a project name). Disambiguate by DOMINANCE — the column where the value occurs
+                # in the MOST rows is the canonical home ("Nagpur": city_name 2012 vs project_name 40).
+                # Data-driven (live row counts), no threshold/word-list. Ground only on a STRICT max;
+                # a genuine tie stays ambiguous → refuse (fall through unchanged).
+                counts = []
+                with conn.cursor() as cur:
+                    for _col, _raw in hits:
+                        try:
+                            cur.execute(
+                                f'SELECT COUNT(*) FROM "{_schema}"."{table}" '
+                                f'WHERE LOWER(CAST("{_col}" AS TEXT)) = %s', (_t,))
+                            counts.append((_col, _raw, cur.fetchone()[0]))
+                        except Exception:
+                            conn.rollback()
+                if len(counts) >= 2:
+                    counts.sort(key=lambda x: x[2], reverse=True)
+                    if counts[0][2] > counts[1][2]:   # strict dominance → canonical column
+                        return (counts[0][0], _casings(counts[0][0], _t))
+        return None
+    except Exception:
+        return None
+
+
 _SUP_DESC = re.compile(r"\b(highest|most|largest|greatest|maximum|max|top|biggest|dearest)\b")
 _SUP_ASC = re.compile(r"\b(lowest|least|smallest|minimum|min|bottom|cheapest)\b")
 _SUP_MEAS_TAIL = re.compile(
@@ -414,6 +506,21 @@ def _superlative_list(query, query_l, qtoks):
               if c.get("table_name") == tbl and c.get("analytics_role") == "MEASURE"]
         if not ms:
             return None
+        if not _monetary_measure_on():
+            # PRIMARY (flag OFF, byte-identical): business-vocabulary name-match over MEASURE columns.
+            return next((m for m in ms if any(h in m.lower() for h in _PRICE_COL_HINTS)), None)
+        # PRIMARY (flag ON): schema-driven — the MONETARY-typed MEASURE column. Deterministic ONLY when
+        # exactly one exists; two-or-more is genuinely ambiguous with no reliable single-winner signal,
+        # so DECLINE (return None → the fast-path yields; downstream handles) rather than guess.
+        monetary = [k.split(".", 1)[1] for k, c in cols.items()
+                    if c.get("table_name") == tbl and c.get("analytics_role") == "MEASURE"
+                    and (c.get("semantic_type") or "").upper() == "MONETARY"]
+        if len(monetary) == 1:
+            return monetary[0]                         # sole monetary measure — the correct measure
+        if len(monetary) >= 2:
+            return None                                # ambiguous → decline, never silently guess
+        # ZERO monetary-typed measures = a metadata gap. ISOLATED fallback to the name-hint here only
+        # (business vocab confined to the gap, never the primary decision on well-tagged schemas).
         return next((m for m in ms if any(h in m.lower() for h in _PRICE_COL_HINTS)), None)
 
     # pick the highest-scored NAMED entity that carries a price-like measure column
@@ -492,6 +599,21 @@ def _fpg_on() -> bool:
     harnesses — is honoured; a missing flag is treated as OFF, so the feature is a no-op by
     default."""
     return bool(getattr(config, "FASTPATH_ENTITY_GLOSSARY", False))
+
+
+def _list_all_entity_on() -> bool:
+    """True when FASTPATH_LIST_ALL_ENTITY_ENABLED is set — a bare "list all <entity>" whose entity resolves
+    only after stripping the list-verb tokens then lists the entity's display column deterministically
+    (instead of declining to the SLM, which picks a wrong sibling/junction table). Default OFF."""
+    return bool(getattr(config, "FASTPATH_LIST_ALL_ENTITY_ENABLED", False))
+
+
+def _monetary_measure_on() -> bool:
+    """True when FASTPATH_MONETARY_MEASURE_ENABLED is set — the superlative price fast-path then selects
+    its measure by schema metadata (analytics_role MEASURE + semantic_type MONETARY, sole-candidate
+    only) instead of the business-vocabulary name-hint. Read dynamically (runtime-toggleable); missing
+    flag → OFF → the name-hint primary path is byte-identical to today."""
+    return bool(getattr(config, "FASTPATH_MONETARY_MEASURE_ENABLED", False))
 
 
 _TREND_ADVERBS = ("hourly", "daily", "weekly", "monthly", "quarterly", "yearly")
@@ -768,12 +890,36 @@ def _sm():
     return _SM_CACHE["v"]
 
 
+# ── Canonical-QueryIntent SHADOW side-channel (Phase 1, OBSERVE-ONLY) ────────────────────────────────
+# A request-scoped ContextVar holding the LAST fully-built fast-path QueryIntent + its decline reason.
+# Reset at every try_fast_path() entry; set inside _finalize on success AND on either decline. NOTHING in
+# the return contract changes (success→FastPathResult, decline→None). Downstream reads it only under the
+# CANONICAL_INTENT_SHADOW_ENABLED flag, purely to MEASURE agreement — never to influence any decision.
+_FASTPATH_INTENT_QV: ContextVar = ContextVar("veda_fastpath_intent", default=None)
+
+
+def get_preserved_intent():
+    """The fast-path QueryIntent preserved for THIS request (or None). {"intent", "reason"}. Read-only —
+    observe/measure only; never used to change SQL/planning/routing/execution."""
+    return _FASTPATH_INTENT_QV.get()
+
+
+def _capture_intent(intent, reason):
+    """Stash the fast-path intent + decline reason on the request-scoped ContextVar (a no-op side-channel
+    with no behavioral effect; consumers act on it only under the shadow flag)."""
+    try:
+        _FASTPATH_INTENT_QV.set({"intent": intent, "reason": reason})
+    except Exception:
+        pass
+
+
 def _finalize(query, intent, ground_fn=None) -> Optional[FastPathResult]:
     """Validate an extracted intent against the schema (the firewall), then build SQL.
     Non-'ok' → None (fall through). This is the SHARED path that an LLM extractor
     will use too — the regex branches below are just one intent source."""
     status, _reason = validate_intent(intent, ground_fn=ground_fn)
     if status != "ok":
+        _capture_intent(intent, "VALIDATION_DECLINE")       # intent existed, firewall rejected it
         return None
     sql, tables, columns, route, why = build_sql(intent)
 
@@ -794,10 +940,12 @@ def _finalize(query, intent, ground_fn=None) -> Optional[FastPathResult]:
             from veda.validation import qualifier_completeness
             ok_q, _missing = qualifier_completeness(query, sql, _sm())
             if not ok_q:
+                _capture_intent(intent, "QUALIFIER_GROUNDING_DECLINE")  # intent+sql built, value ungrounded
                 return None
         except Exception:
             pass
 
+    _capture_intent(intent, "FASTPATH_SUCCESS")
     return FastPathResult(sql=sql, tables=tables, columns=columns,
                           primary=intent.subject_table, route=route, why=why)
 
@@ -809,6 +957,7 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
     hands it to _finalize → validate → build. The intent IR + validator + builders
     live in query/intent.py and are front-end-agnostic: an LLM extractor producing
     the same QueryIntent gets the same validation and the same SQL, for free."""
+    _FASTPATH_INTENT_QV.set(None)   # reset the shadow side-channel per request (no stale intent)
     if not reg.is_ready():
         return None
     query_l = " " + query.lower().strip() + " "
@@ -982,6 +1131,15 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                                               if len(p) > 2}
                             why.append(f"value '{_desc['value']}' → {_desc['target']}."
                                        f"{_desc['filter_col']} (data-driven, via FK)")
+                # LIVE dimension grounding (flag-gated): the sampled value-store missed the named value,
+                # so probe THIS table's DIMENSION columns against live data with an EXACT match. Grounds
+                # only on a unique dimension column (ambiguous → left for the residual guard to refuse).
+                if vals_hit is None and not _extra_tables:
+                    _res2 = _unmodelled_residual(qtoks, set(entity.get("match_tokens", [])))
+                    _lg = _live_ground_dim_value(table, _res2, _sm())
+                    if _lg is not None and _lg[1]:
+                        vals_hit = ({"col_name": _lg[0], "labels": []}, list(_lg[1]))
+                        why.append(f"value {_lg[1]!r} → {table}.{_lg[0]} (live dimension grounding)")
                 if join_hint and group_dim is None and vals_hit is None \
                         and bucket is None and not _extra_tables:
                     return None
@@ -1177,6 +1335,26 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
     # ── 3. Dimension list ("what are the incident statuses") ──────────────────
     if _has(query_l, _LIST_VERBS) and not _count_intent(query_l, qtoks) and not join_hint:
         entity = _single_entity(qtoks, query)
+        # Deterministic "list all <entity>" (flag-gated): the list-verb token ("list") also matches a
+        # values-catalog concept, so _single_entity reads a false second entity and returns None. Retry
+        # with the list-verb tokens stripped; if that yields ONE entity AND the query has no unmodelled
+        # qualifier (no dropped filter), list the entity's governed display column — the correct answer
+        # the SLM otherwise free-forms onto the wrong sibling/junction table ("list all amenities").
+        if entity is None and _list_all_entity_on():
+            _e2 = _single_entity(qtoks - _LIST_VERB_TOKENS, query)
+            if _e2 is not None:
+                _tbl2 = _e2["resolves_to"]["table"]
+                _resid = _unmodelled_residual(qtoks, set(_e2.get("match_tokens", [])) | _LIST_VERB_TOKENS)
+                if _residual_is_filler(_resid, _tbl2, query_l):
+                    try:
+                        from veda.generation import _resolve_display_column
+                        _disp = _resolve_display_column(_tbl2, _sm())
+                    except Exception:
+                        _disp = None
+                    if _disp:
+                        return _finalize(query, QueryIntent(
+                            query_type="dimension_list", subject_table=_tbl2, group_col=_disp,
+                            route="dimension.list.entity", why=[f"list all {_tbl2}.{_disp}"]))
         if entity is not None:
             table = entity["resolves_to"]["table"]
             dim   = reg.match_dimension_in_table(table, qtoks, query_l)

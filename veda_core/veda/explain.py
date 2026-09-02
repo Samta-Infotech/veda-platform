@@ -41,7 +41,7 @@ except Exception:  # importable outside the engine cwd too (unit tests)
 #                call_slm() via slm_call(); complements the llm_usage totals.
 #   totals     — the final one-glance summary, built by finish().
 _SECTIONS = [
-    "query_understanding", "retrieval", "rrf", "graph_expansion", "reranking",
+    "query_understanding", "routing", "retrieval", "rrf", "graph_expansion", "reranking",
     "schema_linking", "entity_selection", "projection", "join_planning",
     "tier1", "tier2", "sql_planning", "sql_generation", "validation",
     "execution", "result_analysis", "summary", "visualization",
