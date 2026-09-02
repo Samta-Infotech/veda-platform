@@ -12,6 +12,7 @@ Idempotent; skips items already summarised unless --force.
     python manage.py profile_source_items [--source N] [--force] [--limit N]
 """
 import json
+import os
 import urllib.request
 
 from django.core.management.base import BaseCommand
@@ -19,9 +20,9 @@ from django.db import connection
 
 from apps.sources.models import SourceItem
 
-SLM_URL = "http://192.168.1.35:11500/api/chat"
-SLM_MODEL = "qwen2.5-coder:7b"
-METAL_URL = "http://192.168.1.39:11435/encode_dense"
+SLM_URL = os.environ.get("VEDA_SLM_CHAT_URL", "http://192.168.1.35:11500/api/chat")
+SLM_MODEL = os.environ.get("SLM_MODEL_NAME", "qwen2.5-coder:7b")
+METAL_URL = os.environ.get("METAL_EMBED_URL", "http://192.168.1.39:11435").rstrip("/") + "/encode_dense"
 
 _SYS = ("You describe ONE data item (a table, dataset, or document) for a query router. Given its name "
         "and observed content, reply with STRICT JSON: {\"summary\": \"<one specific sentence: what it "
@@ -30,6 +31,7 @@ _SYS = ("You describe ONE data item (a table, dataset, or document) for a query 
 
 
 def _post_json(url, payload, timeout=60):
+    """ POST JSON to a URL and return the JSON response."""
     req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"),
                                  headers={"Content-Type": "application/json"}, method="POST")
     with urllib.request.urlopen(req, timeout=timeout) as r:

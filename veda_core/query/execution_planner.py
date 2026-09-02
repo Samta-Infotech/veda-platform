@@ -46,6 +46,7 @@ class ExecutionPlan:
 
 
 def plan_execution(decision: RoutingDecision) -> ExecutionPlan:
+    """Turn a RoutingDecision into an ExecutionPlan """
     by_id = {c.source_id: c for c in decision.candidate_sources}
 
     def _step(sid: str) -> ExecutionStep:

@@ -57,6 +57,7 @@ def _post_json(url, payload, timeout=60):
 
 # ── 1. backfill structural items ────────────────────────────────────────────────────────────────
 def backfill_items(source: Source) -> int:
+    """Backfill the SourceItem table for one source from its kind-specific stores (column_embeddings_v2, doc_chunks)"""
     sid = str(source.pk)
     kind = source.source_kind()
     made = 0
@@ -93,6 +94,7 @@ def backfill_items(source: Source) -> int:
 
 # ── 2. profile each item (SLM summary + embedding) ───────────────────────────────────────────────
 def _observed(item: SourceItem) -> str:
+    """Compact observed content for the SLM prompt, per item type."""
     sid = str(item.source_id)
     if item.item_type == SourceItemType.DOCUMENT:
         sample = " ".join(r[0][:300] for r in _rows(
@@ -104,6 +106,7 @@ def _observed(item: SourceItem) -> str:
 
 
 def _slm_summary(observed: str):
+    """Call the SLM endpoint to summarise one item. Returns (summary, topics)."""
     out = _post_json(_SLM_URL, {"model": _SLM_MODEL, "keep_alive": "24h", "stream": False,
                                 "messages": [{"role": "system", "content": _SYS},
                                              {"role": "user", "content": observed}]})
@@ -117,10 +120,12 @@ def _slm_summary(observed: str):
 
 
 def _embed(text: str):
+    """Call the embedding endpoint to embed one item (name + summary). Returns a list of floats."""
     return _post_json(_METAL_URL, {"texts": [text]}, timeout=30)["vecs"][0]
 
 
 def profile_items(source: Source, force: bool = False) -> int:
+    """Profile each SourceItem for one source: SLM summary + topics, and embedding into pgvector."""
     qs = source.items.all()
     if not force:
         qs = qs.filter(summary="")

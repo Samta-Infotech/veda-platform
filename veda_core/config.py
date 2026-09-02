@@ -528,7 +528,7 @@ DATALAKE_DUCKDB_MEMORY_LIMIT = "4GB"
 # is WRAPPED at QUERY TIME to also match against parquet DISTINCT values sampled on demand via DuckDB
 # for the in-scope datalake sources — no ingestion change, no shared-cache mutation. Default OFF →
 # byte-identical (relational queries unaffected).
-DATALAKE_VALUE_GROUNDING_ENABLED = _os.environ.get("DATALAKE_VALUE_GROUNDING_ENABLED", "0") == "1"
+DATALAKE_VALUE_GROUNDING_ENABLED = _os.environ.get("DATALAKE_VALUE_GROUNDING_ENABLED", "1") == "1"
 
 # Source-isolated retrieval for a datalake SINGLE route (query-path only, default OFF). When a query
 # routes SINGLE to a NON-primary datalake source, run the deterministic head over a DATALAKE-ONLY
@@ -538,7 +538,7 @@ DATALAKE_VALUE_GROUNDING_ENABLED = _os.environ.get("DATALAKE_VALUE_GROUNDING_ENA
 # using a SEPARATE per-scope engine (frozenset(source_ids) keyed) so the homzhub engine is untouched.
 # OFF -> the prior _augment_sm_for_datalake (merge) path runs, byte-identical. See
 # docs/multisource_routing/SOURCE_ISOLATION_REPORT.md.
-SOURCE_ISOLATED_RETRIEVAL_ENABLED = _os.environ.get("SOURCE_ISOLATED_RETRIEVAL_ENABLED", "0") == "1"
+SOURCE_ISOLATED_RETRIEVAL_ENABLED = _os.environ.get("SOURCE_ISOLATED_RETRIEVAL_ENABLED", "1") == "1"
 DATALAKE_VALUE_SAMPLE_LIMIT      = int(_os.environ.get("DATALAKE_VALUE_SAMPLE_LIMIT", "500"))  # distinct/text col
 
 # Aggregate-verb completeness (shared correctness gate, all SQL paths, default OFF). The
@@ -550,7 +550,7 @@ DATALAKE_VALUE_SAMPLE_LIMIT      = int(_os.environ.get("DATALAKE_VALUE_SAMPLE_LI
 # SQL's AST actually contains the matching aggregate function — a fixed SQL-semantics mapping, never
 # a business/domain word list, and add-only (can only turn a false-refuse into a pass, never the
 # reverse; proper-noun dropped-filter values are never aggregate verbs). OFF -> byte-identical.
-AGG_VERB_COMPLETENESS_ENABLED    = _os.environ.get("AGG_VERB_COMPLETENESS_ENABLED", "0") == "1"
+AGG_VERB_COMPLETENESS_ENABLED    = _os.environ.get("AGG_VERB_COMPLETENESS_ENABLED", "1") == "1"
 
 # Fast-path live dimension-value grounding (default OFF). When the deterministic count/measure
 # fast-path can't ground a named filter value ("how many assets in Mumbai") — because the sampled
@@ -642,13 +642,13 @@ ROUTING_COMPETE_WINDOW = float(_os.environ.get("ROUTING_COMPETE_WINDOW", "0.08")
 # cross_source_fk join path) AND (2) item-prior-positive (the query is semantically about its
 # dataset). Two orthogonal signals, no new threshold, no keywords. Default OFF → the dominant-SINGLE
 # fast path is byte-identical; only qualifying cases can reach the new branch.
-REQUIRED_SOURCE_ESCALATION_ENABLED = _os.environ.get("REQUIRED_SOURCE_ESCALATION_ENABLED", "0") == "1"
+REQUIRED_SOURCE_ESCALATION_ENABLED = _os.environ.get("REQUIRED_SOURCE_ESCALATION_ENABLED", "1") == "1"
 
 # Sharper SINGLE-vs-MULTI few-shot for the bounded routing SLM (routing_slm._SYSTEM_V2). Same task,
 # contract, and validation — only the in-prompt PATTERN teaching changes (a requiredness test + diverse
 # generic MULTI shapes). Default OFF → the original prompt is used, byte-identical. The lever the A/B
 # showed matters most: the SLM already sees most cross-source queries but under-calls MULTI.
-ROUTING_SLM_MULTI_FEWSHOT_ENABLED = _os.environ.get("ROUTING_SLM_MULTI_FEWSHOT_ENABLED", "0") == "1"
+ROUTING_SLM_MULTI_FEWSHOT_ENABLED = _os.environ.get("ROUTING_SLM_MULTI_FEWSHOT_ENABLED", "1") == "1"
 
 # Route SLM-resolved MULTI through the federated (JOIN) executor before independent-merge. Today an
 # SLM-resolved MULTI (no structural cross_source_fk edge in the DECISION) is sent to strategy
@@ -656,7 +656,7 @@ ROUTING_SLM_MULTI_FEWSHOT_ENABLED = _os.environ.get("ROUTING_SLM_MULTI_FEWSHOT_E
 # query fails. But run_federated self-discovers join hints independently of the routing edge and works
 # when invoked directly. This flag makes SLM-MULTI try federated first (non-strict); on None it falls
 # back to independent-merge unchanged. Default OFF → byte-identical.
-FEDERATE_SLM_MULTI_ENABLED = _os.environ.get("FEDERATE_SLM_MULTI_ENABLED", "0") == "1"
+FEDERATE_SLM_MULTI_ENABLED = _os.environ.get("FEDERATE_SLM_MULTI_ENABLED", "1") == "1"
 
 # Bounded SEMI_JOIN / FILTER_BY_OTHER_SOURCE cross-source strategy (query/semi_join_planner.py). Inside
 # run_federated, BEFORE the aggregate structured plan, a bounded SLM picks among pre-built, grounded
@@ -664,7 +664,7 @@ FEDERATE_SLM_MULTI_ENABLED = _os.environ.get("FEDERATE_SLM_MULTI_ENABLED", "0") 
 # the EXISTING federated executor. The SLM never emits a source/table/column/key/SQL. Default OFF → the
 # federated path is byte-identical (no new SLM call, no new execution). See
 # docs/multisource_routing/SEMI_JOIN_STRUCTURED_EXECUTION_REPORT.md.
-FEDERATED_SEMI_JOIN_STRUCTURED_ENABLED = _os.environ.get("FEDERATED_SEMI_JOIN_STRUCTURED_ENABLED", "0") == "1"
+FEDERATED_SEMI_JOIN_STRUCTURED_ENABLED = _os.environ.get("FEDERATED_SEMI_JOIN_STRUCTURED_ENABLED", "1") == "1"
 
 # Bounded TRANSIENT-RETRY for the federated route (query/reliability.py::execute_federated_reliably).
 # The federated path already LABELS a failure `retryable` / `failure_class` (federated_route._labelled_failure),
@@ -673,7 +673,7 @@ FEDERATED_SEMI_JOIN_STRUCTURED_ENABLED = _os.environ.get("FEDERATED_SEMI_JOIN_ST
 # permanently. When ON, the federated dispatch re-runs run_federated at most FEDERATED_MAX_RETRIES times ONLY
 # while the payload is a transient failure (the label the path already produces). Permanent failures and
 # successes return immediately. Default OFF → single pass-through, byte-identical.
-FEDERATED_TRANSIENT_RETRY_ENABLED = _os.environ.get("FEDERATED_TRANSIENT_RETRY_ENABLED", "0") == "1"
+FEDERATED_TRANSIENT_RETRY_ENABLED = _os.environ.get("FEDERATED_TRANSIENT_RETRY_ENABLED", "1") == "1"
 FEDERATED_MAX_RETRIES = int(_os.environ.get("FEDERATED_MAX_RETRIES", "1"))
 
 # Bounded self-repair depth for the federated SLM SQL/plan (query/federated_route.py). On an
@@ -690,7 +690,7 @@ FEDERATED_REPAIR_MAX_ATTEMPTS = max(0, int(_os.environ.get("FEDERATED_REPAIR_MAX
 # not-yet-implemented / planner-failure shape returns a controlled refusal — the free-form SLM-SQL chain
 # is NEVER reached in this mode (the path that, on real data, mis-qualifies catalogs). The SLM writes no
 # SQL and names no table/column/key. OFF -> the legacy sequential-fallback chain runs byte-identical.
-OPERATION_CLASSIFIER_ENABLED = _os.environ.get("OPERATION_CLASSIFIER_ENABLED", "0") == "1"
+OPERATION_CLASSIFIER_ENABLED = _os.environ.get("OPERATION_CLASSIFIER_ENABLED", "1") == "1"
 
 # Federated postgres SCHEMA discovery (query/cross_source_composer.py::resolve_pg_schema). DuckDB's
 # postgres ATTACH exposes a source's tables at <catalog>.<schema>.<table>. The catalog qualifier
@@ -699,7 +699,7 @@ OPERATION_CLASSIFIER_ENABLED = _os.environ.get("OPERATION_CLASSIFIER_ENABLED", "
 # Error: Table ... does not exist". When ON, the schema is DISCOVERED from the source's own DB (the
 # non-system schema holding the most base tables), data-driven — no hardcoded schema name. Cached per
 # source_id. OFF -> 'public' (the prior assumption), byte-identical.
-FEDERATED_SCHEMA_DISCOVERY_ENABLED = _os.environ.get("FEDERATED_SCHEMA_DISCOVERY_ENABLED", "0") == "1"
+FEDERATED_SCHEMA_DISCOVERY_ENABLED = _os.environ.get("FEDERATED_SCHEMA_DISCOVERY_ENABLED", "1") == "1"
 
 # Bounded retry for the classifier-dispatched deterministic planners (semi-join / structured-plan). The
 # planners' ONE bounded SLM call (pick a key-pair / pick group+metric fields) has run-to-run variance —
@@ -720,7 +720,7 @@ FEDERATED_PLANNER_MAX_ATTEMPTS = max(1, int(_os.environ.get("FEDERATED_PLANNER_M
 # those sources. HIGH-tier + surfaced-entity match keeps the noisy generic edges (maintenance.asset_id ↔
 # dozens of homzhub tables) from forcing a spurious MULTI; no match → decision unchanged. OFF ->
 # byte-identical. See docs/multisource_routing/CROSS_SOURCE_EDGE_MULTI.md.
-CROSS_SOURCE_EDGE_MULTI_ENABLED = _os.environ.get("CROSS_SOURCE_EDGE_MULTI_ENABLED", "0") == "1"
+CROSS_SOURCE_EDGE_MULTI_ENABLED = _os.environ.get("CROSS_SOURCE_EDGE_MULTI_ENABLED", "1") == "1"
 
 # Source-description prior (routing, default OFF). The item-prior tiers a source on the MAX cosine over
 # its per-item summaries (source_item_embeddings) — which gives a large source (homzhub: 178 item
@@ -733,7 +733,7 @@ CROSS_SOURCE_EDGE_MULTI_ENABLED = _os.environ.get("CROSS_SOURCE_EDGE_MULTI_ENABL
 # query↔(source-summary) BGE-M3 cosines in the same distribution, so this is additive (only promotes a
 # source its description matches, never lowers) and needs NO change to the tuned dominance/decide logic.
 # OFF -> byte-identical. See docs/multisource_routing/SOURCE_DESCRIPTION_PRIOR_IMPLEMENTATION.md.
-SOURCE_DESC_PRIOR_ENABLED = _os.environ.get("SOURCE_DESC_PRIOR_ENABLED", "0") == "1"
+SOURCE_DESC_PRIOR_ENABLED = _os.environ.get("SOURCE_DESC_PRIOR_ENABLED", "1") == "1"
 
 # Chunk-into-tier blend (routing, default OFF). `_dominance_retier` tiers on the item-prior whenever any
 # source has one (to avoid the DB's noisy "always-some-column-at-0.6" false-STRONG). But that ALSO
@@ -765,7 +765,7 @@ CONFIDENT_SINGLE_SKIP_SLM_ENABLED = _os.environ.get("CONFIDENT_SINGLE_SKIP_SLM_E
 # GROUP BY, an aggregate, or a WHERE means the SQL is a legitimate shape and the guard stays silent), so
 # a "by <person>" filter is never mis-guarded. Grammar-signal vs SQL AST — no threshold, no word-list
 # tuned to a benchmark. OFF -> byte-identical.
-GROUPED_SHAPE_GUARD_ENABLED = _os.environ.get("GROUPED_SHAPE_GUARD_ENABLED", "0") == "1"
+GROUPED_SHAPE_GUARD_ENABLED = _os.environ.get("GROUPED_SHAPE_GUARD_ENABLED", "1") == "1"
 
 # Uniqueness-intent shape guard (query/validation.py:distinct_shape_ok). A query asking for uniqueness
 # ("how many UNIQUE owners", "how many DISTINCT cities", "how many DIFFERENT tenants") must be answered
@@ -775,7 +775,7 @@ GROUPED_SHAPE_GUARD_ENABLED = _os.environ.get("GROUPED_SHAPE_GUARD_ENABLED", "0"
 # ON, that mismatch is REFUSED (safe). Fires only when the query signals uniqueness AND the SQL has
 # neither a DISTINCT nor a GROUP BY. Grammar-signal vs SQL AST — no threshold, no benchmark-tuned list.
 # OFF -> byte-identical.
-DISTINCT_SHAPE_GUARD_ENABLED = _os.environ.get("DISTINCT_SHAPE_GUARD_ENABLED", "0") == "1"
+DISTINCT_SHAPE_GUARD_ENABLED = _os.environ.get("DISTINCT_SHAPE_GUARD_ENABLED", "1") == "1"
 
 # Intent↔SQL referent-alignment guard (veda/intent_sql_alignment.py) — Option B, increment 1. Compares
 # the query's deterministically-derived referents against the SQL's ACTUAL referents (extract_sql_facts)
@@ -788,7 +788,7 @@ DISTINCT_SHAPE_GUARD_ENABLED = _os.environ.get("DISTINCT_SHAPE_GUARD_ENABLED", "
 #     assets_carpetareaunit.base_conversion_factor instead of assets_asset.carpet_area) → REFUSE.
 # Fires only on a clear referent mismatch (grammar-signal + AST + metadata, no hardcode); otherwise
 # stays silent. OFF -> byte-identical.
-INTENT_SQL_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_ALIGNMENT_ENABLED", "0") == "1"
+INTENT_SQL_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_ALIGNMENT_ENABLED", "1") == "1"
 
 # Intent↔SQL DIMENSION referent alignment (veda/intent_sql_alignment.py::dimension_alignment) — Option B
 # increment 2. Extends the shared comparator to the GROUP BY dimension: the SQL's grouping column must
@@ -800,7 +800,7 @@ INTENT_SQL_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_ALIGNMENT_ENABLED", "
 # set from a synonym/no-name-match → decline to judge, never a false refusal). No LLM, no thresholds, no
 # hardcoded vocabulary — the query's own word vs the schema's own CATEGORY column names + metadata. Runs
 # on every produced SQL path. OFF -> byte-identical.
-INTENT_SQL_DIMENSION_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_DIMENSION_ALIGNMENT_ENABLED", "0") == "1"
+INTENT_SQL_DIMENSION_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_DIMENSION_ALIGNMENT_ENABLED", "1") == "1"
 
 # Canonical-QueryIntent SHADOW measurement (Phase 1 spike — query/fast_path.py preserves the fast-path
 # QueryIntent on decline via a request-scoped ContextVar; veda/canonical_intent_shadow.py compares it to
@@ -819,7 +819,7 @@ CANONICAL_INTENT_SHADOW_ENABLED = _os.environ.get("CANONICAL_INTENT_SHADOW_ENABL
 # Superlatives (highest/lowest — valid as ORDER BY LIMIT) are NOT aggregate-intent, so never flagged. This
 # is the OMISSION half only; wrong-VALUE aggregates (a SUM over the wrong column/scope) are a separate class,
 # NOT covered here. Grammar-signal + AST, no hardcode. OFF -> byte-identical.
-INTENT_SQL_AGG_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_AGG_PRESENCE_ENABLED", "0") == "1"
+INTENT_SQL_AGG_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_AGG_PRESENCE_ENABLED", "1") == "1"
 
 # Deterministic "list all <entity>" fast-path (query/fast_path.py). A bare catalog listing ("list all
 # amenities") resolves its entity concept (assets_amenity) correctly, but the list-VERB token ("list")
@@ -830,7 +830,30 @@ INTENT_SQL_AGG_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_AGG_PRESENCE_ENABL
 # qualifier (no dropped filter — _residual_is_filler gate), the entity's governed display column is listed
 # deterministically (SELECT DISTINCT <display> FROM <table>). No table/column hardcode — the display column
 # comes from the governed resolver, the residual gate reuses the schema/value checks. OFF -> byte-identical.
-FASTPATH_LIST_ALL_ENTITY_ENABLED = _os.environ.get("FASTPATH_LIST_ALL_ENTITY_ENABLED", "0") == "1"
+FASTPATH_LIST_ALL_ENTITY_ENABLED = _os.environ.get("FASTPATH_LIST_ALL_ENTITY_ENABLED", "1") == "1"
+
+# A scalar "total/sum/average <measure>" query whose measure name embeds a time-adverb ("total expected
+# MONTHLY rent across all lease listings") trips the trend detector and gets hijacked into the count/trend
+# fast-path branch, which declines → the SLM free-forms a raw projection with no aggregate (a fabricated
+# total). When set, such an ungrouped measure query (with no explicit trend / per-<unit> request and a
+# matching measure metric) bypasses the count/trend branch and reaches the SUM/AVG branch. Default OFF →
+# byte-identical (query/fast_path.py::_sum_measure_fix_on).
+FASTPATH_SUM_MEASURE_ENABLED = _os.environ.get("FASTPATH_SUM_MEASURE_ENABLED", "1") == "1"
+
+# "How many <entity> do we have?" leaves a trailing "have" (a join-hint token) → the count fast-path
+# treats it as a relationship/join and bows out → the SLM free-forms a raw projection with LIMIT 100 and
+# answers the LIMIT (100) instead of the real count. When set, a TRAILING "have/has/having" (nothing but
+# filler/punctuation after it), when it is the ONLY join-hint token, is treated as filler so the count
+# path fires. Default OFF → byte-identical (query/fast_path.py::_count_have_filler_on).
+FASTPATH_COUNT_HAVE_FILLER_ENABLED = _os.environ.get("FASTPATH_COUNT_HAVE_FILLER_ENABLED", "1") == "1"
+
+# Two tables can share a measure LABEL ("average security deposit" exists for both assets_leaselisting
+# and assets_leasetransaction). match_metric_labels returns both tied on label-token count and the
+# fast-path takes whichever is first — so "average security deposit of lease TRANSACTIONS" can resolve
+# against assets_leaselisting (wrong table, plausible-but-wrong number). When set, tied metric candidates
+# are re-ranked to prefer the one whose TABLE name is named by the query (data-driven token overlap).
+# Default OFF → byte-identical (query/fast_path.py::_entity_table_anchor_on).
+ENTITY_TABLE_ANCHOR_ENABLED = _os.environ.get("ENTITY_TABLE_ANCHOR_ENABLED", "1") == "1"
 
 # Bounded DOCUMENT_FACT + DATA_GROUNDING cross-source strategy (query/doc_data_planner.py). For a MULTI
 # spanning a document source + a relational data source, a bounded SLM extracts the entities the
@@ -838,20 +861,20 @@ FASTPATH_LIST_ALL_ENTITY_ENABLED = _os.environ.get("FASTPATH_LIST_ALL_ENTITY_ENA
 # column's values and deterministically INTERSECTS. The SLM never invents an entity, source, table, or
 # column. Default OFF → doc+data MULTI keeps its current (independent-merge) behaviour, byte-identical.
 # See docs/multisource_routing/DOC_DATA_GROUNDING_REPORT.md.
-DOC_DATA_GROUNDING_ENABLED = _os.environ.get("DOC_DATA_GROUNDING_ENABLED", "0") == "1"
+DOC_DATA_GROUNDING_ENABLED = _os.environ.get("DOC_DATA_GROUNDING_ENABLED", "1") == "1"
 
 # Master switch for the multi-source routing coordinator (query/source_coordinator.py). Default
 # OFF — prod byte-identical. While SHADOW is True (the default when routing is enabled), the
 # coordinator computes + traces a RoutingDecision on each query for observability WITHOUT changing
 # the answer path; flipping SHADOW off makes it authoritative (only after Phase 4 federated MULTI
 # execution + api-tier profile wiring land).
-MULTISOURCE_ROUTING_ENABLED = _os.environ.get("MULTISOURCE_ROUTING_ENABLED", "0") == "1"
+MULTISOURCE_ROUTING_ENABLED = _os.environ.get("MULTISOURCE_ROUTING_ENABLED", "1") == "1"
 MULTISOURCE_ROUTING_SHADOW  = _os.environ.get("MULTISOURCE_ROUTING_SHADOW", "1") == "1"
 
 # Reliability (Phase 5): bounded retry of a source agent on a TRANSIENT failure only (timeout /
 # connection / service-unavailable). Default OFF; permanent failures (auth/invalid/validation) are
 # never retried. Narrow by design — does not replace the Tier-2 IR repair loop.
-ROUTING_AGENT_RETRY_ENABLED = _os.environ.get("ROUTING_AGENT_RETRY_ENABLED", "0") == "1"
+ROUTING_AGENT_RETRY_ENABLED = _os.environ.get("ROUTING_AGENT_RETRY_ENABLED", "1") == "1"
 ROUTING_AGENT_MAX_RETRIES   = int(_os.environ.get("ROUTING_AGENT_MAX_RETRIES", "1"))
 
 # RRF smoothing constant for hybrid SQL + RAG fusion

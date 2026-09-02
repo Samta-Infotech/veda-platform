@@ -259,10 +259,12 @@ def task_ingest_source(source_id=None, tenant="default", verbose=True, force=Fal
             # Multi-source routing (Phase 1.3): generate a grounded source description from the
             # just-synced substrate schema. Flag-gated default-OFF and never-raises, so it can
             # never turn a successful ingestion into a failure.
+            # circular import: apps.sources.source_profiler imports this module, so import it here.
             from apps.sources.source_profiler import profile_source_if_enabled
             profile_source_if_enabled(source_id, tenant=tenant)
             # Multi-source routing: build + profile the uniform SourceItem layer (per-item summary +
             # embedding for the query-time routing prior). Flag-gated default-OFF, never-raises.
+            # circular import: apps.sources.source_profiler imports this module, so import it here.
             from apps.sources.item_profiler import build_source_items_if_enabled
             build_source_items_if_enabled(source_id)
         logger.info("ingestion job succeeded job_id=%s source_id=%s", job.pk, source_id)

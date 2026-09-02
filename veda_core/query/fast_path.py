@@ -616,6 +616,45 @@ def _monetary_measure_on() -> bool:
     return bool(getattr(config, "FASTPATH_MONETARY_MEASURE_ENABLED", False))
 
 
+def _entity_table_anchor_on() -> bool:
+    """True when ENTITY_TABLE_ANCHOR_ENABLED is set — tied measure-metric candidates are re-ranked to
+    prefer the metric whose TABLE the query actually names (see config). Default OFF → byte-identical."""
+    return bool(getattr(config, "ENTITY_TABLE_ANCHOR_ENABLED", False))
+
+
+def _rank_metrics_by_named_table(matched, qtoks):
+    """Stable re-rank of match_metric_labels output: keep label-token count as the primary key, break
+    ties by how many query tokens (len>=4) are substrings of the metric's source_table — so a query
+    naming "lease transactions" prefers assets_leasetransaction over an equally-labelled assets_leaselisting.
+    Data-driven (table name only); no hardcoded table/entity names. Flag-gated by the caller."""
+    def _tbl_overlap(m):
+        tbl = (m.get("source_table") or "")
+        return sum(1 for t in qtoks if len(t) >= 4 and t in tbl)
+    return sorted(matched, key=lambda x: (x[1], _tbl_overlap(x[0])), reverse=True)
+
+
+def _count_have_filler_on() -> bool:
+    """True when FASTPATH_COUNT_HAVE_FILLER_ENABLED is set — a trailing "…do we have?" no longer counts
+    as a join hint on the count path (see config). Default OFF → byte-identical."""
+    return bool(getattr(config, "FASTPATH_COUNT_HAVE_FILLER_ENABLED", False))
+
+
+def _trailing_have_filler(query_l: str) -> bool:
+    """True when "have"/"has"/"having" is the LAST word of the query (only whitespace/punctuation after) —
+    the "how many X do we have?" filler tail, not a relationship to another entity."""
+    return bool(re.search(r"\b(?:have|has|having)\b[\s?.!]*$", query_l.strip()))
+
+
+def _sum_measure_fix_on() -> bool:
+    """True when FASTPATH_SUM_MEASURE_ENABLED is set. A scalar "total/sum/average <measure>" query whose
+    measure NAME embeds a time-adverb ("total expected MONTHLY rent across all lease listings") wrongly
+    trips _trend_signal → gets hijacked into the count/trend branch → declines → the SLM free-forms a raw
+    projection with no aggregate (a fabricated total). With this flag, such a scalar measure query bypasses
+    the count/trend branch and reaches the SUM/AVG branch, which builds the correct SUM()/AVG(). Read
+    dynamically; missing flag → OFF → byte-identical (the count/trend branch runs exactly as today)."""
+    return bool(getattr(config, "FASTPATH_SUM_MEASURE_ENABLED", False))
+
+
 _TREND_ADVERBS = ("hourly", "daily", "weekly", "monthly", "quarterly", "yearly")
 
 
@@ -966,6 +1005,11 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
     # A relationship word strongly implies a join to another entity. Existence/“with”
     # is handled by the existing deterministic existence path, not here.
     join_hint = bool(_JOIN_HINTS & qtoks)
+    # "How many <entity> do we have?" — a TRAILING "have" is filler, not a join. When it is the ONLY
+    # join-hint token, don't let it bow the count path out. Flag OFF ⇒ unchanged (byte-identical).
+    if join_hint and _count_have_filler_on() and _trailing_have_filler(query_l) \
+            and not ((_JOIN_HINTS - {"have", "has", "having"}) & qtoks):
+        join_hint = False
 
     # ── 0. SUPERLATIVE LIST ("cheapest / most expensive <entity>") — a sorted projection
     # of the entity by its price/measure, ranked BEFORE the count/measure paths (a
@@ -1026,8 +1070,29 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
                     route="metric.compare",
                     why=[f"this {unit} [{t0}..{nxt}) vs last {unit} [{p0}..{t0}) on {tcol}"]))
 
+    # A scalar "total/sum/average <measure>" query whose measure NAME contains a time-adverb
+    # ("total expected MONTHLY rent") trips _trend_signal and would be hijacked here into the
+    # count/trend branch (then declined). When the fix flag is on, and the query is an ungrouped
+    # measure with NO explicit trend / per-<unit> request AND a measure metric actually matches,
+    # skip this branch so control reaches the SUM/AVG branch below. Flag OFF → this is False → the
+    # count/trend branch runs exactly as today (byte-identical).
+    # Grouping is judged by the SAME group words the SUM/AVG branch itself uses below
+    # ((" by ", " per ", …)) — NOT _group_signal, which also fires on "across", the scalar
+    # "across all <entity>" total phrasing that the SUM branch treats as ungrouped.
+    _scalar_measure_bypass = (
+        _sum_measure_fix_on()
+        and (_has(query_l, _SUM_VERBS) or _has(query_l, _AVG_VERBS))
+        and not _count_intent(query_l, qtoks)
+        and not _has(query_l, (" by ", " per ", " each ", "grouped", "breakdown",
+                               "broken down", "distribution"))
+        and " trend " not in query_l and " over time " not in query_l
+        and not re.search(r"\b(?:per|by|every)\s+(day|week|month|quarter|year)\b", query_l)
+        and bool(reg.match_metric_labels(query_l))
+    )
+
     # ── 1. COUNT metric (optionally grouped / filtered / time-bounded) ────────
-    if _count_intent(query_l, qtoks) or _trend_signal(query_l) or _group_signal(query_l):
+    if (_count_intent(query_l, qtoks) or _trend_signal(query_l) or _group_signal(query_l)) \
+            and not _scalar_measure_bypass:
         _eq, _et = qtoks, query
         if _fpg_on() and (_group_signal(query_l) or _has(query_l, (" per ", " across "))):
             _sc = _subject_scope(query)
@@ -1260,9 +1325,18 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
 
     # ── 2. SUM / AVG measure metric (single table, optionally grouped) ────────
     if _has(query_l, _SUM_VERBS) or _has(query_l, _AVG_VERBS):
-        for metric, _ in reg.match_metric_labels(query_l):
+        # In a scalar "total/average <measure> across all <entity>" query, "across" is the
+        # total-over-everything phrasing, NOT a join to another entity — so for the bypass case
+        # ignore an "across"-only join hint (other real join words like "with"/"their" still count).
+        # Flag OFF ⇒ _scalar_measure_bypass is False ⇒ join_hint is used verbatim (byte-identical).
+        _mjoin = (bool((_JOIN_HINTS - {"across"}) & qtoks)
+                  if _scalar_measure_bypass else join_hint)
+        _matched = reg.match_metric_labels(query_l)
+        if _entity_table_anchor_on():
+            _matched = _rank_metrics_by_named_table(_matched, qtoks)  # prefer the table the query names
+        for metric, _ in _matched:
             table = metric["source_table"]
-            if join_hint or metric.get("grain_suspect"):
+            if _mjoin or metric.get("grain_suspect"):
                 continue
             filters, why = [], [f"metric {metric['metric_id']}"]
             if tf and (getattr(tf, "start", None) or getattr(tf, "end", None)) \
@@ -1300,7 +1374,10 @@ def try_fast_path(query: str, tf=None) -> Optional[FastPathResult]:
     # ── 2b. MAX / MIN metric (single table, optionally grouped) ───────────────
     if _has(query_l, _MAX_VERBS) or _has(query_l, _MIN_VERBS):
         func = "MAX" if _has(query_l, _MAX_VERBS) else "MIN"
-        for metric, _ in reg.match_metric_labels(query_l):
+        _matched = reg.match_metric_labels(query_l)
+        if _entity_table_anchor_on():
+            _matched = _rank_metrics_by_named_table(_matched, qtoks)  # prefer the table the query names
+        for metric, _ in _matched:
             table = metric["source_table"]
             if join_hint or metric.get("grain_suspect"):
                 continue

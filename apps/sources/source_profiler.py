@@ -26,6 +26,7 @@ from django.conf import settings
 
 from apps.sources.models import Source
 from apps.sources.serializers import dialect_to_source_type
+from apps.substrate.models import SchemaTable, SchemaColumn
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +62,7 @@ def _describe_tabular(source: Source, tenant: str) -> tuple[str, int, list]:
 
     Returns (description, table_count, capabilities). Empty description when no schema was
     observed (e.g. a document source, or substrate not yet synced)."""
-    from apps.substrate.models import SchemaTable, SchemaColumn
+    
 
     tables = list(
         SchemaTable.objects.filter(source_id=source.pk, tenant=tenant)
