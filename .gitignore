@@ -54,3 +54,7 @@ veda_core/logs/
 
 # AI Related
 .omc
+# TLS material — never commit private keys
+certs/
+*.key
+*.pem
