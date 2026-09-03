@@ -362,7 +362,13 @@ RUNTIME_CONTEXT_ENABLED = True
 # -----------------------------------------------------------------------------
 # SLM — Layer 3
 # -----------------------------------------------------------------------------
-SLM_MODEL_NAME       = "qwen2.5-coder:7b"
+# env-overridable like every other SLM setting below it. Was a hard literal, which made the
+# engine's model the ONE thing here that .env could not change: pointing SLM_MODEL_NAME at a
+# served model silently had no effect on veda_core (chatbot/llm.py reads the env, so only the
+# engine was stuck), and every engine SLM call kept asking the Ollama host for a model that is
+# not resident there — each request forcing a model swap until the queue overflowed and Ollama
+# answered "503 server busy, maximum pending requests exceeded" for all of them.
+SLM_MODEL_NAME       = __import__("os").environ.get("SLM_MODEL_NAME", "qwen2.5-coder:7b")
 SLM_OLLAMA_BASE_URL  = __import__("os").environ.get("OLLAMA_URL", "http://localhost:11434")  # env-overridable (§9): container reaches ollama:11434
 # SLM backend seam (§10, slm/_call_slm.py): "ollama" (dev/ingestion) | "vllm" (prod
 # query tier — OpenAI-compatible /v1/chat/completions). Every engine call site
@@ -372,7 +378,12 @@ VLLM_BASE_URL        = __import__("os").environ.get("VLLM_URL", "http://vllm:800
 # vLLM serves under the HF model path (e.g. "Qwen/Qwen2.5-Coder-7B-Instruct"),
 # not the Ollama tag — set when SLM_BACKEND=vllm.
 VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or None
-SLM_TEMPERATURE      = 0.3
+# env-overridable, and set to 0 in .env. At 0.3 the same question could be understood two
+# different ways on two runs: "what is the late fee on overdue Rent invoices" answered "1850"
+# (SUM of the amount) once and "2" (a COUNT of rows, described as a late fee) the next — a
+# silently wrong answer, with the §8 intent/aggregate guards enabled and live. Benchmarks and
+# regressions are meaningless while the same input can produce a different intent each run.
+SLM_TEMPERATURE      = float(__import__("os").environ.get("SLM_TEMPERATURE", "0.3"))
 SLM_TIMEOUT_SECS     = 240
 SLM_MAX_RETRIES      = 2
 SLM_MAX_TOKENS       = 2048
