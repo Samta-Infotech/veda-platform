@@ -68,7 +68,13 @@ class RoleCreateView(AdminView):
         except AccessManagementError as exc:
             return self.failure(request, exc)
 
+        # Return the new role's id. Without it a client that creates a role in order to
+        # grant permissions to it had to follow up with roles/list or roles/dropdown and
+        # match on name — a second round trip, and ambiguous the moment two roles share
+        # a name prefix. Only the id: the rest of `public_fields` is what the caller just
+        # sent, and detail/list already project it.
         return api.success(MESSAGES["role"]["created"],
+                           {"role_id": role.pk},
                            status_code=status.HTTP_201_CREATED)
 
 

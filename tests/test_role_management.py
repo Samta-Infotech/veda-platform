@@ -181,11 +181,12 @@ def test_admin_creates_a_role(admin_client):
     assert response.status_code == 201
     body = response.json()
     assert body["message"] == "Role created successfully."
-    # create returns no data at all (2026-08-09) — a client that needs the new
-    # role's id looks it up via roles/list or roles/dropdown.
-    assert "data" not in body
-
+    # create returns the new role's id (2026-09-03). It used to return no data at all,
+    # which forced a client that creates a role in order to grant permissions to it to
+    # look the id up via roles/list or roles/dropdown and match on name.
     role = Role.objects.get(name="Data Analyst")
+    assert body["data"] == {"role_id": role.pk}
+
     assert role.description == "Reads dashboards."
     assert role.is_active is True
 

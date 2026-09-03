@@ -5,10 +5,11 @@ serializer module for why there is no write path.
 """
 from __future__ import annotations
 
+from rest_framework.permissions import IsAdminUser
+
 from apps.core import api
 from apps.core.messages import MESSAGES
 
-from ..codes import PermissionCode
 from ..serializers import (
     CatalogResourceDetailSerializer,
     CatalogResourceListSerializer,
@@ -48,7 +49,12 @@ class CatalogListView(AdminView):
 
     serializer_class = CatalogResourceListSerializer
     action = "catalog list"
-    required_permission = PermissionCode.PERMISSION_READ
+    # No RBAC permission of its own — staff-only via IsAdminUser. The
+    # `permission.read` permission was removed (2026-09-03). RequiresPermission is
+    # dropped from permission_classes rather than left with a blank
+    # required_permission, because gate.py:90 fails closed on a blank one and would
+    # 403 every caller under VEDA_RBAC_MODE=enforce.
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         data, failure = self.validate(request)
@@ -68,7 +74,12 @@ class CatalogDetailView(AdminView):
 
     serializer_class = CatalogResourceDetailSerializer
     action = "catalog detail"
-    required_permission = PermissionCode.PERMISSION_READ
+    # No RBAC permission of its own — staff-only via IsAdminUser. The
+    # `permission.read` permission was removed (2026-09-03). RequiresPermission is
+    # dropped from permission_classes rather than left with a blank
+    # required_permission, because gate.py:90 fails closed on a blank one and would
+    # 403 every caller under VEDA_RBAC_MODE=enforce.
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         data, failure = self.validate(request)
@@ -92,7 +103,12 @@ class CatalogTreeView(AdminView):
 
     serializer_class = CatalogTreeSerializer
     action = "catalog tree"
-    required_permission = PermissionCode.PERMISSION_READ
+    # No RBAC permission of its own — staff-only via IsAdminUser. The
+    # `permission.read` permission was removed (2026-09-03). RequiresPermission is
+    # dropped from permission_classes rather than left with a blank
+    # required_permission, because gate.py:90 fails closed on a blank one and would
+    # 403 every caller under VEDA_RBAC_MODE=enforce.
+    permission_classes = [IsAdminUser]
 
     def get(self, request):
         data, failure = self.validate(request)

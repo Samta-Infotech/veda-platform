@@ -19,4 +19,3 @@ class PermissionCode:
     EVALUATION_RUN = "evaluation.run"
     USER_MANAGE = "user.manage"
     ROLE_MANAGE = "role.manage"
-    PERMISSION_READ = "permission.read"
