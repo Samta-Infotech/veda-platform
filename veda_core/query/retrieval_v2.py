@@ -226,7 +226,7 @@ def graph_expand(
 ) -> List[RetrievalResult]:
     """Unified-graph recall booster (Phase 4). PURELY ADDITIVE: returns the original
     candidate columns UNION graph-suggested columns the bi-encoder may have missed
-    (synonym/alias resolution + FK-neighbour columns). The cross-encoder reranker still
+    (synonym/alias resolution + FK join-key reach). The cross-encoder reranker still
     decides the final cut, so this can only raise recall — never drop a candidate.
 
     Flag-guarded (GRAPH_EXPAND_ENABLED) and fully try/except'd: on ANY failure it
@@ -240,40 +240,23 @@ def graph_expand(
         if g is None:
             return candidate_columns
 
-        have = {(c.table_name, c.col_name) for c in candidate_columns}
+        # 1+2) Shared expansion logic — synonym/alias resolution + FK JOIN-KEY reach.
+        # Delegates to UnifiedGraph.suggest_expansions() so Tier-1 (veda/pipeline.py) and
+        # Tier-2 (here) stay behaviourally identical. Previously this function hand-rolled
+        # its own walk that added EVERY column of every related table, which flooded
+        # candidates with unrelated columns (user.email etc.) — the exact bug the shared
+        # method already fixes by following only the specific REFERENCES join key.
+        have_names  = {f"{c.table_name}.{c.col_name}" for c in candidate_columns}
+        have_tables = {c.table_name for c in candidate_columns}
+        seeds, added_names, synonyms = g.suggest_expansions(
+            query, have_names, have_tables, max_add=GRAPH_EXPAND_MAX)
 
-        # 1) synonym/alias resolution of query tokens → column node ids
-        import re as _re
-        tokens = [t for t in _re.findall(r"[a-zA-Z_]+", query.lower()) if len(t) > 2]
-        seeds, suggested = [], []   # suggested = [(table, col)]
-        for tok in tokens:
-            cids = g.resolve_term(tok)
-            if cids:
-                seeds.append(tok)
-            for cid in cids:
-                node = g.node(cid)
-                if node and "." in node["name"]:
-                    t, c = node["name"].split(".", 1)
-                    if (t, c) not in have:
-                        suggested.append((t, c))
-
-        # 2) FK-neighbour columns of the already-retrieved tables (join reach)
-        for t in {c.table_name for c in candidate_columns}:
-            for rel_t in g.get_related_tables(t):
-                for cid in g.get_related_columns(rel_t):
-                    node = g.node(cid)
-                    if node and "." in node["name"]:
-                        rt, rc = node["name"].split(".", 1)
-                        if (rt, rc) not in have:
-                            suggested.append((rt, rc))
-
-        # dedupe, cap (token/latency bound)
-        seen, capped = set(), []
-        for tc in suggested:
-            if tc not in seen:
-                seen.add(tc); capped.append(tc)
-            if len(capped) >= GRAPH_EXPAND_MAX:
-                break
+        # 'table.col' names → (table, col) pairs for the vector-store lookup below
+        capped = []
+        for _name in added_names:
+            if "." in _name:
+                t, c = _name.split(".", 1)
+                capped.append((t, c))
         if not capped:
             if trace is not None:
                 trace.set("graph_expansion", seeds=seeds, added=[], note="no new columns")
@@ -293,7 +276,7 @@ def graph_expand(
         if trace is not None:
             trace.set("graph_expansion",
                       seeds=seeds,
-                      synonyms={t: g.get_synonyms(t)[:6] for t in seeds},
+                      synonyms=synonyms,
                       added=[f"{c.table_name}.{c.col_name}" for c in added])
 
         return candidate_columns + added

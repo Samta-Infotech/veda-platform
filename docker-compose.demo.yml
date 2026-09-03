@@ -26,8 +26,10 @@
 
 services:
   postgres:
+    restart: unless-stopped
     image: pgvector/pgvector:pg17
   inference:
+    restart: unless-stopped
     environment:
       WORKERS: ${INFERENCE_WORKERS:-1}      # demo: one warm engine is plenty
       DJANGO_SETTINGS_MODULE: config.settings.dev
@@ -43,6 +45,7 @@ services:
       DEV_AUTORELOAD: "0"
 
   api:
+    restart: unless-stopped
     environment:
       ROLE: api
       DJANGO_SETTINGS_MODULE: config.settings.dev

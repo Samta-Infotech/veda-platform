@@ -22,7 +22,6 @@ import os
 import urllib.request
 
 from django.conf import settings
-from django.db import connection
 
 from apps.sources.models import Source, SourceItem, SourceItemType
 
@@ -42,10 +41,41 @@ def _is_enabled() -> bool:
     return bool(getattr(settings, "SOURCE_ITEM_PROFILER_ENABLED", False))
 
 
+def _engine_connection():
+    """Connect to the ENGINE db (VEDA_INTERNAL_*), where source_item_embeddings lives.
+
+    The routing prior is read at query time by veda_core/query/source_coordinator.py through
+    get_internal_connection(), i.e. VEDA_INTERNAL_DBNAME (veda_engine) — the same database as
+    the other pgvector tables (table_embeddings_v2, doc_chunks, ...). Django's own `connection`
+    points at the Django db (veda), so writing the prior through it silently lands the rows in
+    a database the coordinator never reads, leaving routing permanently unprimed.
+    """
+    import psycopg2
+
+    return psycopg2.connect(
+        host=os.environ.get("VEDA_INTERNAL_HOST", "pgbouncer"),
+        port=os.environ.get("VEDA_INTERNAL_PORT", "6432"),
+        dbname=os.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),
+        user=os.environ.get("VEDA_INTERNAL_USER", "veda"),
+        password=os.environ.get("VEDA_INTERNAL_PASSWORD", ""),
+    )
+
+
 def _rows(sql, params):
-    with connection.cursor() as cur:
-        cur.execute(sql, params)
-        return cur.fetchall()
+    """Read from the ENGINE db — every caller queries engine-side tables.
+
+    column_embeddings_v2 / doc_chunks live in VEDA_INTERNAL_DBNAME (veda_engine), NOT in the
+    Django db. Running these through django.db.connection returns "relation does not exist",
+    which backfill_items() swallows (`except Exception: tabs = []`) and reports as "0 items" —
+    a silent no-op rather than an error.
+    """
+    conn = _engine_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
+            return cur.fetchall()
+    finally:
+        conn.close()
 
 
 def _post_json(url, payload, timeout=60):
@@ -136,15 +166,20 @@ def profile_items(source: Source, force: bool = False) -> int:
             item.summary, item.topics = summary, topics
             item.save(update_fields=["summary", "topics", "updated_at"])
             vec = _embed(f"{item.name}. {summary}")
-            with connection.cursor() as cur:
-                cur.execute(
-                    "INSERT INTO source_item_embeddings (source_id, item_type, item_key, name, summary, "
-                    "embedding, updated_at) VALUES (%s,%s,%s,%s,%s,%s,now()) "
-                    "ON CONFLICT (source_id, item_type, item_key) DO UPDATE SET "
-                    "name=EXCLUDED.name, summary=EXCLUDED.summary, embedding=EXCLUDED.embedding, "
-                    "updated_at=now()",
-                    [str(item.source_id), item.item_type, item.item_key, item.name, summary,
-                     "[" + ",".join(f"{v:.8f}" for v in vec) + "]"])
+            conn = _engine_connection()          # NOT django's `connection` — see _engine_connection
+            try:
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "INSERT INTO source_item_embeddings (source_id, item_type, item_key, name, summary, "
+                        "embedding, updated_at) VALUES (%s,%s,%s,%s,%s,%s,now()) "
+                        "ON CONFLICT (source_id, item_type, item_key) DO UPDATE SET "
+                        "name=EXCLUDED.name, summary=EXCLUDED.summary, embedding=EXCLUDED.embedding, "
+                        "updated_at=now()",
+                        [str(item.source_id), item.item_type, item.item_key, item.name, summary,
+                         "[" + ",".join(f"{v:.8f}" for v in vec) + "]"])
+                conn.commit()
+            finally:
+                conn.close()
             done += 1
         except Exception as e:
             logger.warning("item profile failed source=%s item=%s: %s", source.pk, item.item_key, e)

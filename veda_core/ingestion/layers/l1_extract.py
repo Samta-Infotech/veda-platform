@@ -53,8 +53,16 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # re-parsed at query time).
     if (ctx.engine or "").lower() in _TABULAR_ENGINES and state.get("tabular_connector"):
         try:
-            from config import artifact_path
-            out_dir = artifact_path(os.path.join("tables"))
+            # Must be SOURCE-SCOPED. artifact_path("tables") resolves to the flat
+            # `data/tables/` while artifact_scope is unset (which it always is today),
+            # so every tabular source would materialize into ONE shared directory:
+            # two sources with a same-named table silently overwrite each other, and
+            # the reader (query/cross_source_composer._materialized_parquet) would
+            # then serve one source's parquet for another's source_id. Use the same
+            # `ARTIFACT_ROOT/<source_id>/tables` layout that source_dispatcher's
+            # tabular path already writes and that the reader probes FIRST.
+            from config import ARTIFACT_ROOT
+            out_dir = os.path.join(ARTIFACT_ROOT, str(ctx.source_id), "tables")
             written = state["tabular_connector"].materialize_parquet(out_dir)
             state["materialized_parquet"] = written
             out.append(StageOutcome("materialize_parquet", True,

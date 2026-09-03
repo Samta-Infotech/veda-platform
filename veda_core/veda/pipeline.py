@@ -62,6 +62,27 @@ _VAGUE_RECENCY_RE = re.compile(
     r'\b(?:recently|lately|latest|newest|most\s+recent)\b', re.IGNORECASE)
 
 
+def _sql_references(sql: str, name: str) -> bool:
+    """Whether ``sql`` names ``name`` as an identifier — quoted (``"x"``) OR bare (``x``).
+
+    Bare-name matching is REQUIRED, not a convenience. This predicate decides
+    whether a validation rejection was RBAC-caused, and the earlier version tested
+    only ``f'"{name}"' in sql`` on the stated assumption that "SQL here always
+    double-quotes identifiers". That assumption does not hold on the verified-cache
+    REPLAY path, which hands back the stored SQL unquoted
+    (``FROM accounts_generalledger``). So every RBAC-caused rejection on that path
+    was misclassified as a generic ``invalid`` with NO feedback attached, which
+    reached the user as ``ask_clarification_node``'s "Could you clarify what you're
+    asking about?" — an ambiguity prompt for what was actually a permission denial,
+    and nothing printed to the engine log either (only ``_feedback`` prints).
+
+    Word-boundary anchored, so it still cannot fire on an unrelated identifier that
+    merely CONTAINS a restricted name — the false-positive the quoted-only test was
+    reaching for. ``"`` is not a word character, so one pattern covers both forms.
+    """
+    return re.search(rf'(?<!\w){re.escape(name)}(?!\w)', sql) is not None
+
+
 def _is_vague_recency_only(raw_expressions):
     """True when every temporal span the L1 parser matched is a bare vague-recency
     word (latest/newest/most recent/recently/lately) — i.e. the derived 30-day
@@ -1800,8 +1821,21 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # is wrong for an unrelated reason" — narrow_allowed() itself only returns
     # the narrowed sets, not what it took out.
     _restricted_for_sql = restricted_names(sm, _ambient_ctx())
+    _tables_before = set(allowed_tables or ())
     allowed_tables, allowed_columns = narrow_allowed(
         allowed_tables, allowed_columns, sm, _ambient_ctx())
+    # Say so when the gate actually took something away. Without this, an RBAC
+    # narrowing and an ordinary planning miss are indistinguishable in the engine
+    # log: the only visible trace was validate_and_parameterize's downstream
+    # "references unknown table(s)", which reads as a hallucinated table rather
+    # than a permission decision (and left an intermittent false denial
+    # undiagnosable — the scope in play was recorded nowhere).
+    _tables_removed = sorted(_tables_before - set(allowed_tables or ()))
+    if _tables_removed:
+        _ctx_dbg = _ambient_ctx()
+        print(f"  [RBAC] narrowed allowlist — removed table(s) {_tables_removed} "
+              f"(source_ids={list(getattr(_ctx_dbg, 'source_ids', ()) or ())}, "
+              f"restricted={_restricted_for_sql['tables']})")
 
     param_sql, params, err = validate_and_parameterize(sql, allowed_tables, allowed_columns,
                                                         join_constraints=join_constraints,
@@ -1817,12 +1851,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # Was this rejection RBAC-caused? The AST error text isn't something to
         # parse (format is validate_and_parameterize's, not ours to depend on) —
         # instead check whether the generated SQL actually references a name
-        # RBAC just stripped. A quoted-identifier match, not a bare substring
-        # one: SQL here always double-quotes identifiers (see the generated
-        # examples throughout this module), so this cannot false-positive on an
-        # unrelated word that merely contains a restricted name.
+        # RBAC just stripped. Identifier-anchored, quoted OR bare: the replay path
+        # feeds unquoted SQL, and a quoted-only test silently turned every RBAC
+        # denial there into a generic refusal (see _sql_references).
         _restricted_hit = any(
-            f'"{name}"' in sql
+            _sql_references(sql, name)
             for name in _restricted_for_sql["tables"] + _restricted_for_sql["columns"])
         if _restricted_hit:
             fb = _feedback("access_denied")

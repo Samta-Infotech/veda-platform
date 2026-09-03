@@ -57,3 +57,8 @@ veda_core/logs/
 
 # Docs
 docs/multisource_routing/
+
+# TLS material — never commit private keys
+certs/
+*.key
+*.pem
