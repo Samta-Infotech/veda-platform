@@ -606,6 +606,32 @@ def _run_coordinator(query, verbose=False, on_event=None):
         _tenant = str(getattr(ctx, "tenant", "default"))
         from query.source_coordinator import plan_route, execute_decision
         _emit(on_event, "route", "Deciding which source can answer…")
+
+        # Permission-aware routing pre-check (flag-gated, default OFF). Decide the best source over ALL
+        # ready sources; if the strict winner is one the user has NO access to, refuse with a clear
+        # permission message rather than mis-routing to a weaker permitted source. Only match SCORES of
+        # the inaccessible source are read (pre-computed vectors) — its content is never fetched.
+        try:
+            from config import ROUTING_PERMISSION_PRECHECK_ENABLED as _perm_pc
+        except Exception:
+            _perm_pc = False
+        if _perm_pc:
+            try:
+                from query.source_coordinator import all_ready_source_ids, best_matching_source
+                _permitted = {str(s) for s in sids}
+                _denied = set(all_ready_source_ids()) - _permitted
+                if _denied:
+                    _best = best_matching_source(query, sorted(_permitted | _denied), _profiles)
+                    if _best is not None and str(_best) in _denied:
+                        _emit(on_event, "answer",
+                              "You don't have permission to access the data source that can answer this.")
+                        return MultiResult.single(
+                            query, STATUS_REFUSED, "no_access",
+                            refuse_reason="You don't have permission to access the data source "
+                                          "that can answer this question.")
+            except Exception:
+                pass
+
         decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
         try:
             _cur_trace().set(
@@ -873,6 +899,38 @@ def _maybe_federated(query, verbose=False, strict=False):
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
+def _clean_refuse_on_empty_error(result) -> None:
+    """A terminal 'error' that produced NEITHER an answer NOR SQL is a "couldn't answer this" — surface
+    a clean refusal instead of a bare error. Evidence-of-failure only (no answer + no SQL); never probes
+    a source the user cannot access, so no existence disclosure. Flag-gated, default ON; a no-op on any
+    item that has an answer or SQL (real results are untouched)."""
+    try:
+        import config as _cfg
+        if not bool(getattr(_cfg, "WEAK_EVIDENCE_CLEAN_REFUSE_ENABLED", True)):
+            return
+    except Exception:
+        return
+    _msg = "I couldn't find any data relevant to this question in the sources available to you."
+    try:
+        for it in (getattr(result, "items", None) or []):
+            if getattr(it, "status", "") != "error":
+                continue
+            r = it.result if isinstance(getattr(it, "result", None), dict) else None
+            if r is not None and (r.get("answer") or r.get("sql")):
+                continue                                   # a real result — leave it alone
+            it.status = "refused"
+            it.refuse_reason = getattr(it, "refuse_reason", None) or "no_relevant_data"
+            if r is not None:
+                r["ok"] = False
+                r["status"] = "refused"
+                r["answer"] = r.get("answer") or _msg
+            else:
+                it.result = {"ok": False, "status": "refused", "answer": _msg,
+                             "refuse_reason": "no_relevant_data"}
+    except Exception:
+        pass
+
+
 def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
     """Public front door. Owns the ONE query trace for the whole request.
 
@@ -902,6 +960,7 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
                 result.trace_id = getattr(tr, "trace_id", "") or None
             except Exception:
                 pass
+            _clean_refuse_on_empty_error(result)
             return result
         finally:
             try:

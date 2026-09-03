@@ -317,6 +317,69 @@ def build_candidates(evidence_by_source: dict, profiles: dict) -> List[Candidate
 
 
 # ── default providers (lazy, guarded — real engine pieces) ─────────────────────────────────────
+def all_ready_source_ids() -> list:
+    """Every source that has a routing prior (one row per item in source_item_embeddings) — i.e. all
+    ingested/ready sources, permission-agnostic. Used only by the permission pre-check to tell whether a
+    BETTER source than the user's permitted set exists. No content is read — just the source_id list."""
+    try:
+        from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+        conn = get_internal_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT DISTINCT source_id FROM source_item_embeddings")
+                return [str(r[0]) for r in cur.fetchall()]
+        finally:
+            release_internal_connection(conn)
+    except Exception:
+        return []
+
+
+def best_matching_source(query: str, source_ids, profiles=None):
+    """The single STRICTLY-best-matching source over ``source_ids`` (permission-agnostic), by the same
+    evidence + dominance tiering the router uses. Returns a source_id, or None when there is no clear
+    winner. Only pre-computed match SCORES are read — no source content is fetched or returned.
+
+    Runs the evidence retrieval under a PERMISSION-AGNOSTIC scope (the ambient RBAC data-scope would
+    otherwise filter out the very sources this pre-check exists to detect) — restored immediately after.
+    """
+    _saved = None
+    try:
+        from veda_core.context import try_current, RequestContext, set_context
+        _cur = try_current()
+        if _cur is not None:
+            _saved = _cur
+            # same tenant/source_id, but NO allowed_resources and ALL sources in scope, for scoring only
+            set_context(RequestContext(source_id=_cur.source_id, tenant=_cur.tenant,
+                                       source_ids=tuple(source_ids), allowed_resources=None))
+    except Exception:
+        _saved = None
+    try:
+        cols, chunks = _default_evidence_provider(query, source_ids)
+        ev = group_evidence_by_source(cols, chunks)
+        if not ev:
+            return None
+        _apply_item_prior(query, source_ids, ev)
+        _dominance_retier(ev)
+        cands = build_candidates(ev, profiles or {})
+        strong = [c for c in cands if c.presence_tier == "STRONG"]
+        if not strong:
+            return None
+        top = max(strong, key=lambda c: getattr(c, "top_score", 0.0))
+        # must be the strict top over EVERY candidate (a genuine single winner, not a tie)
+        if any(c is not top and getattr(c, "top_score", 0.0) >= getattr(top, "top_score", 0.0) for c in cands):
+            return None
+        return top.source_id
+    except Exception:
+        return None
+    finally:
+        if _saved is not None:
+            try:
+                from veda_core.context import set_context
+                set_context(_saved)                        # restore the caller's real (RBAC) scope
+            except Exception:
+                pass
+
+
 def _default_evidence_provider(query: str, source_ids) -> Tuple[list, list]:
     """(columns, chunks) for ROUTING, each carrying a CLEAN bi-encoder COSINE per source.
 
@@ -644,19 +707,32 @@ def _build_execution_context(decision, query):
         query_embedding=cached_v if cached_q == query else None)
 
 
-def _resolve_executable(source_kind: str):
-    """Phase A3 (Source Adapter Foundation, default OFF): return the object whose ``.execute(...)``
-    runs this source kind — either query/source_adapters.py::SourceAdapter (a thin call-through
-    wrapper, same signature/return as the bare agent) when SOURCE_ADAPTER_DISPATCH_ENABLED is on, or
-    the bare agent from query.agents.resolve_agent() otherwise. OFF -> resolve_agent() is called
-    exactly as before this phase existed — byte-identical. See
-    docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md."""
+def _dispatch_flags():
+    """(use_adapter, use_execution_request) from config — two SEPARATE flags, one per architectural
+    change (Phase A3 / Phase B2). use_execution_request implies adapter resolution even if
+    SOURCE_ADAPTER_DISPATCH_ENABLED itself is off, because execute_request() only exists on
+    SourceAdapter (see _resolve_executable's docstring)."""
     try:
         import config as _cfg
         use_adapter = bool(getattr(_cfg, "SOURCE_ADAPTER_DISPATCH_ENABLED", False))
+        use_execution_request = bool(getattr(_cfg, "EXECUTION_REQUEST_DISPATCH_ENABLED", False))
     except Exception:
         use_adapter = False
-    if use_adapter:
+        use_execution_request = False
+    return use_adapter, use_execution_request
+
+
+def _resolve_executable(source_kind: str):
+    """Phase A3 (Source Adapter Foundation) / Phase B2 (Execution Request): return the object whose
+    ``.execute(...)`` (or, Phase B2, ``.execute_request(...)``) runs this source kind — either
+    query/source_adapters.py::SourceAdapter (a thin call-through wrapper, same signature/return as
+    the bare agent) when SOURCE_ADAPTER_DISPATCH_ENABLED or EXECUTION_REQUEST_DISPATCH_ENABLED is on,
+    or the bare agent from query.agents.resolve_agent() otherwise. Both flags OFF -> resolve_agent()
+    is called exactly as before either phase existed — byte-identical. See
+    docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md and
+    docs/architecture/VEDA_CANONICAL_EXECUTION_REQUEST_AUDIT.md."""
+    use_adapter, use_execution_request = _dispatch_flags()
+    if use_adapter or use_execution_request:
         from query.source_adapters import resolve_adapter
         return resolve_adapter(source_kind)
     from query.agents import resolve_agent
@@ -666,16 +742,29 @@ def _resolve_executable(source_kind: str):
 def dispatch(decision: RoutingDecision, query: str, *, sm=None, cols=None,
              profiles: dict = None, evidence=None, on_event=None):
     """Execute a SINGLE-mode routing decision via its source agent, returning the AgentResult.
-    NO_MATCH / CLARIFICATION_REQUIRED / MULTI return None (use execute_decision for MULTI)."""
+    NO_MATCH / CLARIFICATION_REQUIRED / MULTI return None (use execute_decision for MULTI).
+
+    Phase B2 (EXECUTION_REQUEST_DISPATCH_ENABLED, default OFF): when on, this function's own
+    legacy kwargs are unchanged — no caller has to change — but internally it normalizes them into
+    ONE query/execution_request.py::ExecutionRequest and calls the resolved SourceAdapter's
+    execute_request(request) instead of the legacy agent.execute(...) call. execute_request() is a
+    pure unpack-and-delegate back to execute(...) (Phase B1, proven equivalent by test), so this is
+    a boundary-shape change only — never a behavior change."""
     from query.reliability import execute_reliably
     if decision.status != STATUS_ROUTED or decision.mode != MODE_SINGLE:
         return None
     sid = decision.source_ids[0]
-    agent = _resolve_executable(_kind_of(sid, decision, profiles))
-    if agent is None:
+    executable = _resolve_executable(_kind_of(sid, decision, profiles))
+    if executable is None:
         return None
     exec_ctx = _build_execution_context(decision, query)
-    return execute_reliably(lambda: agent.execute(
+    _, use_execution_request = _dispatch_flags()
+    if use_execution_request:
+        from query.execution_request import ExecutionRequest
+        request = ExecutionRequest(query=query, source_id=sid, source_ids=[sid], sm=sm, cols=cols,
+                                   execution_context=exec_ctx, on_event=on_event)
+        return execute_reliably(lambda: executable.execute_request(request, evidence=evidence))
+    return execute_reliably(lambda: executable.execute(
         query, source_id=sid, source_ids=[sid], sm=sm, cols=cols,
         evidence=evidence, execution_context=exec_ctx, on_event=on_event))
 
