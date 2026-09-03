@@ -479,9 +479,24 @@ def plan_route(query: str, source_ids, *,
     # confidence SINGLE and structural MULTI never reach the SLM.
     at_boundary, boundary_candidates = _decision_boundary(candidates, decision, ambiguous, edge_pairs)
     if at_boundary:
-        _attach_item_summaries(query, boundary_candidates)   # give the SLM the matched item summaries
-        decision = resolve_boundary(query, boundary_candidates, slm_call=slm_call,
-                                    query_id=query_id, trace_id=trace_id)
+        # Deterministic document-preference tie-break (flag-gated). When an ambiguous doc+tabular set
+        # reaches the boundary, the SLM was mis-picking the tabular source even though the document
+        # source carried the strictly-higher signal (a "monthly Society Charges fee" answer lives in the
+        # policy doc). If a DOCUMENT source is the strict top-signal candidate, route SINGLE to it and
+        # skip the SLM. Uses the structural source_type + the already-computed max signal — no keywords.
+        _doc_win = _doc_boundary_winner(boundary_candidates) if _doc_boundary_pref_on() else None
+        if _doc_win is not None:
+            from query.routing_contracts import METHOD_DETERMINISTIC, RC_SINGLE_CANDIDATE
+            decision = RoutingDecision(
+                status=STATUS_ROUTED, mode=MODE_SINGLE, source_ids=[_doc_win.source_id],
+                candidate_sources=list(boundary_candidates),
+                evidence_summary=[_doc_win.evidence_summary] if _doc_win.evidence_summary else [],
+                decision_method=METHOD_DETERMINISTIC, reason_code=RC_SINGLE_CANDIDATE,
+                reason="Document source carried the strict top signal at an ambiguous boundary.")
+        else:
+            _attach_item_summaries(query, boundary_candidates)   # give the SLM the matched item summaries
+            decision = resolve_boundary(query, boundary_candidates, slm_call=slm_call,
+                                        query_id=query_id, trace_id=trace_id)
 
     decision.query_id = decision.query_id or query_id
     decision.trace_id = decision.trace_id or trace_id
@@ -506,6 +521,39 @@ def _apply_item_prior(query, source_ids, evidence_by_source, item_prior_provider
         ev.top_item_score = max(getattr(ev, "top_item_score", 0.0), float(score))
 
 
+_DOC_SOURCE_TYPES = frozenset({"filesystem", "document", "docs", "doc"})
+
+
+def _doc_boundary_pref_on() -> bool:
+    """True when ROUTING_DOC_BOUNDARY_PREF_ENABLED is set — at an ambiguous boundary, a document source
+    that is the strict top-signal candidate is routed to deterministically instead of the SLM (which was
+    mis-picking the tabular source). Default OFF → byte-identical (the SLM boundary resolver runs)."""
+    try:
+        import config as _cfg
+        return bool(getattr(_cfg, "ROUTING_DOC_BOUNDARY_PREF_ENABLED", False))
+    except Exception:
+        return False
+
+
+def _doc_boundary_winner(candidates):
+    """Return the document (chunk-backed) candidate iff it is the STRICT top-signal source among the
+    boundary set — i.e. its top_score is higher than every non-document candidate's. Structural
+    (source_type + already-computed top_score); no keywords. None when a tabular source leads."""
+    if not candidates:
+        return None
+    top = max(candidates, key=lambda c: getattr(c, "top_score", 0.0))
+    if (top.source_type or "").lower() not in _DOC_SOURCE_TYPES:
+        return None
+    # strictly ahead of every non-document candidate (no tie with a table)
+    for c in candidates:
+        if c is top:
+            continue
+        if (c.source_type or "").lower() not in _DOC_SOURCE_TYPES \
+                and getattr(c, "top_score", 0.0) >= getattr(top, "top_score", 0.0):
+            return None
+    return top
+
+
 def _dominance_retier(evidence_by_source, gap=None, floor=None):
     """Re-tier sources RELATIVE to the field (benchmark finding). Absolute per-source floors fail on
     a large multi-column DB, which always has *some* column matching any query at ~0.6 — a spurious
@@ -525,8 +573,22 @@ def _dominance_retier(evidence_by_source, gap=None, floor=None):
     # cosines are directly comparable across sources (all query↔summary), whereas raw column vs chunk
     # cosines live in different distributions and mixing them re-introduces noise. Fall back to the
     # column/chunk max only for sources without an item prior (or when no source has one).
+    # When set, the tiering signal is the MAX of (item prior, column cosine, chunk cosine) — the item
+    # prior ADDS a source but must not SUPPRESS a strong raw cosine: a document source with a dominant
+    # chunk hit (0.76) was being flattened to its weaker item-summary score (0.36), tying it with
+    # spuriously-close tabular sources → AMBIGUOUS → SLM → NO_MATCH (doc questions refused). Default OFF
+    # → the item-prior-preferred behaviour below is byte-identical.
+    try:
+        import config as _cfg2
+        _max_signal = bool(getattr(_cfg2, "ROUTING_TIER_MAX_SIGNAL_ENABLED", False))
+    except Exception:
+        _max_signal = False
     have_item = any(getattr(e, "top_item_score", 0.0) > 0 for e in evidence_by_source.values())
-    if have_item:
+    if _max_signal:
+        tops = {sid: max(getattr(e, "top_item_score", 0.0),
+                         e.top_column_score, e.top_chunk_score)
+                for sid, e in evidence_by_source.items()}
+    elif have_item:
         tops = {sid: (getattr(e, "top_item_score", 0.0)
                       or max(e.top_column_score, e.top_chunk_score))
                 for sid, e in evidence_by_source.items()}
@@ -582,16 +644,34 @@ def _build_execution_context(decision, query):
         query_embedding=cached_v if cached_q == query else None)
 
 
+def _resolve_executable(source_kind: str):
+    """Phase A3 (Source Adapter Foundation, default OFF): return the object whose ``.execute(...)``
+    runs this source kind — either query/source_adapters.py::SourceAdapter (a thin call-through
+    wrapper, same signature/return as the bare agent) when SOURCE_ADAPTER_DISPATCH_ENABLED is on, or
+    the bare agent from query.agents.resolve_agent() otherwise. OFF -> resolve_agent() is called
+    exactly as before this phase existed — byte-identical. See
+    docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md."""
+    try:
+        import config as _cfg
+        use_adapter = bool(getattr(_cfg, "SOURCE_ADAPTER_DISPATCH_ENABLED", False))
+    except Exception:
+        use_adapter = False
+    if use_adapter:
+        from query.source_adapters import resolve_adapter
+        return resolve_adapter(source_kind)
+    from query.agents import resolve_agent
+    return resolve_agent(source_kind)
+
+
 def dispatch(decision: RoutingDecision, query: str, *, sm=None, cols=None,
              profiles: dict = None, evidence=None, on_event=None):
     """Execute a SINGLE-mode routing decision via its source agent, returning the AgentResult.
     NO_MATCH / CLARIFICATION_REQUIRED / MULTI return None (use execute_decision for MULTI)."""
-    from query.agents import resolve_agent
     from query.reliability import execute_reliably
     if decision.status != STATUS_ROUTED or decision.mode != MODE_SINGLE:
         return None
     sid = decision.source_ids[0]
-    agent = resolve_agent(_kind_of(sid, decision, profiles))
+    agent = _resolve_executable(_kind_of(sid, decision, profiles))
     if agent is None:
         return None
     exec_ctx = _build_execution_context(decision, query)

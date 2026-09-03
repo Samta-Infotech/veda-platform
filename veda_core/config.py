@@ -477,6 +477,31 @@ QUERY_ROUTER_CONFIDENCE_THRESHOLD = 0.6
 # Toggle automatic routing — if False, always routes to SQL (backward compat)
 QUERY_ROUTER_ENABLED = True
 
+# The sql-vs-rag intent is decided in classify() by a FIXED word-list regex (_DOC_REF_RE) then the SLM
+# router — neither consults the source-coordinator's retrieval evidence, so a document question that
+# misses the word list ("grievance redressal", "paternity leave", "maintenance fee") is mislabelled
+# "sql" and routed to the tabular head, which refuses/errors. When set, classify() also runs the SAME
+# cosine evidence the coordinator uses: if a DOCUMENT source is the dominant STRONG source (chunk cosine
+# beats the best tabular column cosine), the query routes to the RAG lane. Data-driven (BGE-M3 cosine,
+# no keywords). Default OFF → byte-identical (veda_hybrid.py::_doc_intent_evidence_on).
+DOC_INTENT_EVIDENCE_ENABLED = _os.environ.get("DOC_INTENT_EVIDENCE_ENABLED", "1") == "1"
+
+# Source-routing dominance tiering (source_coordinator._dominance_retier): the item-description prior was
+# PREFERRED over raw column/chunk cosine, so a document source with a dominant chunk hit (0.76) was
+# flattened to its weaker item-summary score (0.36) and tied with spuriously-close tabular sources →
+# AMBIGUOUS → the SLM boundary resolver → NO_MATCH (document questions refused). When set, the tiering
+# signal is max(item, column, chunk) so a strong raw cosine is never suppressed. Default ON (fixes the
+# doc-routing refusal); env=0 restores the item-prior-preferred behaviour.
+ROUTING_TIER_MAX_SIGNAL_ENABLED = _os.environ.get("ROUTING_TIER_MAX_SIGNAL_ENABLED", "1") == "1"
+
+# At an ambiguous doc+tabular routing boundary, the bounded SLM was mis-picking the TABULAR source even
+# when the document source carried the strictly-higher signal (a "monthly Society Charges fee" answer
+# lives in the policy doc, not a homzhub table) — because "fee/rent/asset/city" overlap homzhub schema
+# words. When set, a document source that is the strict top-signal candidate at the boundary is routed to
+# deterministically (SLM skipped). Structural (source_type + top_score), no keywords. Default OFF (touches
+# the shared boundary logic — enable after measuring); env=1 to turn on.
+ROUTING_DOC_BOUNDARY_PREF_ENABLED = _os.environ.get("ROUTING_DOC_BOUNDARY_PREF_ENABLED", "1") == "1"
+
 # Parallel Qwen fan-out for the ingestion semantic layer (Stage 3/4). Env-driven so the
 # concurrency is gated on the DEPLOYMENT: the "6" (≈2 concurrent × 3 backends) only makes
 # sense behind scripts/ollama_proxy.py fanning across ≥3 Ollama hosts. Against a SINGLE
@@ -721,6 +746,15 @@ FEDERATED_PLANNER_MAX_ATTEMPTS = max(1, int(_os.environ.get("FEDERATED_PLANNER_M
 # dozens of homzhub tables) from forcing a spurious MULTI; no match → decision unchanged. OFF ->
 # byte-identical. See docs/multisource_routing/CROSS_SOURCE_EDGE_MULTI.md.
 CROSS_SOURCE_EDGE_MULTI_ENABLED = _os.environ.get("CROSS_SOURCE_EDGE_MULTI_ENABLED", "1") == "1"
+
+# Source Adapter dispatch (Phase A3, default OFF — foundation work, not yet the default path). When
+# ON, source_coordinator.dispatch() calls the source through query/source_adapters.py::SourceAdapter
+# (a thin call-through wrapper over the SAME agents.py::_AGENT_BY_KIND agent dispatch() already used)
+# instead of calling resolve_agent() directly. The adapter's execute() is a verbatim pass-through — no
+# new logic, no new SQL/generation/routing behavior — this flag exists purely to prove the adapter
+# layer end-to-end on live traffic before any later phase builds on it. OFF -> byte-identical (calls
+# resolve_agent() exactly as before). See docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md.
+SOURCE_ADAPTER_DISPATCH_ENABLED = _os.environ.get("SOURCE_ADAPTER_DISPATCH_ENABLED", "0") == "1"
 
 # Source-description prior (routing, default OFF). The item-prior tiers a source on the MAX cosine over
 # its per-item summaries (source_item_embeddings) — which gives a large source (homzhub: 178 item

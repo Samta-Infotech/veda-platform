@@ -84,6 +84,50 @@ def test_dispatch_returns_none_for_non_single():
     assert dispatch(d, "q") is None      # MULTI handed to Phase 4 federation, not dispatched here
 
 
+# ── Phase A3: Source Adapter dispatch (flag-gated, default OFF) ──────────────────────────────
+import config as _cfg_mod  # noqa: E402  (top-level module — veda_core is on sys.path via CORE above;
+                                          # same module source_coordinator.py's `import config as _cfg`
+                                          # resolves to, kept as `_cfg_mod` here only to avoid shadowing
+                                          # the `config` name test-locally.)
+
+
+def test_dispatch_default_off_matches_pre_phase_a3_behavior(monkeypatch):
+    """Flag OFF (the default) must be byte-identical to calling resolve_agent() directly — this is
+    the exact pre-Phase-A3 code path, unchanged."""
+    assert _cfg_mod.SOURCE_ADAPTER_DISPATCH_ENABLED is False
+    monkeypatch.setattr(A, "_sql_delegate", lambda q, sm, cols, on_event=None: {
+        "ok": True, "cols": ["rev"], "rows": [[100]]})
+    d = plan_route("rev", ["5"], evidence_provider=_ev(_Col("t.rev", "rev", "r", "5", 0.82)),
+                   edge_provider=lambda s: set(), profile_provider=lambda s: {"5": {"source_type": "relational"}})
+    res = dispatch(d, "rev", sm={}, cols=[], profiles={"5": {"source_type": "relational"}})
+    assert res.status == "ok" and res.data["rows"] == [[100]]
+
+
+def test_dispatch_with_adapter_flag_on_matches_flag_off_exactly(monkeypatch):
+    """Dual-run compatibility check (Phase A4): flipping SOURCE_ADAPTER_DISPATCH_ENABLED on must
+    produce an IDENTICAL result to the flag being off, for the same query/decision/inputs."""
+    monkeypatch.setattr(A, "_sql_delegate", lambda q, sm, cols, on_event=None: {
+        "ok": True, "cols": ["rev"], "rows": [[100]]})
+    d = plan_route("rev", ["5"], evidence_provider=_ev(_Col("t.rev", "rev", "r", "5", 0.82)),
+                   edge_provider=lambda s: set(), profile_provider=lambda s: {"5": {"source_type": "relational"}})
+
+    monkeypatch.setattr(_cfg_mod, "SOURCE_ADAPTER_DISPATCH_ENABLED", False)
+    off = dispatch(d, "rev", sm={}, cols=[], profiles={"5": {"source_type": "relational"}})
+
+    monkeypatch.setattr(_cfg_mod, "SOURCE_ADAPTER_DISPATCH_ENABLED", True)
+    on = dispatch(d, "rev", sm={}, cols=[], profiles={"5": {"source_type": "relational"}})
+
+    assert off == on
+
+
+def test_dispatch_with_adapter_flag_on_still_returns_none_for_non_single(monkeypatch):
+    monkeypatch.setattr(_cfg_mod, "SOURCE_ADAPTER_DISPATCH_ENABLED", True)
+    d = plan_route("q", ["5", "7"], evidence_provider=_ev(*_TWO),
+                   edge_provider=lambda s: {frozenset({"5", "7"})},
+                   profile_provider=lambda s: {"5": {"source_type": "relational"}, "7": {"source_type": "datalake"}})
+    assert dispatch(d, "q") is None
+
+
 if __name__ == "__main__":
     import traceback
 

@@ -203,6 +203,49 @@ def _scope_has_doc_source() -> bool:
         return False
 
 
+def _doc_intent_evidence_on() -> bool:
+    """True when DOC_INTENT_EVIDENCE_ENABLED is set — classify() also consults the coordinator's
+    cosine evidence for the sql-vs-rag decision (see config). Default OFF → byte-identical."""
+    try:
+        import config as _cfg
+        return bool(getattr(_cfg, "DOC_INTENT_EVIDENCE_ENABLED", False))
+    except Exception:
+        return False
+
+
+def _doc_intent_by_evidence(query) -> bool:
+    """Data-driven doc-intent: reuse the SAME retrieval evidence + tiering the source coordinator uses,
+    and return True when a DOCUMENT source is the dominant STRONG source (its chunk cosine is at least
+    its own best column cosine, i.e. it is chunk-backed, and it tiers STRONG after dominance re-tiering).
+    Catches document questions the fixed _DOC_REF_RE word list misses. No keywords. Flag-gated."""
+    if not _doc_intent_evidence_on():
+        return False
+    ctx = _current_ctx()
+    sids = [int(s) for s in (getattr(ctx, "source_ids", ()) or ())] if ctx is not None else []
+    if not sids:
+        return False
+    try:
+        import query.source_coordinator as _SC
+        from query.source_evidence import group_evidence_by_source
+        cols, chunks = _SC._default_evidence_provider(query, sids)
+        ev = group_evidence_by_source(cols, chunks)
+        if not ev:
+            return False
+        _SC._apply_item_prior(query, sids, ev)
+        _SC._dominance_retier(ev)
+        strong = [e for e in ev.values() if getattr(e, "presence_tier", "") == "STRONG"]
+        if not strong:
+            return False
+        # the dominant STRONG source, ranked by its best raw cosine (chunk or column)
+        best = max(strong, key=lambda e: max(getattr(e, "top_chunk_score", 0.0),
+                                             getattr(e, "top_column_score", 0.0)))
+        # chunk-backed (a document source) and not out-scored by its own column evidence
+        return (getattr(best, "top_chunk_score", 0.0) > 0.0
+                and getattr(best, "top_chunk_score", 0.0) >= getattr(best, "top_column_score", 0.0))
+    except Exception:
+        return False
+
+
 def classify(query, verbose=False):
     """Return (intent, source_ids). Falls back to 'sql' if the router is off/unavailable
     — the deterministic SQL head is the safe default."""
@@ -217,6 +260,14 @@ def classify(query, verbose=False):
         intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
         if verbose:
             print(f"  [router] doc-intent override → {intent}")
+        return intent, None
+
+    # Evidence-based doc-intent (flag-gated): catches document questions the fixed word list misses,
+    # by consulting the coordinator's cosine evidence. OFF ⇒ this is False ⇒ byte-identical.
+    if _doc_intent_by_evidence(q):
+        intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
+        if verbose:
+            print(f"  [router] doc-intent (evidence) → {intent}")
         return intent, None
 
     try:
