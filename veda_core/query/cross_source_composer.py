@@ -178,6 +178,58 @@ def build_provenance(federated_result: Optional[dict], evidence: List) -> List[d
     return prov
 
 
+def _federated_rbac_enabled() -> bool:
+    try:
+        import config as _cfg
+        return bool(getattr(_cfg, "FEDERATED_RBAC_ENFORCE_ENABLED", True))
+    except Exception:
+        return True
+
+
+def _federated_rbac_block(sql: str) -> Optional[list]:
+    """Apply the RBAC data-scope to a federated SQL BEFORE it executes — the gate the single-source head
+    runs (narrow_allowed / restricted_names) that the cross-source composer otherwise bypasses. Returns a
+    list of RBAC-restricted table/column names the SQL references (→ the caller refuses), or None to allow.
+    A no-op (None) when the request carries no data-scope, so unrestricted users are byte-identical."""
+    if not _federated_rbac_enabled():
+        return None
+    try:
+        from veda_core.context import try_current
+        ctx = try_current()
+        if ctx is None or getattr(ctx, "allowed_resources", None) is None:
+            return None                      # no RBAC scope on this request → nothing to enforce
+        from veda_hybrid import _load_semantic_model
+        sm, _ = _load_semantic_model()
+        from veda.rbac_filter import restricted_names
+        rn = restricted_names(sm, ctx) or {}
+        # Match on restricted TABLE names only. Column names are intentionally NOT matched here: RBAC
+        # restricts columns per (table, column), but restricted_names flattens to bare column names, so a
+        # common name like "id"/"name" that is restricted on some table would over-block a legitimate
+        # query on an ALLOWED table that also has that column (a false-deny). Table names are unambiguous.
+        # (Finer per-column narrowing WITHIN an allowed table on the federated path is a follow-up; the
+        # single-source head already does it via narrow_allowed.)
+        restricted = {str(x).lower() for x in (rn.get("tables") or [])}
+        if not restricted:
+            return None
+        # AST table names when the SQL parses, PLUS a raw identifier token scan (also covers a plan dict
+        # serialized to text) — UNIONED so a restricted table caught by either wins (fail-safe).
+        names = set()
+        try:
+            import sqlglot
+            from sqlglot import expressions as _exp
+            parsed = sqlglot.parse_one(sql)
+            names |= {t.name.lower() for t in parsed.find_all(_exp.Table) if t.name}
+        except Exception:
+            pass
+        import re as _re
+        names |= {t.lower() for t in _re.findall(r"[A-Za-z_][A-Za-z0-9_]*", sql or "")}
+        hit = sorted(names & restricted)
+        return hit or None
+    except Exception:
+        # A scope EXISTS but we could not evaluate it → fail closed (refuse) rather than leak.
+        return ["__rbac_eval_error__"]
+
+
 def compose_federated(query: str, sql: str, selected_columns, selected_chunks,
                       tenant: str = "default", params: Optional[list] = None) -> Dict:
     """Execute a federated plan and assemble a composed, cited payload. ``sql`` is the
@@ -193,6 +245,10 @@ def compose_federated(query: str, sql: str, selected_columns, selected_chunks,
     if len(surfaces) < 2:
         return {"status": "not_federated", "reason": "fewer than 2 resolvable sources",
                 "sources": sources}
+    _blocked = _federated_rbac_block(sql)
+    if _blocked:
+        return {"status": "refused_rbac", "reason": "access denied to restricted resource(s)",
+                "sql": sql, "sources": sources}
     try:
         fx = FederatedExecutor(surfaces)
         result = fx.execute(sql, params=params)
@@ -229,6 +285,12 @@ def compose_federated_plan(query: str, plan: dict, selected_columns, selected_ch
     if len(surfaces) < 2:
         return {"status": "not_federated", "reason": "fewer than 2 resolvable sources",
                 "sources": sources}
+    # RBAC data-scope on the aggregate-pushdown plan: scan the plan's own SQL/column text for any
+    # restricted name (coarse but fail-closed — never executes restricted data cross-source).
+    import json as _json
+    if _federated_rbac_block(_json.dumps(plan, default=str)):
+        return {"status": "refused_rbac", "reason": "access denied to restricted resource(s)",
+                "plan": plan, "sources": sources}
     try:
         fx = FederatedExecutor(surfaces)
         result = fx.execute_plan(plan)

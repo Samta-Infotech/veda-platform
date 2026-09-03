@@ -513,6 +513,33 @@ ROUTING_TIER_MAX_SIGNAL_ENABLED = _os.environ.get("ROUTING_TIER_MAX_SIGNAL_ENABL
 # the shared boundary logic — enable after measuring); env=1 to turn on.
 ROUTING_DOC_BOUNDARY_PREF_ENABLED = _os.environ.get("ROUTING_DOC_BOUNDARY_PREF_ENABLED", "1") == "1"
 
+# RBAC data-scope on the CROSS-SOURCE / federated path. The single-source head applies narrow_allowed /
+# restricted_names (RequestContext.allowed_resources) before it executes, but cross_source_composer runs
+# the composed SQL DIRECTLY through the federated executor — bypassing that gate — so a restricted user's
+# cross-source query could read a table/column their single-source query would be denied. When set, the
+# composer refuses a federated SQL that references any RBAC-restricted table/column. Default ON: it is a
+# no-op when the request carries no data-scope (unrestricted user) → byte-identical, and only ever DENIES
+# a restricted user reaching restricted data cross-source. env=0 disables (not recommended — security).
+FEDERATED_RBAC_ENFORCE_ENABLED = _os.environ.get("FEDERATED_RBAC_ENFORCE_ENABLED", "1") == "1"
+
+# When the accessible sources cannot answer a query (e.g. a DB-only user asks a document question whose
+# source they have no access to), the pipeline currently ends in a bare "error" with no answer and no
+# SQL. This surfaces a clean refusal ("couldn't find relevant data to answer this question") instead —
+# purely from the evidence of failure (no answer + no SQL produced), NEVER by probing a source the user
+# cannot access (no existence disclosure). Default ON: only rewrites a terminal error that produced
+# nothing → never changes a real answer. env=0 keeps the raw error.
+WEAK_EVIDENCE_CLEAN_REFUSE_ENABLED = _os.environ.get("WEAK_EVIDENCE_CLEAN_REFUSE_ENABLED", "1") == "1"
+
+# Permission-aware routing pre-check. Routing evidence is normally scoped to the user's PERMITTED sources,
+# so a query whose best-matching source the user cannot access mis-routes to a weaker accessible source
+# (a bare error, or — rarely — a wrong answer). When set, the coordinator first computes the routing match
+# over ALL ready sources; if the strictly best-matching source is one the user does NOT have access to, it
+# returns a clean "you don't have permission to the data source that can answer this" refusal. Only the
+# embedding-match SCORE of the inaccessible source is read (pre-computed vectors) — its CONTENT is never
+# fetched or returned, and the answer path stays scoped to permitted sources. This DOES disclose that such
+# a source exists (the query matched it) — a deliberate product choice for a clearer denial. Default OFF.
+ROUTING_PERMISSION_PRECHECK_ENABLED = _os.environ.get("ROUTING_PERMISSION_PRECHECK_ENABLED", "1") == "1"
+
 # Parallel Qwen fan-out for the ingestion semantic layer (Stage 3/4). Env-driven so the
 # concurrency is gated on the DEPLOYMENT: the "6" (≈2 concurrent × 3 backends) only makes
 # sense behind scripts/ollama_proxy.py fanning across ≥3 Ollama hosts. Against a SINGLE
@@ -766,6 +793,20 @@ CROSS_SOURCE_EDGE_MULTI_ENABLED = _os.environ.get("CROSS_SOURCE_EDGE_MULTI_ENABL
 # layer end-to-end on live traffic before any later phase builds on it. OFF -> byte-identical (calls
 # resolve_agent() exactly as before). See docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md.
 SOURCE_ADAPTER_DISPATCH_ENABLED = _os.environ.get("SOURCE_ADAPTER_DISPATCH_ENABLED", "0") == "1"
+
+# Execution Request dispatch (Phase B2, default OFF — a SEPARATE flag from
+# SOURCE_ADAPTER_DISPATCH_ENABLED; each flag gates one architectural change, never reused for two).
+# When ON, source_coordinator.dispatch() normalizes its legacy kwargs into ONE
+# query/execution_request.py::ExecutionRequest object and calls SourceAdapter.execute_request(request)
+# instead of the legacy agent.execute(query, source_id=..., ...) call. execute_request() is itself a
+# pure unpack-and-delegate back to the same execute(...) underneath (Phase B1, proven equivalent by
+# test) — so this flag changes ONLY the shape of what crosses the adapter boundary, never routing,
+# SQL, retrieval, evidence, or the AgentResult produced. Turning this ON implies adapter resolution
+# even if SOURCE_ADAPTER_DISPATCH_ENABLED is left OFF, because execute_request() only exists on
+# SourceAdapter, not the bare agent — see source_coordinator.py::_resolve_executable(). OFF ->
+# byte-identical to pre-Phase-B2 dispatch(). See
+# docs/architecture/VEDA_CANONICAL_EXECUTION_REQUEST_AUDIT.md.
+EXECUTION_REQUEST_DISPATCH_ENABLED = _os.environ.get("EXECUTION_REQUEST_DISPATCH_ENABLED", "0") == "1"
 
 # Source-description prior (routing, default OFF). The item-prior tiers a source on the MAX cosine over
 # its per-item summaries (source_item_embeddings) — which gives a large source (homzhub: 178 item
