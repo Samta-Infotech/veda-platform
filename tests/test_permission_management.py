@@ -144,9 +144,13 @@ def test_every_seeded_permission_is_grounded_in_a_real_code_path():
     enforceable half of "nothing speculative is seeded". The new entry should arrive
     with the gate that checks it.
     """
+    # "permission.read" was here until 2026-09-03 (migration 0010). It gated
+    # permissions/* and catalog/* — the screens an admin opens IN ORDER TO grant
+    # permissions — so a permission to read the list of permissions gated nothing
+    # that being staff did not already gate. Those views are IsAdminUser-only now.
     expected = {
         "query.execute", "data.read", "source.manage", "ingestion.run",
-        "evaluation.run", "user.manage", "role.manage", "permission.read",
+        "evaluation.run", "user.manage", "role.manage",
     }
 
     assert set(Permission.objects.values_list("code", flat=True)) == expected

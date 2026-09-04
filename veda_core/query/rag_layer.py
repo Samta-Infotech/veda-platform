@@ -449,6 +449,34 @@ def run_rag_layer(
             chunks = chunks[:top_k]
 
     if not chunks:
+        # Distinguish "the corpus has nothing for this" from "the passages that DID
+        # match are ones this user may not see". retrieve_top_k_chunks applies
+        # rbac_filter.filter_doc_chunks internally, so an RBAC-emptied list is
+        # indistinguishable here from a genuine miss — and reporting "no relevant
+        # passages found" for a permission block is misleading in the one direction
+        # that matters (it reads as "the data isn't there", hiding that access is the
+        # issue and that an admin could grant it). The drop count is the side channel
+        # filter_doc_chunks records for exactly this. No chunk text or doc name is
+        # revealed — only that something was withheld.
+        _dropped = 0
+        try:
+            from veda.rbac_filter import doc_chunks_dropped
+            _dropped = doc_chunks_dropped()
+        except Exception:
+            _dropped = 0
+        if _dropped:
+            # Says nothing about WHICH document(s) were withheld, or that a
+            # document able to answer exists — naming them would leak the corpus
+            # to someone not allowed to see it. Same canonical wording as
+            # veda/feedback.py's ACCESS_DENIED_WHY/_WHAT.
+            msg = ("You don't have permission to access this data. "
+                   "Contact your Admin to request access.")
+            return RAGResult(
+                answer=msg, chunks=[], citations=[], confidence=0.0,
+                duration_ms=round((time.time() - t0) * 1000, 2),
+                stats={"chunks_retrieved": 0, "chunks_denied": _dropped,
+                       "access_denied": True},
+            )
         msg = "No relevant document passages found"
         if temporal_filter is not None:
             msg += " within the specified time range"

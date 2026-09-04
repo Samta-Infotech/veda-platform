@@ -1,6 +1,6 @@
 """VEDA · L6 — value grounding, qualifier-completeness gate, AST validate + parameterize."""
 import os, re, sys, time, json, logging, threading
-from veda.runtime import _pg
+from veda.runtime import _pg, get_db_config
 import sqlglot
 from sqlglot import exp
 import time as _time
@@ -257,8 +257,60 @@ def _is_grounded_filter_value(token, tables_in_sql, sm):
     ))
     if not targets:
         return True                                   # nothing to check against → safe refuse
+
+    # DATALAKE blind spot. The probe below runs on the RELATIONAL source DB (_pg() always
+    # returns a Postgres connection, config from get_db_config), but a datalake source's
+    # tables live in parquet/CSV and exist in NO Postgres — `SELECT 1 FROM "vendors"` raises
+    # UndefinedTable (42P01). That landed in the blanket `except Exception: return True`
+    # fail-closed below, so EVERY unaccounted token of a datalake query was classified as a
+    # dropped filter value and qualifier_completeness refused even hand-written CORRECT SQL
+    # ("average vendor rating" → dropped 'location'). "The table isn't in the DB I'm probing"
+    # is NOT evidence that the token is a value — it's an inability to look, so it must not
+    # ground anything. Where we can't look in the DB, the DATA still decides: the isolated
+    # datalake sm carries per-column parquet `sample_values`
+    # (veda_hybrid._datalake_isolated_sm, sampled under DATALAKE_VALUE_SAMPLE_LIMIT), so we
+    # consult those instead of guessing. Genuine failures (connect, auth, timeout, permission)
+    # keep failing closed exactly as before — only 42P01 and the "no relational DB in scope"
+    # case just below are reinterpreted, and a relational source has both a DB config and the
+    # tables, so neither path is ever entered for one.
+    tok_l = token.strip().lower()
+
+    def _grounded_in_sm_samples(tbl=None):
+        """True if `token` is a sampled value of ANY column of `tbl` in the sm (of any table
+        when tbl is None). Used only where the DB cannot answer. Unlike the DB probe this is
+        not limited to DIMENSION/IDENTIFIER: a datalake sm labels its value-bearing columns
+        CATEGORY / FREE_TEXT (vendors.city is FREE_TEXT), and the sample is all the evidence
+        there is. Widening only here can make the guard STRICTER, never looser, and cannot
+        touch a relational source."""
+        for k, m in cols_meta.items():
+            if tbl is not None and k.split(".", 1)[0] != tbl:
+                continue
+            for v in ((m or {}).get("sample_values") or []):
+                if str(v).strip().lower() == tok_l:
+                    return True
+        return False
+
+    # Is there even a relational DB to probe? On a datalake SINGLE route the caller has
+    # _constrain_scope_to(the datalake source), and get_db_config() then yields an EMPTY
+    # relational config (host='', database='') because a parquet/CSV source has no Postgres.
+    # _pg() therefore fails at CONNECT — the same false positive as the UndefinedTable case,
+    # just one step earlier, and equally not evidence about the token. Decide from the sm's
+    # parquet sample_values alone. A relational source always has host+database set, so this
+    # branch is unreachable for one; if the config can't be read at all we behave exactly as
+    # before (connect, and fail closed if it fails).
+    try:
+        _cfg = get_db_config() or {}
+        _has_db = bool(str(_cfg.get("host") or "").strip()
+                       and str(_cfg.get("database") or "").strip())
+    except Exception:
+        _has_db = True
+    if not _has_db:
+        return _grounded_in_sm_samples()
+
+    absent = set()                                    # tables confirmed missing from the probed DB
     conn = None
     try:
+        from psycopg2 import errors as _pg_errors      # deferred: keep module import surface as-is
         conn = _pg()
         conn.set_session(readonly=True, autocommit=True)
         deadline = _time.monotonic() + 6.0            # wall-clock budget across all lookups
@@ -268,8 +320,18 @@ def _is_grounded_filter_value(token, tables_in_sql, sm):
                 if _time.monotonic() > deadline:
                     return True                       # ran out of budget → can't confirm filler → safe refuse
                 tbl, col = key.split(".", 1)
-                cur.execute(f'SELECT 1 FROM "{tbl}" WHERE lower("{col}"::text) = lower(%s) LIMIT 1',
-                            (token,))
+                if tbl in absent:                     # already known not to be in this DB
+                    if _grounded_in_sm_samples(tbl):
+                        return True                   # sm's parquet sample says it IS a value
+                    continue
+                try:
+                    cur.execute(f'SELECT 1 FROM "{tbl}" WHERE lower("{col}"::text) = lower(%s) LIMIT 1',
+                                (token,))
+                except _pg_errors.UndefinedTable:     # 42P01 — datalake table, not in Postgres
+                    absent.add(tbl)                   # autocommit → no aborted tx to roll back
+                    if _grounded_in_sm_samples(tbl):
+                        return True
+                    continue
                 if cur.fetchone() is not None:
                     return True                       # token IS a real value somewhere → dropped filter
         return False                                  # confirmed: not a value in any categorical/id col

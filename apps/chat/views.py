@@ -32,6 +32,7 @@ from apps.query.scope import (
     SourceAccessDenied,
     permitted_source_ids,
     resolve_query_scope,
+    source_profiles_for,
 )
 
 logger = logging.getLogger(__name__)
@@ -151,9 +152,17 @@ class ConversationQueryView(APIView):
         # threaded through the chat turn to call_engine_node (chatbot/nodes.py) —
         # None (RBAC off / staff) means no narrowing, exactly as before this change.
         data_scope = serialize_data_scope(compute_data_scope(user, source_ids, effective=effective))
+        # Multi-source routing profiles — the SAME call /api/v1/query makes (apps/query/views.py).
+        # Chat was the only front door that omitted them, and the engine needs them to know a
+        # source is datalake/document rather than relational: without them the datalake-isolated
+        # semantic model is never loaded and the SQL planner gets the primary source's schema
+        # instead, so a datalake question could only pick among tables that do not hold the data.
+        # /api/v1/query answered such questions correctly while chat clarified — this closes that
+        # gap. Best-effort by contract ({} on any lookup failure), so a query is never blocked.
+        source_profiles = source_profiles_for(source_ids)
         service = ConversationQueryService(
             user=user, source_id=source_ids[0], source_ids=source_ids,
-            data_scope=data_scope)
+            data_scope=data_scope, source_profiles=source_profiles)
         try:
             chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
         except ChatNotFound:

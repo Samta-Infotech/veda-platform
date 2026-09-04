@@ -66,8 +66,27 @@ this package's own "no Django" precedent in ``veda_core/context.py``).
 from __future__ import annotations
 
 import dataclasses
+from contextvars import ContextVar
 
 _MISSING = object()
+
+#: How many document chunks the LAST ``filter_doc_chunks`` call removed for the
+#: current request. A side channel, deliberately: ``filter_doc_chunks`` is applied
+#: inside ``ingestion.chunk_embedder.retrieve_top_k_chunks`` (before its ``top_k``
+#: truncation), so its callers only ever see the surviving list and cannot tell
+#: "this user is not allowed to see the passages that matched" apart from "nothing
+#: in the corpus matched". ``query.rag_layer`` reads it to say which one happened
+#: instead of always claiming nothing was found. Contextvar-scoped so concurrent
+#: requests in the same worker never read each other's count.
+_DOC_CHUNKS_DROPPED: ContextVar[int] = ContextVar("veda_rbac_doc_chunks_dropped", default=0)
+
+
+def doc_chunks_dropped() -> int:
+    """Chunks removed by the last ``filter_doc_chunks`` call in this request, or 0."""
+    try:
+        return int(_DOC_CHUNKS_DROPPED.get())
+    except Exception:
+        return 0
 
 
 def _as_source_id(value):
@@ -307,6 +326,7 @@ def filter_doc_chunks(chunks, ctx):
     ``filter_retrieval_results`` — the shared retrieval query stays RBAC-
     oblivious, only the per-request result list is narrowed."""
     if ctx is None or getattr(ctx, "allowed_resources", None) is None or not chunks:
+        _DOC_CHUNKS_DROPPED.set(0)
         return chunks
 
     open_sources, table_index = _index(ctx)
@@ -318,6 +338,7 @@ def filter_doc_chunks(chunks, ctx):
             return chunk.source_id
 
     if all(sid_of(c) in open_sources for c in chunks):
+        _DOC_CHUNKS_DROPPED.set(0)
         return chunks  # nothing restricted among these chunks' sources — zero-cost pass-through
 
     def ok(chunk) -> bool:
@@ -326,4 +347,6 @@ def filter_doc_chunks(chunks, ctx):
             return True
         return (sid, chunk.doc_name) in table_index
 
-    return [c for c in chunks if ok(c)]
+    kept = [c for c in chunks if ok(c)]
+    _DOC_CHUNKS_DROPPED.set(len(chunks) - len(kept))
+    return kept

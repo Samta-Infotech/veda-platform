@@ -23,6 +23,7 @@ def run_chat_turn(
     request_id: str = "",
     on_event: Optional[Callable[[str, str, dict], None]] = None,
     data_scope: Optional[dict] = None,
+    source_profiles: Optional[dict] = None,
 ) -> dict:
     """The ONE function a caller (apps/chat) invokes per user turn.
 
@@ -45,6 +46,15 @@ def run_chat_turn(
     that reaches the inference tier. None (RBAC off, staff, or a caller that
     predates Task 15) means no narrowing, identical to before this parameter
     existed.
+
+    `source_profiles` is the caller's per-source routing metadata
+    (apps.query.scope.source_profiles_for — source_type/is_canonical/domain_tags/
+    description), forwarded the same way and for the same reason: it is what tells
+    the engine a source is datalake/document rather than relational. Without it the
+    engine skips the datalake-isolated semantic model and plans SQL against the
+    primary source's schema, which does not contain the datalake tables at all.
+    /api/v1/query has always sent these; chat did not, which is why the same
+    question answered there and clarified here. None = identical to before.
     """
     graph = get_graph()
     # Wraps the WHOLE turn (classify/smalltalk/followup nodes' own SLM calls —
@@ -64,6 +74,7 @@ def run_chat_turn(
                 "source_ids": list(source_ids) if source_ids else None,
                 "request_id": request_id,
                 "data_scope": data_scope,
+                "source_profiles": source_profiles,
             },
             config={"configurable": {"thread_id": session_id, "on_event": on_event}},
         )
