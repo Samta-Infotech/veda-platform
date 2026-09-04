@@ -378,12 +378,7 @@ VLLM_BASE_URL        = __import__("os").environ.get("VLLM_URL", "http://vllm:800
 # vLLM serves under the HF model path (e.g. "Qwen/Qwen2.5-Coder-7B-Instruct"),
 # not the Ollama tag — set when SLM_BACKEND=vllm.
 VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or None
-# env-overridable, and set to 0 in .env. At 0.3 the same question could be understood two
-# different ways on two runs: "what is the late fee on overdue Rent invoices" answered "1850"
-# (SUM of the amount) once and "2" (a COUNT of rows, described as a late fee) the next — a
-# silently wrong answer, with the §8 intent/aggregate guards enabled and live. Benchmarks and
-# regressions are meaningless while the same input can produce a different intent each run.
-SLM_TEMPERATURE      = float(__import__("os").environ.get("SLM_TEMPERATURE", "0.3"))
+SLM_TEMPERATURE      = 0.3
 SLM_TIMEOUT_SECS     = 240
 SLM_MAX_RETRIES      = 2
 SLM_MAX_TOKENS       = 2048
@@ -807,6 +802,19 @@ SOURCE_ADAPTER_DISPATCH_ENABLED = _os.environ.get("SOURCE_ADAPTER_DISPATCH_ENABL
 # byte-identical to pre-Phase-B2 dispatch(). See
 # docs/architecture/VEDA_CANONICAL_EXECUTION_REQUEST_AUDIT.md.
 EXECUTION_REQUEST_DISPATCH_ENABLED = _os.environ.get("EXECUTION_REQUEST_DISPATCH_ENABLED", "0") == "1"
+
+# Capability Planning shadow observation (Phase C1, default OFF). When ON, source_coordinator.py's
+# plan_route() derives a QueryRequirements (query/query_requirements.py — reuses fast_path.py's own
+# COUNT/SUM/AVG trigger tuples + temporal_parser.py's run_temporal_parser(), no schema, no SLM) right
+# after build_candidates(), compares it against each candidate's SourceCapabilities
+# (query/source_capabilities.py, Phase A), and LOGS the result via
+# query/capability_observation.py::run_capability_planning_shadow(). This is OBSERVE-ONLY: it never
+# filters, reorders, or mutates the candidate list decide() receives — the routing decision is
+# byte-identical whether this flag is on or off. Exists purely to gather real evidence (which
+# candidates would be capability-incompatible, would filtering have removed the actually-selected
+# source) before any future phase considers acting on it. OFF -> zero observable behavior change,
+# not even a log line. See docs/architecture/VEDA_PHASE_C_CAPABILITY_PLANNING_AUDIT.md.
+CAPABILITY_PLANNING_SHADOW_ENABLED = _os.environ.get("CAPABILITY_PLANNING_SHADOW_ENABLED", "0") == "1"
 
 # Source-description prior (routing, default OFF). The item-prior tiers a source on the MAX cosine over
 # its per-item summaries (source_item_embeddings) — which gives a large source (homzhub: 178 item

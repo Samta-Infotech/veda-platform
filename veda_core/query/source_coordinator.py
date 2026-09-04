@@ -509,6 +509,14 @@ def plan_route(query: str, source_ids, *,
     _dominance_retier(evidence_by_source)
     profiles = profile_provider(source_ids)
     candidates = build_candidates(evidence_by_source, profiles)
+
+    # Phase C1 (CAPABILITY_PLANNING_SHADOW_ENABLED, default OFF): observe-only capability-vs-
+    # requirements comparison, logged, never mutates `candidates` — `decide()` below always
+    # receives the exact same list this function already built. See
+    # docs/architecture/VEDA_PHASE_C_CAPABILITY_PLANNING_AUDIT.md.
+    from query.capability_observation import run_capability_planning_shadow
+    run_capability_planning_shadow(query, candidates)
+
     edge_pairs = edge_provider(source_ids)
 
     decision, ambiguous = decide(candidates, edge_pairs)
