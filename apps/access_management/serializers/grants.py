@@ -8,8 +8,41 @@ from __future__ import annotations
 from rest_framework import serializers
 
 from .. import resource_path as rp
-from ..models import Effect
+from ..codes import PermissionCode
+from ..models import Effect, Permission
 from .base import PaginatedListSerializer
+
+
+def _imply_data_read(attrs):
+    """Fill in ``permission_id`` for a resource-scoped grant that omitted it.
+
+    Granting access to a resource is always ``data.read`` ON that path — the caller
+    picks a resource in the catalog tree, never a permission. ``data.read`` is
+    deliberately hidden from ``permissions/dropdown`` for that reason (see
+    ``services/permissions.py::_HIDDEN_FROM_DROPDOWN``), which left a resource screen
+    with no way to obtain the id it was nonetheless required to send. Implied here so
+    it does not have to be hardcoded in every client.
+
+    Only implied when a ``resource_path`` is present. A blank-path ``data.read`` grant
+    covers no resource at all (see ``services/resolver.py``), so defaulting to it for a
+    pathless body would mint a grant that looks real and does nothing — that case still
+    fails, with the same field error it always had.
+    """
+    if attrs.get("permission_id") is not None:
+        return attrs
+    if not attrs.get("resource_path"):
+        raise serializers.ValidationError(
+            {"permission_id": ["This field is required when no resource_path is given."]})
+    permission = (Permission.objects
+                  .filter(code=PermissionCode.DATA_READ, is_active=True)
+                  .only("id").first())
+    if permission is None:
+        # Deactivated or unseeded — say which permission is missing rather than
+        # failing later on a None pk.
+        raise serializers.ValidationError(
+            {"permission_id": [f"No active '{PermissionCode.DATA_READ}' permission to imply."]})
+    attrs["permission_id"] = permission.pk
+    return attrs
 
 
 class _ResourcePathField(serializers.CharField):
@@ -69,10 +102,14 @@ class RolePermissionGrantSerializer(serializers.Serializer):
     """
 
     role_id = serializers.IntegerField(min_value=1)
-    permission_id = serializers.IntegerField(min_value=1)
+    #: Optional for a resource-scoped grant — see ``_imply_data_read``.
+    permission_id = serializers.IntegerField(min_value=1, required=False)
     resource_path = _ResourcePathField()
     effect = serializers.ChoiceField(choices=Effect.choices, required=False,
                                      default=Effect.ALLOW)
+
+    def validate(self, attrs):
+        return _imply_data_read(attrs)
 
 
 class RolePermissionRevokeSerializer(serializers.Serializer):
@@ -84,8 +121,13 @@ class RolePermissionRevokeSerializer(serializers.Serializer):
     """
 
     role_id = serializers.IntegerField(min_value=1)
-    permission_id = serializers.IntegerField(min_value=1)
+    #: Optional for a resource-scoped revoke — same implication as grant, so a client
+    #: can revoke exactly what it granted without having to name data.read.
+    permission_id = serializers.IntegerField(min_value=1, required=False)
     resource_path = _ResourcePathField()
+
+    def validate(self, attrs):
+        return _imply_data_read(attrs)
 
 
 class RolePermissionListSerializer(PaginatedListSerializer):

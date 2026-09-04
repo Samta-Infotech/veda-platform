@@ -1,0 +1,487 @@
+[
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 52.3,
+    "n": 1,
+    "q": "How many vendors are there?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 134.4,
+    "n": 2,
+    "q": "What is the average vendor rating?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 10.0,
+    "n": 3,
+    "q": "What is the highest vendor rating?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 10.4,
+    "n": 4,
+    "q": "What is the lowest vendor rating?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"vendor_id\" AS vendor, MAX(t0.\"rating\") AS \"max_rating\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"vendor_id\"",
+    "answer": "V-4 has the highest rating with 4.8. Additional findings show that V-2 and V-5 also have ratings above the mean of 4.2 \u2014 V-4 has the highest max_rating at 4.8, ",
+    "secs": 20.5,
+    "n": 5,
+    "q": "Which vendor has the highest rating?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"city\" AS city, MAX(t0.\"rating\") AS \"max_rating\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"city\"",
+    "answer": "Muddanahalli has the highest-rated vendor with a maximum rating of 4.8. The median rating across all cities is 4.2 \u2014 Muddanahalli has the highest max_rating at ",
+    "secs": 22.1,
+    "n": 6,
+    "q": "Which city has the highest-rated vendor?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"rating\" AS rating, COUNT(DISTINCT t0.\"vendor_id\") AS \"num_vendors\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"rati",
+    "answer": "5 vendors are rated 4 or above. The maximum rating shown is 4.8 \u2014 2 of 6 groups are above the average rating of 4.2, and rating ranges from 3.7 to 4.8 across 6 ",
+    "secs": 20.6,
+    "n": 7,
+    "q": "How many vendors are rated 4 or above?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"city\" AS city, COUNT(DISTINCT t0.\"vendor_id\") AS \"num_vendors_below_4\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"",
+    "answer": "6 vendors are rated below 4. The median number of vendors rated below 4 across the cities is 1 \u2014 Kochi has the highest num_vendors_below_4 at 2, and Koppa Gate ",
+    "secs": 20.0,
+    "n": 8,
+    "q": "How many vendors are rated below 4?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"city\" AS city, COUNT(DISTINCT t0.\"city\") AS \"distinct_cities\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"city\"",
+    "answer": "5 distinct cities have vendors. All cities listed have exactly one distinct city.",
+    "secs": 21.1,
+    "n": 9,
+    "q": "How many distinct cities have vendors?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 10.4,
+    "n": 10,
+    "q": "Which city has more than one vendor?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"vendor_id\" AS vendor, MAX(t0.\"rating\") AS \"max_rating\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"vendor_id\"\n\nSELE",
+    "answer": "The rating spread between the best and worst vendor is 0.3. All vendors have identical maximum and minimum ratings, showing no variability in their scores.",
+    "secs": 23.3,
+    "n": 11,
+    "q": "What is the rating spread between the best and worst vendor?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"city\" AS city, COUNT(DISTINCT t0.\"rating\") AS \"rating_count\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"city\"",
+    "answer": "5 vendors are listed with an average of 1.2 ratings, ranging from 1 to 2 ratings \u2014 Kochi has the highest rating_count at 2, and Koppa Gate has the lowest rating",
+    "secs": 19.0,
+    "n": 12,
+    "q": "List all vendors with their ratings."
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT DISTINCT o.\"city\", o.\"rating\", o.\"ticket_id\", o.\"vendor_id\" FROM src_4.\"vendors\" AS o WHERE o.\"city\" IN (SELECT D",
+    "answer": "6 vendors are located in Kochi based on the provided data.",
+    "secs": 11.3,
+    "n": 13,
+    "q": "Which vendors are located in Kochi?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 13.5,
+    "n": 14,
+    "q": "Which vendors are rated above 4.2?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"vendor_id\" AS vendor, COUNT(DISTINCT t0.\"rating\") AS \"rating_count\" FROM src_4.\"vendors\" t0  GROUP BY t0.\"ven",
+    "answer": "No vendors have a rating of exactly 4.2 \u2014 0 of 6 vendor are above the average rating_count of 1, and rating_count ranges from 1 to 1 across 6 groups.",
+    "secs": 19.8,
+    "n": 15,
+    "q": "Show vendors with a rating of exactly 4.2."
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT DISTINCT o.\"city\", o.\"rating\", o.\"ticket_id\", o.\"vendor_id\" FROM src_4.\"vendors\" AS o WHERE o.\"city\" IN (SELECT D",
+    "answer": "4 vendors are listed for Muddanahalli. The highest rating among them is 4.8.",
+    "secs": 10.9,
+    "n": 16,
+    "q": "Which vendors are in Muddanahalli?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 4.3,
+    "n": 17,
+    "q": "How many maintenance records are there?"
+  },
+  {
+    "status": "ok",
+    "target": "homzhub",
+    "sql": "SELECT SUM(\"maintenance_amount\") AS \"sum_assets_assetadditionalinfo_maintenance_amount\" FROM \"assets_assetadditionalinfo",
+    "answer": "The total maintenance amount is 115,363,163,9465.00. This represents the sum of all maintenance expenses recorded in the dataset.",
+    "secs": 25.7,
+    "n": 18,
+    "q": "What is the total maintenance amount?"
+  },
+  {
+    "status": "ok",
+    "target": "homzhub",
+    "sql": "SELECT AVG(\"maintenance_amount\") AS \"avg_assets_assetadditionalinfo_maintenance_amount\" FROM \"assets_assetadditionalinfo",
+    "answer": "The average maintenance amount is 169,154,199.35. This single figure represents the mean maintenance cost across all assets in the dataset.",
+    "secs": 26.7,
+    "n": 19,
+    "q": "What is the average maintenance amount?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"ticket_id\") AS \"count_repairs\" FROM src_4.\"maintenance\" t0  GROUP BY t0.",
+    "answer": "There are 3 maintenance records for repairs. The repair category has the highest number of records with 3 out of 5 total records \u2014 Repair has the highest count_",
+    "secs": 15.4,
+    "n": 20,
+    "q": "How many maintenance records are repairs?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"status\" AS status, COUNT(DISTINCT t0.\"ticket_id\") AS \"paid_count\" FROM src_4.\"maintenance\" t0  GROUP BY t0.\"s",
+    "answer": "4 maintenance records are paid. The majority of the records remain open with 3 each in both open and unpaid statuses \u2014 paid has the highest paid_count at 4, and",
+    "secs": 16.3,
+    "n": 21,
+    "q": "How many maintenance records are paid?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"status\" AS status, COUNT(DISTINCT t0.\"ticket_id\") AS \"open_records\" FROM src_4.\"maintenance\" t0  GROUP BY t0.",
+    "answer": "There are 8 open maintenance records in total. The median number of open records across different statuses is 3 \u2014 paid has the highest open_records at 4, and un",
+    "secs": 15.6,
+    "n": 22,
+    "q": "How many maintenance records are open?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"status\" AS status, COUNT(DISTINCT t0.\"ticket_id\") AS \"unpaid_count\" FROM src_4.\"maintenance\" t0  GROUP BY t0.",
+    "answer": "3 maintenance records are unpaid. The maximum number of unpaid counts is 4 \u2014 paid has the highest unpaid_count at 4, and unpaid has the lowest unpaid_count at 1",
+    "secs": 14.1,
+    "n": 23,
+    "q": "How many maintenance records are unpaid?"
+  },
+  {
+    "status": "ok",
+    "target": "doc",
+    "sql": "",
+    "answer": "[DB] The total repair amount for on-demand repairs is 1500. This fee schedule is provided in the maintenance_policy.docx document.",
+    "secs": 26.3,
+    "n": 24,
+    "q": "What is the total repair amount?"
+  },
+  {
+    "status": "EXC",
+    "target": "?",
+    "error": "SLM unreachable at http://192.168.1.35:11500/api/chat: HTTP Error 503: Service Unavailable",
+    "secs": 19.7,
+    "n": 25,
+    "q": "What is the total amount of paid maintenance records?"
+  },
+  {
+    "status": "ok",
+    "target": "homzhub",
+    "sql": "SELECT MAX(\"maintenance_amount\") AS \"max_sum_assets_assetadditionalinfo_maintenance_amount\" FROM \"assets_assetadditional",
+    "answer": "The highest single maintenance amount is 91,904,914,0176.00. This represents the maximum recorded maintenance cost for an asset.",
+    "secs": 25.9,
+    "n": 26,
+    "q": "What is the highest single maintenance amount?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 9.9,
+    "n": 27,
+    "q": "How many maintenance categories are there?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, SUM(t0.\"amount\") AS \"total_amount\" FROM src_4.\"maintenance\" t0  GROUP BY t0.\"category\"",
+    "answer": "4200.0 for Insurance has the highest total maintenance amount. The Insurance category accounts for nearly 40% of the total maintenance expenses \u2014 Insurance has ",
+    "secs": 22.0,
+    "n": 28,
+    "q": "Which category has the highest total maintenance amount?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"ticket_id\") AS \"count\" FROM src_4.\"maintenance\" t0  GROUP BY t0.\"categor",
+    "answer": "Repair has the highest count with 3 records. Taxes and Insurance each have 1 record, while Society Charges and Rent have 2 and 1 record respectively \u2014 Repair ha",
+    "secs": 21.1,
+    "n": 29,
+    "q": "What is the distribution of maintenance records by category?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"status\" AS status, COUNT(DISTINCT t0.\"ticket_id\") AS \"count_status\" FROM src_4.\"maintenance\" t0  GROUP BY t0.",
+    "answer": "There are 8 maintenance records in total, with 4 paid, 1 unpaid, and 3 open. The median number of records per status is 3 \u2014 paid has the highest count_status at",
+    "secs": 20.1,
+    "n": 30,
+    "q": "What is the distribution of maintenance records by status?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"amount\" AS amt, COUNT(DISTINCT t0.\"ticket_id\") AS \"count\" FROM src_4.\"maintenance\" t0  GROUP BY t0.\"amount\"",
+    "answer": "The total maintenance amount across all records is 10,490. The median amount is 925 \u2014 2 of 8 groups are above the average amt of 1311.25, and amt ranges from 30",
+    "secs": 22.6,
+    "n": 31,
+    "q": "List all maintenance records with their amounts."
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT DISTINCT o.\"status\", o.\"category\", o.\"ticket_id\", o.\"amount\", o.\"asset_id\" FROM src_4.\"maintenance\" AS o WHERE o.",
+    "answer": "3 out of 8 maintenance records are unpaid, with a total amount of 1200. The most recent unpaid record is for Society Charges totaling 1200.",
+    "secs": 18.0,
+    "n": 32,
+    "q": "Show maintenance records that are unpaid."
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 4.7,
+    "n": 33,
+    "q": "Show repair maintenance records with an amount over 1000."
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 5.6,
+    "n": 34,
+    "q": "Which maintenance records belong to asset 20?"
+  },
+  {
+    "status": "ok",
+    "target": "homzhub",
+    "sql": "SELECT COUNT(DISTINCT \"id\") AS \"assets_amenity_count\" FROM \"assets_amenity\" LIMIT 100",
+    "answer": "32 amenities are listed in the catalog.",
+    "secs": 26.3,
+    "n": 35,
+    "q": "How many amenities are in the catalog?"
+  },
+  {
+    "status": "ok",
+    "target": "homzhub",
+    "sql": "SELECT COUNT(DISTINCT \"id\") AS \"assets_amenity_count\" FROM \"assets_amenity\" LIMIT 100",
+    "answer": "There are 32 sports amenities. This count represents the total number of sports-related facilities available.",
+    "secs": 20.0,
+    "n": 36,
+    "q": "How many sports amenities are there?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 22.7,
+    "n": 37,
+    "q": "What is the total monthly fee of all catalog amenities?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"amenity_name\" AS amenity, AVG(t0.\"monthly_fee\") AS \"avg_fee\" FROM src_5.\"amenities_catalog\" t0  GROUP BY t0.\"",
+    "answer": "The average monthly fee of catalog amenities is 171.43. There are notable variations, with the minimum at 0.00 for \"Pets Allowed\" and the maximum at 500.00 for ",
+    "secs": 21.5,
+    "n": 38,
+    "q": "What is the average monthly fee of catalog amenities?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"amenity_name\" AS amenity, MAX(t0.\"monthly_fee\") AS \"max_fee\" FROM src_5.\"amenities_catalog\" t0  GROUP BY t0.\"",
+    "answer": "The amenity with the highest monthly fee is Squash at 500. All amenities with fees have been utilized in the dataset \u2014 Squash has the highest max_fee at 500, an",
+    "secs": 20.7,
+    "n": 39,
+    "q": "Which amenity has the highest monthly fee?"
+  },
+  {
+    "status": "ok",
+    "target": "doc",
+    "sql": "",
+    "answer": "The highest monthly fee in the catalog is 2500, which corresponds to the Loan payment category. [DOC]",
+    "secs": 24.0,
+    "n": 40,
+    "q": "What is the highest monthly fee in the catalog?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"monthly_fee\" AS fee, COUNT(DISTINCT t0.\"amenity_id\") AS \"count_zero_fee_amenities\" FROM src_5.\"amenities_cata",
+    "answer": "3 amenities have a zero monthly fee. This is the highest count among all listed fees \u2014 3 of 5 groups are above the average fee of 240, and fee ranges from 0 to ",
+    "secs": 20.8,
+    "n": 41,
+    "q": "How many amenities have a zero monthly fee?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"category\") AS \"distinct_categories\" FROM src_5.\"amenities_catalog\" t0  G",
+    "answer": "There are 5 amenity categories: Sustainability, Security, Sports, Policy, and Convenience \u2014 0 of 5 cat are above the average distinct_categories of 1, and disti",
+    "secs": 18.2,
+    "n": 42,
+    "q": "How many amenity categories are there?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"amenity_id\") AS \"count_amenities\" FROM src_5.\"amenities_catalog\" t0  GRO",
+    "answer": "The category \"Sports\" has the most amenities with 3. No other category exceeds this number \u2014 Sports has the highest count_amenities at 3, and Sustainability has",
+    "secs": 15.0,
+    "n": 43,
+    "q": "Which category has the most amenities?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"amenity_name\" AS amenity, AVG(t0.\"monthly_fee\") AS \"monthly_fee\" FROM src_5.\"amenities_catalog\" t0  GROUP BY ",
+    "answer": "The total monthly fees for catalog amenities are 1200.00, with the highest fee being 500.00 for Squash.",
+    "secs": 19.9,
+    "n": 44,
+    "q": "List all catalog amenities with their monthly fees."
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"amenity_name\") AS \"count_amenities\" FROM src_5.\"amenities_catalog\" t0  G",
+    "answer": "3 amenities fall under the Sports category. No additional insights are provided in the data \u2014 Sports has the highest count_amenities at 3, and Security has the ",
+    "secs": 22.1,
+    "n": 45,
+    "q": "Which amenities are in the Sports category?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 11.3,
+    "n": 46,
+    "q": "Which amenities cost more than 200 per month?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"amenity_id\") AS \"count_distinct_amenities\" FROM src_5.\"amenities_catalog",
+    "answer": "The average number of distinct amenities per category is 1.4. Sports has the highest count with 3 distinct amenities \u2014 Sports has the highest count_distinct_ame",
+    "secs": 13.9,
+    "n": 47,
+    "q": "What is the distribution of amenities by category?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"amenity_name\" AS amenity, COUNT(DISTINCT t0.\"monthly_fee\") AS \"is_free\" FROM src_5.\"amenities_catalog\" t0  GR",
+    "answer": "6 amenities are free of charge. All listed amenities\u2014Intercom, Football, Pets Allowed, Grocery Store, and Basket Ball\u2014are available without additional cost base",
+    "secs": 20.6,
+    "n": 48,
+    "q": "Which amenities are free of charge?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, COUNT(DISTINCT t0.\"amenity_id\") AS \"count_amenities\" FROM src_5.\"amenities_catalog\" t0  GRO",
+    "answer": "The Security category has 1 amenity. This is the minimum count among all categories, indicating a lower level of security amenities compared to other categories",
+    "secs": 22.7,
+    "n": 49,
+    "q": "Show amenities in the Security category."
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"category\" AS cat, SUM(t0.\"monthly_fee\") AS \"total_cost\" FROM src_5.\"amenities_catalog\" t0  GROUP BY t0.\"categ",
+    "answer": "The combined monthly cost of all Sports amenities is 1050. The Sustainability and Policy categories have no associated costs, while the Security category costs ",
+    "secs": 21.8,
+    "n": 50,
+    "q": "What is the combined monthly cost of all Sports amenities?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 54.5,
+    "n": 51,
+    "q": "If all vendors rated below 4.0 are removed, what is the new average rating?"
+  },
+  {
+    "status": "refused",
+    "target": "?",
+    "sql": "",
+    "answer": "",
+    "secs": 10.8,
+    "n": 52,
+    "q": "What percentage of vendors are rated at least 4.0?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"status\" AS status, COUNT(DISTINCT t0.\"ticket_id\") AS \"paid_count\" FROM src_4.\"maintenance\" t0  GROUP BY t0.\"s",
+    "answer": "2.67 out of 3 maintenance records are paid on average. The median number of paid records is 3 \u2014 paid has the highest paid_count at 4, and unpaid has the lowest ",
+    "secs": 14.2,
+    "n": 53,
+    "q": "What proportion of maintenance records are paid?"
+  },
+  {
+    "status": "ok",
+    "target": "datalake",
+    "sql": "SELECT t0.\"asset_id\" AS asset, SUM(t0.\"amount\") AS \"total_maintenance_amount\" FROM src_4.\"maintenance\" t0  GROUP BY t0.\"",
+    "answer": "The total maintenance amount ranges from 640 to 4200, with an average of 1498.57, while the total catalog fees range from 150 to 400, averaging 350. The total m",
+    "secs": 26.7,
+    "n": 54,
+    "q": "Which is greater, the total maintenance amount or the total catalog fees?"
+  }
+]

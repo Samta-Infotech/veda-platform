@@ -1,0 +1,738 @@
+[
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "",
+    "secs": 34.2,
+    "n": 1,
+    "q": "What is the late fee on overdue Rent and Society Charges invoices?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "",
+    "secs": 11.5,
+    "n": 2,
+    "q": "What percentage late fee applies per month on overdue invoices?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The agreement can be terminated with 30 days written notice. (msa_green_tower.pdf) Page 1",
+    "error": "",
+    "secs": 6.3,
+    "n": 3,
+    "q": "How much notice is required to terminate the Green Tower agreement?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Either party may terminate this agreement with 30 days written notice. (msa_green_tower.pdf) Page 1",
+    "error": "",
+    "secs": 6.0,
+    "n": 4,
+    "q": "Can either party terminate the MSA, and under what condition?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 10.0,
+    "n": 5,
+    "q": "Which assets does the Green Tower MSA cover?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 8.3,
+    "n": 6,
+    "q": "In which cities are the assets covered by the MSA located?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "site_notes.md",
+      "Samta-Employee Handbook April_2026.pdf",
+      "maintenance_policy.docx"
+    ],
+    "answer": "Amenities in scope under the Green Tower MSA include Squash, Intercom, and Green Building. (msa_green_tower.pdf) Page 1",
+    "error": "",
+    "secs": 23.5,
+    "n": 7,
+    "q": "Which amenities are in scope under the Green Tower MSA?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The applicable ledger categories under the MSA are Rent, Repair, and Insurance. (msa_green_tower.pdf)",
+    "error": "",
+    "secs": 5.3,
+    "n": 8,
+    "q": "Which ledger categories are applicable under the MSA?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Late Fees A late fee of 2 percent per month applies to overdue Rent and Society Charges invoices. msa_green_tower.pdf, page 1",
+    "error": "",
+    "secs": 12.7,
+    "n": 9,
+    "q": "Is there a penalty for paying invoices late under the MSA?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 8.2,
+    "n": 10,
+    "q": "Does the MSA cover asset 20?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "site_notes.md",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Yes, Intercom is in scope under the Green Tower MSA. (msa_green_tower.pdf) Page 1",
+    "error": "",
+    "secs": 5.5,
+    "n": 11,
+    "q": "Is Intercom in scope under the Green Tower MSA?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 8.1,
+    "n": 12,
+    "q": "Which assets does the maintenance policy govern?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The policy governs the maintenance of Football court and Basket Ball court in Muddanahalli. (maintenance_policy.docx) Page 1",
+    "error": "",
+    "secs": 5.7,
+    "n": 13,
+    "q": "Which courts or facilities are maintained under the policy and where?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "The monthly Society Charges fee is 1200. [1] (maintenance_policy.docx)",
+    "error": "",
+    "secs": 20.1,
+    "n": 14,
+    "q": "What is the monthly Society Charges fee?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "The Repair fee is 1500 and it is charged on-demand. [1] (maintenance_policy.docx)",
+    "error": "",
+    "secs": 25.7,
+    "n": 15,
+    "q": "How much is the Repair fee and how often is it charged?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "The fee for Rent is 900 per month. [1] (maintenance_policy.docx)",
+    "error": "",
+    "secs": 4.0,
+    "n": 16,
+    "q": "What is the fee and frequency for Rent under the policy?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The annual Insurance fee is 4200. (maintenance_policy.docx)",
+    "error": "",
+    "secs": 21.0,
+    "n": 17,
+    "q": "What is the annual Insurance fee?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx"
+    ],
+    "answer": "The Taxes fee is 800 and it is charged annually. (maintenance_policy.docx)",
+    "error": "",
+    "secs": 24.3,
+    "n": 18,
+    "q": "What is the Taxes fee and how often is it charged?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "this cross-source shape is not supported by a deterministic operation yet; please rephrase or narrow the question",
+    "secs": 4.8,
+    "n": 19,
+    "q": "What is the monthly Loan payment amount?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "Based on the provided context:\n\n- Repair, on-demand, fee: 1500\n- Loan payment, monthly, fee: 2500\n- Society Charges, monthly, fee: 1200\n\nThe category \"Insurance\" was not specified with a fee in the given documents.",
+    "error": "",
+    "secs": 27.2,
+    "n": 20,
+    "q": "List all maintenance fee categories with their fees."
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 8.0,
+    "n": 21,
+    "q": "Which fee categories are charged monthly?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 8.4,
+    "n": 22,
+    "q": "Which fee categories are charged annually?"
+  },
+  {
+    "status": "EXC",
+    "error": "connection to server at \"host.docker.internal\" (192.168.65.254), port 5432 failed: Connection refused\n\tIs the server running on that host and accepting TCP/IP connections?\nconnection to server at \"hos",
+    "answer": "",
+    "secs": 23.8,
+    "n": 23,
+    "q": "What is the total of all monthly maintenance fees?"
+  },
+  {
+    "status": "EXC",
+    "error": "SLM unreachable at http://192.168.1.35:11500/api/chat: HTTP Error 503: Service Unavailable",
+    "answer": "",
+    "secs": 21.1,
+    "n": 24,
+    "q": "Which category has the highest fee in the maintenance policy?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "site_notes.md",
+      "maintenance_policy.docx",
+      "Samta-Employee Handbook April_2026.pdf",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "Asset 6 was inspected in the site notes. (site_notes.md)",
+    "error": "",
+    "secs": 20.4,
+    "n": 25,
+    "q": "Which asset was inspected in the site notes?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "site_notes.md",
+      "Samta-Employee Handbook April_2026.pdf",
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "Pending for the inspected asset is Insurance renewal and a Repair request. (site_notes.md)",
+    "error": "",
+    "secs": 20.0,
+    "n": 26,
+    "q": "What is pending for the inspected asset?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "site_notes.md",
+      "Samta-Employee Handbook April_2026.pdf",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "The inspected property lists Green Building and Grocery Store amenities. Citation: site_notes.md [1]",
+    "error": "",
+    "secs": 21.0,
+    "n": 27,
+    "q": "Which amenities does the inspected property list?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "site_notes.md",
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The inspected asset is located in Kochi. (site_notes.md)",
+    "error": "",
+    "secs": 15.4,
+    "n": 28,
+    "q": "In which city is the inspected asset located?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 9.8,
+    "n": 29,
+    "q": "Which asset has a follow-up scheduled?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "site_notes.md",
+      "maintenance_policy.docx",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Yes, there is a Repair request noted in the site inspection of asset 6 in Kochi. (site_notes.md)",
+    "error": "",
+    "secs": 5.3,
+    "n": 30,
+    "q": "Is there a Repair request noted in the site inspection?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SEMI_JOIN plan for these sources",
+    "secs": 8.3,
+    "n": 31,
+    "q": "Is an Insurance renewal pending for the inspected asset?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "All male employees who are on the rolls of the company are entitled to avail paid paternity leave of up to 5 days within the first 15 days of the birth of the child. (Samta-Employee Handbook April_2026.pdf)",
+    "error": "",
+    "secs": 26.3,
+    "n": 32,
+    "q": "What are male employees entitled to under paternity leave?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Employees are not eligible to take leave during the notice period, except in case of an emergency including medical reasons, where leave might be granted as an exception by the HOD provided supporting documents are submitted. (Samta-Employee Handbook April_2026.pdf)",
+    "error": "",
+    "secs": 8.2,
+    "n": 33,
+    "q": "Can employees take leave during their notice period?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "HDFC account. Samta-Employee Handbook April_2026.pdf, Page [1]",
+    "error": "",
+    "secs": 6.7,
+    "n": 34,
+    "q": "Which bank account is required for salary credit?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "this cross-source shape is not supported by a deterministic operation yet; please rephrase or narrow the question",
+    "secs": 5.0,
+    "n": 35,
+    "q": "How is annual salary structured and paid?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Employees must NOT:\n- Use confidential information for their personal benefit or profit.\n- Disclose confidential information to anyone inside or outside of the company.\n- Replicate confidential documents and files and store them on insecure devices. \n(Samta-Employee Handbook April_2026.pdf, Page 9)",
+    "error": "",
+    "secs": 8.3,
+    "n": 36,
+    "q": "What must employees NOT do under confidentiality and data protection?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "All recruits and interns who have been regularized after completing their TDP will be under probation for a period of 6 months. The performance shall be assessed during the probation period, and the manager will submit a report at the end of the probation period. The employee is deemed to be under probation unless a confirmation letter is issued. (Samta-Employee Handbook April_2026.pdf)",
+    "error": "",
+    "secs": 8.2,
+    "n": 37,
+    "q": "What is the probation policy for new recruits and interns?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "Samta's grievance redressal approach involves an open-door policy where employees are encouraged to address conflicts or disagreements through dialogue with their reporting managers first. If a satisfactory resolution is not achieved, employees can escalate the issue in writing to HR, Head of Department (HOD), or CEO. The management aims to provide a fair opportunity to both parties and seek an am",
+    "error": "",
+    "secs": 11.0,
+    "n": 38,
+    "q": "What is Samta's grievance redressal approach?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The code of conduct states that dating colleagues should be conducted professionally, keeping personal discussions outside of work. Supervisors must not date their direct reports to avoid accusations of favoritism and sexual harassment. Friendships at work are encouraged but should not interfere with professional duties. Samta-Employee Handbook April_2026.pdf",
+    "error": "",
+    "secs": 19.6,
+    "n": 39,
+    "q": "What does the code of conduct say about fraternisation?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "[DOC] According to the Samta-Employee Handbook April_2026.pdf, public holidays are as per the annual holiday list declared at the start of the year and listed in the Appendix of this document.",
+    "error": "",
+    "secs": 16.6,
+    "n": 40,
+    "q": "Are public holidays fixed, or as per an annual list?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The career mobility policy aims to promote and retain talent within the company by allowing employees to request transfer/relocation, department change, or function shift based on available openings. The final decision rests with the management, considering role fitment. Management may also assign any employee for outstation duty as needed, with proper arrangements and guidelines. (Samta-Employee ",
+    "error": "",
+    "secs": 10.7,
+    "n": 41,
+    "q": "What is the career mobility policy about?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The business travel policy endeavors to provide reasonable comfort to employees while on travel to other cities/country, to ensure the effective discharge of their duties. Samta-Employee Handbook April_2026.pdf, Page 1",
+    "error": "",
+    "secs": 7.8,
+    "n": 42,
+    "q": "What does the business travel policy provide?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "According to the document, during Maternity Leave, employees continue to be covered under the organization\u2019s health and insurance policy. Samta-Employee Handbook April_2026.pdf, page [2]",
+    "error": "",
+    "secs": 36.8,
+    "n": 43,
+    "q": "What happens to health and insurance coverage while an employee is on leave?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "Samta-Employee Handbook April_2026.pdf",
+      "generic_readme.txt"
+    ],
+    "answer": "The employee handbook outlines several key information security policies, including confidentiality and data protection, technology assets, and employees' accountability. Confidential information such as employee records, financial details, customer data, and internal strategies are to be protected. Access to sensitive data is restricted, and employees must handle confidential information responsi",
+    "error": "",
+    "secs": 11.4,
+    "n": 44,
+    "q": "Summarize the information security policies in the handbook."
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SET_INTERSECTION plan for these sources",
+    "secs": 8.3,
+    "n": 45,
+    "q": "Which amenities appear in both the MSA and the maintenance policy?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SET_INTERSECTION plan for these sources",
+    "secs": 7.8,
+    "n": 46,
+    "q": "Which assets are mentioned across the MSA, maintenance policy, and site notes?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SET_INTERSECTION plan for these sources",
+    "secs": 7.5,
+    "n": 47,
+    "q": "Which city appears in both the MSA and the site notes?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "could not assemble a validated SET_INTERSECTION plan for these sources",
+    "secs": 8.6,
+    "n": 48,
+    "q": "Which ledger or fee categories are common to the MSA and the maintenance policy?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "maintenance_policy.docx"
+    ],
+    "answer": "The Repair fee in the maintenance policy is 1500 for on-demand services, whereas the late fee in the Master Services Agreement is 2 percent per month of overdue invoices.",
+    "error": "",
+    "secs": 25.9,
+    "n": 49,
+    "q": "Compare the Repair fee in the maintenance policy with the late-fee terms in the MSA."
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "site_notes.md",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "[1] (maintenance_policy.docx) states that this policy governs the maintenance of asset 21, including Football court upkeep in Muddanahalli.",
+    "error": "",
+    "secs": 26.7,
+    "n": 50,
+    "q": "For asset 21, which documents mention it and what does each say?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "msa_green_tower.pdf",
+      "maintenance_policy.docx",
+      "site_notes.md"
+    ],
+    "answer": "The Master Services Agreement \u00b7 Green Tower (page 1) governs the late fee for overdue Rent invoices. According to this agreement, a late fee of 2 percent per month applies.",
+    "error": "",
+    "secs": 4.8,
+    "n": 51,
+    "q": "A tenant in Kochi has an overdue Rent invoice \u2014 which document governs the late fee, and how much is it?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "maintenance_policy.docx",
+      "msa_green_tower.pdf"
+    ],
+    "answer": "You should check maintenance_policy.docx for the maintenance fee of the Football court.",
+    "error": "",
+    "secs": 19.7,
+    "n": 52,
+    "q": "Which document should I check for the maintenance fee of the Football court?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "generic_readme.txt",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The generic_readme.txt contains no property, asset, or financial records and should not link to any structured source.",
+    "error": "",
+    "secs": 5.9,
+    "n": 53,
+    "q": "Does the knowledge-base readme contain any property or financial records?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "generic_readme.txt",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The generic onboarding readme covers general onboarding steps, password policies, and how to contact the help desk. (generic_readme.txt)",
+    "error": "",
+    "secs": 5.8,
+    "n": 54,
+    "q": "What topics does the general onboarding readme cover?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "generic_readme.txt",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "The document does not specify how employees contact the help desk.",
+    "error": "",
+    "secs": 4.3,
+    "n": 55,
+    "q": "How do employees contact the help desk?"
+  },
+  {
+    "status": "ok",
+    "kind": "doc",
+    "route": null,
+    "citations": [
+      "generic_readme.txt",
+      "Samta-Employee Handbook April_2026.pdf"
+    ],
+    "answer": "No, generic_readme.txt states that it contains no property, asset, or financial records and should not link to any structured source.",
+    "error": "",
+    "secs": 4.8,
+    "n": 56,
+    "q": "Does the readme link to any structured data source?"
+  },
+  {
+    "status": "refused",
+    "kind": "sql",
+    "route": null,
+    "citations": [],
+    "answer": "",
+    "error": "",
+    "secs": 10.6,
+    "n": 57,
+    "q": "If Rent and Society Charges invoices are overdue by 2 months, what total late-fee percentage applies?"
+  }
+]
