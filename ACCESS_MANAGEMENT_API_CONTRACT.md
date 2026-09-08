@@ -452,7 +452,6 @@ codes do not.
 | `evaluation.run` | Trigger evaluation runs and read results |
 | `user.manage` | Create, view and update users |
 | `role.manage` | Create, view, update and retire roles |
-| `permission.read` | View this catalogue |
 
 Treat it as **data, not a constant**: fetch it with `permissions/list` and render what
 comes back. Hard-coding this table client-side guarantees drift the first time an
@@ -633,9 +632,25 @@ answers "who holds this role", neither returns everything.
 
 | Field | Required | Notes |
 |---|---|---|
-| `role_id`, `permission_id` | yes | must both be **active** |
+| `role_id` | yes | must be **active** |
+| `permission_id` | only without a `resource_path` | must be **active**. Omit it when granting a resource and `data.read` is implied — see below |
 | `resource_path` | no | canonical path, or `""` for a permission that is not resource-scoped (`user.manage`) |
 | `effect` | no | `allow` (default) or `deny` |
+
+**Granting a resource does not need a `permission_id`.** Resource access is always
+`data.read` ON that path — the caller picks a resource in the catalog tree, never a
+permission, and `data.read` is deliberately absent from `permissions/dropdown` for that
+reason. Send the path alone and the server fills it in:
+
+```json
+{ "role_id": 3, "resource_path": "db:crm_postgres:employee", "effect": "allow" }
+```
+
+An explicit `permission_id` is never overridden — a body carrying one behaves exactly as
+it always did, with or without a path. Sending **neither** still 400s: a blank-path
+`data.read` grant covers no resource, so it would look real and do nothing.
+
+`revoke` accepts the same omission, so a client can revoke exactly what it granted.
 
 **Re-granting the same triple with the opposite effect UPDATES it (200), it does not
 add a second row.** `(role, permission, resource_path)` is unique *without* `effect` —

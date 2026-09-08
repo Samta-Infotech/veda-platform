@@ -569,6 +569,19 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
     # `cols` when absent — never clobbers a pipeline that already set it.
     if "cols" not in res0 and res0.get("columns"):
         res0["cols"] = res0["columns"]
+    # A DEFINITE refusal from the router (no access to the source that can answer,
+    # NO_MATCH, ...) is minted by veda_core/veda_hybrid.py::_run_coordinator via
+    # MultiResult.single(..., refuse_reason=...): it never runs the SQL pipeline, so
+    # item0["result"] is null and the reason lives one level UP, on item0 itself.
+    # res0 therefore ends up {} and ask_clarification_node found no feedback ->
+    # every such refusal surfaced as the generic "Could you clarify what you're
+    # asking about?" on the chat path, while /api/v1/query (which reads item0
+    # directly) showed the real reason. Lift them onto res0 — the ONE place res0 is
+    # assembled — so the graph downstream can surface them. Never clobbers a
+    # pipeline that set its own.
+    for _k in ("refuse_reason", "route"):
+        if _k not in res0 and item0.get(_k) is not None:
+            res0[_k] = item0[_k]
     status = res0.get("status")
     if status is None:
         # RAG/hybrid/nosql heads carry no pipeline-level status of their own
@@ -615,6 +628,7 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
             tenant=state.get("tenant"),
             request_id=state.get("request_id"),
             data_scope=state.get("data_scope"),
+            source_profiles=state.get("source_profiles"),
         ):
             if kind == "progress":
                 _extra = {k: v for k, v in data.items() if k not in ("phase", "message")}
@@ -711,8 +725,32 @@ def ask_clarification_node(state: ChatState) -> dict:
     res0 = state.get("engine_result", {})
     status = state.get("status", "refuse")
 
+    # A router-level refusal (no access to the source that can answer, no matching
+    # source, or the router's own clarifying question) carries its reason at
+    # refuse_reason — lifted onto res0 by _extract_engine_result. Surfacing it
+    # verbatim matters most for "no_access": answering a permission denial with
+    # "could you clarify what you're asking about?" actively misleads (it reads as
+    # "I didn't understand" when the truth is "you're not allowed to see this"), and
+    # it hid the denial completely on the chat path while /api/v1/query showed it
+    # correctly all along.
+    #
+    # Matched on ROUTE, not on "has a refuse_reason": every SubResult carries one
+    # (veda_hybrid.py::_to_subresult sets it from result["error"]/status), so keying
+    # off its presence would surface raw engine codes like "qualifier_dropped" to the
+    # user whenever the pipeline built no feedback — strictly worse than the generic
+    # question. These three routes are minted ONLY by _run_coordinator, always with a
+    # human-readable reason. "clarify" is a real question (keep needs_clarification);
+    # "no_access"/"no_match" are terminal — no rephrasing changes the answer.
+    _ROUTER_REFUSAL_ROUTES = ("no_access", "no_match", "clarify")
+    refuse_reason = res0.get("refuse_reason")
+    _route = res0.get("route")
+    router_refusal = bool(refuse_reason) and _route in _ROUTER_REFUSAL_ROUTES
+    definite = router_refusal and _route in ("no_access", "no_match")
+
     feedback = res0.get("feedback")
-    if feedback:
+    if router_refusal:
+        question = refuse_reason
+    elif feedback:
         question = feedback.get("text") or "Could you clarify what you're asking about?"
     else:
         # Rare fallback (e.g. FEEDBACK_ENABLED=False in the engine, so it never
@@ -732,10 +770,13 @@ def ask_clarification_node(state: ChatState) -> dict:
         question = "Could you clarify what you're asking about?"
 
     unavailable = status == "unavailable"
+    # `definite` refusals are terminal, not questions — don't ask the user to clarify
+    # something no rephrasing can fix (and don't leave the UI waiting on an answer).
+    _no_clarify = unavailable or definite
     update = {
         "reply_text": question,
-        "needs_clarification": not unavailable,
-        "clarification_question": None if unavailable else question,
+        "needs_clarification": not _no_clarify,
+        "clarification_question": None if _no_clarify else question,
         "engine_unavailable": unavailable,
     }
     if not unavailable:

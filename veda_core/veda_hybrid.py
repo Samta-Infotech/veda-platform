@@ -623,12 +623,16 @@ def _run_coordinator(query, verbose=False, on_event=None):
                 if _denied:
                     _best = best_matching_source(query, sorted(_permitted | _denied), _profiles)
                     if _best is not None and str(_best) in _denied:
-                        _emit(on_event, "answer",
-                              "You don't have permission to access the data source that can answer this.")
+                        # Deliberately says nothing about WHICH source, or that a
+                        # source able to answer exists at all: naming it tells an
+                        # unauthorised caller what data the platform holds. Same
+                        # wording as veda/feedback.py's ACCESS_DENIED_WHY/_WHAT, the
+                        # canonical denial text every other path already uses.
+                        _deny_msg = ("You don't have permission to access this data. "
+                                     "Contact your Admin to request access.")
+                        _emit(on_event, "answer", _deny_msg)
                         return MultiResult.single(
-                            query, STATUS_REFUSED, "no_access",
-                            refuse_reason="You don't have permission to access the data source "
-                                          "that can answer this question.")
+                            query, STATUS_REFUSED, "no_access", refuse_reason=_deny_msg)
             except Exception:
                 pass
 

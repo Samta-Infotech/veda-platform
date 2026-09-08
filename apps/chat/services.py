@@ -115,6 +115,7 @@ class ConversationQueryService:
 
     def __init__(self, user, source_id: int | None = None, tenant: str = "default",
                  source_ids: list[int] | None = None, data_scope: dict | None = None,
+                 source_profiles: dict | None = None,
                  access_denied: bool = False):
         self.user = user
         self.source_id = source_id
@@ -127,6 +128,15 @@ class ConversationQueryService:
         # (apps.access_management.services.serialize_data_scope), forwarded verbatim
         # to the chatbot turn. None = no restriction, same as every existing caller.
         self.data_scope = data_scope
+        # Per-source routing metadata (apps.query.scope.source_profiles_for), forwarded exactly
+        # as /api/v1/query does. It is what tells the engine a source is datalake/document rather
+        # than relational; without it veda_hybrid._is_datalake_source is False, the
+        # datalake-isolated semantic model is never loaded, and the SQL planner receives the
+        # PRIMARY source's 178-table homzhub schema — which does not contain the datalake tables
+        # at all, so a datalake question could only choose among irrelevant tables and ended in an
+        # "ambiguous subject" clarify. /api/v1/query answered the same question correctly, which is
+        # why this only ever reproduced through chat. None = same behaviour as before.
+        self.source_profiles = source_profiles
         # Set when the view already knows (permitted_source_ids returned empty)
         # that this caller has zero granted sources — run_turn then skips the
         # engine entirely and yields a synthetic denial turn instead. Previously
@@ -208,7 +218,8 @@ class ConversationQueryService:
         session_id = str(chat.pk)
         kwargs = dict(tenant=self.tenant, source_id=self.source_id,
                       source_ids=self.source_ids, request_id=request_id,
-                      data_scope=self.data_scope)
+                      data_scope=self.data_scope,
+                      source_profiles=self.source_profiles)
         # End-to-end wall clock for THIS turn — so latency_ms is ALWAYS reportable,
         # even when the engine result carries none (a refusal/clarify that never
         # reached _done(), or a path that returned no latency). Used as the fallback

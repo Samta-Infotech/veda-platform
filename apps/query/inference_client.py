@@ -133,7 +133,7 @@ class InferenceClient:
 
     def stream_hybrid_query(
         self, query: str, source_id=None, tenant=None, flags=None, request_id=None,
-        source_ids=None, data_scope=None,
+        source_ids=None, data_scope=None, source_profiles=None,
     ) -> Iterator[tuple[str, dict]]:
         """Yields (event, data) as the inference tier's SSE stream delivers them
         (progress events as the pipeline advances, then one final "result" event).
@@ -145,6 +145,12 @@ class InferenceClient:
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, accept="text/event-stream",
             source_ids=source_ids, data_scope=data_scope,
+            # Parity with run_hybrid_query above, which has always forwarded these. Their
+            # absence HERE is why only the streaming front door (chat) lost them: the engine
+            # then cannot tell a datalake/document source from a relational one, skips the
+            # datalake-isolated semantic model, and plans SQL against the primary source's
+            # schema — which does not contain the datalake tables at all.
+            source_profiles=source_profiles,
         )
         response = self._open(request, self.config.timeout_s)
         try:

@@ -52,6 +52,19 @@ class ChatState(TypedDict, total=False):
                                        # JSON-safe dict, see apps.access_management.services.
                                        # serialize_data_scope), forwarded to call_engine_node
                                        # as the X-Veda-Data-Scope header. None = no narrowing.
+    source_profiles: Optional[Dict[str, Any]]  # per-source routing metadata
+                                       # (source_type/is_canonical/domain_tags/description, from
+                                       # apps.query.scope.source_profiles_for), forwarded to
+                                       # call_engine_node the same way /api/v1/query does. WITHOUT
+                                       # it the engine cannot tell a datalake/document source from a
+                                       # relational one: veda_hybrid._is_datalake_source returns
+                                       # False, the datalake-isolated semantic model is never
+                                       # loaded, and the SQL planner is handed the PRIMARY source's
+                                       # schema instead — 178 homzhub tables that do not contain
+                                       # `vendors` at all, so a vendor question could only pick
+                                       # among irrelevant tables (measured: worklists_quote vs
+                                       # list_of_values_listofvalue at 0.1503 vs 0.1502, then an
+                                       # "ambiguous subject" clarify). {} / None = same as before.
 
     # ── supervisor decision ─────────────────────────────────────────────────
     action: str                        # "smalltalk" | "answer" | "clarify" | "followup"
