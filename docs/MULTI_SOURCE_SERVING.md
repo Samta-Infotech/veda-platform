@@ -1,5 +1,9 @@
 # Multi-source query serving + auto-federation
 
+> **Deploying this?** The step-by-step procedure, the flags it depends on and the
+> failure modes are in [MULTI_SOURCE_DEPLOYMENT.md](MULTI_SOURCE_DEPLOYMENT.md).
+> This file is the design/execution log of how the capability was built.
+
 **Goal:** make `source_ids:[4]` (tabular) and `source_ids:[2,4]` (cross-source) NL queries
 actually answer — today they retrieve/validate against homzhub and the firewall rejects the
 real source-4 columns. Then wire auto-federation so cross-source questions compose a join.

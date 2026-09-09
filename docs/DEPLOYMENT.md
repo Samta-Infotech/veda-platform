@@ -203,6 +203,15 @@ curl -sk -X POST https://your.domain.com/api/v1/admin/ingest \
 
 ---
 
+## 8a. Serving more than one source
+
+Routing a question to the right source (and refusing it when the asker has no permission
+for that source) needs flags and per-source setup that are **not** part of the steps above,
+and whose code defaults are wrong for it. See
+[MULTI_SOURCE_DEPLOYMENT.md](MULTI_SOURCE_DEPLOYMENT.md) before onboarding source #2.
+
+---
+
 ## 9. Smoke tests
 
 ```bash
