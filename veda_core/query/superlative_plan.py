@@ -249,9 +249,12 @@ def _select_anchor(spans, dim_span, dim_phrase, count_rank, mode, evidence, why_
                 why_ev[_subj].append("unambiguous subject entity (exact name-token match)")
                 return ("ok", _subj)
             opts = [_human(t, sm) for t, _ in spans[dim_span].entities][:5]
+            # Plain language: this is read by an end user, not by whoever built the schema.
+            # "'amenity' of which records? ... — name the entity to count" used the internal
+            # vocabulary (records / entity / count) and read like a schema error.
             return ("clarify",
-                    f"'{dim_span}' of which records? This data has: "
-                    f"{', '.join(opts)} — name the entity to count.")
+                    f"I'm not sure which '{dim_span}' you mean — it could be "
+                    f"{', '.join(opts)}. Which one did you want?")
         return ("bail", None)
 
     ranked = sorted(evidence.items(), key=lambda kv: (-kv[1], kv[0]))

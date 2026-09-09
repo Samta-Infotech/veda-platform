@@ -338,6 +338,20 @@ def best_matching_source(query: str, source_ids, profiles=None):
     """The single STRICTLY-best-matching source over ``source_ids`` (permission-agnostic), by the same
     evidence + dominance tiering the router uses. Returns a source_id, or None when there is no clear
     winner. Only pre-computed match SCORES are read — no source content is fetched or returned.
+    """
+    _r = best_matching_scored(query, source_ids, profiles)
+    return _r[0] if _r is not None else None
+
+
+def best_matching_scored(query: str, source_ids, profiles=None):
+    """``(source_id, top_score)`` for the strictly-best-matching source over ``source_ids``, or None.
+
+    The scoring half of ``best_matching_source``, split out because a bare source_id cannot answer
+    the question the permission pre-check actually has: "is the INACCESSIBLE winner clearly ahead of
+    the best PERMITTED one, or did it win by a hair?". Both are needed to tell "you have no access to
+    the data that answers this" (refuse, with the permission message) apart from "a source you DO
+    have is just as good" (answer it) — deciding on identity alone produced both failure modes in
+    turn: refusing questions the caller was entitled to, then answering ones it was not.
 
     Runs the evidence retrieval under a PERMISSION-AGNOSTIC scope (the ambient RBAC data-scope would
     otherwise filter out the very sources this pre-check exists to detect) — restored immediately after.
@@ -368,7 +382,7 @@ def best_matching_source(query: str, source_ids, profiles=None):
         # must be the strict top over EVERY candidate (a genuine single winner, not a tie)
         if any(c is not top and getattr(c, "top_score", 0.0) >= getattr(top, "top_score", 0.0) for c in cands):
             return None
-        return top.source_id
+        return top.source_id, float(getattr(top, "top_score", 0.0))
     except Exception:
         return None
     finally:

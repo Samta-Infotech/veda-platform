@@ -114,8 +114,11 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
             what = (f"Tell me what '{missing}' refers to — a column, or a value to filter on?")
             sugg = _closest(missing, cols)
     elif status == "clarify":
-        why = msg or "Your question is ambiguous about which entity it's about."
-        what = "Re-ask naming the subject explicitly (e.g. 'for each <entity> …')."
+        # Plain language — an end user reads this. The old wording ("ambiguous about which
+        # entity", "Re-ask naming the subject explicitly (e.g. 'for each <entity> …')") used
+        # internal vocabulary and told them to re-phrase in a shape only we understand.
+        why = msg or "I'm not sure exactly what you're asking about."
+        what = "Could you tell me which one you mean?"
     elif status == "refuse":
         why = msg or "I can't answer this correctly with the available schema."
         what = "Rephrase, or ask about entities that are related in the schema."

@@ -177,6 +177,43 @@ def push_drill(stack: List[DrillLevel], harvested: Dict[str, Any]) -> List[Drill
     return (stack + [level])[-_MAX_DRILL_DEPTH:]
 
 
+def newly_added_filter(prev: Optional[Dict[str, Any]],
+                       harvested: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The filter THIS turn added relative to `prev`, or None if it added none.
+
+    Deterministic drill detection, and the reason the DrillStack was always empty. The LLM
+    delta classifier labels the ordinary value-narrowing follow-ups — "only the open ones",
+    "just the Repair ones" — as `refine`, not `drill_down` (measured on this deployment), and
+    memory_write_node only pushed a level for `drill_down`. So no breadcrumb was ever recorded
+    and "go back" had nothing to pop, even though the user had plainly drilled in.
+
+    Evidence beats the label here, which is the same principle harvest_frame already applies:
+    if the query we actually EXECUTED carries a filter the previous one did not, this turn
+    narrowed — whatever the classifier chose to call it. Compares (field, operator, value) so
+    re-running the same filter is not mistaken for a new level.
+    """
+    def _key(f):
+        return (f.get("field"), f.get("operator"), str(f.get("value")))
+    prev_keys = {_key(f) for f in ((prev or {}).get("filters") or [])}
+    for f in (harvested.get("filters") or []):
+        if f.get("field") and _key(f) not in prev_keys:
+            return f
+    return None
+
+
+def push_drill_level(stack: List[DrillLevel], filt: Dict[str, Any]) -> List[DrillLevel]:
+    """Push ONE explicitly-identified filter as a drill level (see newly_added_filter).
+
+    push_drill() below guesses "the last filter" because a `drill_down` turn does not say which
+    filter is new; when the caller already KNOWS which one was added, record that instead of
+    guessing — with several filters in play the newest is not necessarily last.
+    """
+    if not filt or not filt.get("field"):
+        return stack
+    level: DrillLevel = {"dimension": filt["field"], "value": filt.get("value")}
+    return (stack + [level])[-_MAX_DRILL_DEPTH:]
+
+
 def pop_drill(stack: List[DrillLevel]) -> List[DrillLevel]:
     """"Go back" — pop one level. No-op (never errors) at the root."""
     return stack[:-1] if stack else stack

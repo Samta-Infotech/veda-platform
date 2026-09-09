@@ -699,6 +699,19 @@ ROUTING_DOMINANCE_FLOOR = float(_os.environ.get("ROUTING_DOMINANCE_FLOOR", "0.35
 ROUTING_DOMINANT_GAP   = float(_os.environ.get("ROUTING_DOMINANT_GAP", "0.10"))
 ROUTING_COMPETE_WINDOW = float(_os.environ.get("ROUTING_COMPETE_WINDOW", "0.08"))
 
+# Permission pre-check margin (veda_hybrid.py's ROUTING_PERMISSION_PRECHECK_ENABLED block). How far
+# ahead an INACCESSIBLE source must score over the caller's best PERMITTED one before the request is
+# refused with the explicit "you don't have permission" message instead of being answered from the
+# permitted source. Its own knob, NOT ROUTING_DOMINANT_GAP above: that one tunes routing confidence,
+# while this one trades two error modes against each other and the two populations overlap. Measured
+# here: a datalake-only caller asking "How many maintenance records are repairs?" sees a denied
+# document source win by 0.105 yet IS entitled to an answer, while an unauthorised caller's cases sit
+# at 0.047-0.215. So the default is set above 0.105 — refusing an entitled caller is the harmful
+# error; an unauthorised one still gets refused either way, just with the pipeline's vaguer wording.
+# Raise it to be more conservative (fewer permission messages, never a false denial); lower it only
+# with fresh measurements, since below ~0.11 entitled callers start being told they have no access.
+ROUTING_PERMISSION_DENY_GAP = float(_os.environ.get("ROUTING_PERMISSION_DENY_GAP", "0.12"))
+
 # Required-Source Escalation (docs/multisource_routing/REQUIRED_SOURCE_ESCALATION_REPORT.md). When a
 # dominant SINGLE is about to be returned deterministically, escalate to the SAME bounded SLM ONLY
 # when a secondary candidate is BOTH (1) edge-connected to the dominant source (a discovered

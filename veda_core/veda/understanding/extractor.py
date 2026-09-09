@@ -87,7 +87,10 @@ def extract(query: str, entity_catalog: List[str], *, timeout: int = 60) -> Opti
             f"Question: {query}\n\nJSON:")
     try:
         raw_text = call_slm(user, system=_SYS, purpose="query_understanding",
-                            temperature=0, seed=0, num_predict=320, num_ctx=2048,
+                            # SLM_NUM_CTX, not a literal — a window the host does not
+                            # already serve blocks until a 504 (see veda/generation.py).
+                            temperature=0, seed=0, num_predict=320,
+                            num_ctx=__import__('config').SLM_NUM_CTX,
                             timeout=timeout)
     except Exception:
         return None                          # SLM unreachable / timeout → degrade

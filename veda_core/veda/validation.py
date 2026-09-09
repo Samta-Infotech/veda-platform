@@ -617,6 +617,32 @@ def value_grounding(sql, resolve_table, cols_meta, skip_values=()):
             if isinstance(e, exp.Literal) and e.is_string:
                 pairs.append((col, e.name))
 
+    # Is there a relational DB to probe at all? A datalake/parquet source has none:
+    # get_db_config() yields an EMPTY config (host='', database=''), so _pg() below died with
+    # OperationalError on the default local socket ("/var/run/postgresql/.s.PGSQL.5432 ... No
+    # such file or directory") and the whole query surfaced as "I couldn't find any data
+    # relevant to this question". That was latent until datalake columns started carrying
+    # CORRECT analytics_roles (veda_hybrid.py's compute_analytics_role fix): while
+    # maintenance.status/category held the raw semantic_type "CATEGORY", the role check below
+    # skipped them and this code never reached _pg(); as real DIMENSIONs they do reach it, so
+    # "How many maintenance records are paid?" started crashing here.
+    #
+    # Where there is no DB, this check is simply not performable: the isolated datalake sm
+    # carries only a BOUNDED `sample_values` sample (DATALAKE_VALUE_SAMPLE_LIMIT), so a value's
+    # ABSENCE from it proves nothing and must never be turned into a refusal — that would reject
+    # valid filters. So skip the probe rather than guess, which is also exactly the behaviour
+    # this function had for datalake before the role fix. A relational source always has
+    # host+database, so it is unaffected; an unreadable config keeps the old path (probe, and
+    # let a genuine failure surface).
+    try:
+        _cfg = get_db_config() or {}
+        _has_db = bool(str(_cfg.get("host") or "").strip()
+                       and str(_cfg.get("database") or "").strip())
+    except Exception:
+        _has_db = True
+    if not _has_db:
+        return True, None
+
     conn = None
     try:
         for col, val in pairs:

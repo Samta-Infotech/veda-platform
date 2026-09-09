@@ -1,6 +1,7 @@
 """VEDA · L5 — LLM SQL generation (single-table + join-skeleton fill)."""
 import os, re, sys, time, json, logging, threading
-from config import SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
+from config import (SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL, SLM_NUM_CTX,
+                    SLM_TIMEOUT_SECS)
 from query.ranking_parser import parse_ranking
 import urllib.request
 from slm import call_slm
@@ -203,7 +204,16 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
     # clauses (and different counts) run-to-run at temperature 0.1.
     sql = call_slm(
         user, system=system, purpose="sql_single_table",
-        temperature=0, seed=0, num_predict=256, num_ctx=2048, timeout=1200,
+        # num_ctx MUST be the configured window, not a per-call literal. This asked for
+        # 2048 while the Ollama host serves 4096 (both models resident and pinned 24h);
+        # any other size needs a fresh model instance, which never loads, so the request
+        # blocked until a 504 at ~600s — then reliability.py retried the whole agent once
+        # (504 is a transient marker) for 2x600 = ~1218s per query, ending in a refusal
+        # that blamed the DATA. Measured with SLM_NUM_CTX instead: 1218s -> 16.3s, correct
+        # answer, every guard green. timeout also came down from 1200s, which could only
+        # ever produce an HTTP 500 — the api's gunicorn worker dies at 300s.
+        temperature=0, seed=0, num_predict=256, num_ctx=SLM_NUM_CTX,
+        timeout=SLM_TIMEOUT_SECS,
     ).strip()
     # strip markdown fences if the model added them
     if sql.startswith("```"):
@@ -405,7 +415,7 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf, results=None):
                if recommended_lines else ""))
     sql = call_slm(
         user, system=system, purpose="sql_join",
-        temperature=0, seed=0, num_predict=320, num_ctx=3072, timeout=120,
+        temperature=0, seed=0, num_predict=320, num_ctx=SLM_NUM_CTX, timeout=120,
     ).strip()
     if sql.startswith("```"):
         sql = sql.strip("`")

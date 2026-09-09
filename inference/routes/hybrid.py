@@ -134,6 +134,7 @@ if APIRouter is not None:
     @router.post("/run_hybrid_query/stream")
     async def run_hybrid_query_stream_route(req: "HybridRequest", request: Request):
         import asyncio
+        from contextvars import copy_context
 
         from veda_core.context import try_current, with_context
         from veda_core.veda_hybrid import run_hybrid_query
@@ -169,7 +170,24 @@ if APIRouter is not None:
             finally:
                 loop.call_soon_threadsafe(events.put_nowait, None)
 
-        threading.Thread(target=with_context(parent_ctx, _run), daemon=True).start()
+        # Carry the WHOLE contextvars context into the worker, not just the RequestContext.
+        # with_context() re-binds only that one var (veda_core/context.py:139-142), so every
+        # OTHER request-scoped contextvar was silently lost here — most importantly
+        # `source_profiles` (set by the middleware from X-Veda-Source-Profiles). The engine then
+        # saw no profiles, veda_hybrid._is_datalake_source() returned False for a datalake
+        # source, the datalake-isolated semantic model was never loaded, and a vendor question
+        # was planned against the primary source's 178-table homzhub schema — refusing with
+        # "ambiguous subject — should rows be per reviews_pillar or reviews_pillarrating?".
+        # The non-streaming route never had this bug because it goes through
+        # inference/concurrency.py::run_in_threadpool_with_context, which already uses
+        # copy_context(); this is the same approach, so both routes now behave identically and
+        # any contextvar added later propagates without touching this line again.
+        # with_context(parent_ctx, ...) is kept inside the copy: re-binding the same
+        # RequestContext is idempotent, and it still covers the dual-import case documented at
+        # veda_hybrid.py:71-81 (bare `context` vs `veda_core.context` hold SEPARATE vars).
+        _ctx_snapshot = copy_context()
+        threading.Thread(target=lambda: _ctx_snapshot.run(with_context(parent_ctx, _run)),
+                         daemon=True).start()
 
         async def gen():
             while True:

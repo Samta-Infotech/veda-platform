@@ -22,9 +22,11 @@ except ImportError:  # keep importable without FastAPI in this environment
     Request = object
     _HAVE_FASTAPI = False
 
+import json
 import logging
 
-from veda_core.context import RequestContext, parse_allowed_resources, set_context
+from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
+                               set_source_profiles)
 
 logger = logging.getLogger(__name__)
 
@@ -121,6 +123,30 @@ def create_app():
             set_context(RequestContext(source_id=int(source_id), tenant=tenant,
                                        source_ids=source_ids,
                                        allowed_resources=allowed_resources))
+            # Multi-source routing profiles (source_type/is_canonical/domain_tags/description),
+            # server-resolved by the api tier from the Source registry (apps/query/scope.py::
+            # source_profiles_for) and sent as X-Veda-Source-Profiles. This was the one forwarded
+            # header nothing here consumed, so set_source_profiles() was only ever called by
+            # in-process callers (the bench scripts) — every HTTP request, on BOTH the plain and
+            # the streaming route, reached the engine with NO profiles. That is why the same
+            # question answered correctly in-process and failed through the API: with no profile,
+            # veda_hybrid._is_datalake_source() is False for a datalake source, the
+            # datalake-isolated semantic model is never loaded, and the SQL planner is handed the
+            # primary source's 178-table homzhub schema instead — a vendor question then had only
+            # irrelevant homzhub tables to choose between and refused with "ambiguous subject —
+            # should rows be per reviews_pillar or reviews_pillarrating?".
+            # Absent/malformed header = {} = exactly the previous behaviour (route on evidence
+            # alone); profiles are routing METADATA, never an access decision, so unlike the
+            # data-scope header above there is nothing to fail closed on.
+            profiles_hdr = request.headers.get("x-veda-source-profiles")
+            if profiles_hdr:
+                try:
+                    set_source_profiles(json.loads(profiles_hdr))
+                except Exception:
+                    logger.warning("malformed X-Veda-Source-Profiles header; ignoring")
+                    set_source_profiles({})
+            else:
+                set_source_profiles({})
         return await call_next(request)
 
     from inference.routes import health, hybrid, retrieve

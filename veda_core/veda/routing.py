@@ -345,8 +345,13 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
                                  and (fb is None or fa < fb)
                                  and (1.0 - fa / (len(_qw) or 1)) >= ANCHOR_SUBJECT_POS_MIN)
                 if not subject_clear:
-                    msg = (f"ambiguous subject — should this be about {a.table} or "
-                           f"{b.table}? (confidence {a.score} vs {b.score})")
+                    # Names NEITHER candidate, and no raw scores — same reasoning as the sibling
+                    # message in veda/planning.py: this text is shown to the end user, for whom
+                    # internal table names are meaningless and are a disclosure of the schema.
+                    # The candidates and their scores are recorded in the trace immediately below,
+                    # so nothing is lost for diagnosis.
+                    msg = ("This question could apply to more than one thing in the data, "
+                           "so I'd rather ask than guess.")
                     if trace is not None:
                         trace.set("anchor_selection", anchor=None,
                                   confidence=round(a.score, 3),
