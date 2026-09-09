@@ -920,6 +920,18 @@ CANONICAL_INTENT_SHADOW_ENABLED = _os.environ.get("CANONICAL_INTENT_SHADOW_ENABL
 # NOT covered here. Grammar-signal + AST, no hardcode. OFF -> byte-identical.
 INTENT_SQL_AGG_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_AGG_PRESENCE_ENABLED", "1") == "1"
 
+# Filter-OMISSION guard (veda/intent_sql_alignment.py::filter_presence_ok). The companion to the
+# aggregate guard above, for the other half of the same silent-wrong class: the question states a
+# CONDITION and the generated SQL applies none. Measured on two live failures — "vendors rated above
+# 4.0" produced `SELECT "rating","vendor_id","city" FROM "vendors" LIMIT 100` (no WHERE) and the
+# answer layer reported "5 vendors have ratings above 4.0" off six unfiltered rows (truth: 4); "the
+# ones that are gated" projected is_gated and the summary became "60% of assets are gated".
+# qualifier_completeness misses both because the column IS in the SQL, as a projection. Fires only on
+# (comparison word + a number) or (a BOOLEAN column the query names by its own word) AND zero filters
+# in the SQL AST — a SQL that filters anything at all passes, so this catches "the predicate vanished
+# entirely", never a wrong predicate. OFF -> byte-identical.
+INTENT_SQL_FILTER_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_FILTER_PRESENCE_ENABLED", "1") == "1"
+
 # Deterministic "list all <entity>" fast-path (query/fast_path.py). A bare catalog listing ("list all
 # amenities") resolves its entity concept (assets_amenity) correctly, but the list-VERB token ("list")
 # also matches a values-catalog concept (list_of_values), so _single_entity reads a false second entity
