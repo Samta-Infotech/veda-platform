@@ -60,6 +60,23 @@ Source plans: `docs/archive/ARCHITECTURE_ROOT_CAUSE_PLAN.md`,
   PgBouncer host + `POSTGRES_USER`/`PASSWORD`) and moved only `ann_search`'s vector scan onto
   it. `_resolve_ef_search`'s `substrate_substrateversion` read stays on `_connection()`
   (`veda`), correctly. Log strings in `semantic_search.py` updated.
-- **Still worth a live check** (Docker was down when this was fixed): with the stack up, one
-  query should no longer log `Signal 1 adapter unavailable`, and `logger.info` should read
-  `Signal 1 via storage_adapters (engine store, source-scoped): N cols` with N > 0.
+- **Live-verified 2026-09-10** (stack up, pg16 locally — see the compose note below): calling
+  `reader.ann_search` directly hit `relation "column_embeddings_v2" does not exist"` against
+  the WRONG-db code and, once pointed at `_internal_connection()`, hit a **second, previously
+  masked bug**: `RequestContext.source_ids` are `int` (`context.py` casts every element), but
+  `column_embeddings_v2.source_id` is `TEXT` — `WHERE source_id = ANY(%s)` raised
+  `operator does not exist: text = integer`. Every other caller of this table
+  (`retrieval_engine_phase3.py:193,392`) already stringifies first; `ann_search` now does too
+  (`source_ids_str = [str(s) for s in source_ids]`). After both fixes, a real query logged
+  `✓ Signal 1 via storage_adapters (engine store, source-scoped): 5 cols` with real cosine
+  scores (0.46–0.50) for source 2 — dense retrieval is confirmed working, source-scoped, live.
+
+## Compose note (unrelated, found while verifying the above)
+
+The local `pg_data` volume (494 MB, created 2026-07-05) is PG16-formatted; `docker-compose.yml`
+had been bumped to `pgvector/pgvector:pg17`, which refuses to start against an older-major
+data directory. Pinned `docker-compose.yml`'s `postgres` image back to `pg16` on
+2026-09-10 (user's explicit choice — see the comment at that line) so the existing local data
+survives. Re-bump to pg17 via a proper `pg_dumpall`-and-restore (or `pg_upgrade`) when
+convenient; `docker-compose.demo.yml:30` still says `pg17` and has the same latent issue if
+that override is ever used against this volume.

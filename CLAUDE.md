@@ -43,14 +43,21 @@ can produce a different intent on each run:
 
 **Two separate Postgres servers are in play.** Do not confuse them:
 
-    pgvector/pgvector:pg17 in Docker, host port 15432   -> veda, veda_engine (platform's own)
+    pgvector/pgvector:pg16 in Docker, host port 15432   -> veda, veda_engine (platform's own)
     homebrew postgresql@17 on the host, port 5432       -> homzhub (the source DB, a local copy)
+
+The Docker image was pinned back from `pg17` to `pg16` on 2026-09-10: the local `pg_data`
+volume (~500MB, real ingested/RBAC/chat data since 2026-07-05) is PG16-formatted, and
+Postgres refuses to start a newer major version against an older data directory. Re-bump to
+pg17 via a proper `pg_dumpall`-and-restore (or `pg_upgrade`), not by editing the compose
+file alone — see `docs/backlog/query-engine-open-items.md`.
 
 `veda` holds the Django tables; `veda_engine` holds the engine's pgvector tables
 (`doc_chunks`, `column_embeddings_v2`, `source_item_embeddings`, …). Code that queries an
 engine table through Django's `connection` works on a single-database setup and silently
 returns "relation does not exist" here — the error gets swallowed and the caller reports
-zero rows. Reach engine tables through `VEDA_INTERNAL_*` instead.
+zero rows. Reach engine tables through `VEDA_INTERNAL_*` instead. (This exact failure mode
+hit `storage_adapters/reader.py::ann_search` in production — fixed 2026-09-10.)
 
 Prod is on DigitalOcean and nothing here points at it: query execution resolves its
 connection from the `sources_source` table, which names the local copy. `run_homzhub_query.sh`

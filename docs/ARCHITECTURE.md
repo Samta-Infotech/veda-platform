@@ -456,7 +456,9 @@ different model and non-deterministic intent.
 **12 dev services** on `veda_net` (13 with the `proxy` profile); only `nginx` publishes a
 host port (`8080`). `api` / `worker` / `beat` build the thin `Dockerfile.api` (no torch);
 `inference` / `ingest-worker` build `Dockerfile.inference` (torch). `postgres` is
-**`pgvector/pgvector:pg17`** and hosts both `veda` and `veda_engine` (dev exposes `15432`).
+**`pgvector/pgvector:pg16`** (pinned back from `pg17` on 2026-09-10 — the local `pg_data`
+volume predates the pg17 bump; see §15) and hosts both `veda` and `veda_engine` (dev
+exposes `15432`).
 `pgbouncer` fronts every pool (transaction mode). Redis is triple-split: `redis-broker`
 (Celery), `redis-cache` (`allkeys-lru` — assembled `sm` + rehydrate pub/sub), `redis-stack`
 (`:6380`, RediSearch — the chat checkpointer). `ollama` is the dev SLM; prod adds `vllm`.
@@ -593,9 +595,13 @@ route.
 - Tenant-from-principal, per-source HNSW auto-tuning at scale (`artifact_scope` OFF by
   default), prod deployment hardening (B1–B13).
 
-**Recently fixed (2026-09-10):** `storage_adapters/reader.py::ann_search` was reading
-`column_embeddings_v2` on the `veda` connection, but that table lives in `veda_engine`, so
-Signal-1 dense retrieval was silently falling back to an **unscoped** engine-store query
-(leaking candidates across sources in a multi-source scope). `reader.py` now uses a
-dedicated `_internal_connection()` for the vector scan. Still worth a live confirmation —
-see [`backlog/query-engine-open-items.md`](backlog/query-engine-open-items.md).
+**Fixed and live-verified (2026-09-10):** `storage_adapters/reader.py::ann_search` was
+reading `column_embeddings_v2` on the `veda` connection, but that table lives in
+`veda_engine`, so Signal-1 dense retrieval was silently falling back to an **unscoped**
+engine-store query (leaking candidates across sources in a multi-source scope). Fixing the
+DB target surfaced a second, previously-masked type bug (`RequestContext.source_ids` are
+`int`; the column is `TEXT`). Both fixed; confirmed against the running stack —
+`✓ Signal 1 via storage_adapters (engine store, source-scoped): N cols` with real scores.
+Also: the local `pg_data` volume is PG16-formatted, so `docker-compose.yml`'s `postgres`
+image is pinned to `pg16` for now (was bumped to `pg17`) — see
+[`backlog/query-engine-open-items.md`](backlog/query-engine-open-items.md).

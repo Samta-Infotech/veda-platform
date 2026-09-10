@@ -296,6 +296,14 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     """
     source_ids, tenant = _scope_ids()
     source_id = source_ids[0]  # primary — only used to resolve the per-source ef_search knob
+    # column_embeddings_v2.source_id is TEXT (digit-strings, e.g. "4"), but
+    # RequestContext.source_ids are int (context.py `__post_init__` casts every element
+    # to int). Every other caller that touches this table stringifies first
+    # (retrieval_engine_phase3.py:193,392: `[str(s) for s in ctx.source_ids]`) — do the
+    # same here, or `source_id = ANY(%s)` binds an integer[] and Postgres raises
+    # "operator does not exist: text = integer" (masked until the DB-target fix above,
+    # since the query never reached this table before).
+    source_ids_str = [str(s) for s in source_ids]
     table = "column_embeddings_v2"
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     # Pin hnsw.ef_search to the §7.1a-tuned value (recall@k=1.0 on the home-schema
@@ -315,7 +323,7 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     with _internal_connection().cursor() as cur:
         cur.execute("BEGIN")
         cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search}")
-        cur.execute(sql, [vec, source_ids, vec, top_k])
+        cur.execute(sql, [vec, source_ids_str, vec, top_k])
         rows = cur.fetchall()
         cur.execute("COMMIT")
         return rows
