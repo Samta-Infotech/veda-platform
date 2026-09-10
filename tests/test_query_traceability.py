@@ -1406,3 +1406,442 @@ def test_no_live_progress_line_states_a_check_COUNT(flags_on):
         src = fh.read()
     offenders = re.findall(r'f"\{len\([^)]*\)\}\s*(?:safety\s*)?checks?\b[^"]*"', src)
     assert not offenders, f"a live progress line states a check count: {offenders}"
+
+
+# ---------------------------------------------------------------------------
+# A denial must RESOLVE access_check negatively, next to the denial itself.
+#
+# Regression: this emit existed on the routing permission pre-check branch and
+# was LOST when that branch was rewritten for the deny-gap logic. The turn then
+# shipped "Checking access permissions ✓ — You have permission to access the
+# required information" directly above an answer saying "You don't have
+# permission to access this data".
+# ---------------------------------------------------------------------------
+
+def test_every_no_access_return_resolves_the_access_phase(flags_on):
+    """Structural guard: a branch that refuses with `no_access` must emit the
+    access_check failure. Checked at the source, because the failure mode was a
+    rewrite silently dropping the emit — a behaviour test on one branch would not
+    have caught it on the next rewrite of another."""
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "veda_core", "veda_hybrid.py")) as fh:
+        src = fh.read()
+    lines = src.splitlines()
+    offenders = []
+    for i, line in enumerate(lines):
+        if '"no_access"' not in line:
+            continue
+        window = "\n".join(lines[max(0, i - 40):i + 5])
+        if "PHASE_ACCESS_CHECK" not in window:
+            offenders.append(i + 1)
+    assert not offenders, (
+        "a `no_access` refusal does not resolve access_check within 40 lines "
+        f"(veda_hybrid.py lines {offenders}) — the denial and the phase it "
+        "describes must stay together")
+
+
+def test_a_denied_turn_never_reports_access_as_verified(flags_on, trace):
+    """The end state the guard above protects: once a denial is emitted, the
+    projected timeline must not say access was verified."""
+    tl = lc.new_timeline(trace=trace)
+    tl.started(lc.PHASE_ACCESS_CHECK)
+    tl.completed(lc.PHASE_ACCESS_CHECK)        # the optimistic early resolution
+    tl.failed(lc.PHASE_ACCESS_CHECK)           # the real outcome
+    rows = {r["phase"]: r["status"] for r in sp.build_timeline_summary(trace)}
+    assert rows[lc.PHASE_ACCESS_CHECK] == "failed", (
+        "timeline_summary collapses a phase to its WORST status — a denial must win")
+
+
+# ---------------------------------------------------------------------------
+# A document / hybrid answer must not arrive with NO explanation.
+#
+# `rag` has no SQL to describe and `hybrid` inherits the SQL head's payload —
+# which does not exist when that head refused. The api tier then shipped its
+# empty `_NO_EXPLAIN` fallback, so a correct handbook answer went out with
+# `version: "1.0"` and every block empty.
+# ---------------------------------------------------------------------------
+
+def _answered(payload):
+    import veda_hybrid as VH
+
+    class _Item:
+        pass
+    it = _Item()
+    it.status = VH.STATUS_OK
+    it.result = payload
+
+    class _Res:
+        items = [it]
+    return _Res()
+
+
+def test_an_answered_turn_with_no_explain_is_backfilled_from_the_trace(flags_on, trace):
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    tl = lc.new_timeline(trace=trace)
+    tl.completed(lc.PHASE_RECEIVED)
+    tl.completed(lc.PHASE_ACCESS_CHECK)
+    rec = er.ExecutionRecorder(trace=trace)
+    rec.close(rec.open("3", source_type="document", engine="rag"), er.COMPLETED, rows=5)
+
+    payload = {"answer": "handbook says 90 days"}          # no explain at all
+    VH._backfill_missing_explain(_answered(payload))
+    ex = payload["explain"]
+
+    # the v2 half — what a reader of a document answer can actually use
+    assert ex["version"] == "2.0"
+    assert [s["name"] for s in ex["sources"]]
+    assert ex["audit"]["timeline_summary"]
+    # The v1 half stays EMPTY on purpose. build_explain handed an empty SQL string
+    # otherwise INVENTS content — measured: understanding "List records.", an
+    # operations entry, and `validation.passed: true` with no checks at all. On a
+    # document answer every one of those is a fabrication, and the validation one
+    # is a false assurance.
+    assert ex["operations"] == []
+    assert ex["data_used"]["datasets"] == []
+    assert ex["sql"]["query"] is None
+    assert ex["understanding"]["summary"] is None, "must not claim it listed records"
+    assert ex["validation"]["passed"] is None, (
+        "nothing was checked — `true` would be a false assurance")
+    assert ex["validation"]["checks"] == []
+
+
+def test_an_existing_explain_is_never_overwritten(flags_on, trace):
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+    payload = {"explain": {"version": "2.0", "understanding": {"summary": "mine"}}}
+    VH._backfill_missing_explain(_answered(payload))
+    assert payload["explain"]["understanding"]["summary"] == "mine"
+
+
+def test_a_refusal_is_not_backfilled(flags_on, trace):
+    """A refusal already has its own payload; a turn that produced nothing has
+    nothing to explain."""
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+
+    class _Item:
+        status = "refused"
+        result = {"answer": None}
+
+    class _Res:
+        items = [_Item()]
+
+    VH._backfill_missing_explain(_Res())
+    assert "explain" not in _Item.result
+
+
+def test_the_backfilled_payload_keeps_the_frozen_v1_shape(flags_on, trace):
+    """CHAT_API_CONTRACT.md §1e — the v1 blocks keep their exact shape whether or
+    not the v2 flags are on, so a client reading them cannot break."""
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+    payload = {}
+    VH._backfill_missing_explain(_answered(payload))
+    ex = payload["explain"]
+    for key in ("version", "understanding", "data_used", "operations",
+                "filters", "validation", "sql"):
+        assert key in ex, f"frozen v1 key `{key}` missing from the backfill"
+    assert set(ex["sql"]) == {"enabled", "query"}
+    assert set(ex["data_used"]) == {"datasets", "fields"}
+    assert set(ex["validation"]) >= {"passed", "checks"}
+
+
+# ---------------------------------------------------------------------------
+# A document answer's v1 blocks, filled from what the head ACTUALLY did.
+# `citations` and `chunks` were computed and then thrown away, so
+# `data_used.datasets` was empty even though the head knew which handbook it read.
+# ---------------------------------------------------------------------------
+
+class _RagLike:
+    """The shape a RAG/hybrid head returns."""
+    def __init__(self, cites, n):
+        self.citations = cites
+        self.chunks = list(range(n))
+        self.explain = None
+
+
+def test_document_evidence_names_the_documents_and_counts_passages(flags_on):
+    import veda_hybrid as VH
+    ev = VH._document_evidence(_RagLike(
+        ["Samta-Employee_Handbook_April_2026.pdf (p.12)",
+         "Samta-Employee_Handbook_April_2026.pdf (p.13)",
+         "maintenance_policy.docx (p.2)"], 5))
+    assert ev["documents"] == ["Samta-Employee Handbook April 2026",
+                               "maintenance policy"], ev["documents"]
+    assert ev["passages"] == 5, "five passages from two documents is still five"
+
+
+def test_a_document_answer_reports_its_documents_and_operations(flags_on, trace):
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+    payload = _RagLike(["Samta-Employee_Handbook_April_2026.pdf (p.12)"], 5)
+    VH._backfill_missing_explain(_answered(payload))
+    ex = payload.explain
+
+    assert ex["data_used"]["datasets"] == ["Samta-Employee Handbook April 2026"]
+    # v1 SHAPE is preserved: operations entries carry `summary`, not `label` —
+    # a client reads `summary`, so a renamed field would be a silent break.
+    assert all(set(o) == {"type", "summary"} for o in ex["operations"]), ex["operations"]
+    assert [o["type"] for o in ex["operations"]] == ["retrieval", "read", "synthesis"]
+    assert "5 relevant passages" in ex["operations"][0]["summary"]
+
+
+def test_the_document_summary_states_what_was_done_not_what_was_meant(flags_on, trace):
+    """"Answered from the Handbook, using 5 relevant passages" is checkable against
+    the citations. "Question about employee separation notice period" would be the
+    system's reading of the user's intent — which the document path never computes,
+    and inventing one is what this layer exists to prevent."""
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+    payload = _RagLike(["Samta-Employee_Handbook_April_2026.pdf (p.12)"], 5)
+    VH._backfill_missing_explain(_answered(payload))
+    summary = payload.explain["understanding"]["summary"]
+
+    assert "Answered from" in summary and "5 relevant passages" in summary, summary
+    # it must not read as an interpretation of the question
+    for word in ("question about", "you asked", "you want", "notice period"):
+        assert word not in summary.lower(), summary
+
+
+def test_a_document_answer_still_claims_no_query_validation(flags_on, trace):
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+    payload = _RagLike(["handbook.pdf (p.1)"], 3)
+    VH._backfill_missing_explain(_answered(payload))
+    ex = payload.explain
+    assert ex["validation"] == {"passed": None, "checks": []}
+    assert ex["sql"] == {"enabled": False, "query": None}
+    assert ex["filters"]["applied"] == []
+
+
+# ---------------------------------------------------------------------------
+# A HYBRID answer fuses SQL rows with document passages. It inherits the SQL
+# head's payload, which describes only the SQL half. Observed live: a
+# maintenance-policy answer carried "Count all maintenances, grouped by Asset Id"
+# with a relational table in data_used, while the answer came from a document.
+# ---------------------------------------------------------------------------
+
+def test_a_hybrid_payload_describes_both_halves(flags_on):
+    import veda_hybrid as VH
+    sql_side = {
+        "understanding": {"summary": "Count all maintenances, grouped by Asset Id.",
+                          "breakdown": ["Count all maintenances"]},
+        "data_used": {"datasets": ["Maintenances"], "fields": ["Asset Id"]},
+        "operations": [{"type": "count", "summary": "Count all maintenances"}],
+    }
+    out = VH._merge_document_evidence(
+        sql_side, {"documents": ["maintenance policy"], "passages": 5})
+
+    # the SQL half is UNTOUCHED — it really did happen
+    assert "Maintenances" in out["data_used"]["datasets"]
+    assert out["operations"][0]["summary"] == "Count all maintenances"
+    assert out["understanding"]["summary"].startswith("Count all maintenances")
+    # and the document half is now there too
+    assert "maintenance policy" in out["data_used"]["datasets"]
+    assert any("5 relevant passages" in o["summary"] for o in out["operations"])
+    assert "Also drew on maintenance policy" in out["understanding"]["summary"]
+    assert all(set(o) == {"type", "summary"} for o in out["operations"])
+
+
+def test_merging_document_evidence_is_idempotent(flags_on):
+    """The merge can be reached more than once; it must not stack duplicates."""
+    import veda_hybrid as VH
+    payload = {
+        "understanding": {"summary": "Count all maintenances.", "breakdown": []},
+        "data_used": {"datasets": ["Maintenances"], "fields": []},
+        "operations": [{"type": "count", "summary": "Count all maintenances"}],
+    }
+    ev = {"documents": ["maintenance policy"], "passages": 5}
+    for _ in range(3):
+        payload = VH._merge_document_evidence(payload, ev)
+    assert payload["data_used"]["datasets"].count("maintenance policy") == 1
+    assert len([o for o in payload["operations"] if o["type"] == "retrieval"]) == 1
+    assert payload["understanding"]["summary"].count("Also drew on") == 1
+
+
+def test_a_sql_only_answer_is_not_touched_by_the_merge(flags_on):
+    import veda_hybrid as VH
+    before = {"understanding": {"summary": "Count all assets.", "breakdown": []},
+              "data_used": {"datasets": ["Assets"], "fields": []},
+              "operations": [{"type": "count", "summary": "Count all assets"}]}
+    import copy
+    after = VH._merge_document_evidence(copy.deepcopy(before),
+                                        {"documents": [], "passages": 0})
+    assert after == before, "no document evidence means no change at all"
+
+
+# ---------------------------------------------------------------------------
+# A SHADOW routing decision is a measurement of what the policy WOULD choose.
+# It does not drive execution, so it is not an explanation of this answer.
+#
+# Measured on a data lake question: the payload said `sources: [invoices_csv,
+# homzhub]` and "The answer needed data from more than one source, joined on a
+# known relationship" — while its own `data_used` listed ONE dataset and every
+# figure came from one CSV. No join happened; the second source was a guess.
+# ---------------------------------------------------------------------------
+
+def test_a_shadow_routing_decision_is_not_reported_as_what_happened(flags_on, trace):
+    trace.set("routing", status="ROUTED", mode="MULTI", source_ids=["4", "2"],
+              reason_code="RELATIONSHIP_EDGE", shadow=True)
+    assert sp.build_routing(trace) is None, (
+        "an observe-only decision must not be presented as this answer's routing")
+
+
+def test_a_real_routing_decision_is_still_reported(flags_on, trace):
+    trace.set("routing", status="ROUTED", mode="SINGLE", source_ids=["2"],
+              reason_code="SINGLE_CANDIDATE", shadow=False)
+    out = sp.build_routing(trace)
+    assert out and out["mode"] == "single" and out["reason_code"] == "SINGLE_CANDIDATE"
+
+
+def test_sources_are_not_guessed_from_a_shadow_decision(flags_on, trace):
+    """With no execution record and a shadow decision we do not know which source
+    answered. An empty list says that; a guessed name claims a source contributed
+    data it never provided."""
+    trace.set("routing", status="ROUTED", mode="MULTI", source_ids=["4", "2"],
+              shadow=True)
+    assert sp.build_data_sources(trace) == []
+
+    # a NON-shadow decision is still a usable fallback
+    trace.set("routing", status="ROUTED", mode="SINGLE", source_ids=["2"],
+              shadow=False)
+    assert [d["name"] for d in sp.build_data_sources(trace)]
+
+
+def test_an_execution_record_always_beats_the_routing_decision(flags_on, trace):
+    """Proof of participation outranks any decision, shadow or not."""
+    trace.set("routing", status="ROUTED", mode="MULTI", source_ids=["4", "2"],
+              shadow=False)
+    rec = er.ExecutionRecorder(trace=trace)
+    rec.close(rec.open("3", source_type="document", engine="rag"), er.COMPLETED, rows=5)
+    names = [d["name"] for d in sp.build_data_sources(trace)]
+    assert len(names) == 1, f"only the source that ran may be named, got {names}"
+
+
+def test_the_reported_row_count_matches_the_rows_returned(flags_on, trace):
+    """No path sets execution.row_count for a federated answer, so the payload said
+    `row_count: null` while the thinking model's evidence said 5 and the table had
+    5 rows. Two numbers for one fact."""
+    import veda_hybrid as VH
+
+    class _Item:
+        status = VH.STATUS_OK
+        result = {"rows": [1, 2, 3, 4, 5],
+                  "explain": {"result": {"row_count": None, "truncated": False}}}
+
+    class _Res:
+        items = [_Item()]
+
+    VH._sync_reported_row_count(_Res())
+    assert _Item.result["explain"]["result"]["row_count"] == 5
+
+
+def test_a_row_count_the_engine_recorded_is_left_alone(flags_on):
+    import veda_hybrid as VH
+
+    class _Item:
+        status = VH.STATUS_OK
+        result = {"rows": [1, 2], "explain": {"result": {"row_count": 100}}}
+
+    class _Res:
+        items = [_Item()]
+
+    VH._sync_reported_row_count(_Res())
+    assert _Item.result["explain"]["result"]["row_count"] == 100, (
+        "a count that came from the execution itself is authoritative")
+
+
+# ===================================================================== sources
+# The `sources` block is what answers "where did this answer come from". It was
+# built ONLY from proof of participation — an execution record, or a routing
+# decision that actually drove execution — and a plain single-source query
+# produces neither, so the commonest query in the system shipped no block at all.
+class TestSourcesBlockPresence:
+
+    def _trace(self, **execution):
+        # Clear the AMBIENT trace first: new_trace() deliberately reuses one that
+        # is already bound to the context (so every stage of a real query writes
+        # into one trace), which means a trace left behind by an earlier test in
+        # this file would be handed back here, carrying its row_count.
+        from veda import explain as _ex
+        from veda.explain import new_trace
+        try:
+            _ex._CURRENT_TRACE.set(None)
+        except Exception:
+            pass
+        tr = new_trace("q")
+        if execution:
+            tr.set("execution", **execution)
+        return tr
+
+    def _profiles(self, prof):
+        """Bind through BOTH module names — `context` and `veda_core.context` are
+        two module objects with two separate ContextVars."""
+        import importlib
+        for name in ("context", "veda_core.context"):
+            try:
+                importlib.import_module(name).set_source_profiles(prof)
+            except Exception:
+                pass
+
+    def test_a_single_source_query_names_where_the_answer_came_from(self):
+        from veda import safe_projection as sp
+        self._profiles({"2": {"name": "homzhub", "source_type": "relational"}})
+        out = sp.build_data_sources(self._trace(row_count=20))
+        assert [s["name"] for s in out] == ["homzhub"]
+        assert out[0]["type"] == "Database"
+
+    def test_the_single_source_carries_what_it_contributed(self):
+        from veda import safe_projection as sp
+        self._profiles({"2": {"name": "homzhub", "source_type": "relational"}})
+        out = sp.build_data_sources(self._trace(row_count=20))
+        assert out[0]["rows"] == 20, "one source answered, so the rows are its rows"
+
+    def test_two_sources_in_scope_with_no_records_names_neither(self):
+        """With two in scope and no record of which answered, we do not know —
+        an empty block says that; naming one would be a guess."""
+        from veda import safe_projection as sp
+        self._profiles({"2": {"name": "homzhub"}, "3": {"name": "invoices_csv"}})
+        assert sp.build_data_sources(self._trace(row_count=5)) == []
+
+    def test_no_scope_at_all_names_nothing(self):
+        from veda import safe_projection as sp
+        self._profiles({})
+        assert sp.build_data_sources(self._trace(row_count=5)) == []
+
+    def test_an_unreported_row_count_is_omitted_not_zeroed(self):
+        from veda import safe_projection as sp
+        self._profiles({"2": {"name": "homzhub"}})
+        out = sp.build_data_sources(self._trace())
+        assert out and "rows" not in out[0], (
+            "'0 rows' and 'not reported' are different claims")
+
+    def test_the_raw_source_id_still_leaves_the_user_facing_block(self):
+        from veda import safe_projection as sp
+        self._profiles({"2": {"name": "homzhub", "source_type": "relational"}})
+        ext = sp.build_explain_extension(self._trace(row_count=20), trace_id="t")
+        assert "id" not in ext["sources"][0], "a source id is an internal key"
+        assert ext["audit"]["sources"][0]["id"] == "2", "it is MOVED, not dropped"

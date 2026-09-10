@@ -497,7 +497,12 @@ def test_step_payload_is_additive_only():
     payload["steps"] = t.as_payload()
     assert payload["phase"] == "source_selection"
     assert payload["message"] == "Found relevant data"
-    assert len(payload["steps"]["steps"]) == 4
+    # `steps` reveals PROGRESSIVELY — a step appears when the turn reaches it — so
+    # its length is the progress so far, not the size of the model. `total_steps`
+    # is the denominator a client needs for "step 2 of 4".
+    assert payload["steps"]["total_steps"] == 4
+    assert len(payload["steps"]["steps"]) == 2
+    assert [s["id"] for s in payload["steps"]["steps"]] == ["understanding", "finding"]
 
 
 def test_tracker_never_raises_on_malformed_input():
@@ -1344,3 +1349,204 @@ def test_a_negative_count_is_rejected_rather_than_shown():
     t = ts.ThinkingStepTracker()
     t.set_evidence(rows=-1, sources=3)
     assert t.as_payload()["evidence"] == {"sources": 3}
+
+
+def test_an_engine_denial_overrides_the_measured_access_completion():
+    """The api tier measures RBAC before the engine runs and marks the check
+    complete from that duration — it knows the check HAPPENED, not that it
+    PASSED. When the engine later denies, the denial must win.
+
+    Observed live: `access ✓ "You have permission to access the required
+    information"` (6 ms) directly above an answer saying the opposite.
+    """
+    t = ts.ThinkingStepTracker()
+    t.set_sub_check_duration(ts.STEP_FINDING, "access", 6)
+    t.consume(ev("access_check", status="started"))
+    assert rows({s["id"]: s for s in t.snapshot()}["finding"],
+                ts.DETAIL_ACCESS)[0]["state"] == ts.STATE_COMPLETED
+
+    t.consume(ev("access_check", status="failed"))
+    check = rows({s["id"]: s for s in t.snapshot()}["finding"], ts.DETAIL_ACCESS)[0]
+    assert check["state"] == ts.STATE_FAILED
+    msg = (check.get("message") or "").lower()
+    # The copy must convey a denial. It deliberately says "access" rather than
+    # "permission" (that wording is in _ACCESS_COPY) — what matters is that the
+    # optimistic sentence is GONE, because that is the one that contradicted the
+    # answer the user was reading.
+    assert "you have permission" not in msg, msg
+    assert "isn't available" in msg or "not available" in msg, msg
+
+
+# ---------------------------------------------------------------------------
+# A hybrid turn: the SQL head's validation FAILS, the documents answer, and the
+# answer is correct. Observed live — the panel showed
+# "✗ The result did not pass a safety check" above a good handbook answer.
+# ---------------------------------------------------------------------------
+
+def test_a_superseded_validation_failure_does_not_describe_a_delivered_answer():
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("received", status="completed"))
+    t.consume(ev("sql_planning"))
+    t.consume(ev("validation", status="failed"))          # the SQL attempt failed
+    t.consume(ev("result_preparation", status="completed"))  # documents answered
+    t.finish(answered_without_result=False)
+
+    check = rows({s["id"]: s for s in t.snapshot()}["analyzing"], ts.DETAIL_VALIDATION)[0]
+    assert check["state"] == ts.STATE_WARNING, "a delivered answer did not fail a check"
+    msg = check["message"].lower()
+    assert "did not pass" not in msg, msg
+    assert "set aside" in msg, msg
+
+
+def test_a_validation_failure_on_a_REFUSAL_stays_a_failure():
+    """The downgrade must not soften the case where the failure IS the outcome."""
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("received", status="completed"))
+    t.consume(ev("sql_planning"))
+    t.consume(ev("validation", status="failed"))
+    t.finish(answered_without_result=True)
+
+    check = rows({s["id"]: s for s in t.snapshot()}["analyzing"], ts.DETAIL_VALIDATION)[0]
+    assert check["state"] == ts.STATE_FAILED
+    assert "did not pass" in check["message"].lower()
+
+
+def test_a_failed_turn_keeps_its_validation_failure():
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("received", status="completed"))
+    t.consume(ev("sql_planning"))
+    t.consume(ev("validation", status="failed"))
+    t.finish(failed=True)
+    check = rows({s["id"]: s for s in t.snapshot()}["analyzing"], ts.DETAIL_VALIDATION)[0]
+    assert check["state"] == ts.STATE_FAILED
+
+
+def test_hybrid_doc_chunks_are_counted_as_passages():
+    """`hybrid_retrieve` names the count `doc_chunks`, not `chunks`. Reading only
+    the latter reported `evidence: {"rows": 0}` for an answer built from 5
+    passages — a count that was not merely absent but wrong."""
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("received", status="completed"))
+    t.consume({"phase": "hybrid_retrieve", "message": "", "sql_cols": 0, "doc_chunks": 5})
+    assert t.as_payload()["evidence"].get("passages") == 5
+
+
+# ------------------------------------------------- execution shape from evidence
+def test_two_named_sources_are_a_multi_source_execution():
+    """The cross-source lane emits no `intent`, so a federated answer reported
+    execution.type "unknown" while naming the sources it had just combined."""
+    assert ts.execution_shape_from_evidence(
+        source_names=["sales_lake", "homzhub"]) == ts.EXEC_MULTI_SOURCE
+    assert ts.execution_shape_from_evidence(source_count=3) == ts.EXEC_MULTI_SOURCE
+
+
+def test_one_source_with_passages_is_a_document_execution():
+    assert ts.execution_shape_from_evidence(
+        source_count=1, passages=6) == ts.EXEC_DOCUMENTS
+
+
+def test_rows_alone_are_a_sql_execution():
+    assert ts.execution_shape_from_evidence(has_rows=True) == ts.EXEC_SQL
+
+
+def test_multi_source_wins_over_the_rows_a_federated_answer_also_returns():
+    assert ts.execution_shape_from_evidence(
+        source_count=2, has_rows=True) == ts.EXEC_MULTI_SOURCE
+
+
+def test_zero_passages_is_not_evidence_of_a_document_answer():
+    """0 retrieved passages means retrieval found nothing — not that this was a
+    document turn. Same for a null count, which means 'not reported'."""
+    assert ts.execution_shape_from_evidence(passages=0) is None
+    assert ts.execution_shape_from_evidence(passages=None) is None
+
+
+def test_no_facts_at_all_leaves_the_shape_honestly_unknown():
+    assert ts.execution_shape_from_evidence() is None
+    assert ts.execution_shape_from_evidence(source_count=1, source_names=["x"]) is None
+
+
+# --------------------------------------------------------- progressive reveal
+def test_the_first_frame_shows_only_the_step_that_actually_started():
+    """All four steps were listed from the first frame — that is a PLAN, not
+    progress, and on a turn that never reaches step 3 the plan is simply wrong."""
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("supervisor_classify", "Understanding your question"))
+    p = t.as_payload()
+    assert [s["id"] for s in p["steps"]] == ["understanding"]
+    assert p["total_steps"] == 4
+
+
+def test_the_next_step_appears_only_once_the_turn_reaches_it():
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("supervisor_classify", "Understanding your question"))
+    assert len(t.as_payload()["steps"]) == 1
+    t.consume(ev("source_selection", "Finding the data"))
+    ids = [s["id"] for s in t.as_payload()["steps"]]
+    assert ids == ["understanding", "finding"]
+    assert ids[0] == "understanding" and ids[-1] == "finding"
+
+
+def test_a_future_step_is_never_listed_while_the_turn_is_running():
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("supervisor_classify", "Understanding your question"))
+    ids = {s["id"] for s in t.as_payload()["steps"]}
+    assert "analyzing" not in ids and "preparing" not in ids, (
+        "advertising a step that has not run claims work that may never happen")
+
+
+def test_a_step_the_turn_moved_past_is_shown_resolved_not_pending():
+    """A pending circle sitting between two ticks reads as broken. The document
+    path emits no phase mapping to 'Analyzing', so this is the live case."""
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("result_preparation", "Putting your answer together"))
+    steps = {s["id"]: s for s in t.as_payload()["steps"]}
+    assert steps["understanding"]["state"] in (ts.STATE_SKIPPED, ts.STATE_COMPLETED)
+    assert steps["understanding"]["state"] != ts.STATE_PENDING
+
+
+def test_a_skipped_step_carries_no_content():
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("result_preparation", "Putting your answer together"))
+    for s in t.as_payload()["steps"]:
+        if s["state"] == ts.STATE_SKIPPED:
+            assert s["details"] == [] and s["expandable"] is False
+
+
+def test_a_turn_that_never_started_lists_no_steps_at_all():
+    """Smalltalk bypasses the engine — four empty circles above a finished answer
+    is not progress, it is a progress display full of blanks."""
+    t = ts.ThinkingStepTracker()
+    t.finish()
+    assert t.as_payload()["steps"] == []
+    assert t.has_progress() is False
+
+
+def test_total_steps_is_stable_while_the_list_grows():
+    t = ts.ThinkingStepTracker()
+    seen = []
+    for phase in ("supervisor_classify", "source_selection",
+                  "data_retrieval", "result_preparation"):
+        t.consume(ev(phase, "…"))
+        p = t.as_payload()
+        assert p["total_steps"] == 4
+        seen.append(len(p["steps"]))
+    assert seen == sorted(seen), "the list may only grow, never shrink"
+    assert seen[-1] == 4
+
+
+def test_the_running_step_always_has_a_summary_to_fall_back_to():
+    """The legacy top-level `message` falls back to the running step's summary,
+    because most phases carry no user-facing copy and shipped `message: ""` — a
+    status line that appeared, blanked and reappeared several times per turn.
+    That fallback is only safe while a summary is guaranteed to exist."""
+    for phase in ("received", "source_selection", "data_retrieval",
+                  "result_preparation"):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev(phase, ""))
+        cur = t.current_step()
+        assert cur, f"{phase} opened no step"
+        assert t.steps[cur].summary or ts._GENERIC_CONTEXT[cur], (
+            f"{phase} leaves the running step with nothing to say")
+        rendered = {s["id"]: s for s in t.as_payload()["steps"]}
+        assert rendered[cur]["summary"].strip(), "a rendered step must never be blank"

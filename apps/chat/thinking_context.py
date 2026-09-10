@@ -176,7 +176,10 @@ class ThinkingContext:
     def absorb(self, payload: dict) -> None:
         """Take whatever confirmed facts this progress event carries. Never raises."""
         try:
-            _chunks = (payload or {}).get("chunks")
+            _p = payload or {}
+            _chunks = _p.get("chunks")
+            if _chunks is None:
+                _chunks = _p.get("doc_chunks")     # hybrid_retrieve's name
             if isinstance(_chunks, int) and _chunks >= 0:
                 self.passages = _chunks
             _intent = (payload or {}).get("intent")

@@ -255,13 +255,32 @@ same thing:
 ```
 
 **The four steps are fixed.** Same four, same order, same ids, for SQL,
-documents, data lake, multi-source, refusals and small talk. Render them
-unconditionally; only their `state`, `summary` and `details` vary.
+documents, data lake, multi-source, refusals and small talk. Only their `state`,
+`summary` and `details` vary.
+
+**Do not render `phase` / `message`.** Those two are the pre-step-model thinking
+line and are kept only for clients that predate `steps`. A steps-aware client that
+renders both shows the same progress twice — once as a top-level status line and
+once as the step list. `message` now mirrors the running step's `summary`, so the
+two can never disagree, but the step list is the one to render.
+
+**`steps` reveals progressively.** A step enters the array when the turn actually
+reaches it — the first frame carries one step, not four. Render the array as it
+arrives, in order; the array only ever **grows**, and a step already in it never
+disappears and never moves. Use `total_steps` (always `4`) as the denominator for
+"step 2 of 4" — never `steps.length`, which is the progress so far.
+
+Listing all four up front described a *plan*, not progress, and on a turn that
+never reaches step 3 the plan was simply wrong. A step is withheld only while it
+is still `pending` and nothing after it has begun; once the turn moves past a step
+it appears with a resolved state (`completed` or `skipped`), never as a `pending`
+circle between two ticks.
 
 | Field | Contract |
 |---|---|
 | `status` | `active` while the turn runs, then exactly one of `completed` / `failed` |
 | `current_step` | the `id` of the running step; **`null` once `status` is terminal** |
+| `total_steps` | always `4` — the size of the model. `steps.length` is the progress so far and grows during the turn |
 | `steps[].state` | `pending` · `active` · `completed` · `warning` · `failed` · `skipped` |
 | `steps[].duration_ms` | real measured time; `null` for a step that never started, and for one whose work happened but was never reported as a phase. **Never fabricated** — `null` means "not measured", not zero |
 | `steps[].index` | 1-4, matching the fixed order — for a client that renders by position rather than by `id` |
@@ -293,6 +312,8 @@ event cannot introduce a new row shape in the UI:
 * A `pending` step never precedes a resolved one — a step the turn moved past
   resolves to `completed` (its work happened but went unreported) or `skipped`
   (it genuinely did not run).
+* A step not yet reached is **absent from `steps`**, not present as `pending`.
+  `pending` therefore appears only transiently, on a step the turn has entered.
 * Steps only move **forward**. A late backend phase cannot reopen a finished step.
 * A step that has not started shows **nothing** inside it: `details` is empty even
   when a measurement for it already exists.
@@ -317,7 +338,7 @@ contract:** no v1 key is removed, renamed or reshaped.
 |---|---|
 | `routing` | why this source set — `{mode, summary, source_count, reason_code}` |
 | `execution` | per-source outcome — `{summary, status, sources: [{name, type, status, duration_ms, rows_returned, required}]}` |
-| `sources` | the sources that participated, by display name — `[{name, type, known}]` |
+| `sources` | **where the answer came from** — `[{name, type, known, rows?}]`, by display name, never an identifier. `rows` is that source's own contribution and is **omitted when it was not recorded** (omitted and `0` are different claims). Present for a single-source answer too; an EMPTY list means the backend could not establish which source answered, not that none did |
 | `result` | `{row_count, truncated, partial, reused_verified_query}` |
 | `warnings` | stable machine codes + user copy (below). Always a list |
 | `limitations` | the same warnings as plain sentences. Always a list |
@@ -402,7 +423,7 @@ internals improve.
 | Warning `code`s | the seven in §1d — stable machine identifiers |
 | `flow` `stage` values | `request` · `access` · `sources` · `evidence` · `validation` · `operations` · `result` · `answer` |
 | `status` values | `active` · `completed` · `failed` |
-| Model keys | `type` `status` `current_step` `steps` `evidence` `execution` `timing` |
+| Model keys | `type` `status` `current_step` `steps` `total_steps` `evidence` `execution` `timing` |
 | Event names and order | `thinking`\* → `content`\* → `visualization`? → `explainability` → `usage` → `completed` |
 | Error `code`s | `LLM_UNAVAILABLE` · `MODEL_ERROR` · `STREAM_ERROR` |
 | The three-level split | backend phase names and source ids stay inside `audit`, never above it |
@@ -566,3 +587,6 @@ must not assume the answered-turn shape.
 | 2026-09-10 (explainability v2) | Added §1c (the normalized `thinking` model) and §1d (`explainability` v2: `routing` / `execution` / `sources` / `result` / `warnings` / `limitations` / `provenance` / `flow` / `support` / `audit`). Both **flag-gated OFF by default** — with the flags off the wire is byte-identical to §1a/§1b. Three disclosure levels defined; backend phase names and source identifiers confined to `audit`. `sql.enabled` default flipped to **off**. A confidence below `LOW_CONFIDENCE_WARNING_BELOW` (default 0.5) now raises a `low_evidence` warning; a MISSING confidence deliberately does not. History `metadata` gained `trace_id` + `timeline`. |
 | 2026-09-10 (stability) | Added §1e — the frozen-vs-not-frozen split, so a frontend can be built now while the internals keep improving. Identifiers, state values, closed vocabularies and event order are frozen; all human-readable copy and the presence of optional blocks are explicitly NOT. |
 | 2026-09-10 (correction) | §2 documented `POST /conversations/history`; the endpoint is **`GET`** with a query parameter and rejects POST. Corrected. |
+| 2026-09-10 (progressive steps) | `thinking.steps` now reveals **one step at a time** — a step enters the array when the turn reaches it, instead of all four being listed from the first frame. Added `total_steps` (always `4`) so a client can still render "step 2 of 4"; `steps.length` is now the progress so far. The array only grows, and a step already present never disappears or moves. A step the turn has moved past appears with a resolved state (`completed`/`skipped`), never as `pending` between two ticks — the same rule the terminal frame already applied, now applied live so consecutive frames cannot contradict each other. |
+| 2026-09-10 (legacy message) | The legacy top-level `message` shipped **empty** on most `thinking` frames (9 of the 12 a normal relational turn emits) — most internal phases have no user-facing copy of their own — so a client rendering it showed a status line that appeared, blanked and reappeared several times per turn. It now falls back to the running step's `summary`: never empty, and never able to disagree with the step model. **`phase` and `message` are legacy**; a client that renders `steps` must not render them too, or the same progress appears twice. |
+| 2026-09-10 (sources) | `explainability.sources` — "where did this answer come from" — was built only from proof of participation: a per-source execution record, or a routing decision that actually drove execution. A plain single-source query produces **neither** (only the cross-source coordinator writes execution records, and the routing decision is observe-only under shadow mode), so the commonest query in the system shipped **no `sources` block at all** (measured: a Tier-1 relational answer, `sources: null`). It now falls back to the one source the request was scoped to, when there is exactly one — with two or more and no record of which answered, the list stays empty rather than naming a guess. Each entry may now carry `rows`, that source's own recorded contribution, omitted when never recorded. Source identifiers remain confined to `audit.sources`. |

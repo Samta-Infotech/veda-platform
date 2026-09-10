@@ -122,6 +122,14 @@ def build_routing(trace) -> Optional[Dict[str, Any]]:
     if not r:
         return None
     mode_raw = str(r.get("mode") or "")
+    # SHADOW decisions describe what the routing policy WOULD have chosen; they do
+    # not drive execution (MULTISOURCE_ROUTING_SHADOW). Reporting one as fact told a
+    # user "The answer needed data from more than one source, joined on a known
+    # relationship" for an answer whose own `data_used` listed exactly ONE dataset
+    # and where no join happened. An observe-only measurement is not an explanation
+    # of this answer, so no routing block is produced for it.
+    if r.get("shadow"):
+        return None
     reason_code = str(r.get("reason_code") or "")
     sids = list(r.get("source_ids") or [])
 
@@ -221,8 +229,79 @@ def build_data_sources(trace) -> List[Dict[str, Any]]:
     records = _sec(trace, er.TRACE_SECTION).get("records") or []
     ids = [r.get("source_id") for r in records if isinstance(r, dict) and r.get("source_id")]
     if not ids:
-        ids = list(_sec(trace, "routing").get("source_ids") or [])
-    return sn.describe_all(ids)
+        # Fall back to the routing decision ONLY when it actually chose the sources.
+        # Under MULTISOURCE_ROUTING_SHADOW the decision is observe-only, so naming
+        # its sources here claimed a source had contributed data when it had not —
+        # measured: `sources: [invoices_csv, homzhub]` on an answer whose figures
+        # came entirely from one CSV. With no records and a shadow decision we do
+        # not know which source answered, and an empty list says that honestly.
+        _r = _sec(trace, "routing")
+        if not _r.get("shadow"):
+            ids = list(_r.get("source_ids") or [])
+    if not ids:
+        ids = _scoped_single_source()
+    out = sn.describe_all(ids)
+    _attach_contribution(out, records, trace)
+    return out
+
+
+#: The engine is imported under BOTH names — bare ``context`` and
+#: ``veda_core.context`` — and Python loads those as two module objects with two
+#: separate ContextVars. Read through both or the value set by the other half of
+#: the process is invisible (the same trap documented in inference/routes/hybrid.py).
+_CONTEXT_MODULE_NAMES = ("veda_core.context", "context")
+
+
+def _scoped_single_source() -> List[str]:
+    """The one source the request was scoped to, when there is exactly one.
+
+    LAST RESORT, and deliberately narrow. The `sources` block is built from proof
+    of participation: an execution record, or a routing decision that actually
+    drove execution. A plain single-source query produces NEITHER — only the
+    cross-source coordinator writes execution records, and the routing decision is
+    observe-only under shadow mode — so the commonest query in the system answered
+    with no `sources` block at all, and the reader could not see where the answer
+    came from (measured: a Tier-1 relational answer, `sources: null`).
+
+    With exactly ONE source in scope there is no ambiguity: the answer came from
+    it. With two or more and no records, we genuinely do not know which one
+    answered, and an empty block says that honestly rather than naming a guess.
+    """
+    import importlib
+    for name in _CONTEXT_MODULE_NAMES:
+        try:
+            profiles = importlib.import_module(name).current_source_profiles()
+        except Exception:
+            continue
+        if isinstance(profiles, dict) and len(profiles) == 1:
+            return [str(next(iter(profiles)))]
+    return []
+
+
+def _attach_contribution(entries, records, trace) -> None:
+    """Say what each source CONTRIBUTED, so the block answers "where did this come
+    from" rather than only "who took part".
+
+    Only from a figure that was actually recorded: a per-source execution record's
+    own row count, or — when a single source answered the whole query — the
+    query's row count. Never divided, never estimated, and omitted entirely when
+    no figure exists, because "0 rows" and "not reported" are different claims.
+    """
+    try:
+        by_id = {}
+        for r in (records or []):
+            if isinstance(r, dict) and r.get("source_id") is not None:
+                by_id[str(r["source_id"])] = _sane_count(r.get("row_count"))
+        single = len(entries) == 1
+        total = _sane_count(_sec(trace, "execution").get("row_count"))
+        for e in entries:
+            rows = by_id.get(str(e.get("id")))
+            if rows is None and single:
+                rows = total
+            if isinstance(rows, int) and rows >= 0:
+                e["rows"] = rows
+    except Exception:
+        pass
 
 
 # ── Part 9/10: cross-source ──────────────────────────────────────────────────

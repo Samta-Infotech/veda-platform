@@ -721,6 +721,29 @@ def _run_coordinator(query, verbose=False, on_event=None):
                         # canonical denial text every other path already uses.
                         _deny_msg = ("You don't have permission to access this data. "
                                      "Contact your Admin to request access.")
+                        # RESOLVE access_check NEGATIVELY before returning.
+                        #
+                        # Regression re-fix: this emit existed on this branch and was
+                        # LOST when the branch was rewritten for the deny-gap logic
+                        # (the merge diff shows the removed line). Without it the
+                        # timeline keeps the optimistic `started`/`completed` from
+                        # scope-resolution time, so a real denial shipped as
+                        # "Checking access permissions ✓ — You have permission to
+                        # access the required information" directly above an answer
+                        # saying "You don't have permission to access this data".
+                        # Telling someone they have permission they do not have is
+                        # the worst thing this layer can get wrong, so the emit
+                        # belongs next to the denial it describes, not in a sweep.
+                        try:
+                            from veda import lifecycle as _lc2
+                            _lc2.current_timeline().failed(_lc2.PHASE_ACCESS_CHECK)
+                        except Exception:
+                            pass
+                        try:
+                            from veda import warnings as _vw2
+                            _vw2.add(_vw2.RESTRICTED_DATA)
+                        except Exception:
+                            pass
                         _emit(on_event, "answer", _deny_msg)
                         return MultiResult.single(
                             query, STATUS_REFUSED, "no_access", refuse_reason=_deny_msg)
@@ -1202,6 +1225,8 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
             _clean_refuse_on_empty_error(result)
             # Decide the access-check outcome from the TURN's terminal feedback,
             # before the timeline is closed and re-read into the payload.
+            _backfill_missing_explain(result)   # before the timeline refresh reads it
+            _sync_reported_row_count(result)
             _reconcile_access_check(result, _tl)
             _emit_terminal_lifecycle(_tl, _final_status)
             # The payload was built before the line above ran, so the PERSISTED
@@ -1286,6 +1311,239 @@ def _raise_low_confidence_caveat(confidence) -> None:
         if floor > 0 and float(confidence) < floor:
             from veda import warnings as _vw
             _vw.add(_vw.LOW_EVIDENCE)
+    except Exception:
+        pass
+
+
+
+#: The v1 blocks are DERIVED FROM SQL. Handed an empty SQL string, build_explain
+#: still produces content — measured: `understanding: "List records."`,
+#: `operations: [{"type": "list", "summary": "List records"}]`, and worst of all
+#: `validation: {"passed": true, "checks": []}`. On a DOCUMENT answer all three are
+#: fabrications: nothing listed any records, and claiming validation PASSED when
+#: nothing was checked is the exact kind of false assurance this layer exists to
+#: remove. The keys stay (a client reads them — CHAT_API_CONTRACT.md §1e) but the
+#: content becomes the honest empty value: `None` where a fact is unknown, `[]`
+#: where nothing happened.
+_V1_WITHOUT_SQL = {
+    "understanding": {"summary": None, "breakdown": []},
+    "operations": [],
+    "validation": {"passed": None, "checks": []},
+    "data_used": {"datasets": [], "fields": []},
+}
+
+
+def _strip_invented_v1(explain: dict) -> dict:
+    """Replace the SQL-derived v1 blocks with their honest empty form."""
+    try:
+        for key, empty in _V1_WITHOUT_SQL.items():
+            if key in explain:
+                explain[key] = json.loads(json.dumps(empty))
+    except Exception:
+        pass
+    return explain
+
+
+def _document_evidence(payload) -> dict:
+    """Document names and passage count off a RAG/hybrid head result.
+
+    These are REAL facts the head already computed and then threw away:
+    `citations` carries "doc_name (p.N)" strings and `chunks` is the retrieved
+    passage list. Before this, a document answer's `data_used.datasets` was empty
+    even though the head knew exactly which handbook it had read.
+
+    The page suffix is dropped and underscores become spaces — a display name, the
+    same treatment a relational source's name gets. Names are DEDUPED preserving
+    order, because five passages from one document are one document.
+    """
+    out = {"documents": [], "passages": 0}
+    try:
+        cites = list(getattr(payload, "citations", None) or [])
+        seen = set()
+        for c in cites:
+            name = str(c).split(" (p.")[0].strip()
+            if not name:
+                continue
+            name = name.rsplit(".", 1)[0] if "." in name[-6:] else name
+            name = name.replace("_", " ").strip()
+            if name and name not in seen:
+                seen.add(name)
+                out["documents"].append(name)
+        chunks = getattr(payload, "chunks", None)
+        if chunks is not None:
+            out["passages"] = len(chunks)
+    except Exception:
+        pass
+    return out
+
+
+def _apply_document_v1(explain: dict, ev: dict) -> dict:
+    """Fill the v1 blocks with what a DOCUMENT answer actually did.
+
+    Keeps the v1 shape exactly (`operations` entries stay `{type, summary}` — a
+    client reads `summary`, so a differently-named field would be a silent break).
+
+    `understanding.summary` states what was DONE, not an interpretation of the
+    question. "Answered from the Employee Handbook, using 5 relevant passages" is
+    checkable against the citations; "Question about employee separation notice
+    period" would be the system's reading of the user's intent, which the document
+    path never actually computes — and inventing one is the thing this layer exists
+    to prevent.
+
+    `validation` stays unknown: no query checks ran, and `passed: true` with an
+    empty check list is a false assurance.
+    """
+    try:
+        docs, n = ev.get("documents") or [], int(ev.get("passages") or 0)
+        if docs:
+            explain["data_used"] = {"datasets": list(docs), "fields": []}
+        ops = []
+        if n:
+            ops.append({"type": "retrieval",
+                        "summary": f"Retrieved {n} relevant passage{'' if n == 1 else 's'}"})
+            ops.append({"type": "read", "summary": "Read the relevant passages"})
+            ops.append({"type": "synthesis",
+                        "summary": "Synthesized the retrieved information"})
+        if ops:
+            explain["operations"] = ops
+        if docs or n:
+            where = docs[0] if len(docs) == 1 else f"{len(docs)} documents"
+            bits = [f"Answered from {where}"] if docs else []
+            if n:
+                bits.append(f"using {n} relevant passage{'' if n == 1 else 's'}")
+            explain["understanding"] = {"summary": " ".join(bits) + ".",
+                                        "breakdown": [o["summary"] for o in ops]}
+    except Exception:
+        pass
+    return explain
+
+
+def _merge_document_evidence(explain: dict, ev: dict) -> dict:
+    """ADD the document half to a payload that already describes the SQL half.
+
+    A hybrid answer fuses SQL rows with document passages. When the SQL head
+    succeeded, the hybrid result inherits ITS payload — which describes the SQL and
+    says nothing about the documents. Observed live: a maintenance-policy answer
+    carried `understanding: "Count all maintenances, grouped by Asset Id"` with
+    `data_used.datasets` naming a relational table, while the answer the user read
+    came from a policy document.
+
+    Purely ADDITIVE — nothing the SQL head wrote is replaced, because that half of
+    the answer really did happen. The document names and passage count are appended,
+    and the summary is extended rather than rewritten, so the payload finally
+    describes BOTH halves instead of half the answer.
+    """
+    try:
+        docs, n = ev.get("documents") or [], int(ev.get("passages") or 0)
+        if not (docs or n):
+            return explain
+        du = explain.get("data_used")
+        if isinstance(du, dict):
+            existing = list(du.get("datasets") or [])
+            du["datasets"] = existing + [d for d in docs if d not in existing]
+        ops = explain.get("operations")
+        if isinstance(ops, list) and n:
+            have = {o.get("summary") for o in ops if isinstance(o, dict)}
+            for kind, text in (("retrieval",
+                                f"Retrieved {n} relevant passage"
+                                f"{'' if n == 1 else 's'}"),
+                               ("read", "Read the relevant passages"),
+                               ("synthesis", "Synthesized the retrieved information")):
+                if text not in have:
+                    ops.append({"type": kind, "summary": text})
+        un = explain.get("understanding")
+        if isinstance(un, dict) and docs:
+            where = docs[0] if len(docs) == 1 else f"{len(docs)} documents"
+            tail = f"Also drew on {where}"
+            if n:
+                tail += f" ({n} relevant passage{'' if n == 1 else 's'})"
+            base = (un.get("summary") or "").rstrip()
+            if tail not in base:
+                un["summary"] = (base + (" " if base else "") + tail + ".").strip()
+    except Exception:
+        pass
+    return explain
+
+def _backfill_missing_explain(result) -> None:
+    """Give an ANSWERED turn an explainability payload when its head produced none.
+
+    The document and hybrid heads never build one: `rag` has no SQL to describe, and
+    `hybrid` inherits the SQL head's payload — which does not exist when that head
+    refused or failed validation. The api tier then ships its empty `_NO_EXPLAIN`
+    fallback, so a perfectly good answer arrives with NO explanation at all
+    (observed live: a correct employee-handbook answer with `version: "1.0"` and
+    every block empty).
+
+    Built from the TRACE, once, HERE — at the one exit every head passes through —
+    rather than per head. Wiring this kind of thing per path is the mistake that
+    produced EXP-B1/B4/B5, the terminal step frame, the low-confidence caveat and
+    the refusal timeline_summary, all in this same codebase.
+
+    The v1 blocks come out EMPTY and that is deliberate: there is no SQL, no
+    operations and no filters to describe, and inventing them would be worse than
+    saying nothing. What the reader gains is the v2 half — routing, execution,
+    sources, warnings, flow, audit — assembled from what actually happened.
+
+    ADDITIVE and safe for a client: a payload that was all-empty gains keys; no v1
+    key changes shape (CHAT_API_CONTRACT.md §1e — "never require a block"). Only a
+    turn that ANSWERED is backfilled; a refusal already has its own payload, and one
+    that produced nothing has nothing to explain.
+    """
+    try:
+        from veda.business_explain import build_explain
+        from veda.explain import current_trace
+        tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return
+        for item in (getattr(result, "items", None) or []):
+            if getattr(item, "status", None) != STATUS_OK:
+                continue
+            payload = getattr(item, "result", None)
+            if isinstance(payload, dict):
+                if not payload.get("explain"):
+                    payload["explain"] = _strip_invented_v1(build_explain(
+                        sql="", table="", sm=None, trace=tr,
+                        trace_id=getattr(tr, "trace_id", "") or ""))
+            elif payload is not None and not getattr(payload, "explain", None):
+                try:
+                    _ex = _strip_invented_v1(build_explain(
+                        sql="", table="", sm=None, trace=tr,
+                        trace_id=getattr(tr, "trace_id", "") or ""))
+                    payload.explain = _apply_document_v1(
+                        _ex, _document_evidence(payload))
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+
+def _sync_reported_row_count(result) -> None:
+    """Make `result.row_count` agree with the rows that were actually returned.
+
+    No path sets `execution.row_count` in the trace for a federated answer, so
+    build_result_meta read nothing and the payload said `row_count: null` — while
+    the thinking model's `evidence.rows` said 5 and the rendered table had exactly
+    5 rows. Two numbers for one fact, one of them wrong.
+
+    Filled HERE, at the one exit every head passes through, from the rows the head
+    actually returned. Only ever fills a null: a count the engine did record is
+    left alone, because that one came from the execution itself.
+    """
+    try:
+        for item in (getattr(result, "items", None) or []):
+            payload = getattr(item, "result", None)
+            rows = None
+            if isinstance(payload, dict):
+                rows = payload.get("rows")
+                ex = payload.get("explain")
+            else:
+                rows = getattr(payload, "rows", None)
+                ex = getattr(payload, "explain", None)
+            if not isinstance(ex, dict) or not isinstance(rows, list):
+                continue
+            res = ex.get("result")
+            if isinstance(res, dict) and res.get("row_count") is None:
+                res["row_count"] = len(rows)
     except Exception:
         pass
 
@@ -1907,6 +2165,12 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
             hy.cols = sqlres.get("cols") or []
             hy.rows = sqlres.get("rows") or []
             hy.explain = sqlres.get("explain")
+            # The inherited payload describes the SQL half only. Add the document
+            # half so it describes the answer the user actually read.
+            if hy.explain:
+                hy.explain = _merge_document_evidence(
+                    hy.explain, _document_evidence(hy))
+
             # Analytics + "Analysis:" fold-in on the SQL head's OWN executed rows —
             # same deterministic pass as Tier-1/Tier-2/federated (never a second
             # analysis; works off the already-attached cols/rows). Best-effort: a

@@ -61,6 +61,53 @@ def _incoming_trace_id(request) -> "str | None":
 _INTERNAL_ONLY_KEYS = frozenset({"context", "trace", "_debug"})
 
 
+
+#: Keys whose VALUE can carry a raw engine error. The chat path shows safe copy for
+#: these, but this route hands them to the caller verbatim — measured on the direct
+#: endpoint, `refuse_reason` and `result.error` carried a full DuckDB failure:
+#:
+#:     Catalog Error: Table with name assets_amenitycategory does not exist!
+#:     Did you mean "amenities_catalog"?
+#:     ... COUNT(DISTINCT "id") AS "assets_amenitycategory_count" ... GROUP BY ...
+#:     Did you mean "pg_settings"?
+#:
+#: That is raw table names, a SQL fragment with column aliases, and a hint naming
+#: the storage engine — every category the standing rule says never crosses to a
+#: caller. Sanitised HERE because _serialize is the ONE boundary every head result
+#: passes through before the wire (see its docstring).
+_ERROR_BEARING_KEYS = frozenset({"error", "refuse_reason"})
+
+#: Fingerprints of an engine-internal error. Deliberately narrow: a message that
+#: matches none of these is a business-level refusal already written for a user
+#: ("I couldn't map 'maintenance' to any column…") and is passed through unchanged.
+_INTERNAL_ERROR_MARKS = (
+    "catalog error", "syntax error at", "binder error", "parser error",
+    "conversion error", "psycopg2", "sqlstate",
+    "relation ", "column \"", "select ", " from ", "group by", "pg_",
+    # DuckDB's hint is `Did you mean "identifier"?` — the QUOTE is what makes it an
+    # engine hint. A bare "did you mean" also appears in this platform's OWN
+    # user-facing clarify copy ("more than one grouping fits what you asked for —
+    # did you mean status or loe status?"), which is guidance the reader needs and
+    # must survive. Matching on the quoted form keeps them apart.
+    'did you mean "',
+)
+
+_SAFE_ERROR_TEXT = ("The query could not be completed against this data source. "
+                    "Please rephrase, or contact your administrator.")
+
+
+def _sanitise_error(value):
+    """Replace an engine-internal error with safe copy. Never raises."""
+    try:
+        if not isinstance(value, str) or not value.strip():
+            return value
+        low = value.lower()
+        if any(m in low for m in _INTERNAL_ERROR_MARKS):
+            return _SAFE_ERROR_TEXT
+    except Exception:
+        pass
+    return value
+
 def _verbose() -> bool:
     """Container-log verbosity for the query pipeline, controlled by env.
 
@@ -81,7 +128,23 @@ def _serialize(obj: Any) -> Any:
     if dataclasses.is_dataclass(obj):
         return _serialize(dataclasses.asdict(obj))
     if isinstance(obj, dict):
-        return {k: _serialize(v) for k, v in obj.items() if k not in _INTERNAL_ONLY_KEYS}
+        out = {}
+        for k, v in obj.items():
+            if k in _INTERNAL_ONLY_KEYS:
+                continue
+            if k in _ERROR_BEARING_KEYS:
+                out[k] = _sanitise_error(v)
+            elif k == "explain" and v == {}:
+                # A failed head (`exec_error`) has nothing to explain, and shipped
+                # `explain: {}` — a TRUTHY empty object in both Python and JS, so a
+                # client's `if (explain)` opened an explainability panel with every
+                # block missing. The key STAYS (removing it would change the shape a
+                # client is being built against); its value becomes the falsy null
+                # that already means "this turn produced no explainability".
+                out[k] = None
+            else:
+                out[k] = _serialize(v)
+        return out
     if isinstance(obj, (list, tuple)):
         return [_serialize(v) for v in obj]
     if isinstance(obj, (str, int, float, bool)) or obj is None:
