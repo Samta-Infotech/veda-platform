@@ -159,6 +159,15 @@ _VALIDATION_COPY = {
     STATE_ACTIVE: "Checking the result",
 }
 
+#: Copy for a validation failure on an attempt the turn then RECOVERED from.
+#: The failure is real, but it belongs to a method that was set aside — not to the
+#: answer the reader is holding. Observed live on a hybrid turn: the SQL head's
+#: validation failed, the documents answered correctly, and the panel showed
+#: "✗ The result did not pass a safety check" above a good answer. "The result"
+#: is the wrong subject; the delivered result passed nothing and failed nothing,
+#: because it was never the SQL result.
+_VALIDATION_SUPERSEDED = "One method was set aside; the answer came another way"
+
 _SUB_CHECK_COPY = {"access": _ACCESS_COPY, "validation": _VALIDATION_COPY}
 
 #: The kinds of evidence a step may expose when the reader opens it. A CLOSED
@@ -187,6 +196,27 @@ EXEC_MULTI_SOURCE = "multi_source"
 EXEC_UNKNOWN = "unknown"
 
 #: route/intent value on the engine's `route` event -> execution shape.
+def execution_shape_from_evidence(*, source_count=None, source_names=None,
+                                  passages=None, has_rows=False):
+    """The execution shape a turn DEMONSTRABLY had, from facts already established.
+
+    The shape is normally read from an event's `intent`, but the CROSS-SOURCE lane
+    emits none — so a federated answer shipped `execution: {"type": "unknown"}`
+    while its own payload named the sources it combined (observed on the
+    csv_lake/parquet questions). This is the fallback, and it is a READ of evidence,
+    never a guess: every branch needs a fact, and with no facts it returns None so
+    the shape stays honestly unknown.
+    """
+    names = list(source_names or [])
+    if len(names) > 1 or (isinstance(source_count, int) and source_count > 1):
+        return EXEC_MULTI_SOURCE
+    if isinstance(passages, int) and passages > 0:
+        return EXEC_DOCUMENTS
+    if has_rows:
+        return EXEC_SQL
+    return None
+
+
 _EXEC_FROM_INTENT = {
     "sql": EXEC_SQL, "deterministic": EXEC_SQL, "tier2": EXEC_SQL,
     "rag": EXEC_DOCUMENTS, "doc": EXEC_DOCUMENTS, "document": EXEC_DOCUMENTS,
@@ -399,9 +429,18 @@ class ThinkingStepTracker:
             # `source_count` arrives nested in `details` — the engine is already
             # inconsistent about placement, so read both rather than depend on
             # which side of that inconsistency a future event lands on.
+            # `rag_retrieve` names it `chunks`; `hybrid_retrieve` names it
+            # `doc_chunks` (query/rag_layer.py:626). Reading only the first meant a
+            # HYBRID answer built from 5 passages reported `evidence: {"rows": 0}` —
+            # a count that is not just missing but actively wrong, because the rows
+            # came from a SQL attempt that failed while the answer came from the
+            # documents. Read every name the engine actually uses.
             chunks = p.get("chunks")
-            if chunks is None:
-                chunks = det.get("chunks")
+            for _k in ("doc_chunks", "chunks"):
+                if chunks is None:
+                    chunks = p.get(_k)
+                    if chunks is None:
+                        chunks = det.get(_k)
             if isinstance(chunks, int) and chunks >= 0:
                 self.evidence["passages"] = chunks
             src = det.get("source_count")
@@ -590,7 +629,8 @@ class ThinkingStepTracker:
 
     # -- terminal ------------------------------------------------------------
     def finish(self, *, failed: bool = False, error_code: str | None = None,
-               retryable: bool | None = None) -> None:
+               retryable: bool | None = None,
+               answered_without_result: bool = False) -> None:
         """Freeze every open step at the real terminal moment."""
         now = _now_ms()
         self._last_ms = now
@@ -633,6 +673,15 @@ class ThinkingStepTracker:
                         st.details = []
                 if st.sub_checks:
                     st.sub_checks = []
+        # A validation failure on a SUPERSEDED attempt must not describe the answer.
+        # Only downgrade when the turn actually delivered one: on a failed or
+        # answerless turn the failure IS the story and stays as it is.
+        if not failed and not answered_without_result:
+            for st in self.steps.values():
+                for c in st.sub_checks:
+                    if c.get("kind") == "validation" and c.get("state") == STATE_FAILED:
+                        c["state"] = STATE_WARNING
+                        c["message"] = _VALIDATION_SUPERSEDED
         self.finished = True
         self.status = "failed" if failed else "completed"
         if error_code:
@@ -646,10 +695,48 @@ class ThinkingStepTracker:
         end = self._last_ms if self.finished else _now_ms()
         return max(0, (end or self._first_ms) - self._first_ms)
 
-    def snapshot(self) -> list:
-        """The collapsed view: all four steps, in order, with live/frozen timing."""
+    def snapshot(self, *, reached_only: bool = False) -> list:
+        """The collapsed view, in order, with live/frozen timing.
+
+        ``reached_only`` reveals the turn PROGRESSIVELY: a step appears when it
+        actually starts, instead of all four being listed from the first frame. The
+        full list was showing the user a plan ("here are the four things that will
+        happen") rather than progress — and on a turn that never reaches step 3, the
+        plan was simply wrong. One step runs, completes, and the next appears.
+
+        A step that never STARTED is still included once the turn is over and it has
+        a resolved state: `finish()` marks a step `completed` when its content proves
+        the work happened but no phase reported it (the document path never emits one
+        mapping to "Analyzing"), and `skipped` when it genuinely did not run. Both
+        are real outcomes. Only a step still sitting `pending` — one the turn had not
+        got to yet — is withheld.
+        """
         now = _now_ms()
-        return [self.steps[k].as_dict(now) for k in STEP_ORDER]
+        if not reached_only:
+            return [self.steps[k].as_dict(now) for k in STEP_ORDER]
+        out = []
+        for i, k in enumerate(STEP_ORDER):
+            st = self.steps[k]
+            later_started = any(self.steps[j].started_ms is not None
+                                for j in STEP_ORDER[i + 1:])
+            if st.started_ms is None and st.state == STATE_PENDING \
+                    and not later_started:
+                continue                       # not reached yet — withhold it
+            d = st.as_dict(now)
+            if st.started_ms is None and st.state == STATE_PENDING:
+                # The turn moved PAST a step that never reported a phase. Showing it
+                # `pending` puts a ○ between two ✓ and reads as broken. Same rule
+                # finish() applies at the terminal frame, applied here so a LIVE
+                # frame is not inconsistent with the frame that follows it: content
+                # proves the work happened and was simply never reported (`completed`,
+                # with no duration, because none was measured); no content means it
+                # genuinely did not run (`skipped`).
+                d["state"] = STATE_COMPLETED if d.get("details") else STATE_SKIPPED
+                if d["state"] == STATE_SKIPPED:
+                    d["details"] = []
+                    d["expandable"] = False
+            out.append(d)
+        return out
 
     def current_step(self) -> str | None:
         return self._current
@@ -678,7 +765,7 @@ class ThinkingStepTracker:
         report a terminal status. Both contradictions were observable in real
         streams before this.
         """
-        steps = self.snapshot()
+        steps = self.snapshot(reached_only=True)
         if self.finished:
             # §12: exactly one terminal state, internally consistent.
             for st in steps:
@@ -690,6 +777,10 @@ class ThinkingStepTracker:
             "status": self.status,
             "current_step": None if self.finished else self._current,
             "steps": steps,
+            # How many steps the model has in total. `steps` now grows as the turn
+            # progresses, so a client that wants "step 2 of 4" needs the denominator
+            # from somewhere other than len(steps).
+            "total_steps": len(STEP_ORDER),
             "evidence": dict(self.evidence),
             "execution": {"type": self.execution_type},
             "timing": {"total_duration_ms": self.total_duration_ms()},

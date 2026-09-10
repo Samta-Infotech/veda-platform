@@ -73,6 +73,14 @@ class RAGResult:
     duration_ms:  float
     error:        Optional[str] = None
     stats:        dict = field(default_factory=dict)
+    #: Explainability payload, backfilled from the trace by
+    #: veda_hybrid._backfill_missing_explain — the document head builds none of its
+    #: own (there is no SQL to describe). DECLARED, not set dynamically: the
+    #: inference route serialises head results with dataclasses.asdict(), which
+    #: keeps only declared fields, so an attribute assigned at runtime was silently
+    #: dropped on the wire and every document answer arrived with no explanation.
+    #: HybridResult already carries this field for the same reason.
+    explain:      Optional[dict] = None
 
 
 @dataclass

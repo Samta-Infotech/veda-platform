@@ -361,6 +361,20 @@ class ConversationQueryService:
                         steps.set_details(_k, step_ctx.details(_k))
                     if steps.has_progress():
                         payload["steps"] = steps.as_payload()
+                # The LEGACY `message` line, kept for clients that predate the step
+                # model. Most phases have no user-facing copy of their own, so it
+                # went out EMPTY on 9 of the 12 frames a normal turn emits — a client
+                # rendering it showed a status line that appeared, blanked, and
+                # reappeared several times per turn. It now falls back to the running
+                # step's own summary: the same sentence the step model already shows,
+                # so the two can no longer disagree, and nothing new is claimed.
+                if not payload.get("message"):
+                    _cur = steps.current_step()
+                    if _cur:
+                        _st = steps.steps.get(_cur)
+                        _sum = getattr(_st, "summary", None) if _st else None
+                        if _sum:
+                            payload["message"] = _sum
             q.put(("thinking", payload))
 
         def target() -> None:
@@ -448,7 +462,13 @@ class ConversationQueryService:
             for _k in _steps.steps:
                 _steps.set_context(_k, _ctx.sentence(_k))
                 _steps.set_details(_k, _ctx.details(_k), terminal=True)
-        _steps.finish(failed=failed, error_code=error_code, retryable=retryable)
+        # `answered_without_result` = the turn produced no answer (refusal/clarify).
+        # finish() uses it to decide whether a validation FAILURE still describes the
+        # answer: on a delivered answer it does not, because the failing attempt was
+        # superseded; on a refusal it is the whole story.
+        _no_answer = bool(getattr(_ctx, "no_answer", False)) if _ctx is not None else False
+        _steps.finish(failed=failed, error_code=error_code, retryable=retryable,
+                      answered_without_result=_no_answer)
         _frame = {"phase": "completed",
                   "status": "failed" if failed else "completed",
                   "message": business_friendly_message("output", "Done")}
@@ -500,6 +520,23 @@ class ConversationQueryService:
                     _ctx.execution_type = _steps.execution_type
                 elif _ctx.execution_type != ts_mod.EXEC_UNKNOWN:
                     _steps.execution_type = _ctx.execution_type
+                else:
+                    # Still unknown: the shape is normally read from an event's
+                    # `intent`, and the CROSS-SOURCE lane emits none — a federated
+                    # answer therefore shipped `execution: {"type": "unknown"}` even
+                    # though the payload named the sources it combined (observed on
+                    # the csv_lake/parquet questions). Derive it from what the turn
+                    # DEMONSTRABLY produced instead of leaving it blank. Every branch
+                    # rests on a fact already established elsewhere in this payload;
+                    # none of them guesses, and no branch fires without one.
+                    _shape = ts_mod.execution_shape_from_evidence(
+                        source_count=_ctx.source_count,
+                        source_names=_ctx.source_names,
+                        passages=_ctx.passages,
+                        has_rows=isinstance(_rows0, list))
+                    if _shape:
+                        _steps.execution_type = _shape
+                        _ctx.execution_type = _shape
                 # Context and details are applied BEFORE finish(), not after.
                 # finish() decides what to do with a step that never started, and
                 # that decision depends on whether the step has content: content

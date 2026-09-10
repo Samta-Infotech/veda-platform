@@ -424,7 +424,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
             ],
             "summary": ", ".join(filter_phrases) if filter_phrases else "No filters applied.",
         },
-        "validation": {"passed": all_passed, "checks": check_items},
+        # `passed` is None when NOTHING was checked. It used to be True, because
+        # all_passed starts True and an empty check list never falsifies it — so a
+        # payload with `checks: []` claimed `passed: true`. That is a false
+        # assurance: the reader is told the result cleared checks that never ran.
+        # Observed live on a document answer.
+        "validation": {"passed": (all_passed if check_items else None),
+                       "checks": check_items},
         # SQL visibility is now a decision, not a constant. This used to be a
         # hardcoded True, so the generated SQL reached EVERY end user with no way
         # to turn it off. EXPLAIN_EXPOSE_SQL defaults True — existing behaviour is

@@ -289,3 +289,25 @@ def test_build_explain_understanding_breakdown_empty_for_bare_list():
     is that one phrase, matching `operations` exactly."""
     out = build_explain(sql="SELECT id FROM ledger", table="ledger", sm=None)
     assert out["understanding"]["breakdown"] == ["List records"]
+
+
+def test_validation_passed_is_unknown_when_nothing_was_checked():
+    """`all_passed` starts True and an empty check list never falsifies it, so a
+    payload with `checks: []` used to claim `passed: true` — telling the reader the
+    result cleared checks that never ran. Observed live on a document answer."""
+    out = build_explain(sql="", table="", sm=None)
+    assert out["validation"]["checks"] == []
+    assert out["validation"]["passed"] is None, (
+        "no checks ran, so `passed` must be unknown — not True")
+
+
+def test_validation_passed_still_reflects_real_checks():
+    sm = {"columns": {"ledger.total": {"business_role": "Total Amount"}}}
+    sql = "SELECT payer_name, SUM(amount) AS total FROM ledger GROUP BY payer_name"
+    ok = build_explain(sql=sql, table="ledger", sm=sm,
+                       checks=[{"name": "value_grounding", "status": "pass"}])
+    assert ok["validation"]["checks"] and ok["validation"]["passed"] is True
+
+    bad = build_explain(sql=sql, table="ledger", sm=sm,
+                        checks=[{"name": "value_grounding", "status": "fail"}])
+    assert bad["validation"]["passed"] is False
