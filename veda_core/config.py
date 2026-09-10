@@ -723,6 +723,32 @@ ROUTING_DOMINANCE_FLOOR = float(_os.environ.get("ROUTING_DOMINANCE_FLOOR", "0.35
 ROUTING_DOMINANT_GAP   = float(_os.environ.get("ROUTING_DOMINANT_GAP", "0.10"))
 ROUTING_COMPETE_WINDOW = float(_os.environ.get("ROUTING_COMPETE_WINDOW", "0.08"))
 
+# Permission pre-check margin (veda_hybrid.py's ROUTING_PERMISSION_PRECHECK_ENABLED block). How far
+# ahead an INACCESSIBLE source must score over the caller's best PERMITTED one before the request is
+# refused with the explicit "you don't have permission" message instead of being answered from the
+# permitted source. Its own knob, NOT ROUTING_DOMINANT_GAP above: that one tunes routing confidence,
+# while this one trades two error modes against each other and the two populations overlap. Measured
+# here: a datalake-only caller asking "How many maintenance records are repairs?" sees a denied
+# document source win by 0.105 yet IS entitled to an answer, while an unauthorised caller's cases sit
+# at 0.047-0.215. So the default is set above 0.105 — refusing an entitled caller is the harmful
+# error; an unauthorised one still gets refused either way, just with the pipeline's vaguer wording.
+# Raise it to be more conservative (fewer permission messages, never a false denial); lower it only
+# with fresh measurements, since below ~0.11 entitled callers start being told they have no access.
+ROUTING_PERMISSION_DENY_GAP = float(_os.environ.get("ROUTING_PERMISSION_DENY_GAP", "0.12"))
+
+# Permission pre-check margin (veda_hybrid.py's ROUTING_PERMISSION_PRECHECK_ENABLED block). How far
+# ahead an INACCESSIBLE source must score over the caller's best PERMITTED one before the request is
+# refused with the explicit "you don't have permission" message instead of being answered from the
+# permitted source. Its own knob, NOT ROUTING_DOMINANT_GAP above: that one tunes routing confidence,
+# while this one trades two error modes against each other and the two populations overlap. Measured
+# here: a datalake-only caller asking "How many maintenance records are repairs?" sees a denied
+# document source win by 0.105 yet IS entitled to an answer, while an unauthorised caller's cases sit
+# at 0.047-0.215. So the default is set above 0.105 — refusing an entitled caller is the harmful
+# error; an unauthorised one still gets refused either way, just with the pipeline's vaguer wording.
+# Raise it to be more conservative (fewer permission messages, never a false denial); lower it only
+# with fresh measurements, since below ~0.11 entitled callers start being told they have no access.
+ROUTING_PERMISSION_DENY_GAP = float(_os.environ.get("ROUTING_PERMISSION_DENY_GAP", "0.12"))
+
 # Per-source relevance QUALIFICATION for the federated route (query/cross_source_composer.py,
 # consumed by query/federated_route.run_federated). Default OFF -> byte-identical.
 #
@@ -1013,6 +1039,18 @@ CANONICAL_INTENT_SHADOW_ENABLED = _os.environ.get("CANONICAL_INTENT_SHADOW_ENABL
 # is the OMISSION half only; wrong-VALUE aggregates (a SUM over the wrong column/scope) are a separate class,
 # NOT covered here. Grammar-signal + AST, no hardcode. OFF -> byte-identical.
 INTENT_SQL_AGG_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_AGG_PRESENCE_ENABLED", "1") == "1"
+
+# Filter-OMISSION guard (veda/intent_sql_alignment.py::filter_presence_ok). The companion to the
+# aggregate guard above, for the other half of the same silent-wrong class: the question states a
+# CONDITION and the generated SQL applies none. Measured on two live failures — "vendors rated above
+# 4.0" produced `SELECT "rating","vendor_id","city" FROM "vendors" LIMIT 100` (no WHERE) and the
+# answer layer reported "5 vendors have ratings above 4.0" off six unfiltered rows (truth: 4); "the
+# ones that are gated" projected is_gated and the summary became "60% of assets are gated".
+# qualifier_completeness misses both because the column IS in the SQL, as a projection. Fires only on
+# (comparison word + a number) or (a BOOLEAN column the query names by its own word) AND zero filters
+# in the SQL AST — a SQL that filters anything at all passes, so this catches "the predicate vanished
+# entirely", never a wrong predicate. OFF -> byte-identical.
+INTENT_SQL_FILTER_PRESENCE_ENABLED = _os.environ.get("INTENT_SQL_FILTER_PRESENCE_ENABLED", "1") == "1"
 
 # Deterministic "list all <entity>" fast-path (query/fast_path.py). A bare catalog listing ("list all
 # amenities") resolves its entity concept (assets_amenity) correctly, but the list-VERB token ("list")

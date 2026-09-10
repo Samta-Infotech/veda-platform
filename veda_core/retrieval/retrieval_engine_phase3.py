@@ -302,12 +302,20 @@ class RetrievalEnginePhase3:
         # Signal 1 encodes the RAW query (WP1); enriched tokens feed only the
         # sparse (Signal 2) and value (Signal 5) signals.
 
+        # SOURCE ISOLATION (marker-gated). `__source_isolated__` is stamped ONLY on the
+        # flag-gated datalake-only semantic model built by veda_hybrid._datalake_isolated_sm,
+        # so `_iso_allow` is None for every normal (relational) query and every block below
+        # that reads it is skipped → that path stays byte-identical.
+        _iso_allow = (sorted((self.semantic_model.get("columns") or {}).keys())
+                      if self.semantic_model.get("__source_isolated__") else None)
+
         def _run_signal1():
             signal1 = []
             if self.semantic_searcher:
                 logger.info("  - Signal 1: BGE-M3 semantic search (1024-dim)...")
                 try:
-                    signal1 = self.semantic_searcher.search(query, k=50)
+                    signal1 = self.semantic_searcher.search(query, k=50,
+                                                            allowed_cols=_iso_allow)
                     logger.info(f"    ✓ {len(signal1)} results")
                 except Exception as e:
                     logger.warning(f"Signal 1 failed: {e}")
@@ -331,20 +339,6 @@ class RetrievalEnginePhase3:
             _f2 = _ex.submit(_run_signal2)
             signal1_semantic = _f1.result()
             signal2_sparse   = _f2.result()
-
-        # Source isolation (flag-gated via the sm marker, default OFF): Signal 1 is the ONE
-        # signal not bound to this engine's semantic_model — the shared BGE searcher queries the
-        # GLOBAL column store, so on an isolated single-source sm it re-admits other sources'
-        # columns via name collision (datalake "vendors.rating" vs homzhub "reviews_pillarrating.rating").
-        # Signals 2–5 already read this sm and are clean. Filter Signal 1 back to the sm's columns.
-        # Guard: apply ONLY if some candidate matches (DENSE_ID_REMAP on → "table.col" id-space);
-        # if none match the ids are UUIDs (unaligned) — leave Signal 1 untouched rather than nuke it.
-        # No marker (every normal, non-isolated sm) → this block is skipped → byte-identical.
-        if self.semantic_model.get("__source_isolated__") and signal1_semantic:
-            _iso_cols = self.semantic_model.get("columns", {})
-            _kept = [t for t in signal1_semantic if t[0] in _iso_cols]
-            if _kept:
-                signal1_semantic = _kept
 
         # Signal 3+4: FK subgraph + FK path bridges (merged loop, F2).
         logger.info("  - Signal 3+4: FK subgraph + FK path bridges (merged loop)...")
@@ -422,6 +416,34 @@ class RetrievalEnginePhase3:
             top_k=50
         )
         logger.info(f"✓ Merged {len(fused)} candidates")
+
+        # ── SOURCE ISOLATION, enforced at the ONE fusion point ────────────────────────────
+        # Every signal converges here: RRFMerger.merge() unions the candidate keys of
+        # signals 1/2/5 with the keys of signals 3/4 (Signal 6 is a per-table prior that only
+        # boosts an existing candidate, never adds one — see rrf_merger.py). So this list is
+        # the complete candidate set the SQL head, anchor ranking and the
+        # ANCHOR_CONFIDENCE_GATE ever see, and one filter here closes the leak for all of
+        # them — cheaper and much harder to regress than patching each signal separately.
+        #
+        # WHY THIS IS NEEDED. On an isolated datalake sm, signals 2–5 read THIS sm and are
+        # clean, but the persisted-sparse store (Signal 2) and the dense store (Signal 1) are
+        # global; the dense scan is now restricted at the source (semantic_search.py), and this
+        # is the backstop that guarantees the property regardless of which store answers.
+        # The bug this replaces: the old filter kept Signal 1 untouched whenever NONE of its
+        # top-50 hits were in-scope ("if _kept:"), which is precisely the failing case — for
+        # "Which amenity has the highest monthly fee?" all 50 dense hits were homzhub rent/price
+        # columns, so the guard let every one of them through and the whole candidate list became
+        # homzhub, ending in "ambiguous subject — assets_amenity or assets_leaselisting?".
+        # Only ids in the "table.column" id-space are judged (an unremapped UUID id is not
+        # comparable to the sm's keys and is left alone — degrade, never nuke).
+        # No marker (every normal, non-isolated sm) → _iso_allow is None → skipped entirely.
+        if _iso_allow is not None and fused:
+            _allow = set(_iso_allow)
+            _clean = [(c, s) for c, s in fused if "." not in str(c) or str(c) in _allow]
+            if len(_clean) != len(fused):
+                logger.info(f"  ↳ source isolation: dropped {len(fused) - len(_clean)} "
+                            f"out-of-source candidates ({len(_clean)} remain)")
+            fused = _clean
 
         # STEP 5: INTENT-AWARE BOOSTING
         logger.info(f"\n[STEP 5/7] Intent-aware boosting ({intent})...")

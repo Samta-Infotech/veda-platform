@@ -22,8 +22,11 @@ except ImportError:  # keep importable without FastAPI in this environment
     Request = object
     _HAVE_FASTAPI = False
 
+import json
 import logging
 
+from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
+                               set_source_profiles)
 from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
                                set_source_profiles)
 
@@ -143,6 +146,8 @@ def create_app():
                     logger.warning("malformed X-Veda-Source-Profiles header; "
                                    "continuing without source display names")
                     set_source_profiles({})
+            else:
+                set_source_profiles({})
         return await call_next(request)
 
     from inference.routes import health, hybrid, retrieve

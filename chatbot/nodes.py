@@ -754,7 +754,14 @@ def memory_write_node(state: ChatState) -> dict:
     elif delta_type == "drill_down":
         new_stack = memory_frame.push_drill(prev_stack, harvested)
     else:
-        new_stack = prev_stack
+        # A turn the classifier called something else (in practice almost always `refine`) still
+        # drilled in if the executed query added a filter the previous one did not. Without this
+        # the DrillStack stayed empty for every real narrowing — "only the open ones", "just the
+        # Repair ones" — so drill_up had nothing to pop. Deterministic and evidence-based: it
+        # reads the filters the SQL actually ran, never the classifier's label.
+        _added = memory_frame.newly_added_filter(prev_frame, harvested)
+        new_stack = (memory_frame.push_drill_level(prev_stack, _added)
+                     if _added is not None else prev_stack)
 
     MemoryStore.write_frame(tenant, session_id, new_frame,
                             expected_version=prev_frame.get("version") if prev_frame else None)
@@ -803,8 +810,30 @@ def ask_clarification_node(state: ChatState) -> dict:
     router_refusal = bool(refuse_reason) and _route in _ROUTER_REFUSAL_ROUTES
     definite = router_refusal and _route in ("no_access", "no_match")
 
+    # The engine's own refusal text, when it has one. A refusal that reaches here through the
+    # source-agent/coordinator path carries {answer, ok, refuse_reason, status} — the pipeline's
+    # rich feedback dict is dropped when the AgentResult is mapped (veda_hybrid.py:318-319 sets
+    # result=None for a refusal), but `answer` survives and is still real information
+    # ("I couldn't find any data relevant to this question in the sources available to you.").
+    # Showing it beats the generic question, which told the user nothing at all. NOT used for a
+    # router refusal (that has its own explicit wording) and never over a real feedback text,
+    # which is the engine's purpose-built clarifying question.
+    _engine_answer = (res0.get("answer") or "").strip()
+
     feedback = res0.get("feedback")
-    if router_refusal:
+    if status == "unavailable":
+        # A transport/infra failure, NOT the engine declining to answer: call_engine_node sets
+        # this for InferenceUnavailable or a stream that drops mid-response, and leaves
+        # engine_result EMPTY — so with no feedback and no answer this fell through to
+        # "Could you clarify what you're asking about?". That is the one case where the generic
+        # question is actively wrong: nothing about the question needs clarifying, the service
+        # did not respond, and inviting a rephrase sends the user to fix something that isn't
+        # theirs. This node's own docstring already promised this branch; it was never written.
+        # Retryable, so say so — and needs_clarification stays False (handled below), because
+        # there is no question outstanding.
+        question = ("I couldn't reach the query service just now, so I don't have an answer for "
+                    "this yet. Please try again in a moment.")
+    elif router_refusal:
         question = refuse_reason
     elif feedback:
         question = feedback.get("text") or "Could you clarify what you're asking about?"
@@ -823,7 +852,7 @@ def ask_clarification_node(state: ChatState) -> dict:
         # violating it. If a genuinely richer fallback message is wanted
         # later, it belongs behind an HTTP call to the inference tier (which
         # already has veda_core in scope), not a direct import here.
-        question = "Could you clarify what you're asking about?"
+        question = _engine_answer or "Could you clarify what you're asking about?"
 
     unavailable = status == "unavailable"
     # `definite` refusals are terminal, not questions — don't ask the user to clarify

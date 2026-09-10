@@ -69,13 +69,32 @@ def _from_sql_dict(d, source_id, source_type) -> AgentResult:
                            error="unexpected run_query return shape")
     status_str = d.get("status")
     if d.get("ok"):
+        # `status` is part of the payload contract, not decoration: chatbot/memory/frame.py::
+        # harvest_frame refuses to harvest anything whose payload does not say
+        # status == "answered" (it documents itself as receiving "pipeline.py's _done() payload
+        # forwarded verbatim"). Dropping it here made that check fail for EVERY answer that came
+        # through a source agent, so memory_write_node's harvest returned None, no QueryFrame or
+        # DrillStack was ever persisted, and every follow-up was treated as a new topic — which
+        # is why drill-down never accumulated. state["status"] was right all along (nodes.py::
+        # _extract_engine_result derives it from the SubResult); only the payload was missing it.
         return AgentResult(
             source_id, source_type, STATUS_OK, engine="deterministic_sql",
-            data={k: d.get(k) for k in ("cols", "rows", "answer", "sql", "table", "explain")},
+            data={k: d.get(k) for k in ("cols", "rows", "answer", "sql", "table", "explain",
+                                        "status")},
         )
     # clarify is a terminal, understood outcome (not a failure) — surface as refused-with-reason.
     if status_str in ("clarify", "refuse", "tier2_rejected"):
+        # Carry the pipeline's OWN explanation through, not just `reason`. run_query builds a
+        # purpose-written clarifying question for every non-answered status (veda/feedback.py::
+        # explain_failure, e.g. "Is 'Security' a column name or a value you want to filter on?"),
+        # but this mapping used to keep only `reason` — which falls back to the bare status string
+        # "clarify" when the dict has no `answer`. Everything downstream then had nothing to show
+        # and the user got the contentless "Could you clarify what you're asking about?" instead
+        # of being told what was actually unclear. Only the small diagnostic fields are copied
+        # (no cols/rows — a refusal has no result set to render).
         return AgentResult(source_id, source_type, STATUS_REFUSED, engine="deterministic_sql",
+                           data={k: d.get(k) for k in ("feedback", "answer", "msg", "status",
+                                                       "missing", "sql") if d.get(k) is not None},
                            reason=d.get("answer") or d.get("reason") or status_str or "refused")
     return AgentResult(source_id, source_type, STATUS_FAILED, engine="deterministic_sql",
                        error=d.get("error") or status_str or "sql failed")

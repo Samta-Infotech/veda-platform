@@ -88,7 +88,8 @@ class SemanticSearcher:
         query_embedding: List[float],
         conn: psycopg2.extensions.connection,
         k: int = 50,
-        schema: str = "public"
+        schema: str = "public",
+        allowed_cols: Optional[List[str]] = None,
     ) -> List[Tuple[str, float]]:
         """
         Cosine similarity search in pgvector.
@@ -98,6 +99,10 @@ class SemanticSearcher:
             conn: PostgreSQL connection
             k: Number of results to return
             schema: Database schema name
+            allowed_cols: SOURCE ISOLATION — when given, restrict the ANN scan to these
+                "table.column" ids (the isolated semantic model's own columns) so the
+                top-k is ranked WITHIN that source instead of across the whole store.
+                None (every normal query) → the SQL is byte-identical to before.
 
         Returns:
             List of (col_id, similarity_score) tuples
@@ -146,19 +151,37 @@ class SemanticSearcher:
             # Execute cosine similarity search
             # <=> is pgvector's cosine distance operator
             # 1 - distance = similarity (0-1)
+            #
+            # SOURCE ISOLATION (allowed_cols given → the caller runs on an isolated
+            # single-source semantic model): this store holds EVERY source's columns and
+            # carries no source predicate, which is exactly how homzhub columns reached a
+            # datalake-only query — "Which amenity has the highest monthly fee?" filled all
+            # 50 dense slots with assets_leaselisting.expected_monthly_rent /
+            # licensing_licensepackage.price / assets_leasetransaction.rent, and
+            # amenities_catalog.monthly_fee (the ONLY in-scope answer) never appeared. Two
+            # irrelevant homzhub anchors then tripped planning.py's ANCHOR_CONFIDENCE_GATE
+            # ("ambiguous subject — assets_amenity or assets_leaselisting?"). Post-filtering
+            # the top-k cannot fix that (the right column isn't IN the top-k); the scan
+            # itself has to be restricted, which also makes the k slots useful again.
+            _iso_pred = ""
+            if allowed_cols:
+                _iso_pred = "AND (table_name || '.' || col_name) = ANY(%s)\n"
             query = f"""
                 SELECT
                     col_id,
                     1 - (embedding <=> %s::vector) as similarity
                 FROM {schema}.{BIENCODER_COL_TABLE}
                 WHERE embedding IS NOT NULL
+                {_iso_pred}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
             """
 
             cur.execute("BEGIN")
             cur.execute(f"SET LOCAL hnsw.ef_search = {int(_ef)}")
-            cur.execute(query, (embedding_str, embedding_str, k))
+            _params = ((embedding_str, list(allowed_cols), embedding_str, k) if allowed_cols
+                       else (embedding_str, embedding_str, k))
+            cur.execute(query, _params)
             results = cur.fetchall()
             cur.execute("COMMIT")
             cur.close()
@@ -251,7 +274,8 @@ class SemanticSearchEngine:
             logger.error(f"Failed to connect to database: {e}")
             raise
 
-    def search(self, query: str, k: int = 50) -> List[Tuple[str, float]]:
+    def search(self, query: str, k: int = 50,
+               allowed_cols: Optional[List[str]] = None) -> List[Tuple[str, float]]:
         """
         Semantic search given the RAW natural-language query (WP1).
 
@@ -259,6 +283,10 @@ class SemanticSearchEngine:
             query: Raw natural-language query (NOT enriched tokens — enrichment now
                 lives only in the sparse/value signals)
             k: Number of results to return
+            allowed_cols: SOURCE ISOLATION — "table.column" allowlist (the isolated
+                semantic model's columns). One shared searcher serves every per-source
+                engine, so isolation cannot be searcher state; it is passed per call.
+                None (every normal query) → behaviour is byte-identical to before.
 
         Returns:
             List of (col_id, similarity_score) tuples
@@ -267,7 +295,8 @@ class SemanticSearchEngine:
         embedding = self.searcher.embed_query(query)
 
         # Step 2: Search in pgvector
-        results = self.searcher.retrieve_semantic(embedding, self.conn, k)
+        results = self.searcher.retrieve_semantic(embedding, self.conn, k,
+                                                  allowed_cols=allowed_cols)
 
         # Step 3 (DENSE_ID_REMAP, flag-gated): the store returns UUID col_ids, but fusion
         # keys on "table.column"; without this dense never aligns in RRF (dead signal).
@@ -279,6 +308,18 @@ class SemanticSearchEngine:
                     results = [(m.get(str(cid), str(cid)), sc) for cid, sc in results]
         except Exception:
             pass
+
+        # Step 4 (SOURCE ISOLATION): the ANN scan above is restricted only on the engine-store
+        # path — the storage_adapters path returns before the predicate and its own source
+        # scoping comes from the ambient context (which the routing coordinator has already
+        # narrowed to the single routed source). Enforce the allowlist here too, so isolation
+        # holds whichever Signal-1 path served the query. Applied ONLY to ids that live in the
+        # "table.column" id-space (DENSE_ID_REMAP on); an unremapped UUID id is not comparable
+        # to the allowlist, so it is left alone rather than dropped — degrade, never nuke.
+        if allowed_cols and results:
+            _allow = set(allowed_cols)
+            results = [(cid, sc) for cid, sc in results
+                       if "." not in str(cid) or str(cid) in _allow]
 
         return results
 

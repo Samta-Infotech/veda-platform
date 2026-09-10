@@ -102,7 +102,10 @@ def run_nl_simplifier(query: str, verbose: bool = False) -> SimplifierResult:
             purpose="nl_simplify",
             temperature=0.1,
             num_predict=64,
-            num_ctx=512,
+            # SLM_NUM_CTX, not 512: a window the Ollama host does not already serve blocks
+            # until this call's own timeout, so the simplifier silently burned its full
+            # budget on EVERY query and never produced a rewrite (see veda/generation.py).
+            num_ctx=__import__('config').SLM_NUM_CTX,
             endpoint="generate",
             timeout=10,
         ).strip()

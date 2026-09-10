@@ -859,9 +859,19 @@ def try_multitable(query, results, sm, all_cols, tf, primary=None):
             subject_clear = (a.signals["position"] == _pos[0] and _pos[0] > _pos[1])
             if not subject_clear and (a.score - b.score) < need:
                 alt = earliest.table if conflict else b.table
+                # This string reaches the END USER, so it names NEITHER candidate. It used to
+                # print the raw tables — "should rows be per assets_amenity or
+                # reminders_reminderfrequency? (confidence 0.4072 vs 0.4)" — which is
+                # unanswerable for a user, discloses the schema to whoever asked (including a
+                # caller with no access to those tables), and dresses noise up as precision.
+                # Humanizing the names was not enough: most of these tables carry no business
+                # label, so "Reminders Reminderfrequencies" still traces straight back to the
+                # internal name. The candidates and their scores stay in the trace for us; the
+                # user gets the ask instead, and the caller appends the concrete
+                # "Re-ask naming the subject explicitly (e.g. 'for each <entity> …')" hint.
                 return {"action": "clarify",
-                        "msg": (f"ambiguous subject — should rows be per {a.table} "
-                                f"or {alt}? (confidence {a.score} vs {b.score})")}
+                        "msg": ("This question could apply to more than one thing in the data, "
+                                "so I'd rather ask than guess.")}
 
     # A table is "requested" if a token of its name NOT shared with the anchor appears
     # in the query — e.g. "annotation" → annotation_record (vs anchor counterparty_details).

@@ -51,11 +51,25 @@ def _adverb_modifies_measure(query, adverb, sm):
     OTHER name-words also appears in the query (so the query is naming that measure). Data-driven (the
     schema's own MEASURE column names), no hardcoded vocabulary."""
     ql = " " + re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()) + " "
+
+    def _mentioned(w: str) -> bool:
+        """Is this name-word in the query, allowing the plural the user naturally writes?
+
+        The column is `monthly_fee` but people ask about "monthly fees" — and an exact
+        " fee " probe misses " fees ", so the adverb looked like a time breakdown and the
+        temporal guard refused the whole question. Measured: "highest monthly fee" passed
+        while "…and monthly fees" was refused, on the same column. A trailing "s" either
+        way is enough here; this stays schema-driven (the column's own words) with no
+        vocabulary list, exactly as the docstring promises.
+        """
+        base = w[:-1] if w.endswith("s") and len(w) > 3 else w
+        return any((" " + f + " ") in ql for f in (w, base, base + "s"))
+
     for k, c in (sm or {}).get("columns", {}).items():
         if (c.get("analytics_role") or "").upper() != "MEASURE":
             continue
         words = set(k.split(".", 1)[1].lower().split("_"))
-        if adverb in words and any((" " + w + " ") in ql for w in words - {adverb} if len(w) > 2):
+        if adverb in words and any(_mentioned(w) for w in words - {adverb} if len(w) > 2):
             return True
     return False
 
@@ -164,8 +178,9 @@ def entity_anchor_ok(query, sql, sm):
         or any(_col_table(c, sm) in named_tables for c in sql_cols)
     if aligned:
         return True, ""
-    return False, ("the figure this would measure isn't the one the question names — it belongs to "
-                   "a different subject than the one being ranked")
+    # Plain language (see the aggregate-omission message below for the same reasoning).
+    return False, ("I couldn't match the figure you asked about to the data I'd have to rank it "
+                   "by, so I'd rather not show a number that might be wrong")
 
 
 def alignment_ok(query, sql, sm):
@@ -211,8 +226,74 @@ def aggregate_presence_ok(query, sql, sm=None):
         return True, ""
     if _facts(sql).get("aggregations"):
         return True, ""                                  # SQL computes an aggregate → not omitted
-    return False, ("this asks for a count, total or average, but what came back is a list of "
-                   "individual records rather than the single figure requested")
+    # Plain language — an end user reads this, and "the SQL returns rows without an aggregate"
+    # tells them nothing they can act on while exposing how the query was built. What matters to
+    # them is that we could not produce the single figure they asked for and are not going to
+    # show a number we do not trust.
+    return False, ("I couldn't work out a reliable total for this, so I'd rather not show a "
+                   "figure that might be wrong")
+
+
+# ── D. FILTER presence ─────────────────────────────────────────────────────────────────────────────
+# Comparison words the query uses to express a numeric predicate. A closed grammar list, the same
+# shape as _AGG_INTENT / _TIME_UNITS above — not a semantic vocabulary.
+_CMP_WORDS = (" above ", " over ", " below ", " under ", " more than ", " less than ",
+              " greater than ", " fewer than ", " at least ", " at most ", " higher than ",
+              " lower than ")
+
+
+def _filter_presence_enabled() -> bool:
+    try:
+        import config as _cfg
+        return bool(getattr(_cfg, "INTENT_SQL_FILTER_PRESENCE_ENABLED", True))
+    except Exception:
+        return True
+
+
+def _boolean_flag_named(query, sm):
+    """A BOOLEAN/FLAG column whose own distinctive name-word the query uses, e.g. "gated" for
+    `is_gated`. Schema-driven (the column's words), no vocabulary list."""
+    ql = " " + re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()) + " "
+    for k, c in (sm or {}).get("columns", {}).items():
+        st = (c.get("semantic_type") or "").upper()
+        if st not in ("BOOLEAN", "FLAG", "BOOL"):
+            continue
+        for w in k.split(".", 1)[1].lower().split("_"):
+            if len(w) > 3 and w not in ("flag", "is", "has") and (" " + w + " ") in ql:
+                return k
+    return None
+
+
+def filter_presence_ok(query, sql, sm):
+    """(ok, reason). Refuse when the question states a FILTER the SQL never applied.
+
+    The silent-wrong this exists for: "Only those rated above 4.0" produced
+    `SELECT rating, vendor_id, city FROM vendors LIMIT 100` — no WHERE at all — and the answer
+    layer then reported "5 vendors have ratings above 4.0" off six unfiltered rows. Same shape on
+    "Only the ones that are gated": the SQL merely PROJECTED is_gated and the summary became
+    "60% of assets are gated". Both read as confident answers and both are invented.
+    qualifier_completeness does not catch it because the column IS present in the SQL — as a
+    projection — so the qualifier looks represented.
+
+    Two filter intents are detected, both cheap and both evidence-based:
+      * a comparison phrase plus a number ("above 4.0", "over 250");
+      * a BOOLEAN column named by the query ("gated" -> is_gated).
+    Either one with ZERO filters in the SQL is an omission. A SQL that filters anything at all
+    passes — this only catches "the predicate vanished entirely", never a wrong predicate."""
+    if not _filter_presence_enabled() or not sql:
+        return True, ""
+    ql = " " + re.sub(r"[^a-z0-9.]", " ", (query or "").lower()) + " "
+    wants = False
+    if any(w in ql for w in _CMP_WORDS) and re.search(r"\d", ql):
+        wants = True                                     # "above 4.0" / "over 250"
+    elif _boolean_flag_named(query, sm):
+        wants = True                                     # "gated" -> is_gated
+    if not wants:
+        return True, ""
+    if _facts(sql).get("filters"):
+        return True, ""                                  # SQL filters something -> not omitted
+    return False, ("I couldn't apply the condition you asked for, so I'd rather not show numbers "
+                   "that ignore it")
 
 
 # ── C. DIMENSION referent alignment (increment 2) ──────────────────────────────────────────────────

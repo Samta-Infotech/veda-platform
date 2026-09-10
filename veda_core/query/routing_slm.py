@@ -107,11 +107,35 @@ def _decision_field(parsed):
     return parsed.get("decision", parsed.get("mode")) if isinstance(parsed, dict) else None
 
 
+def _normalize_sid(v):
+    """One selected id as the bare source_id string the candidate set is keyed by.
+
+    _build_user_message lists candidates as "- source_id=4 type=... domains=...", so a small
+    model very reasonably answers "source_id=4" instead of "4". validate_slm_decision then found
+    it in no candidate set and rejected the whole decision as invalid, and the caller degraded to
+    "Which data source should answer? 2, 3, 4, 5. (selected non-candidate source(s):
+    ['source_id=4'])" — a clarification asking the user to pick the source the model had ALREADY
+    picked correctly. Stripping the prompt's own label is not guessing: the id still has to exist
+    in candidate_ids afterwards, so a genuinely invented source is rejected exactly as before.
+    """
+    t = str(v).strip().strip('"\'')
+    if "=" in t:                       # "source_id=4" / "source_id = 4"
+        t = t.rsplit("=", 1)[1].strip()
+    for pre in ("source_id:", "source_id", "source:", "source", "src_", "src"):
+        if t.lower().startswith(pre):  # "source_id 4", "src_4", "source 4"
+            t = t[len(pre):].strip(" :_-")
+            break
+    return t or str(v).strip()
+
+
 def _selected_field(parsed):
     """Read the selection, tolerating `selected_source_ids` or the old `source_ids`."""
     if not isinstance(parsed, dict):
         return None
-    return parsed.get("selected_source_ids", parsed.get("source_ids"))
+    raw = parsed.get("selected_source_ids", parsed.get("source_ids"))
+    if isinstance(raw, list):
+        return [_normalize_sid(s) for s in raw]
+    return raw
 
 
 def validate_slm_decision(parsed, candidate_ids: set) -> Tuple[bool, str]:

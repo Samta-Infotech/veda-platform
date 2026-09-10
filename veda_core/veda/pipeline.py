@@ -1947,9 +1947,29 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         from veda.intent_sql_alignment import aggregate_presence_ok as _agg_ok
         _ok_agg, _agg_why = _agg_ok(query, sql, sm)
         if not _ok_agg:
-            fb = _feedback("clarify", msg=_agg_why)
+            # Own next step: the generic "which one you mean?" tail treats a stated-but-unbuilt
+            # aggregate as an ambiguity the user has to resolve, which it isn't.
+            fb = _feedback("clarify", msg=_agg_why,
+                           what="Try asking for one figure at a time — a count, or a total.")
             log_route(_route + ".aggregate_omission", query, (time.time() - start) * 1000)
             return _done(0, "clarify", msg=_agg_why, feedback=fb) if return_result else 0
+
+    # Filter-OMISSION guard (flag-gated): the other half of the same silent-wrong class — the question
+    # states a CONDITION ("rated above 4.0", "the ones that are gated") and the SQL applies NO filter at
+    # all, so the answer layer narrates the unfiltered rows as if they were the filtered ones. Measured:
+    # `SELECT "rating","vendor_id","city" FROM "vendors" LIMIT 100` answered "5 vendors have ratings above
+    # 4.0" (truth 4). Placed AFTER the aggregate guard so a query that omits both is reported by the
+    # aggregate one first (the coarser defect). No-op when off / no filter intent / SQL filters anything.
+    if sql:
+        from veda.intent_sql_alignment import filter_presence_ok as _filt_ok
+        _ok_filt, _filt_why = _filt_ok(query, sql, sm)
+        if not _ok_filt:
+            # No worked example here: a fixed one ("vendors where rating > 4") was shown
+            # verbatim on a maintenance question, which reads as the wrong suggestion.
+            fb = _feedback("clarify", msg=_filt_why,
+                           what="Try naming the field and the value to compare it against.")
+            log_route(_route + ".filter_omission", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_filt_why, feedback=fb) if return_result else 0
 
     # DIMENSION referent alignment (flag-gated, increment 2): the SQL GROUP BY column must belong to the
     # CATEGORY/DIMENSION candidates of the SQL's tables whose name matches the requested dimension phrase.

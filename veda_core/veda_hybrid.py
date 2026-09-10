@@ -316,7 +316,14 @@ def _agent_to_subresult(query, ar):
         payload = {"ok": True, **(getattr(ar, "data", {}) or {})}
         return _to_subresult(query, engine, payload)
     if status == "refused":
-        return SubResult(query, STATUS_REFUSED, engine, None, getattr(ar, "reason", "") or "refused")
+        # Pass the agent's diagnostic payload through instead of None. It carries the pipeline's
+        # own feedback/answer for this refusal (see agents.py::_from_sql_dict), and dropping it
+        # left every consumer with nothing but the reason string — which is why a refused
+        # datalake query surfaced as the contentless "Could you clarify what you're asking
+        # about?" in chat. Empty dict → None, so a refusal with genuinely nothing to say behaves
+        # exactly as before.
+        return SubResult(query, STATUS_REFUSED, engine, (getattr(ar, "data", None) or None),
+                         getattr(ar, "reason", "") or "refused")
     return SubResult(query, STATUS_ERROR, engine, None, getattr(ar, "error", "") or "failed")
 
 
@@ -417,10 +424,26 @@ def _augment_sm_for_datalake(sm, cols, source_id):
             return sm, cols
         new_cols = dict(sm.get("columns", {}) or {})
         new_tables = dict(sm.get("tables", {}) or {})
+        # analytics_role is a DIFFERENT vocabulary from semantic_type and must be derived, not
+        # copied. semantic_type is MONETARY / METRIC / CATEGORY / FREE_TEXT / TEMPORAL /
+        # IDENTIFIER; analytics_role is MEASURE / DIMENSION / TIME_DIMENSION / IDENTIFIER /
+        # ATTRIBUTE (see ingestion/deterministic_metadata.py::compute_analytics_role, the one
+        # producer of it, and _SQL_USAGE which keys groupable/filterable/sortable off it).
+        # Copying semantic_type in put strings like "MONETARY" in the role field — not a valid
+        # role, so every consumer silently fell through _SQL_USAGE's ATTRIBUTE default:
+        #   * monthly_fee/amount/rating (MONETARY/METRIC) were never seen as MEASUREs, so
+        #     intent_sql_alignment.py:56's `analytics_role != "MEASURE": continue` skipped them
+        #     and _wants_time_bucket read "monthly fee" as a per-month breakdown -> the
+        #     temporal-alignment guard refused amenity-fee questions outright;
+        #   * category/status (CATEGORY) were never DIMENSIONs, so they were not groupable.
+        # Same derivation the relational ingestion path uses, so datalake columns now carry the
+        # same role vocabulary as every other source.
+        from ingestion.deterministic_metadata import compute_analytics_role
         for tbl, col, stype in rows:
             st = stype or "DIMENSION"
             new_cols[f"{tbl}.{col}"] = {
-                "col_name": col, "table_name": tbl, "semantic_type": st, "analytics_role": st,
+                "col_name": col, "table_name": tbl, "semantic_type": st,
+                "analytics_role": compute_analytics_role(col, st),
                 "business_definition": f"{col} from datalake dataset {tbl}"}
             new_tables.setdefault(tbl, {
                 "table_name": tbl, "business_purpose": f"datalake dataset {tbl}",
@@ -548,11 +571,16 @@ def _datalake_isolated_sm(source_id):
         except Exception:
             col_samples = {}
         tables, columns = {}, {}
+        # Derive analytics_role rather than copying semantic_type — see the same fix in
+        # _augment_sm_for_datalake above for why (the two vocabularies are not interchangeable,
+        # and an invalid role silently degrades to ATTRIBUTE).
+        from ingestion.deterministic_metadata import compute_analytics_role
         for tbl, col, stype in rows:
             st = stype or "DIMENSION"
             svals = col_samples.get((tbl, col), [])
             columns[f"{tbl}.{col}"] = {
-                "col_name": col, "table_name": tbl, "semantic_type": st, "analytics_role": st,
+                "col_name": col, "table_name": tbl, "semantic_type": st,
+                "analytics_role": compute_analytics_role(col, st),
                 "business_definition": f"{col} from datalake dataset {tbl}",
                 "sample_values": svals}
             tables.setdefault(tbl, {
@@ -632,19 +660,68 @@ def _run_coordinator(query, verbose=False, on_event=None):
             _perm_pc = False
         if _perm_pc:
             try:
-                from query.source_coordinator import all_ready_source_ids, best_matching_source
+                from query.source_coordinator import (all_ready_source_ids,
+                                                      best_matching_scored)
                 _permitted = {str(s) for s in sids}
                 _denied = set(all_ready_source_ids()) - _permitted
                 if _denied:
-                    _best = best_matching_source(query, sorted(_permitted | _denied), _profiles)
-                    if _best is not None and str(_best) in _denied:
-                        try:
-                            from veda import lifecycle as _lc2
-                            _lc2.current_timeline().failed(_lc2.PHASE_ACCESS_CHECK)
-                        except Exception:
-                            pass
-                        _emit(on_event, "answer",
-                              "You don't have permission to access the data source that can answer this.")
+                    _all_hit = best_matching_scored(query, sorted(_permitted | _denied), _profiles)
+                    _best = _all_hit[0] if _all_hit is not None else None
+                    # ...but WHICH source won is not enough on its own, and deciding on identity
+                    # alone failed in both directions:
+                    #   * refuse whenever the global winner is inaccessible → a datalake-only
+                    #     caller asking "How many maintenance records are repairs?" was told
+                    #     "you don't have permission", because maintenance_policy.docx (source 3,
+                    #     denied) matched best — even though the permitted `maintenance` dataset
+                    #     answers it directly;
+                    #   * proceed whenever ANY permitted source is STRONG → homzhub (178 tables)
+                    #     is STRONG for almost any wording, so a homzhub-only caller asking
+                    #     "Which city has the highest-rated vendor?" got a bare "could you
+                    #     clarify", never learning that the answer exists but is not theirs.
+                    # So compare the two winners' SCORES. When the inaccessible source is ahead by
+                    # the same margin the router itself calls dominant (ROUTING_DOMINANT_GAP, the
+                    # gap _decision_boundary uses for a confident SINGLE), the caller genuinely has
+                    # no access to the data that answers this → refuse WITH the permission message.
+                    # When a permitted source is within that margin it is a real answer, so answer
+                    # it. Costs one extra scoring pass, and only on this rare path (some ready
+                    # source is inaccessible AND wins).
+                    #
+                    # The margin is its OWN knob, not ROUTING_DOMINANT_GAP, because the two
+                    # populations overlap and the trade-off is genuinely tight. Measured on this
+                    # deployment (item-prior scores, permission-agnostic scoring):
+                    #   datalake-only caller, MUST NOT refuse (it is entitled):
+                    #     "How many maintenance records are repairs?"          gap 0.105
+                    #     "Show amenities in the Security category."           gap 0.033
+                    #   homzhub-only caller, SHOULD refuse with the permission message:
+                    #     "Which city has the highest-rated vendor?"           gap 0.215
+                    #     "Show vendors with a rating above 4.2."              gap 0.142
+                    #     "Show unpaid maintenance tickets with their IDs."    gap 0.089
+                    #     "Show every maintenance ticket ..."                  gap 0.047
+                    # No single cutoff satisfies both ends (0.105 sits above 0.047-0.089), so this
+                    # is deliberately set ABOVE the highest must-not-refuse case: never tell an
+                    # entitled caller "you don't have permission" — that is the harmful error —
+                    # and accept that a narrow-margin unauthorised case falls through to the
+                    # pipeline's own (vaguer) refusal instead. It still refuses, and still leaks
+                    # nothing; it just says less. Raising this only makes it more conservative.
+                    # A principled fix needs more than a scalar gap (e.g. domain/type agreement
+                    # between the query and the winning source) and is not attempted here.
+                    _perm_hit = (best_matching_scored(query, sorted(_permitted), _profiles)
+                                 if (_best is not None and str(_best) in _denied) else None)
+                    try:
+                        from config import ROUTING_PERMISSION_DENY_GAP as _deny_gap
+                    except Exception:
+                        _deny_gap = 0.12
+                    if (_best is not None and str(_best) in _denied
+                            and (_perm_hit is None
+                                 or (_all_hit[1] - _perm_hit[1]) >= float(_deny_gap))):
+                        # Deliberately says nothing about WHICH source, or that a
+                        # source able to answer exists at all: naming it tells an
+                        # unauthorised caller what data the platform holds. Same
+                        # wording as veda/feedback.py's ACCESS_DENIED_WHY/_WHAT, the
+                        # canonical denial text every other path already uses.
+                        _deny_msg = ("You don't have permission to access this data. "
+                                     "Contact your Admin to request access.")
+                        _emit(on_event, "answer", _deny_msg)
                         return MultiResult.single(
                             query, STATUS_REFUSED, "no_access", refuse_reason=_deny_msg)
             except Exception:
@@ -941,6 +1018,27 @@ def _clean_refuse_on_empty_error(result) -> None:
     except Exception:
         return
     _msg = "I couldn't find any data relevant to this question in the sources available to you."
+    # An INFRASTRUCTURE failure must not be repainted as "the data isn't there". "no answer and
+    # no SQL" is also exactly what an unreachable LLM host produces, and blaming the data then
+    # sends the user — and whoever debugs it — hunting a retrieval or permission problem that
+    # does not exist. Observed today: with the SLM host refusing connections, every SQL query
+    # came back "I couldn't find any data relevant to this question" while the rows sat right
+    # there. So reuse the engine's OWN transient/permanent classifier (query/reliability.py, the
+    # same one execute_reliably retries on) and say what actually happened when it is transient.
+    _infra_msg = ("I couldn't reach the service needed to answer this, so I don't have an answer "
+                  "yet. Please try again in a moment.")
+
+    def _is_transient(err) -> bool:
+        if not err:
+            return False
+        try:
+            from query.reliability import classify_failure
+            return classify_failure(str(err)) == "transient"
+        except Exception:
+            _e = str(err).lower()
+            return any(m in _e for m in ("timeout", "timed out", "504", "unreachable",
+                                         "connection refused", "connectionerror"))
+
     try:
         for it in (getattr(result, "items", None) or []):
             if getattr(it, "status", "") != "error":
@@ -948,15 +1046,64 @@ def _clean_refuse_on_empty_error(result) -> None:
             r = it.result if isinstance(getattr(it, "result", None), dict) else None
             if r is not None and (r.get("answer") or r.get("sql")):
                 continue                                   # a real result — leave it alone
+            _err = getattr(it, "refuse_reason", None) or (r or {}).get("error")
+            _transient = _is_transient(_err)
+            _text = _infra_msg if _transient else _msg
+            _reason = "engine_unavailable" if _transient else "no_relevant_data"
             it.status = "refused"
-            it.refuse_reason = getattr(it, "refuse_reason", None) or "no_relevant_data"
+            it.refuse_reason = getattr(it, "refuse_reason", None) or _reason
             if r is not None:
                 r["ok"] = False
                 r["status"] = "refused"
-                r["answer"] = r.get("answer") or _msg
+                r["answer"] = r.get("answer") or _text
             else:
-                it.result = {"ok": False, "status": "refused", "answer": _msg,
-                             "refuse_reason": "no_relevant_data"}
+                it.result = {"ok": False, "status": "refused", "answer": _text,
+                             "refuse_reason": _reason}
+    except Exception:
+        pass
+
+
+def _emit_terminal_lifecycle(timeline, final_status: str) -> None:
+    """Close the timeline with the phase that matches the actual outcome.
+
+    Only emitted for a terminal state we can describe safely: `answered` completes,
+    anything else is a warning on result_preparation rather than a failure, because
+    a refusal is a CORRECT outcome (the refuse-over-guess contract) and must not be
+    presented to the user as the system breaking."""
+    try:
+        from veda import lifecycle as lc
+        if not getattr(timeline, "enabled", False):
+            return
+        # EXP-B1: close any phase left OPEN (started, never resolved). Measured on the
+        # 10-query benchmark: access_check hung at "started" on 6 of 10 query types,
+        # because its completion lived on the deterministic SQL path only — document,
+        # hybrid and refusal paths never reach it, so the user watched a spinner that
+        # never finished. Resolving here means EVERY path closes it, whichever head ran.
+        #
+        # A phase already resolved NEGATIVELY is left alone: a real permission denial
+        # emits access_check=failed earlier (pipeline._feedback), and overwriting that
+        # with "verified" would be the contradiction this whole fix is about.
+        # Shared with veda/pipeline.py::_done, which sweeps FIRST so the persisted
+        # payload never records an unresolved phase. Idempotent, so running twice
+        # is harmless.
+        timeline.close_open_phases(failed=(final_status not in
+                                           ("answered", "refused", "clarify")))
+
+        if final_status == "answered":
+            timeline.completed(lc.PHASE_RESULT_PREPARATION)
+            timeline.completed(lc.PHASE_COMPLETED)
+        elif final_status in ("refused", "clarify"):
+            # WARNING, not completed. The message here was already honest ("could not
+            # answer") but the STATUS contradicted it, and the status is what the UI
+            # renders: a refusal came out as four green ticks above a reply saying the
+            # question could not be answered. A refusal is not a system failure — so
+            # not `failed` either. `warning` is the state that exists for exactly this.
+            timeline.warning(lc.PHASE_RESULT_PREPARATION,
+                             "Could not answer this from the available data")
+            timeline.completed(lc.PHASE_COMPLETED)
+        else:
+            timeline.failed(lc.PHASE_RESULT_PREPARATION,
+                            "Could not complete this question")
     except Exception:
         pass
 

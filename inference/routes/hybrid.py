@@ -101,6 +101,72 @@ def _serialize(obj: Any) -> Any:
     return str(obj)
 
 
+
+#: The engine is imported under BOTH names — bare ``context`` (cwd=veda_core) and
+#: ``veda_core.context`` (inference tier, PYTHONPATH=/app) — and Python loads those
+#: as TWO module objects. Verified in the running container: their
+#: ``_source_profiles`` ContextVars are DIFFERENT objects, so a value set through
+#: one name is invisible to a reader going through the other.
+#:
+#:     copy_context() snapshot, profiles set via veda_core.context:
+#:         veda_core.context.current_source_profiles()  -> {'2': {...}}
+#:         context.current_source_profiles()            -> {}          <-- lost
+#:
+#: `copy_context()` carries whatever the writer actually set, which is why it fixed
+#: the measured "every source resolved to 'a data source'" bug. These two helpers
+#: are the belt for the other half of the problem: they re-bind the captured scope
+#: through EVERY name, so a reader on either one sees it. `veda_hybrid._current_ctx`
+#: already does the equivalent for reads of the RequestContext; this covers the
+#: writes, and source profiles, which have no such fallback.
+_CONTEXT_MODULES = ("veda_core.context", "context")
+
+
+def _capture_scope() -> dict:
+    """The request scope, read through whichever module name holds it. Never raises."""
+    import importlib
+    out = {"ctx": None, "profiles": None}
+    for name in _CONTEXT_MODULES:
+        try:
+            mod = importlib.import_module(name)
+        except Exception:
+            continue
+        try:
+            if out["ctx"] is None:
+                out["ctx"] = mod.try_current()
+        except Exception:
+            pass
+        try:
+            if not out["profiles"]:
+                out["profiles"] = mod.current_source_profiles() or None
+        except Exception:
+            pass
+    return out
+
+
+def _rebind_scope(scope: dict) -> None:
+    """Re-bind a captured scope through EVERY context module name.
+
+    Idempotent — re-setting the value a copy_context() snapshot already carries
+    changes nothing. Best-effort by design: a failure here must never cost the
+    request, because the snapshot is the primary mechanism and this is the belt.
+    """
+    import importlib
+    for name in _CONTEXT_MODULES:
+        try:
+            mod = importlib.import_module(name)
+        except Exception:
+            continue
+        if scope.get("ctx") is not None:
+            try:
+                mod.set_context(scope["ctx"])
+            except Exception:
+                pass
+        if scope.get("profiles"):
+            try:
+                mod.set_source_profiles(scope["profiles"])
+            except Exception:
+                pass
+
 if APIRouter is not None:
     router = APIRouter(prefix="/v1")
 
@@ -134,7 +200,6 @@ if APIRouter is not None:
     @router.post("/run_hybrid_query/stream")
     async def run_hybrid_query_stream_route(req: "HybridRequest", request: Request):
         import asyncio
-
         from contextvars import copy_context
 
         from veda_core.veda_hybrid import run_hybrid_query
@@ -155,6 +220,9 @@ if APIRouter is not None:
         # non-streaming route — so the two paths now behave identically, and adding
         # a third request-scoped ContextVar cannot reintroduce this class of bug.
         parent_ctx = copy_context()
+        # Captured separately from the snapshot: see _capture_scope for why the
+        # snapshot alone can leave one module view of the scope empty.
+        _scope = _capture_scope()
         _tid = _incoming_trace_id(request)
 
         def on_event(phase: str, message: str, extra: dict):
@@ -163,6 +231,7 @@ if APIRouter is not None:
             )
 
         def _run():
+            _rebind_scope(_scope)          # belt; the snapshot is the primary path
             try:
                 result = run_hybrid_query(req.query, verbose=_verbose(),
                                           on_event=on_event, trace_id=_tid)
@@ -183,6 +252,33 @@ if APIRouter is not None:
             finally:
                 loop.call_soon_threadsafe(events.put_nowait, None)
 
+        # MERGE RESOLUTION (2026-09-10) — both sides were fixing the SAME bug and
+        # both diagnoses were right; this keeps the working mechanism from one and
+        # the concern from the other.
+        #
+        # The bug: this used to be `with_context(try_current(), _run)`, which
+        # re-binds ONLY the (source, tenant) RequestContext. `source_profiles` is a
+        # SEPARATE ContextVar and was silently dropped in the worker. Measured
+        # consequences on the real chat path: every source resolved to the generic
+        # "a data source" label (`known: false`) though the api tier had sent the
+        # names; the routing coordinator's canonical tie-break saw an empty profile
+        # map; and `_is_datalake_source()` returned False for a datalake source, so
+        # the datalake-isolated semantic model was never loaded and a vendor
+        # question got planned against the primary source's 178-table schema.
+        #
+        # `copy_context()` carries EVERY ContextVar, which is what
+        # inference/concurrency.py::run_in_threadpool_with_context already does for
+        # the non-streaming route — so both routes now behave identically and a
+        # ContextVar added later propagates without touching this line again.
+        #
+        # The other side ALSO wrapped `with_context(...)` inside the snapshot, for
+        # the dual-import case (bare `context` vs `veda_core.context` hold separate
+        # vars — veda_hybrid.py:71-81). That concern is real and verified, but the
+        # wrapper is not the way to address it here: `with_context` is not imported
+        # in this module, and `parent_ctx` is a contextvars.Context rather than the
+        # RequestContext that `set_context` expects. `_rebind_scope()` at the top of
+        # `_run` covers the same ground correctly, for profiles as well as the
+        # RequestContext, and is idempotent when the snapshot already carried them.
         threading.Thread(target=lambda: parent_ctx.run(_run), daemon=True).start()
 
         async def gen():
