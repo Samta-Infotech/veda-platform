@@ -264,8 +264,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             if _bad:
                 _tld.failed(_lcd.PHASE_VALIDATION)
             elif status == "answered":
-                _tld.completed(_lcd.PHASE_VALIDATION,
-                               f"{len(_ck)} safety checks passed")
+                # No COUNT here. This line is emitted before build_explain runs,
+                # so it can only count the trace's checks — while the panel the
+                # reader opens lists the EXPANDED labels, a different (larger)
+                # number. A live line that says "4" above a list of 5 is worse than
+                # one that says neither; the number belongs where the list is.
+                _tld.completed(_lcd.PHASE_VALIDATION, "Safety checks passed")
             else:
                 # The ledger holds the AST/read-only/fan-out checks, and those DID
                 # pass. But this turn produced no answer — it was stopped by a LATER
@@ -2059,8 +2063,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             if _failed:
                 _tlv.failed(_lcv.PHASE_VALIDATION)
             elif _checks:
-                _tlv.completed(_lcv.PHASE_VALIDATION,
-                               f"{len(_checks)} safety checks passed")
+                _tlv.completed(_lcv.PHASE_VALIDATION, "Safety checks passed")
     except Exception:
         pass
     if not err and getattr(tr, "enabled", False):

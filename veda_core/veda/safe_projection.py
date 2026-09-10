@@ -354,7 +354,8 @@ def _flow_stage(kind: str, label: str, items=None) -> Dict[str, Any]:
     return out
 
 
-def build_flow(trace, *, operations=None) -> Optional[Dict[str, Any]]:
+def build_flow(trace, *, operations=None,
+               validation=None) -> Optional[Dict[str, Any]]:
     """The end-to-end story of this answer, assembled from what actually happened.
 
     One shape for every execution type — the reader always follows
@@ -399,14 +400,22 @@ def build_flow(trace, *, operations=None) -> Optional[Dict[str, Any]]:
         stages.append(_flow_stage(
             "evidence", f"{retrieved} record{'' if retrieved == 1 else 's'} retrieved"))
 
-    # VALIDATION — the checks that actually ran, by their user-facing labels.
-    checks = (_sec(trace, "validation").get("checks") or [])
-    passed = [c for c in checks if isinstance(c, dict) and c.get("status") == "pass"]
-    if checks:
+    # VALIDATION — counted from the LIST THE USER IS SHOWN, passed in from the
+    # payload, not from the trace's own check ledger.
+    #
+    # The two are not the same number: build_explain expands one trace check into
+    # SEVERAL user-facing labels (`_CHECK_LABELS`), so a turn with 4 trace checks
+    # shows 5 statements. Counting the trace here put "4 checks passed" in the flow
+    # directly above a list of 5 — both numbers correct in their own terms, and
+    # contradictory side by side. The number the reader can count must be the
+    # number they are told.
+    items = [c for c in ((validation or {}).get("checks") or []) if isinstance(c, dict)]
+    passed = [c for c in items if c.get("passed")]
+    if items:
         stages.append(_flow_stage(
             "validation",
-            f"{len(passed)} of {len(checks)} checks passed" if len(passed) != len(checks)
-            else f"{len(checks)} check{'' if len(checks) == 1 else 's'} passed"))
+            f"{len(passed)} of {len(items)} checks passed" if len(passed) != len(items)
+            else f"{len(items)} check{'' if len(items) == 1 else 's'} passed"))
 
     # OPERATIONS — the semantic steps, in order, as the answer payload states them.
     # Passed in rather than read from the trace: operations are derived from the
@@ -458,7 +467,7 @@ def _demote_source_ids(out: Dict[str, Any]) -> None:
 
 # ── the whole v2 extension ───────────────────────────────────────────────────
 def build_explain_extension(trace, *, trace_id: str = "",
-                            operations=None) -> Dict[str, Any]:
+                            operations=None, validation=None) -> Dict[str, Any]:
     """Every v2 block, assembled from the trace. Keys whose block does not apply
     to this query are OMITTED rather than emitted as null, except `warnings` /
     `limitations` (always a list, so a client can render unconditionally) and
@@ -482,7 +491,7 @@ def build_explain_extension(trace, *, trace_id: str = "",
         except Exception:
             pass
     try:
-        _flow = build_flow(trace, operations=operations)
+        _flow = build_flow(trace, operations=operations, validation=validation)
         if _flow:
             out["flow"] = _flow
     except Exception:

@@ -315,7 +315,8 @@ def _apply_v2(out: Dict[str, Any], *, trace: Any = None, trace_id: str = "") -> 
         from veda import safe_projection as sp
         ext = sp.build_explain_extension(
             tr, trace_id=trace_id or getattr(tr, "trace_id", "") or "",
-            operations=out.get("operations"))
+            operations=out.get("operations"),
+            validation=out.get("validation"))
         if not ext:
             return
         out.update(ext)

@@ -1141,8 +1141,11 @@ def test_flow_for_a_database_answer(flags_on, trace):
     tl = lc.new_timeline(trace=trace)
     tl.completed(lc.PHASE_ACCESS_CHECK)
     trace.set("execution", row_count=5)
-    trace.set("validation", checks=[{"name": "read_only", "status": "pass"},
-                                    {"name": "fanout", "status": "pass"}])
+    # the flow counts the PAYLOAD's expanded label list, not the trace ledger —
+    # one trace check becomes several user-facing labels
+    payload_validation = {"passed": True, "checks": [
+        {"label": "Read-only query", "passed": True},
+        {"label": "Duplicate-safe (no double-counting)", "passed": True}]}
     rec = er.ExecutionRecorder(trace=trace)
     r = rec.open("2", source_type="relational", engine="deterministic_sql")
     rec.close(r, er.COMPLETED, rows=5)
@@ -1150,7 +1153,9 @@ def test_flow_for_a_database_answer(flags_on, trace):
     # Operations are derived from the executed SQL by build_explain and live only in
     # the PAYLOAD, so the flow is given them rather than reading the trace for them.
     ops = [{"summary": "Group by Status"}, {"summary": "Sort by Amount"}]
-    stages = [s["stage"] for s in sp.build_flow(trace, operations=ops)["stages"]]
+    stages = [s["stage"] for s in
+              sp.build_flow(trace, operations=ops,
+                            validation=payload_validation)["stages"]]
     assert stages[0] == "request" and stages[-1] == "answer"
     for expected in ("access", "sources", "evidence", "validation", "operations"):
         assert expected in stages, f"{expected} missing from {stages}"
@@ -1346,3 +1351,58 @@ def test_no_user_facing_tick_carries_a_raw_identifier(flags_on):
     assert not offenders, (
         "a stage tick interpolates a value into user-facing text; if the value is "
         f"an identifier it leaks: {offenders}")
+
+
+def test_the_flow_and_the_check_list_never_disagree(flags_on, trace):
+    """One trace check expands into SEVERAL user-facing labels, so counting the
+    trace put "4 checks passed" in the flow directly above a list of 5. Both
+    numbers were right in their own terms and contradictory side by side.
+
+    The number the reader is told must be the number they can count.
+    """
+    tl = lc.new_timeline(trace=trace)
+    tl.completed(lc.PHASE_ACCESS_CHECK)
+    trace.set("execution", row_count=5)
+    # the TRACE holds 4 checks...
+    trace.set("validation", checks=[{"name": "value_grounding", "status": "pass"},
+                                    {"name": "ir_equivalence", "status": "pass"},
+                                    {"name": "ast_readonly_parameterized_fanout",
+                                     "status": "pass"},
+                                    {"name": "join_fanout", "status": "pass"}])
+    # ...while the PAYLOAD shows 5 expanded labels
+    payload_validation = {"passed": True, "checks": [
+        {"label": "All filter values exist in the data", "passed": True},
+        {"label": "No requested filters were ignored", "passed": True},
+        {"label": "No extra filters, joins, or grouping were added", "passed": True},
+        {"label": "Read-only query", "passed": True},
+        {"label": "Duplicate-safe (no double-counting)", "passed": True},
+    ]}
+    flow = sp.build_flow(trace, validation=payload_validation)
+    stage = next(s for s in flow["stages"] if s["stage"] == "validation")
+    assert "5 checks passed" in stage["label"], (
+        f"the flow must count the 5 labels the reader sees, got {stage['label']!r}")
+    assert "4" not in stage["label"]
+
+
+def test_the_flow_reports_a_partial_pass_honestly(flags_on, trace):
+    tl = lc.new_timeline(trace=trace)
+    tl.completed(lc.PHASE_ACCESS_CHECK)
+    trace.set("execution", row_count=1)
+    flow = sp.build_flow(trace, validation={"passed": False, "checks": [
+        {"label": "Read-only query", "passed": True},
+        {"label": "Duplicate-safe (no double-counting)", "passed": False},
+    ]})
+    stage = next(s for s in flow["stages"] if s["stage"] == "validation")
+    assert stage["label"] == "1 of 2 checks passed"
+
+
+def test_no_live_progress_line_states_a_check_COUNT(flags_on):
+    """The live line is emitted before the payload exists, so any count it states
+    can only be the trace's — a different number from the list the reader opens."""
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "veda_core", "veda", "pipeline.py")) as fh:
+        src = fh.read()
+    offenders = re.findall(r'f"\{len\([^)]*\)\}\s*(?:safety\s*)?checks?\b[^"]*"', src)
+    assert not offenders, f"a live progress line states a check count: {offenders}"
