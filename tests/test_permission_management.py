@@ -230,7 +230,7 @@ def test_list_search_matches_code_or_name(admin_client):
     assert by_code["pagination"]["total"] == 1
     assert by_code["permissions"][0]["code"] == "ingestion.run"
 
-    by_name = _list(admin_client, search="Manage users").json()["data"]
+    by_name = _list(admin_client, search="Users").json()["data"]
     assert by_name["pagination"]["total"] == 1
     assert by_name["permissions"][0]["code"] == "user.manage"
 
