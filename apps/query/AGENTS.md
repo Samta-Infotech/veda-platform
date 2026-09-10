@@ -25,5 +25,3 @@ Full flow: [../../docs/ARCHITECTURE.md §3](../../docs/ARCHITECTURE.md),
 - **`QueryLog.status` accepts non-canonical values** (`"forbidden"`, `"unavailable"`,
   `"unknown"`) — `choices` don't validate on `.create()`.
 - `cache_hit` is derived from the engine tagging the result table `"(cached)"`.
-- Related possible bug: `storage_adapters/reader.py::ann_search` may query the wrong
-  Postgres DB — see [../../docs/backlog/query-engine-open-items.md](../../docs/backlog/query-engine-open-items.md).

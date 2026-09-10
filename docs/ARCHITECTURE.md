@@ -593,8 +593,9 @@ route.
 - Tenant-from-principal, per-source HNSW auto-tuning at scale (`artifact_scope` OFF by
   default), prod deployment hardening (B1–B13).
 
-**Known open bug (unverified at runtime):** `storage_adapters/reader.py::ann_search` reads
-`column_embeddings_v2` on the `POSTGRES_DB` connection (`veda`), but that table lives in
-`veda_engine`. The same connection reads Django `substrate_*` tables. One class of read may
-be failing silently to zero rows — see [`backlog/query-engine-open-items.md`](backlog/query-engine-open-items.md)
-and confirm which DB the inference container's `POSTGRES_DB` resolves to.
+**Recently fixed (2026-09-10):** `storage_adapters/reader.py::ann_search` was reading
+`column_embeddings_v2` on the `veda` connection, but that table lives in `veda_engine`, so
+Signal-1 dense retrieval was silently falling back to an **unscoped** engine-store query
+(leaking candidates across sources in a multi-source scope). `reader.py` now uses a
+dedicated `_internal_connection()` for the vector scan. Still worth a live confirmation —
+see [`backlog/query-engine-open-items.md`](backlog/query-engine-open-items.md).

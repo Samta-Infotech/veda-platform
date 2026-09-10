@@ -36,11 +36,17 @@ class FKEdge:
 
 
 _CONN = None
+_INTERNAL_CONN = None
 
 
 def _connection():
     """psycopg2 connection to the Django-managed Postgres (the `veda` DB, through
-    PgBouncer). Reads the same POSTGRES_*/PGBOUNCER_* env the Django settings use."""
+    PgBouncer). Reads the same POSTGRES_*/PGBOUNCER_* env the Django settings use.
+
+    This is where the Django substrate tables live: substrate_fkedge / _glossaryentry
+    / _synonym / _columnvaluesample / _substrateversion / _verifiedquerycache,
+    sources_source. Engine-owned vector tables (column_embeddings_v2, …) do NOT live
+    here — use `_internal_connection()` for those (see `ann_search`)."""
     global _CONN
     if _CONN is not None and _CONN.closed == 0:
         return _CONN
@@ -57,6 +63,37 @@ def _connection():
     # is read-only by construction (SELECT only).
     _CONN.autocommit = True
     return _CONN
+
+
+def _internal_connection():
+    """psycopg2 connection to the ENGINE's internal store (`veda_engine` DB, through
+    PgBouncer) — where ingestion writes the pgvector tables the runtime reads:
+    column_embeddings_v2 / table_embeddings_v2 / graph_node_embeddings / doc_chunks.
+
+    Reads `VEDA_INTERNAL_*` (matching `config.VEDA_INTERNAL_DB`,
+    `storage_adapters.writer.sync_from_engine`, and `veda_core/ingestion/biencoder.py`),
+    falling back to the PgBouncer host/port and POSTGRES_USER/PASSWORD when only those
+    are set. This is a SEPARATE connection from `_connection()`: one psycopg2
+    connection is bound to one database, and `column_embeddings_v2` is not in `veda`
+    (before this split, `ann_search` queried it on the `veda` connection and always
+    raised `relation "column_embeddings_v2" does not exist`, silently degrading
+    Signal 1 to an unscoped engine-store fallback)."""
+    global _INTERNAL_CONN
+    if _INTERNAL_CONN is not None and _INTERNAL_CONN.closed == 0:
+        return _INTERNAL_CONN
+    _INTERNAL_CONN = psycopg2.connect(
+        host=os.environ.get("VEDA_INTERNAL_HOST",
+                            os.environ.get("PGBOUNCER_HOST", "pgbouncer")),
+        port=int(os.environ.get("VEDA_INTERNAL_PORT",
+                                os.environ.get("PGBOUNCER_PORT", "6432"))),
+        dbname=os.environ.get("VEDA_INTERNAL_DBNAME", "veda_engine"),
+        user=os.environ.get("VEDA_INTERNAL_USER",
+                            os.environ.get("POSTGRES_USER", "veda")),
+        password=os.environ.get("VEDA_INTERNAL_PASSWORD",
+                                os.environ.get("POSTGRES_PASSWORD", "change-me")),
+    )
+    _INTERNAL_CONN.autocommit = True
+    return _INTERNAL_CONN
 
 
 def _scope():
@@ -250,6 +287,12 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     rows. `column_embeddings_v2` has no `tenant` column (single-tenant-per-
     source, matching `veda_core/query/retrieval_v2.py`'s own query), so
     filtering here is by `source_id SET` only.
+
+    `column_embeddings_v2` lives in the ENGINE'S internal store (`veda_engine`),
+    NOT the Django `veda` DB — so this query runs on `_internal_connection()`.
+    The per-source `ef_search` knob (`_resolve_ef_search`) still reads the Django
+    `substrate_substrateversion` table on `_connection()`; only the vector scan
+    moves.
     """
     source_ids, tenant = _scope_ids()
     source_id = source_ids[0]  # primary — only used to resolve the per-source ef_search knob
@@ -269,7 +312,7 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
     # Explicit transaction so SET LOCAL is scoped to it and released at COMMIT — this is
     # PgBouncer-transaction-pool-safe (never leaks the GUC to the next pooled client),
     # unlike a session-level SET (see the readonly-poisoning fix in _connection).
-    with _connection().cursor() as cur:
+    with _internal_connection().cursor() as cur:
         cur.execute("BEGIN")
         cur.execute(f"SET LOCAL hnsw.ef_search = {ef_search}")
         cur.execute(sql, [vec, source_ids, vec, top_k])

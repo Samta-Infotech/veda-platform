@@ -31,13 +31,14 @@ inverse), `publish_sm()` (`veda:sm:{s}:{t}` in redis-cache), `publish_registry()
 the anti-cross-source-leak fix for non-relational sources), `publish_rehydrate()`.
 
 ## Gotchas
-- **⚠ Possible bug (F1, unverified).** `reader.ann_search()` reads `column_embeddings_v2`,
-  which `config.VEDA_INTERNAL_DB` places in db **`veda_engine`**. But `reader._connection()`
-  targets `POSTGRES_DB` (default `veda`), and the same connection reads Django `substrate_*`
-  tables. One class of read may be failing silently to zero rows. `writer.py` uses
-  `VEDA_INTERNAL_*` correctly; `reader.py` did not follow when it switched off the (dropped)
-  `column_embeddings_bge` mirror. **Confirm which DB the inference container's `POSTGRES_DB`
-  resolves to.** See [../docs/backlog/query-engine-open-items.md](../docs/backlog/query-engine-open-items.md).
+- **Two connections, two databases.** `_connection()` → `veda` (Django `substrate_*` +
+  `sources_source`). `_internal_connection()` → `veda_engine` (the engine's pgvector tables).
+  `ann_search` is the only reader that needs the second one — it queries
+  `column_embeddings_v2`, which ingestion writes to `veda_engine`. (Before 2026-09-10 it ran
+  on the `veda` connection and silently errored into an unscoped fallback — see
+  [../docs/backlog/query-engine-open-items.md](../docs/backlog/query-engine-open-items.md).
+  Worth a live confirmation: a query should log `Signal 1 via storage_adapters (engine
+  store, source-scoped): N cols`, not `Signal 1 adapter unavailable`.)
 - `save_verified_query` is **synchronous** on the latency path (the archived plan wanted
   fire-and-forget) — bounded (one INSERT + one publish) but not free.
 - The `sm` load: `veda_hybrid._load_semantic_model` / `veda/runtime._load_one_sm` are

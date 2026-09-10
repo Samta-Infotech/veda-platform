@@ -43,25 +43,23 @@ Source plans: `docs/archive/ARCHITECTURE_ROOT_CAUSE_PLAN.md`,
   no `rerank_model` / `rerank_latency` into the explain trace — `mlflow_observability`
   has schema slots waiting (`coverage.json`). Capturing them needs pipeline edits.
 
-## ⚠ Possible bug — `storage_adapters/reader.py::ann_search` database target (HIGH, unverified)
+## ✅ FIXED 2026-09-10 — `storage_adapters/reader.py::ann_search` database target
 
-- `reader._connection()` (`storage_adapters/reader.py:41`) connects to
-  `dbname = os.environ.get("POSTGRES_DB", "veda")`. The live `.env` sets `POSTGRES_DB=veda`.
-- `ann_search()` (`reader.py:257`) queries `column_embeddings_v2`. `veda_core/config.py:145`
-  states that table lives in `VEDA_INTERNAL_DBNAME`, and the live `.env` sets that to
-  `veda_engine` — **a different database on the same server**.
-- The same `_connection()` also reads Django `substrate_fkedge` / `substrate_glossaryentry`
-  / `substrate_verifiedquerycache`, which are in `veda`. One connection cannot see both DBs.
-- `writer.py` uses `VEDA_INTERNAL_*` correctly for engine tables; `reader.py` did **not**
-  follow suit when it switched off the (now-dropped) `column_embeddings_bge` Django mirror
-  to `column_embeddings_v2`.
-- **What to check:** run `SELECT count(*) FROM column_embeddings_v2` on the `veda` DB in
-  the inference container. If it errors "relation does not exist", dense retrieval (Signal 1)
-  has been silently returning zero rows in the deployed system, and retrieval is limping on
-  learned-sparse + the structural signals. `CLAUDE.md` warns about exactly this class of
-  swallowed cross-database error. `evaluation/benchmark_archive/…/INDEX.md` reports decent
-  recall, so either `column_embeddings_v2` was also created in `veda`, or that benchmark ran
-  on the CLI path (`VEDA_ANN_VIA_ADAPTER=0`, engine `db_config`), not the served adapter path.
-- Fix if confirmed: give `reader.ann_search` (and `_resolve_ef_search`'s
-  `SubstrateVersion` read stays on `veda`) its own `VEDA_INTERNAL_*` connection for the
-  `column_embeddings_v2` query, the way `writer.sync_from_engine` does.
+- **Was:** `reader._connection()` connects to `POSTGRES_DB` (`veda`). `ann_search()` queried
+  `column_embeddings_v2`, which `veda_core/ingestion/biencoder.py` writes to
+  `VEDA_INTERNAL_DB` (`veda_engine`) and `veda_core/query/retrieval_v2.py` reads from the
+  same — a different database on the same Postgres server. `pgbouncer.ini` passes the DB
+  name through unchanged. So `ann_search` raised `relation "column_embeddings_v2" does not
+  exist`, which `veda_core/retrieval/semantic_search.py:133` caught and logged as
+  `Signal 1 adapter unavailable`, falling back to the engine's own `_internal_db_config()`
+  connection — which works, but applies **no `source_id` filter**. Net: dense retrieval
+  (Signal 1) ran but lost its multi-source scoping (the exact cross-source leak the adapter
+  path was added to fix, `semantic_search.py:157-165`).
+- **Fix:** added `reader._internal_connection()` (reads `VEDA_INTERNAL_*`, matching
+  `writer.sync_from_engine` / `config.VEDA_INTERNAL_DB`, with a graceful fallback to the
+  PgBouncer host + `POSTGRES_USER`/`PASSWORD`) and moved only `ann_search`'s vector scan onto
+  it. `_resolve_ef_search`'s `substrate_substrateversion` read stays on `_connection()`
+  (`veda`), correctly. Log strings in `semantic_search.py` updated.
+- **Still worth a live check** (Docker was down when this was fixed): with the stack up, one
+  query should no longer log `Signal 1 adapter unavailable`, and `logger.info` should read
+  `Signal 1 via storage_adapters (engine store, source-scoped): N cols` with N > 0.

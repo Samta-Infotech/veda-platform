@@ -109,18 +109,17 @@ class SemanticSearcher:
             Scores range from 0.0 (opposite) to 1.0 (identical)
         """
         # Phase 8 (B#6): Signal 1 routes through storage_adapters.ann_search → the engine's
-        # live column_embeddings_v2 store (HNSW, per-source SET, ef_search pinned to §7.1a
-        # recall@k=1.0) — NOT the Django column_embeddings_bge mirror, whose writer was never
-        # implemented and stayed permanently empty. This is the ACTIVE, multi-source-correct
-        # Signal-1 path: the store is scoped to the request's ambient source-id SET, so one
-        # warm engine serves N sources.
+        # live column_embeddings_v2 store (in the INTERNAL veda_engine DB — HNSW, per-source
+        # SET, ef_search pinned to §7.1a recall@k=1.0) — NOT the Django column_embeddings_bge
+        # mirror, whose writer was never implemented and stayed permanently empty. This is the
+        # ACTIVE, multi-source-correct Signal-1 path: the store is scoped to the request's
+        # ambient source-id SET, so one warm engine serves N sources.
         #
         # ON by default; set VEDA_ANN_VIA_ADAPTER=0 to fall back to the engine's own db_config
-        # store (single-source, no source filter — dev/CLI only). NOTE (was gated off historically):
-        # the engine's direct store returned 0 rows because db_config pointed at the L7 source
-        # instead of the internal store, so retrieval ran on BM25 + 4 signals with adaptive-cutoff
-        # tuned to an EMPTY Signal 1. Activating Signal 1 shifts the RRF/cutoff balance — recalibrate
-        # ADAPTIVE_CUTOFF/RRF against eval traffic once there's data to tune on.
+        # store below (no source filter — dev/CLI only). NOTE: the fallback branch also queries
+        # column_embeddings_v2 but WITHOUT a source_id predicate, so in a multi-source deployment
+        # it leaks candidates across sources (the 2026-09 fix put ann_search on _internal_connection
+        # so the adapter path — the scoped one — stops silently erroring into this fallback).
         if _os.environ.get("VEDA_ANN_VIA_ADAPTER", "1") != "0":
             try:
                 from veda_core.context import try_current
@@ -128,10 +127,10 @@ class SemanticSearcher:
                     from storage_adapters.reader import ann_search
                     rows = ann_search("bge", list(query_embedding), k)
                     out = [(str(cid), float(score)) for cid, score in rows]
-                    logger.info(f"✓ Signal 1 via storage_adapters (Django HNSW): {len(out)} cols")
+                    logger.info(f"✓ Signal 1 via storage_adapters (engine store, source-scoped): {len(out)} cols")
                     return out
             except Exception as _e:
-                logger.warning(f"Signal 1 adapter unavailable ({_e}) — engine store")
+                logger.warning(f"Signal 1 adapter unavailable ({_e}) — engine store (unscoped)")
 
         try:
             cur = conn.cursor()
