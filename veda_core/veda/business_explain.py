@@ -515,7 +515,11 @@ def _apply_v2_refusal(out: Dict[str, Any], *, trace: Any = None, trace_id: str =
         from veda import safe_projection as sp
         out["warnings"] = sp.build_warnings(tr)
         out["limitations"] = sp.build_limitations(tr)
-        out["timeline_summary"] = sp.build_timeline_summary(tr)
+        # Under `audit` — level 3 (§9), the same as the answered path. Keeping a
+        # top-level copy here is how `source_selection` was still reaching the
+        # normal UX on refusals after the answered path had been moved: the SAME
+        # "wired to one path" mistake as EXP-B1/B4/B5 and the terminal step frame.
+        out.setdefault("audit", {})["timeline_summary"] = sp.build_timeline_summary(tr)
         _prov = sp.build_provenance(tr)
         if _prov:
             out["provenance"] = _prov

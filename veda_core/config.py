@@ -2288,28 +2288,38 @@ EXPLAIN_TRACE_PERSIST = True
 # access_check → source_selection → execution_plan → data_retrieval →
 # cross_source_processing → validation → result_preparation → completed).
 # Only phases that actually occur are emitted.
-LIFECYCLE_EVENTS_ENABLED = _os.environ.get("LIFECYCLE_EVENTS_ENABLED", "0") == "1"
+# DEFAULT ON (2026-09-10) — live-verified on 6 query shapes (SQL / documents / csv lake / parquet / small talk / outage): every phase resolves, 0 left unresolved in the PERSISTED record.
+# Revert with LIFECYCLE_EVENTS_ENABLED=0; env overrides the default.
+LIFECYCLE_EVENTS_ENABLED = _os.environ.get("LIFECYCLE_EVENTS_ENABLED", "1") == "1"
 
 # The first-class WARNING tier — "you got an answer, but read it with this
 # caveat" (truncation, a source that did not respond, RBAC narrowing, an
 # unresolved cross-source conflict, a fallback path). Before this VEDA had only
 # pass/fail/refuse, so every one of those was silent.
-QUERY_WARNINGS_ENABLED = _os.environ.get("QUERY_WARNINGS_ENABLED", "0") == "1"
+# DEFAULT ON (2026-09-10) — three codes fired correctly on real queries (result_truncated, low_evidence, fallback_used) and the tier is idempotent per code.
+# Revert with QUERY_WARNINGS_ENABLED=0; env overrides the default.
+QUERY_WARNINGS_ENABLED = _os.environ.get("QUERY_WARNINGS_ENABLED", "1") == "1"
 
 # Per-source execution records: status, timestamps, duration, rows, retries,
 # fallback. The internal record may hold the raw driver error; only
 # `as_safe_dict()` (generic, category-based copy) may reach a user.
-SOURCE_EXECUTION_RECORDS_ENABLED = _os.environ.get("SOURCE_EXECUTION_RECORDS_ENABLED", "0") == "1"
+# DEFAULT ON (2026-09-10) — verified per-source, and the two bugs that made it name the WRONG source (context default over routed source, document answer attributed to the database) are fixed.
+# Revert with SOURCE_EXECUTION_RECORDS_ENABLED=0; env overrides the default.
+SOURCE_EXECUTION_RECORDS_ENABLED = _os.environ.get("SOURCE_EXECUTION_RECORDS_ENABLED", "1") == "1"
 
 # Persist the ExecutionPlan (query/execution_planner.py) into the trace. It has
 # always been built and then discarded, so multi-source runs had no record of the
 # strategy or the steps. Observation only — never changes the plan.
-EXECUTION_PLAN_TRACE_ENABLED = _os.environ.get("EXECUTION_PLAN_TRACE_ENABLED", "0") == "1"
+# DEFAULT ON (2026-09-10) — the plan was computed then discarded before this; reporting it costs nothing and it reports `sequential` honestly.
+# Revert with EXECUTION_PLAN_TRACE_ENABLED=0; env overrides the default.
+EXECUTION_PLAN_TRACE_ENABLED = _os.environ.get("EXECUTION_PLAN_TRACE_ENABLED", "1") == "1"
 
 # Emit the `explain` payload at version 2: adds sources / routing / execution /
 # warnings / limitations / result / cross_source / support blocks. Additive — every
 # v1 key keeps its exact shape and meaning, so an existing consumer is unaffected.
-EXPLAIN_V2_ENABLED = _os.environ.get("EXPLAIN_V2_ENABLED", "0") == "1"
+# DEFAULT ON (2026-09-10) — additive by contract — every v1 key keeps its exact shape, verified key-by-key against a live capture.
+# Revert with EXPLAIN_V2_ENABLED=0; env overrides the default.
+EXPLAIN_V2_ENABLED = _os.environ.get("EXPLAIN_V2_ENABLED", "1") == "1"
 
 # Include the generated SQL in the end-user explain payload. Historically
 # build_explain() hardcoded `"sql": {"enabled": True}`, so the raw SQL went to
@@ -2324,13 +2334,16 @@ EXPLAIN_EXPOSE_SQL = _os.environ.get("EXPLAIN_EXPOSE_SQL", "0") == "1"
 
 # Measure real DB-side execution time in veda/execution.py rather than inferring
 # it from the gap between trace stage offsets.
-DB_EXECUTION_TIMING_ENABLED = _os.environ.get("DB_EXECUTION_TIMING_ENABLED", "0") == "1"
+# DEFAULT ON (2026-09-10) — measured, not inferred: it is what established the database is 0.3% of turn latency.
+# Revert with DB_EXECUTION_TIMING_ENABLED=0; env overrides the default.
+DB_EXECUTION_TIMING_ENABLED = _os.environ.get("DB_EXECUTION_TIMING_ENABLED", "1") == "1"
 
 # Cross-source join match counts (traceability Part 10). Computed over the temp
 # tables execute_plan has ALREADY materialized in DuckDB — two local counts, no
 # source access, no extra federated round trip. Only the aggregate-pushdown path
 # can offer this cheaply; the plain execute() path would need extra federated
 # queries, so it deliberately reports no join block rather than a guess.
+# STAYS OFF. Never verified against a real multi-source query — multi-source routing is itself disabled on evidence it hurts accuracy, so there is no path on which this has been exercised.
 FEDERATED_JOIN_STATS_ENABLED = _os.environ.get("FEDERATED_JOIN_STATS_ENABLED", "0") == "1"
 
 # Confidence below which an answer carries a user-visible "limited matching data" caveat
@@ -2354,6 +2367,7 @@ LOW_CONFIDENCE_WARNING_BELOW = float(_os.environ.get("LOW_CONFIDENCE_WARNING_BEL
 # floor, so a narration that is slow, absent or rejected costs nothing.
 # Default OFF: it adds an SLM call, and this project's rule is that new behaviour
 # ships flag-gated and off.
+# STAYS OFF. Measured: it makes an SLM call per query and its own validator rejects every real narration, so it costs latency and tokens for zero output. Fix the validator (stem matching) before enabling.
 EXPLAIN_NARRATOR_ENABLED = _os.environ.get("EXPLAIN_NARRATOR_ENABLED", "0") == "1"
 EXPLAIN_NARRATOR_TIMEOUT_S = float(_os.environ.get("EXPLAIN_NARRATOR_TIMEOUT_S", "6") or 6)
 

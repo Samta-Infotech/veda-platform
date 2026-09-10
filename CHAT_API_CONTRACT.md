@@ -370,8 +370,14 @@ beyond the request to show.
 | 2 — detail | each step's evidence rows, the warnings, the flow | `steps[].details`, `warnings`, `flow` |
 | 3 — audit | backend phase names, per-phase timings, **source identifiers** | `explainability.audit` |
 
-**Levels 1 and 2 contain no backend phase names and no source identifiers.**
-`audit` is the only block that does — `{timeline, timeline_summary, sources}` —
+**Levels 1 and 2 contain no backend phase names and no source identifiers**, with
+ONE legacy exception: the **v1 `timeline`** key (§1a) is a list of raw stage ticks
+`[{phase, message}]` that predates this layer, and its `phase` values ARE internal
+names. Treat that key as level-3 data too; `audit.timeline` is the maintained
+replacement. (It no longer leaks anything worse — a tick that interpolated the
+primary table name into its `message` was found and fixed.)
+
+Otherwise `audit` is the only block that carries them — `{timeline, timeline_summary, sources}` —
 and it is not part of the primary experience. `audit.sources` is where a raw
 source id can still be recovered (`[{id, name}]`); every other block names a
 source by display name only.

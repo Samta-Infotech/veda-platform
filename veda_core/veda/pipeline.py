@@ -1167,7 +1167,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                candidate_field_count=len(es.candidate_fields),
                selected_reason=("router" if primary == _router_primary else "grain_vet_override"))
         if primary:
-            _tick("schema_linking", f"Using {primary} for this")
+            # PRE-EXISTING LEAK, fixed here: this tick lands in the v1
+            # explainability payload's `timeline`, which is user-facing — and
+            # `primary` is a RAW TABLE NAME (observed live: "Using assets_asset
+            # for this"). A table name must never reach a user-facing payload.
+            # The table's identity is already available safely as a business
+            # label in `data_used.datasets`, so the progress line does not need
+            # to carry the identifier at all.
+            _tick("schema_linking", "Identified the relevant records")
         print(f"  [L3] Routing       {len(results)} cols across {len(_cand_tabs)} tables "
               f"({', '.join(_cand_tabs[:4])}…) → primary: {primary}")
         if not primary:

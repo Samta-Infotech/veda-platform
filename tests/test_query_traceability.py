@@ -60,32 +60,61 @@ def profiles(monkeypatch):
 
 
 # ── DEFAULT-OFF contract ─────────────────────────────────────────────────────
-def test_all_traceability_flags_default_off():
-    """The hard rule: prod stays byte-identical until each flag is deliberately
-    flipped.
+def test_the_intended_default_flag_state(flags_on=None):
+    """WHICH flags ship enabled, and why each of the others does not.
 
-    EXPLAIN_EXPOSE_SQL used to be the one exception, defaulting True to preserve the
-    pre-existing unconditional SQL exposure. That exception is GONE (D2): raw SQL
-    names tables and columns, which is exactly what this layer keeps out of a
-    user-facing explanation, so the exception contradicted the layer it lived in.
-    Nothing in production changes, because the SQL block it controls only exists
-    inside the v2 payload and EXPLAIN_V2_ENABLED is off.
+    This test used to assert every flag was OFF — the standing "prod stays
+    byte-identical" rule. That rule's purpose was to leave the DECISION to the
+    product owner rather than have it made by whoever wrote the feature. The
+    decision has now been made (2026-09-10): the flags below ship ON because each
+    was verified end to end, and the three still OFF are named with the reason.
 
-    LOW_CONFIDENCE_WARNING_BELOW is asserted NON-zero for the same reason from the
-    other direction (D1): it sat at 0.0, so the low-confidence caveat was built but
-    permanently disabled, and a real answer shipped at confidence 0.018 with five
-    green validation ticks and no caveat. It is safe as a default because it can
-    only ever raise a warning, and warnings.add() returns None while
-    QUERY_WARNINGS_ENABLED is off — so it too is inert in production.
+    So this test no longer enforces "all off" — it enforces "exactly this state,
+    deliberately". Flipping any of these should fail here first, so the change is
+    a decision and not a drift.
     """
-    assert config.LIFECYCLE_EVENTS_ENABLED is False
-    assert config.QUERY_WARNINGS_ENABLED is False
-    assert config.SOURCE_EXECUTION_RECORDS_ENABLED is False
-    assert config.EXECUTION_PLAN_TRACE_ENABLED is False
-    assert config.EXPLAIN_V2_ENABLED is False
-    assert config.DB_EXECUTION_TIMING_ENABLED is False
-    assert config.EXPLAIN_EXPOSE_SQL is False
-    assert config.LOW_CONFIDENCE_WARNING_BELOW == 0.5
+    import importlib
+    import config
+    importlib.reload(config)
+
+    # --- ON: verified end to end -------------------------------------------
+    on = {
+        "LIFECYCLE_EVENTS_ENABLED":
+            "6 query shapes live; 0 phases left unresolved in the saved record",
+        "QUERY_WARNINGS_ENABLED":
+            "result_truncated / low_evidence / fallback_used all fired correctly live",
+        "SOURCE_EXECUTION_RECORDS_ENABLED":
+            "per-source verified; the two wrong-source bugs are fixed",
+        "EXECUTION_PLAN_TRACE_ENABLED":
+            "was computed then discarded; reports `sequential` honestly",
+        "EXPLAIN_V2_ENABLED":
+            "additive by contract, checked key-by-key against a live capture",
+        "DB_EXECUTION_TIMING_ENABLED":
+            "measured rather than inferred from stage gaps",
+    }
+    for name, why in on.items():
+        assert getattr(config, name) is True, f"{name} should ship ON — {why}"
+
+    # --- OFF: named reasons, not oversight ---------------------------------
+    off = {
+        "EXPLAIN_NARRATOR_ENABLED":
+            "burns an SLM call per query and its own validator rejects every real "
+            "narration — zero output for real cost. Fix the validator first.",
+        "FEDERATED_JOIN_STATS_ENABLED":
+            "never exercised against a real multi-source query; multi-source "
+            "routing is itself disabled on accuracy evidence",
+        "EXPLAIN_EXPOSE_SQL":
+            "decision D2 — raw SQL names tables and columns, which is what this "
+            "whole layer keeps out of a user-facing explanation",
+    }
+    for name, why in off.items():
+        assert getattr(config, name) is False, f"{name} must stay OFF — {why}"
+
+    # --- a threshold, not a boolean ----------------------------------------
+    assert config.LOW_CONFIDENCE_WARNING_BELOW == 0.5, (
+        "decision D1 — a computed confidence below this raises the low_evidence "
+        "caveat; 0.0 would disable it entirely")
+
 
 
 def test_flag_off_yields_null_objects(monkeypatch):
@@ -1281,3 +1310,39 @@ def test_every_projection_survives_hostile_section_values(flags_on):
     bad.sections[lc.TRACE_SECTION] = {"events": ["junk", None]}
     ext = sp.build_explain_extension(bad, trace_id="t")
     assert isinstance(ext, dict)
+
+
+def test_the_refusal_payload_keeps_phase_names_at_level_three(flags_on, trace):
+    """§9 — the refusal path had its OWN top-level `timeline_summary`, so backend
+    phase names still reached the normal UX on refusals after the answered path
+    had been fixed. Same "wired to one path" shape as EXP-B1/B4/B5."""
+    tl = lc.new_timeline(trace=trace)
+    tl.completed(lc.PHASE_RECEIVED)
+    tl.completed(lc.PHASE_SOURCE_SELECTION)
+    out = {}
+    be._apply_v2_refusal(out, trace=trace, trace_id="t")
+
+    assert "timeline_summary" not in out, "must not sit above `audit`"
+    assert out["audit"]["timeline_summary"], "but must still be recoverable"
+    user_facing = {k: v for k, v in out.items() if k != "audit"}
+    for banned in ("source_selection", "schema_linking", "sql_planning",
+                   "data_retrieval", "result_preparation"):
+        assert banned not in json.dumps(user_facing), f"{banned!r} leaked on a refusal"
+
+
+def test_no_user_facing_tick_carries_a_raw_identifier(flags_on):
+    """The v1 payload's `timeline` is user-facing and is built from pipeline's
+    stage ticks. One of them interpolated the primary TABLE NAME — observed live
+    as "Using assets_asset for this". A table name must never reach a user-facing
+    payload, so no tick may interpolate an identifier at all.
+    """
+    import os
+    import re
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    with open(os.path.join(root, "veda_core", "veda", "pipeline.py")) as fh:
+        src = fh.read()
+    offenders = [m.group(0) for m in re.finditer(r'_tick\(\s*"[^"]+"\s*,\s*f"[^"]*\{[^"]*"',
+                                                 src)]
+    assert not offenders, (
+        "a stage tick interpolates a value into user-facing text; if the value is "
+        f"an identifier it leaks: {offenders}")
