@@ -6,7 +6,7 @@ an operator needs some way in. Timestamps stay read-only: they are set by the mo
 """
 from django.contrib import admin
 
-from .models import CatalogResource, Permission, Role, RolePermission, UserRole
+from .models import AuthorizationDecision, CatalogResource, Permission, Role, RolePermission, UserRole
 
 
 @admin.register(Role)
@@ -94,4 +94,30 @@ class RolePermissionAdmin(admin.ModelAdmin):
         return False
 
     def has_change_permission(self, request, obj=None):
+        return False
+
+
+@admin.register(AuthorizationDecision)
+class AuthorizationDecisionAdmin(admin.ModelAdmin):
+    """Append-only authorization audit (traceability Part 21).
+
+    Read-only by construction: nothing in the codebase updates or deletes these
+    rows, and an audit an operator can edit is not an audit. Retention is an ops
+    decision (a periodic prune), not something this admin should enable.
+    """
+
+    list_display = ("created_at", "user", "action", "resource_kind", "decision",
+                    "reason_code", "mode", "request_id")
+    list_filter = ("decision", "reason_code", "mode", "action")
+    search_fields = ("request_id", "view_name", "user__username")
+    date_hierarchy = "created_at"
+    readonly_fields = [f.name for f in AuthorizationDecision._meta.fields]
+
+    def has_add_permission(self, request):
+        return False
+
+    def has_change_permission(self, request, obj=None):
+        return False
+
+    def has_delete_permission(self, request, obj=None):
         return False

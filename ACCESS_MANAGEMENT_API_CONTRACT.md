@@ -947,8 +947,10 @@ for up to `expires_in` after a role change).
 
 | Date | Change |
 |---|---|
+| 2026-09-10 (self-service withdrawn) | Removed §8b `GET /api/v1/access/me`. The endpoint was withdrawn by the product owner and deleted from the codebase; the route no longer exists. The §8b entry below records that it was added earlier the same day. |
 | 2026-08-05 | Initial contract: `POST /api/v1/users`. Split out of `AUTH_API_CONTRACT.md` §7, which now points here for user management. |
 | 2026-08-06 (grants) | Added §8 — `users/roles/{assign,revoke,list}` and `roles/permissions/{grant,revoke,list}`. Idempotent (201 new / 200 existing), one decision per `(role, permission, resource)` triple, no approval workflow. The RBAC graph is now complete — and still unenforced. |
+| 2026-09-10 (self-service) | Added §8b `GET /api/v1/access/me` — the caller's OWN roles and reachable sources, by display name. The only non-administrative endpoint here. Exists because a user could not otherwise tell a permission refusal from a data refusal. Returns no resource paths, no source ids and no permission codes. |
 | 2026-08-06 (catalog) | Added §7 — resource paths (ADR-0001) and the read-only `catalog/{list,detail}` projection, populated by `manage.py sync_catalog`. |
 | 2026-08-06 (permissions) | Added §6 — the read-only permission catalogue on a new `access_management_permission` table, seeded by migration 0004. No write endpoints: only code can enforce a permission. Roles remain the admin-composable layer. |
 | 2026-08-06 (roles) | Added §5 — role management (`create`/`detail`/`list`/`update`) on a new `access_management_role` table. No `roles/delete`: retirement is `update {is_active:false}`. Paging contract now shared with `users/list`, so both answer identically. |

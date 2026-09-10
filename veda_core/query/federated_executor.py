@@ -104,6 +104,52 @@ def validate_federated_sql(sql: str, allowed_catalogs: set) -> dict:
 
 
 # --------------------------------------------------------------------- executor
+def _join_stats(conn, table_names: List[str], quoted_group_key: str) -> Optional[dict]:
+    """Cross-source match counts for the aggregate-pushdown join (traceability Part 10).
+
+    CHEAP BY CONSTRUCTION: the per-source aggregates are ALREADY materialized as
+    DuckDB temp tables by execute_plan, so this is two local counts over local
+    data — it touches no source and issues no federated query.
+
+    ``matched``   = group keys present in EVERY source (the INNER JOIN cardinality)
+    ``unmatched`` = keys present in at least one source but not all (union - matched)
+
+    Deliberately NOT offered for the plain ``execute()`` path: there the SQL is an
+    arbitrary caller-supplied join, so the same numbers would need one or two EXTRA
+    federated round trips against the sources — real added latency on a path whose
+    measured median is already tens of seconds. A missing join block is honest;
+    a guessed one is not.
+
+    Flag-gated (FEDERATED_JOIN_STATS_ENABLED, default OFF) and best-effort: any
+    failure returns None so the query result is completely unaffected.
+    """
+    try:
+        import config as _cfg
+        if not bool(getattr(_cfg, "FEDERATED_JOIN_STATS_ENABLED", False)):
+            return None
+    except Exception:
+        return None
+    if len(table_names) < 2:
+        return None
+    try:
+        inner = table_names[0]
+        for tn in table_names[1:]:
+            inner += f" INNER JOIN {tn} USING ({quoted_group_key})"
+        matched = conn.execute(f"SELECT COUNT(*) FROM {inner}").fetchone()[0]
+
+        full = table_names[0]
+        for tn in table_names[1:]:
+            full += f" FULL JOIN {tn} USING ({quoted_group_key})"
+        union = conn.execute(f"SELECT COUNT(*) FROM {full}").fetchone()[0]
+
+        matched, union = int(matched), int(union)
+        return {"join_used": True, "matched_count": matched,
+                "unmatched_count": max(0, union - matched),
+                "source_count": len(table_names)}
+    except Exception:
+        return None
+
+
 class FederatedExecutor:
     def __init__(self, surfaces: List[SourceSurface]):
         if not _DUCKDB_AVAILABLE:
@@ -207,9 +253,13 @@ class FederatedExecutor:
             cols = [d[0] for d in rel.description]
             allr = rel.fetchmany(row_limit + 1)
             rows = [dict(zip(cols, r)) for r in allr[:row_limit]]
-            return {"columns": cols, "rows": rows, "row_count": len(rows),
-                    "truncated": len(allr) > row_limit, "catalogs": sorted(cats),
-                    "pushdown": True}
+            out = {"columns": cols, "rows": rows, "row_count": len(rows),
+                   "truncated": len(allr) > row_limit, "catalogs": sorted(cats),
+                   "pushdown": True}
+            stats = _join_stats(conn, names, gk)
+            if stats:
+                out["join"] = stats
+            return out
         finally:
             try:
                 conn.close()

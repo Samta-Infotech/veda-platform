@@ -111,15 +111,32 @@ def _depends_on_history(message: str, history: list) -> bool:
 # skip its own LLM call too — on this deployment's hardware a single such call
 # alone can take ~20s, so a bare "hi" was paying 20-40+ seconds of pure LLM
 # round-trip time for something that should be instant.
+# WHY THESE ARE WIDER THAN THEY LOOK LIKE THEY NEED TO BE.
+# The first cut required a greeting word and then nothing but punctuation, so it
+# matched "hi" but not "hi there!" — and the natural forms people actually type
+# ("hi there", "hey there, how are you?", "hello there") fell through to the full
+# engine. Measured on this deployment: "hi there!" cost 16-23 s and came back with
+# "It seems like you have multiple documents related to an employee handbook",
+# because routing sent a greeting to document retrieval (top similarity 0.50) and
+# the summariser dutifully described whatever chunks came back.
+#
+# Widening is safe because _canned_smalltalk_reply checks _DATA_QUESTION_HINTS
+# FIRST: anything with a data verb in it ("hi, how many assets are there") never
+# reaches these patterns. Guard tests cover 22 greeting forms and 11 near-misses
+# that must still go to the engine.
+_GREET_WORD = (r"(?:hi+|hello+|hey+|hiya|yo|greetings|"
+               r"good\s*(?:morning|afternoon|evening|day))")
+_HOW_ARE_YOU = (r"(?:how\s*(?:are\s*(?:you|u|ya)|'?s\s*it\s*going|'?re\s*you)"
+                r"(?:\s*doing)?)")
 _GREETING_RE = re.compile(
-    r"^\s*(hi+|hello+|hey+|hiya|yo|good\s*(morning|afternoon|evening|day)|"
-    r"how\s*(are\s*(you|u)|'?s\s*it\s*going)( doing)?)\s*[.,!?]*\s*$", re.IGNORECASE)
+    rf"^\s*(?:{_GREET_WORD}(?:\s+there)?(?:\s*[,!.\-]+\s*|\s+)?(?:{_HOW_ARE_YOU})?"
+    rf"|{_HOW_ARE_YOU})\s*[.,!?]*\s*$", re.IGNORECASE)
 _THANKS_RE = re.compile(
-    r"^\s*(thanks?( you)?( very much| so much| a lot)?|thx|ty|appreciate it|"
-    r"much appreciated|cheers)\s*[.,!?]*\s*$", re.IGNORECASE)
+    r"^\s*(thanks?( you)?( very much| so much| a lot| a ton)?|thx|ty|appreciate it|"
+    r"much appreciated|cheers|perfect|great|awesome|nice)\s*[.,!?]*\s*$", re.IGNORECASE)
 _BYE_RE = re.compile(
-    r"^\s*(bye|goodbye|see\s*(you|ya)( later| soon)?|take care|good\s*night)\s*[.,!?]*\s*$",
-    re.IGNORECASE)
+    r"^\s*(bye|goodbye|see\s*(you|ya)( later| soon)?|take care|good\s*(night|bye))"
+    r"\s*[.,!?]*\s*$", re.IGNORECASE)
 
 # Deterministic fast path for pure runtime-value questions ("what's the current
 # date", "what time is it") — skips the classify LLM call (and its thinking event)
@@ -191,6 +208,39 @@ def _canned_smalltalk_reply(message: str) -> str | None:
         return "Goodbye! Come back anytime you have data questions."
     return None
 
+
+
+def _is_social(message: str) -> bool:
+    """Is this conversational rather than analytical? Wider than the canned test.
+
+    The canned regexes answer a STRICTER question — "can I reply to this with a
+    fixed string, no model call at all" — and using them to decide "is this a
+    genuine greeting" made the override below fire on anything they could not
+    themselves answer. Measured: the LLM classified "hi there!" as smalltalk and
+    was OVERRULED into a followup purely because the canned pattern missed it,
+    sending a greeting through the full engine.
+
+    A message that OPENS with a social token, carries no data verb, and contains
+    no referential language has nothing to follow up ON, whatever the frame says.
+    The referential guard is what keeps "hi, what about the other one" a followup.
+    """
+    if _DATA_QUESTION_HINTS.search(message):
+        return False
+    # A canned pattern matching the WHOLE message is unambiguous — check it before
+    # the referential guard, or "how's it going" is rejected over the "it" in it.
+    if (_GREETING_RE.match(message) or _THANKS_RE.match(message)
+            or _BYE_RE.match(message)):
+        return True
+    # Only the LOOSER opener match needs the referential guard: "hi" at the front
+    # does not make "hi, what about the other one" social.
+    return bool(_SOCIAL_OPENER_RE.match(message)
+                and not _REFERENTIAL_HINTS.search(message))
+
+
+_SOCIAL_OPENER_RE = re.compile(
+    r"^\s*(?:hi+|hello+|hey+|hiya|yo|greetings|thanks?|thank\s*you|thx|ty|cheers|"
+    r"bye|goodbye|see\s*(?:you|ya)|take\s*care|"
+    r"good\s*(?:morning|afternoon|evening|day|night))\b", re.IGNORECASE)
 
 def _emit(config: RunnableConfig | None, phase: str, message: str,
           extra: dict | None = None) -> None:
@@ -332,8 +382,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         )
         action = "answer"
     elif (action == "smalltalk" and frame.get("entity")
-            and not (_GREETING_RE.match(message) or _THANKS_RE.match(message)
-                      or _BYE_RE.match(message))):
+            and not _is_social(message)):
         # _DATA_QUESTION_HINTS is schema-agnostic action-words only (count/how
         # many/show me/...) — it never catches a bare entity mention like
         # "tell me something about transaction" (no table/column names
@@ -569,6 +618,13 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
     # `cols` when absent — never clobbers a pipeline that already set it.
     if "cols" not in res0 and res0.get("columns"):
         res0["cols"] = res0["columns"]
+    # The head that answered ("deterministic" / "tier2" / "rag" / "nosql" / ...) lives
+    # on item0, one level ABOVE res0, and was discarded here — so the chat front door
+    # had no route to audit (traceability Part 19). Carried onto res0 under a
+    # namespaced key so it cannot collide with a pipeline field. setdefault, never
+    # overwrite: if a pipeline ever sets it itself, that value wins.
+    if item0.get("route"):
+        res0.setdefault("_route", item0["route"])
     # A DEFINITE refusal from the router (no access to the source that can answer,
     # NO_MATCH, ...) is minted by veda_core/veda_hybrid.py::_run_coordinator via
     # MultiResult.single(..., refuse_reason=...): it never runs the SQL pipeline, so

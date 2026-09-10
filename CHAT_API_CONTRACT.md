@@ -1,7 +1,7 @@
 # Chat API Contract — Query + History
 
 Covers `POST /api/v1/conversations/query` (send a message) and
-`POST /api/v1/conversations/history` (read a conversation back). Both
+`GET /api/v1/conversations/history` (read a conversation back). Both
 require an authenticated user (session/token — see `_resolve_user()`); an
 unauthenticated request gets a `401`.
 
@@ -10,6 +10,13 @@ For the `usage` (token count) field details, see `TOKEN_USAGE_API_CONTRACT.md`
 
 For how to obtain and refresh the token you authenticate with, see
 `AUTH_API_CONTRACT.md`.
+
+**Explainability (updated 2026-09-10).** Both endpoints can carry a richer
+progress model and a "how this answer was produced" payload. Everything in
+§1c and §1d is **additive and feature-flagged OFF by default** — with the flags
+off the wire is byte-identical to what is documented in §1a/§1b, so an existing
+client needs no change. §1c is the normalized `thinking` model; §1d is the v2
+`explainability` payload.
 
 ---
 
@@ -109,6 +116,7 @@ full contract.
 | Tier-1 (deterministic SQL), answered | a real number, e.g. `0.87` — always present |
 | Tier-2 (LLM-IR fallback), answered, `INSIGHT_ENGINE_ENABLED=true` | a real number |
 | Tier-2, answered, Insight Engine off (default) | `null` |
+| Federated (cross-source), answered | `null` — that path computes no confidence at all |
 | Refusal (any tier) | `null`, or `explainability` itself may be `null`/a refusal-shaped object with no `confidence` key at all — see `build_refusal_explain()` |
 
 Deterministic, weakest-link value derived from the anchor-selection and
@@ -118,6 +126,20 @@ a single-table query with a high-confidence anchor). Computed by
 `query/result_explainer.py::synthesize_confidence()`, called from
 `veda/pipeline.py`'s `_done()` (Tier-1) and `veda_hybrid.py`'s
 `_tier2_finish()` (Tier-2, Insight-Engine-only).
+
+**A low score now produces a visible caveat.** When `confidence` is a real
+number BELOW `LOW_CONFIDENCE_WARNING_BELOW` (default `0.5`), the turn also
+carries a `low_evidence` entry in `explainability.warnings` and `limitations`
+(§1d). A **missing** score does not — deliberately: the federated path computes
+none at all, so warning on `null` put a caveat on every federated answer,
+including correct ones. Absent evidence is a gap in the SIGNAL, not a signal.
+
+**`sql.query` is now withheld by default.** `sql.enabled` reflects
+`EXPLAIN_EXPOSE_SQL`, whose default changed from on to **off**: raw SQL names
+tables and columns, which is exactly what the rest of this payload keeps out of
+a user-facing explanation. The block keeps its shape either way — a client
+reading `sql.query` gets `null` rather than a missing key — and
+`EXPLAIN_EXPOSE_SQL=1` restores it for a technical/admin view.
 
 On an engine error mid-turn: `502` — `message` is a safe user-displayable
 string (never raw exception text) and `data.code` is one of the error codes in
@@ -196,14 +218,242 @@ which are not persisted — see §2).
 
 ---
 
-## 2. `POST /api/v1/conversations/history`
+---
+
+## 1c. The `thinking` model (flag `VEDA_THINKING_STEPS`, default off)
+
+With the flag off, a `thinking` frame is exactly what §1b documents:
+`{"phase": ..., "message": ...}`. With it on, **the same frames** additionally
+carry a `steps` object — the legacy keys never change, so old and new clients
+read the same stream.
+
+`steps` is a **normalized model of the whole turn**, not a rendering of the
+event that carried it. The api tier folds the backend's ~26 internal phases into
+four fixed steps, so no client has to decide which of several phases means the
+same thing:
+
+```json
+{
+  "type": "thinking",
+  "status": "active",
+  "current_step": "analyzing",
+  "steps": [
+    { "id": "understanding", "index": 1, "title": "Understanding your request",
+      "state": "completed", "duration_ms": 6835,
+      "summary": "You're asking for a ranking, for August 2026.",
+      "expandable": true,
+      "details": [ { "type": "operation", "label": "Looking for a ranking",
+                     "state": "completed" } ] },
+    { "id": "finding",    "index": 2, "title": "Finding the right information", "...": "..." },
+    { "id": "analyzing",  "index": 3, "title": "Analyzing the information",     "...": "..." },
+    { "id": "preparing",  "index": 4, "title": "Preparing your answer",         "...": "..." }
+  ],
+  "evidence":  { "sources": 1, "rows": 5 },
+  "execution": { "type": "sql" },
+  "timing":    { "total_duration_ms": 24512 }
+}
+```
+
+**The four steps are fixed.** Same four, same order, same ids, for SQL,
+documents, data lake, multi-source, refusals and small talk. Render them
+unconditionally; only their `state`, `summary` and `details` vary.
+
+| Field | Contract |
+|---|---|
+| `status` | `active` while the turn runs, then exactly one of `completed` / `failed` |
+| `current_step` | the `id` of the running step; **`null` once `status` is terminal** |
+| `steps[].state` | `pending` · `active` · `completed` · `warning` · `failed` · `skipped` |
+| `steps[].duration_ms` | real measured time; `null` for a step that never started, and for one whose work happened but was never reported as a phase. **Never fabricated** — `null` means "not measured", not zero |
+| `steps[].index` | 1-4, matching the fixed order — for a client that renders by position rather than by `id` |
+| `steps[].summary` | one line, in the user's terms. Falls back to a generic sentence until the backend supplies facts |
+| `steps[].details` | ordered evidence rows (below). Empty until the step starts |
+| `steps[].expandable` | whether `details` is non-empty — the UI's cue that opening the step shows more |
+| `evidence` | **counted facts only**: `sources`, `passages`, `rows`. A key is ABSENT when the backend did not report it — absent and `0` are different claims |
+| `execution.type` | `sql` · `documents` · `multi_source` · `unknown` |
+| `timing` → `total_duration_ms` | the whole turn, from the first event to the terminal frame. Live while running, frozen when terminal. This is the QUERY's time, not an overhead the progress display adds |
+| `error` | present only on a failed turn: `{"code": ..., "retryable": true|false}` |
+
+### `details[]` — a closed vocabulary
+
+Each row is `{"type", "label", "state"}`, plus `duration_ms`/`message` on a
+timed check. `type` is one of **six** values and no others, so a new backend
+event cannot introduce a new row shape in the UI:
+
+| `type` | Meaning | Example `label` |
+|---|---|---|
+| `access` | authorization, timed | `Checking access permissions` |
+| `source` | a source that took part, by display name | `homzhub` |
+| `evidence` | what was retrieved | `5 relevant passages retrieved` |
+| `operation` | a semantic step of the analysis | `Ordered by Transaction Amount` |
+| `validation` | a safety/consistency check | `Checking the result is complete and safe` |
+| `output` | what is being produced | `Preparing table · 5 rows` |
+
+### `steps[].state` rules a client can rely on
+
+* A `pending` step never precedes a resolved one — a step the turn moved past
+  resolves to `completed` (its work happened but went unreported) or `skipped`
+  (it genuinely did not run).
+* Steps only move **forward**. A late backend phase cannot reopen a finished step.
+* A step that has not started shows **nothing** inside it: `details` is empty even
+  when a measurement for it already exists.
+* Once `status` is terminal, **no step is `active`** and `current_step` is `null`.
+
+### Terminal frame
+
+Exactly one terminal `thinking` frame is emitted before `content`, on **every**
+exit including an error. On the error path it arrives before the `error` event,
+so a client can freeze the progress display rather than leave a step spinning
+next to an outage message.
+
+---
+
+## 1d. `explainability` v2 (flag `EXPLAIN_V2_ENABLED`, default off)
+
+With the flag off the payload is exactly §1a's v1 object. With it on,
+`version` becomes `"2.0"` and the payload gains the blocks below. **Additive by
+contract:** no v1 key is removed, renamed or reshaped.
+
+| Block | What it is |
+|---|---|
+| `routing` | why this source set — `{mode, summary, source_count, reason_code}` |
+| `execution` | per-source outcome — `{summary, status, sources: [{name, type, status, duration_ms, rows_returned, required}]}` |
+| `sources` | the sources that participated, by display name — `[{name, type, known}]` |
+| `result` | `{row_count, truncated, partial, reused_verified_query}` |
+| `warnings` | stable machine codes + user copy (below). Always a list |
+| `limitations` | the same warnings as plain sentences. Always a list |
+| `provenance` | present only when the answer **replayed a previously verified query** — `{reused_verified_query, summary}`. Absent on an ordinary turn |
+| `flow` | the "how this answer was produced" walkthrough (below) |
+| `support` | `{trace_id}` — quote this in a bug report |
+| `audit` | **level 3.** The technical record. See the disclosure levels below |
+
+### Warning codes
+
+Stable identifiers; the `message` is user-facing copy that may be reworded.
+
+| `code` | Meaning |
+|---|---|
+| `result_truncated` | the result was cut to the first page |
+| `partial_source_failure` | at least one source did not respond |
+| `restricted_data` | permissions removed data that would otherwise have been included |
+| `unmatched_records` | records on one side of a cross-source join had no match |
+| `source_conflict` | sources disagreed |
+| `fallback_used` | the primary method could not answer; an alternate was used |
+| `low_evidence` | the answer's confidence is below the configured floor |
+
+### `flow` — how this answer was produced
+
+One shape for every execution type. Stages appear **only when the turn holds
+evidence for them**, so a document answer legitimately has no query-validation
+stage and a database answer has no passage count. Render them in order:
+
+```json
+{ "stages": [
+  { "stage": "request",    "label": "Your request" },
+  { "stage": "access",     "label": "Access verified" },
+  { "stage": "sources",    "label": "Data source", "items": ["homzhub"] },
+  { "stage": "evidence",   "label": "5 rows returned" },
+  { "stage": "validation", "label": "4 checks passed" },
+  { "stage": "operations", "label": "Operations applied",
+    "items": ["Sort by Transaction Amount (highest first)", "Return top 5"] },
+  { "stage": "answer",     "label": "Answer" } ] }
+```
+
+`stage` is one of `request` · `access` · `sources` · `evidence` · `validation` ·
+`operations` · `result` · `answer`. `flow` is **absent** when there is nothing
+beyond the request to show.
+
+### Three disclosure levels
+
+| Level | What to render | Where it lives |
+|---|---|---|
+| 1 — normal | the four steps and their state | `thinking.steps` |
+| 2 — detail | each step's evidence rows, the warnings, the flow | `steps[].details`, `warnings`, `flow` |
+| 3 — audit | backend phase names, per-phase timings, **source identifiers** | `explainability.audit` |
+
+**Levels 1 and 2 contain no backend phase names and no source identifiers**, with
+ONE legacy exception: the **v1 `timeline`** key (§1a) is a list of raw stage ticks
+`[{phase, message}]` that predates this layer, and its `phase` values ARE internal
+names. Treat that key as level-3 data too; `audit.timeline` is the maintained
+replacement. (It no longer leaks anything worse — a tick that interpolated the
+primary table name into its `message` was found and fixed.)
+
+Otherwise `audit` is the only block that carries them — `{timeline, timeline_summary, sources}` —
+and it is not part of the primary experience. `audit.sources` is where a raw
+source id can still be recovered (`[{id, name}]`); every other block names a
+source by display name only.
+
+---
+
+---
+
+## 1e. Stability — what the frontend can safely build against
+
+The explainability work continues behind these flags. This section is the promise
+about **what will not move**, so a client built today keeps working while the
+internals improve.
+
+### Frozen — depend on these
+
+| | |
+|---|---|
+| The four step `id`s | `understanding` · `finding` · `analyzing` · `preparing`, always all four, always this order |
+| `steps[].state` values | `pending` · `active` · `completed` · `warning` · `failed` · `skipped` |
+| `details[].type` values | `access` · `source` · `evidence` · `operation` · `validation` · `output` |
+| Warning `code`s | the seven in §1d — stable machine identifiers |
+| `flow` `stage` values | `request` · `access` · `sources` · `evidence` · `validation` · `operations` · `result` · `answer` |
+| `status` values | `active` · `completed` · `failed` |
+| Model keys | `type` `status` `current_step` `steps` `evidence` `execution` `timing` |
+| Event names and order | `thinking`\* → `content`\* → `visualization`? → `explainability` → `usage` → `completed` |
+| Error `code`s | `LLM_UNAVAILABLE` · `MODEL_ERROR` · `STREAM_ERROR` |
+| The three-level split | backend phase names and source ids stay inside `audit`, never above it |
+
+New values may be **added** to a closed set (a new warning code, a new
+`execution.type`); nothing listed above will be renamed or removed. Treat an
+unrecognised value as "something new" and fall through to a default rather than
+throwing.
+
+### Not frozen — do not depend on these
+
+1. **Every human-readable string.** `summary`, `label`, `message`, `title`,
+   `flow[].label`, warning `message` — all of it is copy and all of it will be
+   reworded. **Never branch on a string, never match it, never translate by
+   comparing it.** Branch on `id` / `type` / `code` / `state` and render whatever
+   text arrives.
+2. **Which optional blocks are present.** A document answer currently returns the
+   **v1** payload — no `flow`, no `audit`, no `routing`, no `execution`. That is a
+   known gap being closed. Render what is there; never require a block.
+3. **`evidence` keys.** `sources` / `passages` / `rows` today, more later. A key is
+   ABSENT when the backend did not report it — do not substitute `0`.
+4. **`confidence`.** May be a number or `null`, and `null` is not "low". Show the
+   `warnings` instead; that is what the caveat lives in.
+5. **`duration_ms`.** May be `null` on a step whose work genuinely happened. Render
+   "—", not "0s".
+6. **The `steps` block may be absent entirely** on a turn that bypassed the engine
+   (a canned greeting, answered in ~50 ms). No progress happened, so none is
+   reported — show the answer with no progress UI, not four empty steps.
+
+### The one rule that covers most of it
+
+> Render structure from the **identifiers**; render text from the **strings**.
+> Never let a string decide behaviour.
+
+A client that follows this keeps working through copy rewrites, new warning codes,
+new execution types, and the document-payload gap being closed.
+
+---
+
+## 2. `GET /api/v1/conversations/history`
 
 Read a full conversation back (used to hydrate a chat window on load/reload).
 
 ### Request
 
-```json
-{ "chat_id": 42 }
+Read-only, so **GET** — the parameter travels as a query string, not a JSON body.
+(This doc previously showed `POST` with a body; that returns
+`{"detail": "Method \"POST\" not allowed."}`.)
+
+```
+GET /api/v1/conversations/history?chat_id=42
 ```
 
 `404` if the chat doesn't exist / doesn't belong to the user
@@ -235,6 +485,11 @@ Read a full conversation back (used to hydrate a chat window on load/reload).
           ],
           "metadata": {
             "thinking": "Done — here's your answer",
+            "trace_id": "0b28a3c4234e4d169afca077ac23bae8",
+            "timeline": [
+              { "phase": "received", "title": "Received your question",
+                "status": "completed", "message": "Got your question" }
+            ],
             "explainability": { "version": "1.0", "confidence": 0.87, "...": "..." },
             "usage": {
               "prompt_tokens": 1240,
@@ -267,6 +522,27 @@ different order is ever needed).
 
 ---
 
+### `metadata.trace_id` and `metadata.timeline` (history)
+
+Present only when the lifecycle flag was on for that turn — **absent, not null**,
+for turns recorded before it, so a client checks for the key rather than for a
+value. Both are written from the events the user actually watched, so the stored
+record and the live stream can never disagree.
+
+* `trace_id` — the same support reference as `explainability.support.trace_id`.
+* `timeline` — `[{phase, title, status, message}]`, the per-phase record.
+
+**Treat `metadata.timeline` as level-3 audit data** (§1d): it carries raw backend
+phase names in `phase`, and is intended for a technical/audit view, not the normal
+UX — render `title`/`status` if you show it at all. Unlike the SSE payload it is
+**not** nested under an `audit` key, so that turns stored before the level split
+stay readable without a migration.
+
+A refusal or clarify stores a refusal-shaped `explainability`
+(`{version, status, why, what_would_help, suggestions, warnings, limitations,
+support, timeline_summary}`) with no `sql`, `operations` or `data_used` — a client
+must not assume the answered-turn shape.
+
 ## Notes
 
 - `usage` and `explainability.confidence` are additive — pre-existing
@@ -280,3 +556,13 @@ different order is ever needed).
   `metadata.explainability.confidence`. Do not add a second one elsewhere —
   earlier drafts of this contract had a duplicate top-level `confidence` key
   (in the `insights` event / `data.confidence`); that duplication was removed.
+
+---
+
+## Revision history
+
+| Date | Change |
+|---|---|
+| 2026-09-10 (explainability v2) | Added §1c (the normalized `thinking` model) and §1d (`explainability` v2: `routing` / `execution` / `sources` / `result` / `warnings` / `limitations` / `provenance` / `flow` / `support` / `audit`). Both **flag-gated OFF by default** — with the flags off the wire is byte-identical to §1a/§1b. Three disclosure levels defined; backend phase names and source identifiers confined to `audit`. `sql.enabled` default flipped to **off**. A confidence below `LOW_CONFIDENCE_WARNING_BELOW` (default 0.5) now raises a `low_evidence` warning; a MISSING confidence deliberately does not. History `metadata` gained `trace_id` + `timeline`. |
+| 2026-09-10 (stability) | Added §1e — the frozen-vs-not-frozen split, so a frontend can be built now while the internals keep improving. Identifiers, state values, closed vocabularies and event order are frozen; all human-readable copy and the presence of optional blocks are explicitly NOT. |
+| 2026-09-10 (correction) | §2 documented `POST /conversations/history`; the endpoint is **`GET`** with a query parameter and rejects POST. Corrected. |

@@ -632,6 +632,21 @@ def _run_coordinator(query, verbose=False, on_event=None):
                 _csp = lambda: {}
         _profiles = _csp() or {}
         _tenant = str(getattr(ctx, "tenant", "default"))
+        try:
+            # The scope reaching here is ALREADY RBAC-narrowed by the api tier
+            # (resolve_query_scope -> permitted_source_ids), so a non-empty scope is
+            # a positive access fact worth showing. Says only THAT access was
+            # verified — never which sources, and never what was excluded.
+            from veda import lifecycle as _lc1
+            # STARTED, not completed: at scope-resolution time we know the caller
+            # has *a* permitted scope, but not yet whether narrowing will block
+            # THIS query — that only surfaces after narrow_allowed + validation.
+            # Claiming "Verified your access" here and then refusing on access
+            # grounds was a visible contradiction in the live stream. The phase is
+            # completed in pipeline.py once validation actually passes.
+            _lc1.current_timeline().started(_lc1.PHASE_ACCESS_CHECK)
+        except Exception:
+            pass
         from query.source_coordinator import plan_route, execute_decision
         _emit(on_event, "route", "Deciding which source can answer…")
 
@@ -713,6 +728,18 @@ def _run_coordinator(query, verbose=False, on_event=None):
                 pass
 
         decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
+        try:  # user-safe source-selection event, from the decision the router made
+            from veda import lifecycle as _lc3
+            _tl3 = _lc3.current_timeline()
+            if decision.status == "ROUTED":
+                _tl3.completed(_lc3.PHASE_SOURCE_SELECTION,
+                               source_count=len(decision.source_ids or []))
+            elif decision.status == "NO_MATCH":
+                _tl3.failed(_lc3.PHASE_SOURCE_SELECTION)
+            else:
+                _tl3.warning(_lc3.PHASE_SOURCE_SELECTION)
+        except Exception:
+            pass
         try:
             _cur_trace().set(
                 "routing", status=decision.status, mode=decision.mode,
@@ -1036,6 +1063,96 @@ def _clean_refuse_on_empty_error(result) -> None:
         pass
 
 
+def _emit_terminal_lifecycle(timeline, final_status: str) -> None:
+    """Close the timeline with the phase that matches the actual outcome.
+
+    Only emitted for a terminal state we can describe safely: `answered` completes,
+    anything else is a warning on result_preparation rather than a failure, because
+    a refusal is a CORRECT outcome (the refuse-over-guess contract) and must not be
+    presented to the user as the system breaking."""
+    try:
+        from veda import lifecycle as lc
+        if not getattr(timeline, "enabled", False):
+            return
+        # EXP-B1: close any phase left OPEN (started, never resolved). Measured on the
+        # 10-query benchmark: access_check hung at "started" on 6 of 10 query types,
+        # because its completion lived on the deterministic SQL path only — document,
+        # hybrid and refusal paths never reach it, so the user watched a spinner that
+        # never finished. Resolving here means EVERY path closes it, whichever head ran.
+        #
+        # A phase already resolved NEGATIVELY is left alone: a real permission denial
+        # emits access_check=failed earlier (pipeline._feedback), and overwriting that
+        # with "verified" would be the contradiction this whole fix is about.
+        # Shared with veda/pipeline.py::_done, which sweeps FIRST so the persisted
+        # payload never records an unresolved phase. Idempotent, so running twice
+        # is harmless.
+        timeline.close_open_phases(failed=(final_status not in
+                                           ("answered", "refused", "clarify")))
+
+        if final_status == "answered":
+            timeline.completed(lc.PHASE_RESULT_PREPARATION)
+            timeline.completed(lc.PHASE_COMPLETED)
+        elif final_status in ("refused", "clarify"):
+            # WARNING, not completed. The message here was already honest ("could not
+            # answer") but the STATUS contradicted it, and the status is what the UI
+            # renders: a refusal came out as four green ticks above a reply saying the
+            # question could not be answered. A refusal is not a system failure — so
+            # not `failed` either. `warning` is the state that exists for exactly this.
+            timeline.warning(lc.PHASE_RESULT_PREPARATION,
+                             "Could not answer this from the available data")
+            timeline.completed(lc.PHASE_COMPLETED)
+        else:
+            timeline.failed(lc.PHASE_RESULT_PREPARATION,
+                            "Could not complete this question")
+    except Exception:
+        pass
+
+
+def _emit_terminal_lifecycle(timeline, final_status: str) -> None:
+    """Close the timeline with the phase that matches the actual outcome.
+
+    Only emitted for a terminal state we can describe safely: `answered` completes,
+    anything else is a warning on result_preparation rather than a failure, because
+    a refusal is a CORRECT outcome (the refuse-over-guess contract) and must not be
+    presented to the user as the system breaking."""
+    try:
+        from veda import lifecycle as lc
+        if not getattr(timeline, "enabled", False):
+            return
+        # EXP-B1: close any phase left OPEN (started, never resolved). Measured on the
+        # 10-query benchmark: access_check hung at "started" on 6 of 10 query types,
+        # because its completion lived on the deterministic SQL path only — document,
+        # hybrid and refusal paths never reach it, so the user watched a spinner that
+        # never finished. Resolving here means EVERY path closes it, whichever head ran.
+        #
+        # A phase already resolved NEGATIVELY is left alone: a real permission denial
+        # emits access_check=failed earlier (pipeline._feedback), and overwriting that
+        # with "verified" would be the contradiction this whole fix is about.
+        # Shared with veda/pipeline.py::_done, which sweeps FIRST so the persisted
+        # payload never records an unresolved phase. Idempotent, so running twice
+        # is harmless.
+        timeline.close_open_phases(failed=(final_status not in
+                                           ("answered", "refused", "clarify")))
+
+        if final_status == "answered":
+            timeline.completed(lc.PHASE_RESULT_PREPARATION)
+            timeline.completed(lc.PHASE_COMPLETED)
+        elif final_status in ("refused", "clarify"):
+            # WARNING, not completed. The message here was already honest ("could not
+            # answer") but the STATUS contradicted it, and the status is what the UI
+            # renders: a refusal came out as four green ticks above a reply saying the
+            # question could not be answered. A refusal is not a system failure — so
+            # not `failed` either. `warning` is the state that exists for exactly this.
+            timeline.warning(lc.PHASE_RESULT_PREPARATION,
+                             "Could not answer this from the available data")
+            timeline.completed(lc.PHASE_COMPLETED)
+        else:
+            timeline.failed(lc.PHASE_RESULT_PREPARATION,
+                            "Could not complete this question")
+    except Exception:
+        pass
+
+
 def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
     """Public front door. Owns the ONE query trace for the whole request.
 
@@ -1048,8 +1165,25 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
     trace — see explain.ExplainTrace.finish). Observability only: the returned
     MultiResult is byte-identical except for the added trace_id field."""
     tr = new_trace(query, trace_id=trace_id)
-    with use_trace(tr):
+    # The user-safe execution timeline + per-source recorder for THIS query. Both
+    # are _Null* objects unless their flag is on, so with the flags off this is two
+    # attribute lookups and the answer path is byte-identical. Bound ambiently (the
+    # same ContextVar pattern as the trace) so a stage deep in the pipeline can emit
+    # without threading a parameter through every signature.
+    from veda import lifecycle as _lc
+    from veda import exec_records as _er
+    _tl = _lc.new_timeline(on_event=on_event, trace=tr)
+    _rec = _er.new_recorder(trace=tr, timeline=_tl)
+    with use_trace(tr), _lc.use_timeline(_tl), _er.use_recorder(_rec):
         _final_status = "error"
+        _tl.completed(_lc.PHASE_RECEIVED)
+        # Ordering (live-verification finding): routing runs BEFORE Tier-1's
+        # understanding stage, so without this the timeline showed
+        # source_selection completing before understanding had even appeared.
+        # The phase order comes from first appearance, so opening understanding
+        # here restores the intended narrative without misstating anything —
+        # reading the question genuinely is the first thing that happens.
+        _tl.started(_lc.PHASE_UNDERSTANDING)
         try:
             result = _run_hybrid_query_inner(query, verbose=verbose, on_event=on_event)
             try:  # a final status for the trace's one-glance summary
@@ -1066,6 +1200,14 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
             except Exception:
                 pass
             _clean_refuse_on_empty_error(result)
+            # Decide the access-check outcome from the TURN's terminal feedback,
+            # before the timeline is closed and re-read into the payload.
+            _reconcile_access_check(result, _tl)
+            _emit_terminal_lifecycle(_tl, _final_status)
+            # The payload was built before the line above ran, so the PERSISTED
+            # timeline was one phase short. Refresh it now that the timeline is
+            # genuinely final (F30).
+            _refresh_persisted_timeline(result, _tl)
             return result
         finally:
             try:
@@ -1073,6 +1215,139 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
             except Exception:
                 pass
 
+
+
+
+def _reconcile_access_check(result, timeline) -> None:
+    """Record an access-check FAILURE only if the turn actually refused on access.
+
+    `access_check` is emitted optimistically at scope-resolution time (we know the
+    caller has *a* permitted scope, not whether narrowing will block THIS query), and
+    pipeline.py completes it once validation passes. The failure case is the hard one:
+    a permission problem surfaces late, but so do plenty of failures that are NOT
+    permission problems — and Tier-1 refusing does not mean the TURN refused.
+
+    So the decision is made HERE, once, from the terminal feedback the user actually
+    receives. `ACCESSED_DENIED_WHY` is feedback's own classification, not a
+    re-derivation — one source of truth for "was this an access failure?".
+
+    This runs BEFORE _emit_terminal_lifecycle and before _refresh_persisted_timeline,
+    so the mark reaches both the live stream and the persisted payload. It only ever
+    ADDS a negative resolution that the evidence supports; it never flips one away.
+    """
+    try:
+        if not getattr(timeline, "enabled", False):
+            return
+        from veda import lifecycle as lc
+        from veda.feedback import ACCESS_DENIED_WHY
+        for item in (getattr(result, "items", None) or []):
+            if getattr(item, "status", None) == STATUS_OK:
+                continue
+            payload = getattr(item, "result", None)
+            fb = (payload or {}).get("feedback") if isinstance(payload, dict) else None
+            if isinstance(fb, dict) and fb.get("why") == ACCESS_DENIED_WHY:
+                timeline.failed(lc.PHASE_ACCESS_CHECK)
+                try:
+                    from veda import warnings as vw
+                    vw.add(vw.RESTRICTED_DATA)
+                except Exception:
+                    pass
+                return
+    except Exception:
+        pass
+
+
+def _raise_low_confidence_caveat(confidence) -> None:
+    """Raise the low-confidence caveat if the evidence does not clear the floor.
+
+    ONE helper, called from EVERY answer-producing path. There are three — Tier-1
+    (veda/pipeline.py::_done), Tier-2, and federated — and EXP-B3 originally landed
+    on Tier-1 alone. Measured live: "probabtion period days in samta" took the
+    FEDERATED route, was answered from amenity monthly fees relabelled "Total Days",
+    and carried confidence=null with ZERO warnings. That is the same "wired to one
+    path" mistake EXP-B1/B4/B5 were, so this is a shared function rather than a
+    third copy of the check.
+
+    `None` does NOT count as low. That was tried and reverted: the federated path
+    computes no confidence at all and Tier-2 only has one when the Insight Engine
+    ran, so treating None as low put a "limited matching data" caveat on every
+    answer from those paths, including correct ones. A caveat on everything is a
+    caveat on nothing. An absent confidence signal is a gap in the SIGNAL, and the
+    fix for it is to compute one — not to warn unconditionally.
+
+    Must be called BEFORE build_explain — safe_projection reads warnings from the
+    trace at payload-build time. Never raises.
+    """
+    try:
+        import config as _cfg
+        floor = float(getattr(_cfg, "LOW_CONFIDENCE_WARNING_BELOW", 0.0) or 0.0)
+        if confidence is None:
+            return
+        if floor > 0 and float(confidence) < floor:
+            from veda import warnings as _vw
+            _vw.add(_vw.LOW_EVIDENCE)
+    except Exception:
+        pass
+
+def _refresh_persisted_timeline(result, timeline) -> None:
+    """Re-read the timeline into the payload AFTER the terminal phase is emitted.
+
+    WHY (F30). `pipeline._done` builds the explainability payload, and only THEN
+    does the front door emit the phase that describes the outcome
+    (`result_preparation`). So the payload — the thing that gets PERSISTED and
+    re-read from conversation history — was missing the final phase. Measured on a
+    clarify: the live thinking steps correctly showed 4 steps ending in a warning,
+    but the stored `timeline_summary` had 5 phases and stopped at validation. On an
+    answered query it was masked by luck: a truncation warning happens to map to
+    `result_preparation`, so the phase appeared for an unrelated reason.
+
+    An omission, not a false claim — but a stored record that ends one phase early
+    is exactly the class of thing this layer exists to remove.
+
+    Only keys ALREADY PRESENT are refreshed. A v1 payload must not silently gain a
+    v2 block here: the additive-by-contract promise runs in one direction only.
+    """
+    try:
+        if not getattr(timeline, "enabled", False):
+            return
+        from veda import safe_projection as sp
+        from veda.explain import current_trace
+        tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return
+        # Each key is refreshed WHERE IT LIVES. The phase-carrying blocks live under
+        # `audit` (level 3, §9); `warnings` is a top-level, user-facing block. The
+        # distinction matters: build_explain's own v1 payload ALSO has a `timeline`
+        # key, holding its stage ticks — refreshing that one with the lifecycle list
+        # quietly replaced user-safe content with raw backend phase names, and
+        # leaked `source_selection` / `data_retrieval` into the normal UX.
+        fresh = {}
+        for key, fn, where in (("timeline", sp.build_timeline, "audit"),
+                               ("timeline_summary", sp.build_timeline_summary, "audit"),
+                               # RESTRICTED_DATA is raised by
+                               # _reconcile_access_check, which by design runs after
+                               # pipeline._done has already built the payload.
+                               ("warnings", sp.build_warnings, "top")):
+            try:
+                fresh[key] = (fn(tr), where)
+            except Exception:
+                pass
+        if not fresh:
+            return
+        for item in (getattr(result, "items", None) or []):
+            payload = getattr(item, "result", None)
+            if not isinstance(payload, dict):
+                continue
+            ex = payload.get("explain")
+            if not isinstance(ex, dict):
+                continue
+            audit = ex.get("audit") if isinstance(ex.get("audit"), dict) else None
+            for key, (value, where) in fresh.items():
+                target = audit if where == "audit" else ex
+                if target is not None and key in target:
+                    target[key] = value   # refresh-only: never introduce a key
+    except Exception:
+        pass
 
 def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     """Single entry point. Returns a MultiResult ALWAYS — a one-item MultiResult for a
@@ -1355,7 +1630,64 @@ def _fan_out(sub_queries, verbose=False, on_event=None):
     return MultiResult(items=items)
 
 
+#: route -> the engine label used when this dispatch has to open a record itself
+#: (EXP-B4). Only routes that do NOT go through the SQL head need one; the SQL head
+#: opens its own record around execute_sql, with true DB timing.
+_ROUTE_ENGINE = {"rag": "rag", "hybrid": "rag", "nosql": "nosql"}
+
+
 def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
+    """Thin wrapper over the real dispatch, adding the data_retrieval record for the
+    heads that do not produce one themselves (EXP-B4).
+
+    Measured on the 10-query benchmark: document and hybrid answers showed NO
+    "Running the query" step at all, because the record was opened around execute_sql
+    — which those heads never call. Wrapping the dispatch ONCE covers every head and
+    every one of its seven return points; touching those individually is the very
+    per-path mistake that caused this.
+
+    Only fills a GAP: if the head already registered a record (the SQL path does, with
+    real DB timing), nothing is added here — no double counting. Note the duration
+    recorded for a document head is whole-retrieval time, not database time; there is
+    no database in that path, so the two numbers legitimately mean different things.
+    """
+    from veda import exec_records as _erd
+    _rec_before = _erd.current_recorder().has_records()
+    route, res = _dispatch_single_inner(query, verbose=verbose,
+                                        precomputed_sql=precomputed_sql,
+                                        on_event=on_event)
+    try:
+        _recorder = _erd.current_recorder()
+        _engine = _ROUTE_ENGINE.get(route)
+        if _engine and not _rec_before and not _recorder.has_records():
+            # Prefer the source the ROUTER actually chose over the request
+            # context's default. Measured on a document question: routing picked
+            # source 3 (the document store) and the answer really did come from a
+            # PDF, but this stamped the ambient context's source_id — 2, the
+            # relational database — so the user was told "Retrieving data from
+            # homzhub" for an answer that came from the employee handbook.
+            _sid = None
+            try:
+                _routed = (_cur_trace().sections.get("routing") or {}).get("source_ids")
+                if _routed:
+                    _sid = _routed[0]
+            except Exception:
+                _sid = None
+            if _sid is None:
+                _ctx = _current_ctx()
+                _sid = getattr(_ctx, "source_id", None) if _ctx is not None else None
+            _r = _recorder.open(_sid if _sid is not None else "", engine=_engine)
+            _ok = not getattr(res, "error", None) if res is not None else False
+            _rows = getattr(res, "rows", None)
+            _recorder.close(_r, _erd.COMPLETED if _ok else _erd.FAILED,
+                            rows=(len(_rows) if _rows is not None else None),
+                            error=(str(getattr(res, "error", "")) or None) if not _ok else None)
+    except Exception:
+        pass
+    return route, res
+
+
+def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=None):
     """The single-query pipeline: classify → best head → (Tier-2 for SQL). Returns
     (route, head_result). This is the UNCHANGED per-modality dispatch — every sub-query
     of a compound query runs through here exactly as a standalone query would."""
@@ -1431,6 +1763,16 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             elif TIER2_LLM_FALLBACK:
                 print("  [Tier2] deterministic head couldn't answer → LLM-IR fallback")
                 _emit(on_event, "tier2", "Deterministic head couldn't answer — trying LLM-assisted SQL...")
+                try:
+                    # Part 23: an ALTERNATE retrieval path is being taken. Worth
+                    # telling the reader — the primary, fully-deterministic path
+                    # could not answer, so the result came a different way. Names
+                    # no internal component (never "Tier-2", never an agent class);
+                    # veda/warnings.py's FALLBACK_USED copy is deliberately generic.
+                    from veda import warnings as _vwt
+                    _vwt.add(_vwt.FALLBACK_USED)
+                except Exception:
+                    pass
                 # TIER-1 → TIER-2 boundary snapshot: exactly what Tier-1 knew when it
                 # handed off (read from the ExecutionState it already built — no
                 # recompute). One of the most important trace events for debugging
@@ -1913,6 +2255,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,
                                    timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0, semantic_model=sm,
+                                   sql=sql,   # LIMIT-page awareness, see result_explainer
                                    patterns=_pattern_details,
                                    result_shape=getattr(_ictx, "result_shape", None))
                 if getattr(nl, "answer", None):
@@ -1929,6 +2272,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
             from query.result_explainer import blend_patterns
             result["answer"] = blend_patterns(result.get("answer") or "", _pattern_details)
 
+    _raise_low_confidence_caveat(_confidence)
     try:
         from veda.business_explain import build_explain
         result["explain"] = build_explain(sql=sql or "", table=table or "", sm=sm,

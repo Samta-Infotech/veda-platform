@@ -215,7 +215,14 @@ def test_dim_multiple_candidates_clarify():
             "how many leads by status",
             'SELECT furnishing_status, loe_status, COUNT(*) FROM leads_lead '
             'GROUP BY furnishing_status, loe_status', DSM)
-        assert out == A.DIM_CLARIFY and "furnishing_status" in why and "loe_status" in why
+        # Both candidates must still be NAMED, but in ordinary words: this string is
+        # shown to the user verbatim as the reply, so it may not carry raw
+        # identifiers (nor "column"/"table"/"SQL") — the same rule the
+        # explainability projection enforces. Underscored names would leak the
+        # schema's own spelling into a user-facing sentence.
+        assert out == A.DIM_CLARIFY
+        assert "furnishing status" in why and "loe status" in why, why
+        assert "_" not in why, why
     finally:
         _dim_off()
 

@@ -27,6 +27,8 @@ import logging
 
 from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
                                set_source_profiles)
+from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
+                               set_source_profiles)
 
 logger = logging.getLogger(__name__)
 
@@ -123,27 +125,26 @@ def create_app():
             set_context(RequestContext(source_id=int(source_id), tenant=tenant,
                                        source_ids=source_ids,
                                        allowed_resources=allowed_resources))
-            # Multi-source routing profiles (source_type/is_canonical/domain_tags/description),
-            # server-resolved by the api tier from the Source registry (apps/query/scope.py::
-            # source_profiles_for) and sent as X-Veda-Source-Profiles. This was the one forwarded
-            # header nothing here consumed, so set_source_profiles() was only ever called by
-            # in-process callers (the bench scripts) — every HTTP request, on BOTH the plain and
-            # the streaming route, reached the engine with NO profiles. That is why the same
-            # question answered correctly in-process and failed through the API: with no profile,
-            # veda_hybrid._is_datalake_source() is False for a datalake source, the
-            # datalake-isolated semantic model is never loaded, and the SQL planner is handed the
-            # primary source's 178-table homzhub schema instead — a vendor question then had only
-            # irrelevant homzhub tables to choose between and refused with "ambiguous subject —
-            # should rows be per reviews_pillar or reviews_pillarrating?".
-            # Absent/malformed header = {} = exactly the previous behaviour (route on evidence
-            # alone); profiles are routing METADATA, never an access decision, so unlike the
-            # data-scope header above there is nothing to fail closed on.
+            # X-Veda-Source-Profiles has been SENT by the api tier since the
+            # multi-source routing work (apps/query/inference_client.py) but was
+            # never read here, so current_source_profiles() returned {} in every
+            # deployed request: the coordinator's canonical tie-break could not
+            # fire, and nothing could resolve a source's display name. Binding it
+            # is the controlled boundary for both (traceability Part 6).
+            #
+            # Fails OPEN to {} rather than closed: these are display/tie-break
+            # metadata, NOT an authorization input (the scope was already narrowed
+            # by X-Veda-Source-Ids before the request was made), so a malformed
+            # header must degrade to generic labels, never deny a legitimate query.
             profiles_hdr = request.headers.get("x-veda-source-profiles")
             if profiles_hdr:
                 try:
-                    set_source_profiles(json.loads(profiles_hdr))
+                    import json as _json
+                    parsed = _json.loads(profiles_hdr)
+                    set_source_profiles(parsed if isinstance(parsed, dict) else {})
                 except Exception:
-                    logger.warning("malformed X-Veda-Source-Profiles header; ignoring")
+                    logger.warning("malformed X-Veda-Source-Profiles header; "
+                                   "continuing without source display names")
                     set_source_profiles({})
             else:
                 set_source_profiles({})

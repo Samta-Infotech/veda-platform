@@ -25,8 +25,9 @@ from query.routing_contracts import (
 )
 from query.routing_policy import decide
 from query.routing_slm import resolve_boundary
-
-
+from query.execution_request import ExecutionRequest
+from query.federated_route import run_federated
+from query.reliability import execute_federated_reliably
 # ── request-scoped query embedding (P3: embed once) ──────────────────────────────────────────────
 # A ContextVar (request-safe, concurrency-safe — NOT global mutable state): the query embedding is
 # computed once per routing request and reused by BOTH the evidence provider and the item-prior
@@ -135,24 +136,50 @@ def _rse_enabled():
         return False
 
 
+def _rse_item_window():
+    """Competitiveness margin for RSE's Signal 2, or None when the guard is disabled (then any
+    positive item prior qualifies — byte-identical to the pre-guard behaviour). Reuses
+    ROUTING_COMPETE_WINDOW; see config for the measurement behind it."""
+    try:
+        from config import RSE_ITEM_COMPETITIVENESS_ENABLED, ROUTING_COMPETE_WINDOW
+        return float(ROUTING_COMPETE_WINDOW) if RSE_ITEM_COMPETITIVENESS_ENABLED else None
+    except Exception:
+        return None
+
+
 def _required_secondary(top, ranked, edge_pairs):
     """The best secondary candidate that MAY be required alongside the dominant ``top`` — using two
     orthogonal, already-computed signals (no new threshold, no keywords):
       SIGNAL 1 (structural): edge-connected to ``top`` via a discovered cross_source_fk pair.
-      SIGNAL 2 (semantic):   item-prior-positive (query ↔ its dataset summaries cosine > 0), i.e. the
-                             query is semantically ABOUT this source — not a bare shared-column match.
+      SIGNAL 2 (semantic):   item-prior COMPETITIVE with the top's (query ↔ its dataset summaries),
+                             i.e. the query is semantically ABOUT this source — not a bare
+                             shared-column match.
     Returns the highest item-prior such candidate, or None. The SLM (not this function) decides whether
     the secondary is actually required; this only gates WHEN to ask.
+
+    Signal 2 was originally `top_item_score > 0.0`, which is vacuous: a BGE-M3 cosine is positive for
+    essentially any text pair, and Signal 1 is permanently true for any datalake source that shares a
+    valid cross_source_fk edge with the primary. Measured, RSE therefore fired on 123/182 benchmark
+    queries — every one a decision the policy had already called clearly dominant — and on 0/6 genuine
+    cross-source queries, which reach the boundary through other branches. The guard below restores
+    the documented intent by requiring the secondary to be within ROUTING_COMPETE_WINDOW of the top's
+    item prior; a secondary that is far behind on the very signal meant to prove the query is ABOUT it
+    is not a required source. Flag-gated (RSE_ITEM_COMPETITIVENESS_ENABLED) — off, `_rse_item_window`
+    returns None and this is the original predicate exactly.
     """
     top_id = top.source_id
     connected = set()
     for pair in (edge_pairs or set()):
         if top_id in pair:
             connected |= (set(pair) - {top_id})
+    win = _rse_item_window()
+    top_item = float(getattr(top, "top_item_score", 0.0) or 0.0)
     cands = [c for c in ranked
              if c.source_id != top_id
              and c.source_id in connected                       # Signal 1: structural join path
-             and getattr(c, "top_item_score", 0.0) > 0.0        # Signal 2: semantic item support
+             and getattr(c, "top_item_score", 0.0) > 0.0        # Signal 2a: semantic item support
+             and (win is None or                                # Signal 2b: ...and COMPETITIVE
+                  float(getattr(c, "top_item_score", 0.0) or 0.0) >= top_item - win)
              and c.presence_tier in ("STRONG", "WEAK")]         # already a real candidate, not NONE
     return max(cands, key=lambda c: getattr(c, "top_item_score", 0.0)) if cands else None
 
@@ -523,6 +550,23 @@ def plan_route(query: str, source_ids, *,
     _dominance_retier(evidence_by_source)
     profiles = profile_provider(source_ids)
     candidates = build_candidates(evidence_by_source, profiles)
+
+    # Phase C1 (CAPABILITY_PLANNING_SHADOW_ENABLED, default OFF): observe-only capability-vs-
+    # requirements comparison, logged, never mutates `candidates` — `decide()` below always
+    # receives the exact same list this function already built. See
+    # docs/architecture/VEDA_PHASE_C_CAPABILITY_PLANNING_AUDIT.md.
+    from query.capability_observation import run_capability_planning_shadow
+    run_capability_planning_shadow(query, candidates)
+
+    # Phase C2 (CAPABILITY_FILTERING_ENABLED, default OFF): narrow aggregation-only capability
+    # filtering — runs AFTER the C1 shadow observation above (which always sees the unfiltered
+    # set) so C1's own observability is unaffected regardless of this flag. Returns the SAME
+    # `candidates` object when nothing is filtered (flag off, non-aggregation query, nothing
+    # incompatible, or the all-incompatible fallback); only a genuine removal produces a new list.
+    # See docs/architecture/VEDA_PHASE_C1_UNBLOCKED_BENCHMARK.md.
+    from query.capability_filter import filter_candidates_by_aggregation_capability
+    candidates = filter_candidates_by_aggregation_capability(query, candidates)
+
     edge_pairs = edge_provider(source_ids)
 
     decision, ambiguous = decide(candidates, edge_pairs)
@@ -702,8 +746,7 @@ def _federated_delegate(query, tenant, source_ids):
     dispatch branch the single/independent agents' `execute_reliably` never covered, so a transient
     infra blip (DuckDB ATTACH timeout, postgres reset) failed it permanently. `execute_federated_reliably`
     re-runs it ONLY on a transient failure the payload itself labels; OFF → single pass-through."""
-    from query.federated_route import run_federated
-    from query.reliability import execute_federated_reliably
+    
     return execute_federated_reliably(
         lambda: run_federated(query, tenant=tenant, source_ids=source_ids))
 
@@ -753,6 +796,124 @@ def _resolve_executable(source_kind: str):
     return resolve_agent(source_kind)
 
 
+
+# ── observability helpers (traceability Phase 1) ────────────────────────────────────────────────
+# All flag-gated and best-effort: an observability failure must never fail a query, so every one of
+# these swallows its own exceptions and returns None.
+
+def _rows_of(agent_result) -> "int | None":
+    """Row count of an AgentResult's normalized data, or None when it carries none."""
+    try:
+        rows = (getattr(agent_result, "data", None) or {}).get("rows")
+        return len(rows) if rows is not None else None
+    except Exception:
+        return None
+
+
+def _trace_execution_plan(plan) -> None:
+    """Persist the ExecutionPlan into the trace (Part 5).
+
+    HONESTY (Part 25 Defect 2): ``plan.mode`` says PARALLEL, but the independent
+    strategy below runs its steps in a SEQUENTIAL for-loop. Recording the planner's
+    label alone would make the trace — and every explanation projected from it —
+    claim concurrency that does not happen. So we stamp ``executed_mode`` from what
+    the runtime actually does, and veda/safe_projection.py projects THAT.
+    """
+    try:
+        import config
+        if not bool(getattr(config, "EXECUTION_PLAN_TRACE_ENABLED", False)):
+            return
+        from veda.explain import current_trace
+        tr = current_trace()
+        if not getattr(tr, "enabled", False):
+            return
+        tr.set("execution_plan",
+               planner_mode=getattr(plan, "mode", ""),
+               executed_mode="sequential",
+               strategy=getattr(plan, "strategy", ""),
+               reason=getattr(plan, "reason", ""),
+               steps=[{"source_id": st.source_id, "source_type": st.source_type,
+                       "depends_on": list(st.depends_on or []), "required": bool(st.required)}
+                      for st in (getattr(plan, "steps", None) or [])])
+    except Exception:
+        pass
+
+
+def _trace_federation(fed_result, source_ids) -> None:
+    """Record federated execution facts + any refusal, then raise the matching warning."""
+    try:
+        from veda.explain import current_trace
+        tr = current_trace()
+        if not getattr(tr, "enabled", False):
+            return
+        status = (fed_result or {}).get("status") if isinstance(fed_result, dict) else None
+        payload = {"used": True, "operation": "combined", "source_ids": [str(s) for s in source_ids],
+                   "result_status": "complete" if status == "ok" else "incomplete"}
+        if isinstance(fed_result, dict):
+            inner = fed_result.get("result") or {}
+            if isinstance(inner, dict):
+                if inner.get("catalogs"):
+                    payload["catalog_count"] = len(inner["catalogs"])
+                if inner.get("truncated"):
+                    payload["truncated"] = True
+                # Part 10: match counts, when the pushdown path computed them.
+                if isinstance(inner.get("join"), dict):
+                    payload["join"] = inner["join"]
+            prov = fed_result.get("provenance")
+            if prov:
+                payload["provenance_count"] = len(prov)
+            # Part 23: execute_federated_reliably annotates the payload when it
+            # actually re-ran the federated query.
+            if fed_result.get("retry_attempts"):
+                payload["retry_attempts"] = int(fed_result["retry_attempts"])
+                try:
+                    from veda import warnings as _vwf
+                    _vwf.add(_vwf.FALLBACK_USED)
+                except Exception:
+                    pass
+        tr.set("federation", **payload)
+        if status and status != "ok":
+            from veda import warnings as vw
+            vw.add(vw.PARTIAL_SOURCE_FAILURE)
+    except Exception:
+        pass
+
+
+def _trace_merge(merged, source_ids) -> None:
+    """Record the MergeResult's policy + conflict (Part 9) and warn on a conflict."""
+    try:
+        from veda.explain import current_trace
+        tr = current_trace()
+        if not getattr(tr, "enabled", False):
+            return
+        policy = getattr(merged, "policy", "")
+        conflict = getattr(merged, "conflict", None)
+        tr.set("federation",
+               used=True,
+               operation="merged",
+               merge_policy=policy,
+               source_ids=[str(s) for s in source_ids],
+               conflict_detected=bool(conflict),
+               needs_clarification=bool(getattr(merged, "needs_clarification", False)),
+               result_status="conflict" if conflict else "complete")
+        if conflict:
+            from veda import warnings as vw
+            vw.add(vw.SOURCE_CONFLICT)
+    except Exception:
+        pass
+
+
+def _emit_partial_warnings(partial: dict) -> None:
+    """Turn the partial-failure block into a user-safe warning (Part 11)."""
+    try:
+        if not partial or partial.get("complete"):
+            return
+        from veda import warnings as vw
+        vw.add(vw.PARTIAL_SOURCE_FAILURE)
+    except Exception:
+        pass
+
+
 def dispatch(decision: RoutingDecision, query: str, *, sm=None, cols=None,
              profiles: dict = None, evidence=None, on_event=None):
     """Execute a SINGLE-mode routing decision via its source agent, returning the AgentResult.
@@ -774,7 +935,7 @@ def dispatch(decision: RoutingDecision, query: str, *, sm=None, cols=None,
     exec_ctx = _build_execution_context(decision, query)
     _, use_execution_request = _dispatch_flags()
     if use_execution_request:
-        from query.execution_request import ExecutionRequest
+        
         request = ExecutionRequest(query=query, source_id=sid, source_ids=[sid], sm=sm, cols=cols,
                                    execution_context=exec_ctx, on_event=on_event)
         return execute_reliably(lambda: executable.execute_request(request, evidence=evidence))
@@ -799,6 +960,7 @@ def execute_decision(decision: RoutingDecision, query: str, *, sm=None, cols=Non
         return {"kind": "none", "decision": decision}
 
     plan = plan_execution(decision)
+    _trace_execution_plan(plan)
 
     if plan.strategy == STRATEGY_SINGLE:
         return {"kind": "single", "plan": plan,
@@ -806,8 +968,9 @@ def execute_decision(decision: RoutingDecision, query: str, *, sm=None, cols=Non
                                    evidence=evidence, on_event=on_event)}
 
     if plan.strategy == STRATEGY_FEDERATED:
-        return {"kind": "federated", "plan": plan,
-                "result": _federated_delegate(query, tenant, list(decision.source_ids))}
+        _fed = _federated_delegate(query, tenant, list(decision.source_ids))
+        _trace_federation(_fed, list(decision.source_ids))
+        return {"kind": "federated", "plan": plan, "result": _fed}
 
     # independent: run each source's agent (with bounded transient retry), then merge under an
     # explicit policy. Per-source partial failure (Phase 5.3) is surfaced, never hidden.
@@ -815,24 +978,58 @@ def execute_decision(decision: RoutingDecision, query: str, *, sm=None, cols=Non
     from query.result_orchestrator import merge_results
     from query.reliability import execute_reliably, classify_failure
     exec_ctx = _build_execution_context(decision, query)
+    from veda import exec_records as _er
+    recorder = _er.current_recorder()
     results, failures = [], []
     for step in plan.steps:
         agent = resolve_agent(step.source_type or _kind_of(step.source_id, decision, profiles))
         if agent is None:
             failures.append({"source_id": step.source_id, "required": step.required,
                              "error": "no agent for source kind", "failure_class": "permanent"})
+            _skipped = recorder.open(step.source_id, source_type=step.source_type,
+                                     required=step.required)
+            recorder.close(_skipped, _er.SKIPPED)
             continue
+        _rec = recorder.open(step.source_id, source_type=step.source_type,
+                             engine=getattr(agent, "source_type", ""), required=step.required)
         res = execute_reliably(lambda a=agent, s=step: a.execute(
             query, source_id=s.source_id, source_ids=[s.source_id], sm=sm, cols=cols,
             evidence=evidence, execution_context=exec_ctx, on_event=on_event))
         results.append(res)
-        if getattr(res, "status", "") == "failed":
+        _status = getattr(res, "status", "")
+        if _status == "failed":
             failures.append({"source_id": step.source_id, "required": step.required,
                              "error": res.error, "failure_class": classify_failure(res.error)})
+            recorder.close(_rec, _er.FAILED, error=res.error,
+                           error_class=classify_failure(res.error))
+        elif _status == "refused":
+            recorder.close(_rec, _er.REFUSED)
+        else:
+            _rec.engine = getattr(res, "engine", "") or _rec.engine
+            recorder.close(_rec, _er.COMPLETED, rows=_rows_of(res))
+        # Part 23: a retry actually happened for this source. Recorded on the
+        # record (so the safe projection can show "retried") and surfaced once as
+        # a user-safe warning — an alternate attempt is something the reader should
+        # know about, since it means the first path was unavailable.
+        _retries = int(getattr(res, "retry_count", 0) or 0)
+        if _retries:
+            _rec.retry_count = _retries
+            _rec.fallback_used = True
+            recorder._sync()
+            try:
+                from veda import warnings as _vw2
+                _vw2.add(_vw2.FALLBACK_USED)
+            except Exception:
+                pass
     canonical_ids = {c.source_id for c in decision.candidate_sources if c.is_canonical}
     any_required_failed = any(f["required"] for f in failures)
+    merged = merge_results(results, canonical_ids=canonical_ids)
+    partial = {"failures": failures, "any_required_failed": any_required_failed,
+               "ok_count": sum(1 for r in results if getattr(r, "status", "") == "ok"),
+               "complete": not failures}
+    # These three were computed and then discarded on every multi-source query —
+    # the audit's "federation evidence is built and thrown away". Record them.
+    _trace_merge(merged, list(decision.source_ids))
+    _emit_partial_warnings(partial)
     return {"kind": "independent", "plan": plan, "results": results,
-            "merge": merge_results(results, canonical_ids=canonical_ids),
-            "partial": {"failures": failures, "any_required_failed": any_required_failed,
-                        "ok_count": sum(1 for r in results if getattr(r, "status", "") == "ok"),
-                        "complete": not failures}}
+            "merge": merged, "partial": partial}

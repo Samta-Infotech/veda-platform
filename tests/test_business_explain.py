@@ -199,7 +199,32 @@ def test_build_explain_existing_fields_unaffected_by_new_keys():
         {"type": "total", "summary": "Calculate total Amount"},
         {"type": "group", "summary": "Group by Payer Name"},
     ]
-    assert out["sql"]["query"].startswith("SELECT payer_name")
+    # The SQL block's SHAPE is part of the v1 contract and must always be present;
+    # whether it is POPULATED is EXPLAIN_EXPOSE_SQL's call, so assert against the
+    # flag rather than against whatever the default happens to be. The default was
+    # flipped to off (D2) precisely because raw SQL names tables and columns.
+    assert "sql" in out and "query" in out["sql"] and "enabled" in out["sql"]
+
+
+def test_sql_block_follows_the_expose_flag_in_both_states(monkeypatch):
+    """D2: the SQL is exposed only when EXPLAIN_EXPOSE_SQL says so, and the block
+    keeps its shape either way so an existing v1 consumer never sees a missing key."""
+    import config
+    sm = {"columns": {"ledger.total": {"business_role": "Total Amount"}}}
+    sql = 'SELECT payer_name, SUM(amount) AS total FROM ledger GROUP BY payer_name'
+
+    monkeypatch.setattr(config, "EXPLAIN_EXPOSE_SQL", True, raising=False)
+    on = build_explain(sql=sql, table="ledger", sm=sm)
+    assert on["sql"]["enabled"] is True
+    assert on["sql"]["query"].startswith("SELECT payer_name")
+
+    monkeypatch.setattr(config, "EXPLAIN_EXPOSE_SQL", False, raising=False)
+    off = build_explain(sql=sql, table="ledger", sm=sm)
+    assert off["sql"]["enabled"] is False
+    assert off["sql"]["query"] is None
+    # And nothing else in the payload may carry the SQL text as a side effect.
+    import json
+    assert "SELECT payer_name" not in json.dumps(off)
 
 
 def test_build_refusal_explain_returns_none_without_feedback():

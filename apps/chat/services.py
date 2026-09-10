@@ -17,6 +17,9 @@ from .table_rendering import (
     rows_to_markdown_table as _rows_to_markdown_table,
 )
 from .thinking_messages import business_friendly_message
+from .thinking_context import ThinkingContext
+from . import thinking_steps as ts_mod
+from .thinking_steps import ThinkingStepTracker
 from .visualization import VisualizationRecommender
 
 logger = logging.getLogger(__name__)
@@ -50,6 +53,23 @@ CODE_STREAM_ERROR = "STREAM_ERROR"
 # the worker's `finally`), so this only caps a pathological worst case.
 _WORKER_JOIN_TIMEOUT_S = 5
 
+# Sentinel the verified-query cache reports instead of a real table name. Imported
+# from apps.query.audit — the shared definition both front doors read — rather than
+# re-typed here, so the two can never disagree.
+from apps.query.audit import CACHED_TABLE_SENTINEL  # noqa: E402
+
+def _thinking_steps_enabled() -> bool:
+    """Whether to fold the internal phase stream into the four user-facing steps.
+
+    Default OFF: with it off, every `thinking` event is byte-identical to before, so
+    an existing client is untouched. With it on the SAME events are emitted, each
+    additionally carrying a `steps` block — the legacy `phase`/`message` fields never
+    change, so old and new clients can both read the same stream.
+    """
+    from django.conf import settings
+    return bool(getattr(settings, "VEDA_THINKING_STEPS", False))
+
+
 _visualization_recommender = VisualizationRecommender()
 
 # Fixed-shape fallback when the engine has no "explain" for this turn (smalltalk,
@@ -62,7 +82,13 @@ _NO_EXPLAIN = {
     "operations": [],
     "filters": {"applied": [], "summary": "No filters applied."},
     "validation": {"passed": None, "checks": []},
-    "sql": {"enabled": True, "query": None},
+    # `enabled: False`, not True. This fallback ships precisely when NO SQL ran (the
+    # comment above says so), so advertising the SQL block as enabled was wrong on its
+    # own terms — and it contradicted EXPLAIN_EXPOSE_SQL, which now defaults off (D2).
+    # Observed on a document answer: the payload said `enabled: true, query: null`,
+    # which reads as "SQL is available and we are withholding it" rather than "this
+    # question was not answered with SQL at all".
+    "sql": {"enabled": False, "query": None},
 }
 
 
@@ -116,7 +142,8 @@ class ConversationQueryService:
     def __init__(self, user, source_id: int | None = None, tenant: str = "default",
                  source_ids: list[int] | None = None, data_scope: dict | None = None,
                  source_profiles: dict | None = None,
-                 access_denied: bool = False):
+                 access_denied: bool = False,
+                 access_check_ms: float | None = None):
         self.user = user
         self.source_id = source_id
         # Validated query SCOPE (P5) — ready source ids, primary first, resolved
@@ -147,6 +174,14 @@ class ConversationQueryService:
         # thing the 403 was protecting) while looking, streaming, and saving
         # exactly like any other turn — user's call.
         self.access_denied = access_denied
+        #: MEASURED duration of the RBAC resolution the view performed before this
+        #: service was constructed (traceability: real timing, never inferred).
+        #: Surfaced as the "Checking access permissions" sub-check's duration.
+        self.access_check_ms = access_check_ms
+        #: Set by _build_reply_events once the turn has produced its events.
+        #: {} until then, so a view that reads it after an errored turn gets an
+        #: empty dict rather than an AttributeError.
+        self.last_audit: dict = {}
 
     def create_conversation(self, title: str = "") -> ChatSession:
         name = (title or "").strip() or DEFAULT_CONVERSATION_TITLE
@@ -252,6 +287,15 @@ class ConversationQueryService:
             # the user into thinking their question was bad when in fact the AI
             # service is down. Always show the outage copy.
             logger.warning("conversation query pipeline unavailable chat_id=%s", chat.pk)
+            # Resolve the four steps BEFORE the error. This path returns without
+            # reaching _build_reply_events, which is the only other place the
+            # terminal step frame is emitted — so the steps were left exactly as the
+            # last progress frame had them. Observed in a real stream: the turn died
+            # on LLM_UNAVAILABLE with "Analyzing the information" still `active`, so
+            # the UI kept spinning on a step that would never finish, next to an
+            # error telling the user the assistant was down.
+            yield from self._terminal_step_frame(
+                failed=True, error_code=CODE_LLM_UNAVAILABLE, retryable=True)
             yield {"event": "error",
                    "data": {"code": CODE_LLM_UNAVAILABLE,
                             "message": MSG_LLM_UNAVAILABLE}}
@@ -278,6 +322,16 @@ class ConversationQueryService:
         None if an error event was already yielded here.
         """
         q: "queue.Queue[tuple[str, object]]" = queue.Queue()
+        # Four-step progress model for THIS turn. Lives here, in the api tier,
+        # because folding internal phases into user-facing steps is a display
+        # concern and this is already the boundary where internal phase names stop
+        # (see thinking_messages.py). The pipeline is not touched.
+        steps = ThinkingStepTracker() if _thinking_steps_enabled() else None
+        step_ctx = ThinkingContext() if steps is not None else None
+        self._steps, self._step_ctx = steps, step_ctx
+        if steps is not None and self.access_check_ms is not None:
+            from .thinking_steps import STEP_FINDING
+            steps.set_sub_check_duration(STEP_FINDING, "access", self.access_check_ms)
 
         def on_event(phase: str, evt_message: str, extra: dict | None = None) -> None:
             # `extra` carries the inference tier's per-phase structured fields
@@ -288,8 +342,26 @@ class ConversationQueryService:
             # `phase` itself is forwarded verbatim (never renamed — logs/tracing
             # upstream are unaffected); only the displayed `message` is swapped
             # for a business-friendly one (thinking_messages.py, UX Phase 1).
-            q.put(("thinking", {**(extra or {}), "phase": phase,
-                               "message": business_friendly_message(phase, evt_message)}))
+            payload = {**(extra or {}), "phase": phase,
+                       "message": business_friendly_message(phase, evt_message)}
+            # `narration` is the async SLM narrator's delivery (veda/narrator.py).
+            # It is NOT a pipeline phase: it carries no progress of its own, it only
+            # replaces the contextual sentence of a step. Swallowed here rather than
+            # forwarded, so no client ever sees a phase that did not happen.
+            if phase == "narration":
+                if steps is not None:
+                    steps.set_context((extra or {}).get("step") or "analyzing",
+                                      evt_message, from_narrator=True)
+                return
+            if steps is not None:
+                step_ctx.absorb(payload)
+                if steps.consume(payload):
+                    for _k in steps.steps:
+                        steps.set_context(_k, step_ctx.sentence(_k))
+                        steps.set_details(_k, step_ctx.details(_k))
+                    if steps.has_progress():
+                        payload["steps"] = steps.as_payload()
+            q.put(("thinking", payload))
 
         def target() -> None:
             try:
@@ -358,8 +430,112 @@ class ConversationQueryService:
         yield {"event": "usage", "data": {
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0}}
 
+    def _terminal_step_frame(self, *, failed: bool, error_code: str | None = None,
+                             retryable: bool | None = None):
+        """Freeze and emit the four steps once, at the real end of the turn.
+
+        Shared by the normal reply path and the outage path so the two cannot drift:
+        every way out of a turn must leave the steps resolved. A no-op when the
+        feature is off or the frame was already emitted.
+        """
+        _steps = getattr(self, "_steps", None)
+        if _steps is None or _steps.finished:
+            return
+        _ctx = getattr(self, "_step_ctx", None)
+        if _ctx is not None:
+            if failed:
+                _ctx.no_answer = True
+            for _k in _steps.steps:
+                _steps.set_context(_k, _ctx.sentence(_k))
+                _steps.set_details(_k, _ctx.details(_k), terminal=True)
+        _steps.finish(failed=failed, error_code=error_code, retryable=retryable)
+        _frame = {"phase": "completed",
+                  "status": "failed" if failed else "completed",
+                  "message": business_friendly_message("output", "Done")}
+        # A turn that bypassed the engine (a canned greeting, answered in ~100 ms)
+        # has no progress to report. Emitting the four steps anyway put four empty
+        # circles above a finished answer under a `completed` status — nothing had
+        # completed. The legacy phase/message still goes out, so a client that only
+        # reads those is unaffected.
+        if _steps.has_progress():
+            _frame["steps"] = _steps.as_payload()
+        yield {"event": "thinking", "data": _frame}
+
     def _build_reply_events(self, response: dict):
         res0 = response.get("engine_result") or {}
+        # TERMINAL step frame: freeze every open step at the real end of the turn and
+        # emit the completed four-step model once, as the answer lands. Emitted BEFORE
+        # the content so a client can collapse the live progress section at the same
+        # moment it renders the answer. Absorbs the final explainability payload first
+        # so the "Preparing" step can say what was actually produced (chart / table /
+        # summary) rather than guessing from the live stream alone.
+        _steps = getattr(self, "_steps", None)
+        if _steps is not None and not _steps.finished:
+            _ctx = getattr(self, "_step_ctx", None)
+            _failed = not bool(res0.get("ok")) and res0.get("status") not in (
+                "answered", "clarify", None)
+            if _ctx is not None:
+                _ctx.absorb_explain(res0.get("explain") or {})
+                # The turn's OUTCOME, known only here. Without it the Preparing step
+                # said "Putting your answer together." on a refusal — this sentence
+                # overwrites the phase's own honest message at the terminal frame,
+                # so the honest text never reached the user.
+                _ctx.no_answer = res0.get("status") in ("refused", "clarify") or (
+                    not res0.get("ok") and res0.get("status") not in ("answered", None))
+                if res0.get("_from_cache"):
+                    _ctx.from_cache = True
+                # Counted evidence, from what the turn ACTUALLY returned. Never a
+                # score: "20 rows" is a fact the reader can weigh, a confidence
+                # percentage the backend never defined is not (§7).
+                _rows0 = res0.get("rows")
+                if isinstance(_rows0, list):
+                    _steps.set_evidence(rows=len(_rows0))
+                if _ctx.passages is not None:
+                    _steps.set_evidence(passages=_ctx.passages)
+                if _ctx.source_names:
+                    _steps.set_evidence(sources=len(_ctx.source_names))
+                elif _ctx.source_count:
+                    _steps.set_evidence(sources=_ctx.source_count)
+                if _steps.execution_type != ts_mod.EXEC_UNKNOWN:
+                    _ctx.execution_type = _steps.execution_type
+                elif _ctx.execution_type != ts_mod.EXEC_UNKNOWN:
+                    _steps.execution_type = _ctx.execution_type
+                # Context and details are applied BEFORE finish(), not after.
+                # finish() decides what to do with a step that never started, and
+                # that decision depends on whether the step has content: content
+                # means the work happened and was simply never reported as a phase
+                # (the document/RAG head emits nothing mapping to "Analyzing"),
+                # whereas no content means it genuinely did not run. Setting details
+                # afterwards hid that distinction and left the step `pending`
+                # between two completed ones.
+                for _k in _steps.steps:
+                    _steps.set_context(_k, _ctx.sentence(_k))
+                    _steps.set_details(_k, _ctx.details(_k), terminal=True)
+            # Emit through the SHARED terminal emitter, not a second copy of it.
+            # There are two ways out of a turn — this one and the outage path — and
+            # keeping two copies is how the no-progress guard came to be applied to
+            # only one of them: a canned greeting still shipped four empty circles.
+            # `_terminal_step_frame` re-applies context/details itself, so the loop
+            # above is now only about the evidence the api tier contributes.
+            yield from self._terminal_step_frame(failed=_failed)
+        # Audit facts for this turn (traceability Part 19), stashed on the
+        # per-request service instance rather than emitted as an event: they are
+        # for the QueryLog row only and must never cross the wire. The view reads
+        # `service.last_audit` after draining run_turn. Populated from what the
+        # turn ALREADY produced — nothing re-derived.
+        self.last_audit = {
+            "route": res0.get("_route") or "",
+            "status": res0.get("status") or ("answered" if res0.get("ok") else ""),
+            # `_from_cache` is set by the engine AT the lane. The sentinel
+            # comparison is kept as a fallback for callers that still emit it,
+            # but it alone recorded False on every hit since the sentinel was
+            # removed from the engine (last true row: 2026-07-09).
+            "cache_hit": bool(res0.get("_from_cache")) or (
+                res0.get("table") == CACHED_TABLE_SENTINEL),
+            "latency_ms": response.get("_turn_latency_ms"),
+            "usage": res0.get("usage") or {},
+            "explain": res0.get("explain"),
+        }
         # Computed (fast, synchronous, no LLM — same call as before) BEFORE any
         # content streams, so the thinking message below completes the
         # "thinking" sequence rather than interleaving mid-answer.

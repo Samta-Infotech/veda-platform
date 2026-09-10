@@ -28,7 +28,6 @@ except ImportError:  # keep importable without DRF
     _HAVE_DRF = False
 
 from .inference_client import InferenceClient, InferenceUnavailable
-from .models import QueryLog
 from .scope import (
     NoReadySource,
     SourceAccessDenied,
@@ -36,6 +35,7 @@ from .scope import (
     resolve_query_scope,
     source_profiles_for,
 )
+from .audit import audit_fields_from_explain, record_query
 from apps.ingestion.tasks import task_ingest_source
 from apps.evaluation.tasks import task_run_eval
 
@@ -45,7 +45,9 @@ DEFAULT_TENANT = "default"
 
 # The verified-query path tags the answer table "(cached)" (§6.6) — this sentinel
 # is the cache-hit signal on the wire, not a real table name.
-_CACHED_TABLE_SENTINEL = "(cached)"
+# Canonical definition lives in apps.query.audit (shared by both front doors);
+# aliased here so this module's existing readers are unchanged.
+from .audit import CACHED_TABLE_SENTINEL as _CACHED_TABLE_SENTINEL
 
 _ZERO_USAGE = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
 
@@ -147,10 +149,16 @@ class QueryView(APIView):
         result = payload.get("result", {})
         route, first_result = self._first_item_fields(result)
         sql = first_result.get("sql") or ""
-        cache_hit = first_result.get("table") == _CACHED_TABLE_SENTINEL
+        # Same fix as the chat path: the engine now reports the lane directly on
+        # `_from_cache`. The sentinel comparison alone had been False on every
+        # hit since the sentinel left the engine, so this endpoint's own
+        # `cache_hit` response field was wrong too, not just the audit row.
+        cache_hit = bool(first_result.get("_from_cache")) or (
+            first_result.get("table") == _CACHED_TABLE_SENTINEL)
         usage = first_result.get("usage")
         self._audit(query, tenant, source_id, status_str, latency, route=route, sql=sql,
-                    rid=request_id, cache_hit=cache_hit, usage=usage)
+                    rid=request_id, cache_hit=cache_hit, usage=usage,
+                    user=user, explain=first_result.get("explain"), source_ids=source_ids)
         return Response({"status": status_str, "result": result, "latency_ms": latency,
                          "request_id": request_id, "cache_hit": cache_hit,
                          "usage": usage or dict(_ZERO_USAGE)})
@@ -188,28 +196,38 @@ class QueryView(APIView):
 
     @staticmethod
     def _audit(query, tenant, source_id, status_str, latency, route="", sql="", refusal="",
-               rid="", cache_hit=False, usage=None) -> None:
+               rid="", cache_hit=False, usage=None, user=None, explain=None,
+               source_ids=None) -> None:
         """Append one QueryLog row (L9 audit, §6.6).
 
-        Best-effort by design: an audit-write failure is logged with its traceback
-        but never propagated, because losing an audit row must not turn a
-        successfully answered query into a 500 for the caller. (Previously this
-        swallowed the exception silently, so a broken audit table was invisible.)
+        Delegates to ``apps.query.audit.record_query`` — the ONE writer, shared with
+        the chat front door, which previously wrote no audit row at all
+        (traceability Part 19). The signature is unchanged for existing callers;
+        ``user``/``explain``/``source_ids`` are additive.
+
+        Still best-effort by design: an audit-write failure is logged with its
+        traceback but never propagated, because losing an audit row must not turn a
+        successfully answered query into a 500 for the caller.
         """
-        usage = usage or {}
-        try:
-            QueryLog.objects.create(
-                source_id=source_id, tenant=tenant, query_text=query,
-                route=route or "", status=status_str, executed_sql=sql or "",
-                refusal_reason=refusal or "", latency_ms=latency, request_id=rid or "",
-                cache_hit=cache_hit,
-                prompt_tokens=usage.get("prompt_tokens"),
-                completion_tokens=usage.get("completion_tokens"),
-                total_tokens=usage.get("total_tokens"),
-            )
-        except Exception:  # noqa: BLE001 — audit must never break the response
-            logger.exception("query audit write failed request_id=%s tenant=%s status=%s",
-                             rid, tenant, status_str)
+        
+        # Facts the turn already computed (partial / warning codes / which sources
+        # actually executed) — never re-derived here.
+        derived = audit_fields_from_explain(explain)
+        derived.pop("request_id", None)      # rid is authoritative on this path
+        fields = dict(query=query, tenant=tenant, user=user, source_id=source_id,
+                      status=status_str, route=route, sql=sql, refusal=refusal,
+                      latency_ms=latency, usage=usage, cache_hit=cache_hit,
+                      request_id=rid)
+        # `participating_sources` means "which sources ACTUALLY executed", so the
+        # execution records win and the request SCOPE is only a fallback. Getting
+        # this precedence backwards here made the two front doors disagree on the
+        # same column for the same query — measured live: chat recorded [2] (what
+        # ran) while /api/v1/query recorded [2,3,4,5] (everything permitted).
+        fields["participating_sources"] = derived.pop("participating_sources", None) or source_ids
+        for k, v in derived.items():
+            if not fields.get(k):
+                fields[k] = v
+        record_query(**fields)
 
 
 class IngestTriggerView(APIView):
