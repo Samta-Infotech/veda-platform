@@ -86,11 +86,19 @@ def execute_reliably(run, *, enabled=None, max_retries=None, classify=None):
            and attempts < max_retries):
         attempts += 1
         res = run()
-    if attempts and getattr(res, "reason", "") == "":
+    if attempts:
+        # Structured (traceability Part 23) so the per-source execution record can
+        # report "retried" without parsing prose. `reason` keeps its existing
+        # human string for any caller that already reads it.
         try:
-            res.reason = f"retried x{attempts}"
+            res.retry_count = attempts
         except Exception:
             pass
+        if getattr(res, "reason", "") == "":
+            try:
+                res.reason = f"retried x{attempts}"
+            except Exception:
+                pass
     return res
 
 

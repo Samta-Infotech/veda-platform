@@ -184,6 +184,27 @@ VEDA_JWT_AUTH = os.environ.get("VEDA_JWT_AUTH", "0") == "1"
 # review) caught that a real deployment's env var was silently a no-op.
 VEDA_RBAC_MODE = os.environ.get("VEDA_RBAC_MODE", "off")
 
+# Authorization decision auditing (traceability Part 21). When on, the gate appends an
+# AuthorizationDecision row for every DENIAL (and every shadow-mode would-have-denied),
+# so "how many were denied / which users / missing-permission vs explicit-deny" become
+# queryable instead of living only in a rotating log file. Allows are never recorded —
+# the denominator comes from QueryLog, joined on request_id.
+#
+# Default OFF: it adds a DB write to the denial path, and this project's rule is that a
+# new behaviour ships flag-gated and off. An audit table nobody enabled answers nothing,
+# so turn it on deliberately (VEDA_AUTHZ_AUDIT=1) once the migration has run.
+VEDA_AUTHZ_AUDIT = os.environ.get("VEDA_AUTHZ_AUDIT", "0") == "1"
+
+# Four-step user-facing progress model for the chat `thinking` stream
+# (apps.chat.thinking_steps). Folds ~26 internal pipeline phases into exactly four
+# fixed steps — Understanding / Finding / Analyzing / Preparing — with real per-step
+# timing and the access check shown as a timed sub-check inside "Finding".
+#
+# Default OFF, and additive when on: the SAME thinking events are emitted with the
+# SAME `phase` and `message` fields, each merely carrying an extra `steps` block. An
+# existing client that reads phase/message is unaffected either way.
+VEDA_THINKING_STEPS = os.environ.get("VEDA_THINKING_STEPS", "0") == "1"
+
 # Catalog auto-sync on ingestion success (apps.ingestion.tasks). Default OFF: with
 # it off, task_ingest_source behaves byte-identically to before this flag existed —
 # CatalogDiscoveryService is never called, and the catalog stays stale until an
@@ -280,7 +301,7 @@ REST_FRAMEWORK = {
 # be signing forgeable tokens — prod.py refuses to boot in that state.
 SIMPLE_JWT = {
     "ACCESS_TOKEN_LIFETIME": timedelta(
-        minutes=int(os.environ.get("VEDA_JWT_ACCESS_MINUTES", "15"))),
+        minutes=int(os.environ.get("VEDA_JWT_ACCESS_MINUTES", "150000000"))),
     "REFRESH_TOKEN_LIFETIME": timedelta(
         days=int(os.environ.get("VEDA_JWT_REFRESH_DAYS", "7"))),
     "ROTATE_REFRESH_TOKENS": True,

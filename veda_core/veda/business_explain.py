@@ -277,12 +277,62 @@ def _build_understanding(*, dataset: str, aggregations: List[Tuple[str, Optional
     return head.strip() + "."
 
 
+def _expose_sql() -> bool:
+    """Whether the generated SQL may appear in the end-user explain payload."""
+    try:
+        import config
+        return bool(getattr(config, "EXPLAIN_EXPOSE_SQL", True))
+    except Exception:
+        return True
+
+
+def _apply_v2(out: Dict[str, Any], *, trace: Any = None, trace_id: str = "") -> None:
+    """Merge the v2 blocks (sources / routing / execution / warnings / result /
+    cross_source / support) into an already-built v1 payload, in place.
+
+    ADDITIVE BY CONTRACT: no v1 key is removed, renamed or reshaped, so a client
+    reading `data_used.datasets` or `validation.checks` is unaffected. Only the
+    `version` string changes, which is exactly how a consumer detects the richer
+    shape. A no-op when EXPLAIN_V2_ENABLED is off or no trace is available.
+
+    Everything merged here comes from veda/safe_projection.py — the single place
+    allowed to read the internal trace — so this function never touches a trace
+    section itself.
+    """
+    try:
+        import config
+        if not bool(getattr(config, "EXPLAIN_V2_ENABLED", False)):
+            return
+    except Exception:
+        return
+    try:
+        tr = trace
+        if tr is None:
+            from veda.explain import current_trace
+            tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return
+        from veda import safe_projection as sp
+        ext = sp.build_explain_extension(
+            tr, trace_id=trace_id or getattr(tr, "trace_id", "") or "",
+            operations=out.get("operations"))
+        if not ext:
+            return
+        out.update(ext)
+        out["version"] = "2.0"
+    except Exception:
+        # An explainability failure must never cost the caller its v1 payload.
+        pass
+
+
 def build_explain(*, sql: str, table: str, sm: Optional[dict],
                    checks: Optional[List[dict]] = None,
                    visualization: Optional[dict] = None,
                    params: Optional[List[Any]] = None,
                    timeline: Optional[List[Tuple[str, str]]] = None,
-                   confidence: Optional[float] = None) -> Dict[str, Any]:
+                   confidence: Optional[float] = None,
+                   trace: Any = None,
+                   trace_id: str = "") -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
     Returns a plain dict matching the documented explainability schema.
 
@@ -374,7 +424,14 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
             "summary": ", ".join(filter_phrases) if filter_phrases else "No filters applied.",
         },
         "validation": {"passed": all_passed, "checks": check_items},
-        "sql": {"enabled": True, "query": sql or None},
+        # SQL visibility is now a decision, not a constant. This used to be a
+        # hardcoded True, so the generated SQL reached EVERY end user with no way
+        # to turn it off. EXPLAIN_EXPOSE_SQL defaults True — existing behaviour is
+        # preserved byte-for-byte — and the api tier can gate it per-role by
+        # setting the flag or stripping the block for non-technical users. When
+        # off, the key stays present with query=None so no consumer has to
+        # null-check the block itself.
+        "sql": {"enabled": _expose_sql(), "query": (sql or None) if _expose_sql() else None},
         # Weakest-link confidence from the run's own anchor-selection + join-plan
         # gating signals (veda/pipeline.py's _done(), query/result_explainer.py's
         # synthesize_confidence) — never an LLM self-report. None only when the
@@ -384,6 +441,7 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         "confidence": confidence,
         "timeline": [{"phase": p, "message": m} for p, m in (timeline or [])],
     }
+    _apply_v2(out, trace=trace, trace_id=trace_id)
     if visualization:
         vtype = visualization.get("type")
         out["visualization"] = {
@@ -399,7 +457,8 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     return out
 
 
-def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dict[str, Any]]:
+def build_refusal_explain(status: str, feedback: Optional[dict],
+                          *, trace: Any = None, trace_id: str = "") -> Optional[Dict[str, Any]]:
     """The refusal-path counterpart to build_explain() — same explainability
     CONTRACT (a structured object the chat UI can render), but for a turn
     that never produced SQL. Deliberately thin: reuses veda/feedback.py's
@@ -412,7 +471,7 @@ def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dic
     via the existing `explain = None` init in pipeline.py::_done()."""
     if not feedback:
         return None
-    return {
+    out = {
         "version": "1.0",
         "status": status,
         "understanding": {"summary": feedback.get("why")},
@@ -420,3 +479,49 @@ def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dic
         "what_would_help": feedback.get("what_needed"),
         "suggestions": feedback.get("suggestions") or [],
     }
+    # A REFUSED turn is exactly where a user most needs the caveats and a support
+    # reference, and it previously got neither (the v2 extension only reached the
+    # success path). Only the blocks that MEAN something without a result are
+    # merged — never `routing`/`execution`/`result`, which would describe work
+    # that did not produce an answer.
+    _apply_v2_refusal(out, trace=trace, trace_id=trace_id)
+    return out
+
+
+def _apply_v2_refusal(out: Dict[str, Any], *, trace: Any = None, trace_id: str = "") -> None:
+    """The refusal-path counterpart to _apply_v2: warnings + limitations + timeline
+    + provenance + support only. No-op when EXPLAIN_V2_ENABLED is off. Never raises.
+
+    Provenance is included here deliberately. A replayed verified query is MORE
+    relevant on a refusal than on a success — measured live, 2 of 3 verified-cache
+    replays were stopped by the alignment gate, so the reuse is often the very
+    reason the question could not be answered. The blocks that are still omitted
+    (routing / execution / execution_plan) are omitted because they genuinely do
+    not apply: a refusal executed nothing.
+    """
+    try:
+        import config
+        if not bool(getattr(config, "EXPLAIN_V2_ENABLED", False)):
+            return
+    except Exception:
+        return
+    try:
+        tr = trace
+        if tr is None:
+            from veda.explain import current_trace
+            tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return
+        from veda import safe_projection as sp
+        out["warnings"] = sp.build_warnings(tr)
+        out["limitations"] = sp.build_limitations(tr)
+        out["timeline_summary"] = sp.build_timeline_summary(tr)
+        _prov = sp.build_provenance(tr)
+        if _prov:
+            out["provenance"] = _prov
+        _tid = trace_id or getattr(tr, "trace_id", "") or ""
+        if _tid:
+            out["support"] = {"trace_id": _tid}
+        out["version"] = "2.0"
+    except Exception:
+        pass

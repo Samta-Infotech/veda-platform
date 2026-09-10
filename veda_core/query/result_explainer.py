@@ -194,7 +194,9 @@ def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[s
     answer rather than ship a confident wrong number. Deliberately lenient (large
     allowed set + tolerance) so it only trips on genuine invention, not rounding."""
     allowed = _collect_allowed_numbers(facts, patterns)
-    ceiling = max(int(facts.get("row_count", 0) or 0), 12)
+    # A truncated result must NOT license every integer up to the page size: that whitelist is
+    # exactly what let "9 out of 100 … Over 95% …" through the guard on a LIMIT-100 page.
+    ceiling = 12 if facts.get("result_truncated") else max(int(facts.get("row_count", 0) or 0), 12)
     for n in _parse_numbers_from_text(answer):
         if float(n).is_integer() and abs(n) <= ceiling:
             continue   # a count / rank / ordinal — always fair game
@@ -269,6 +271,23 @@ def deterministic_fallback_answer(query: str, columns: List[str], rows: List[dic
 
 _FACTS_SAMPLE_ROWS = 5   # rows included in the precomputed facts payload, regardless of result size
 
+_LIMIT_RE = __import__("re").compile(r"\bLIMIT\s+(\d+)\s*$", __import__("re").I)
+
+
+def _sql_truncated(sql: Optional[str], n_rows: int) -> bool:
+    """True when the executed SQL's trailing LIMIT is exactly filled — i.e. these rows are ONE PAGE
+    of a larger result and `len(rows)` is NOT the population size. Deliberately conservative: it
+    only fires on a filled limit, so a 1-row aggregate under `LIMIT 100` is never flagged.
+    Flag-gated; off → always False and every caller behaves exactly as before."""
+    try:
+        from config import SUMMARY_TRUNCATION_AWARE_ENABLED as _on
+    except Exception:
+        return False
+    if not _on or not sql or n_rows <= 0:
+        return False
+    m = _LIMIT_RE.search(sql.strip().rstrip(";"))
+    return bool(m) and n_rows >= int(m.group(1))
+
 
 def _as_number(v):
     """Coerce a cell to float if it is (or looks like) a number, else None."""
@@ -318,7 +337,8 @@ def _numeric_aggregates(columns: List[str], rows: List[dict], max_cols: int = 6)
     return metrics
 
 
-def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[str] = None) -> dict:
+def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[str] = None,
+                   truncated: bool = False) -> dict:
     """Precompute the compact 'facts' payload that is the ONLY data given to the
     SLM — never the raw rows/table. Cheap (no SLM call), deterministic, and
     constant-size: a 3-row result and a 3,000-row result produce a same-sized
@@ -345,6 +365,13 @@ def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[s
         facts = {"row_count": row_count, "sample_rows": sample}
         if row_count > len(sample):
             facts["note"] = f"showing {len(sample)} of {row_count} rows"
+        if truncated:
+            # row_count is ONE PAGE, not the population — say so inside the payload itself, since
+            # that payload is the only thing the narrator sees.
+            facts["result_truncated"] = True
+            facts["rows_shown"] = row_count
+            facts["note"] = (f"showing {len(sample)} of {row_count} returned rows; {row_count} is "
+                             f"a truncated page, the true total is UNKNOWN")
     if rank_column:
         facts["ranked_by"] = rank_column
     # Aggregates over the result, bounded to ANALYSIS_MAX_ROWS (Phase-7 scalability).
@@ -427,6 +454,7 @@ def run_nl_answer(
     patterns:       Optional[List[str]] = None,
     result_shape:   Optional[str] = None,
     analytical_context: Optional[dict] = None,
+    sql:            Optional[str] = None,
 ) -> NLAnswerResult:
     """
     Converts result rows into a natural-language prose answer using a small local
@@ -461,7 +489,8 @@ def run_nl_answer(
         return NLAnswerResult(answer="No results found.", row_count=0,
                               duration_ms=round((time.time() - t0) * 1000, 2))
 
-    facts = _extract_facts(columns, rows, rank_column=rank_column)
+    facts = _extract_facts(columns, rows, rank_column=rank_column,
+                           truncated=_sql_truncated(sql, len(rows)))
     glossary = _column_glossary(columns, table, semantic_model)
 
     rank_line = (f"\n\nThese rows are already ordered by \"{rank_column}\" — "
@@ -494,6 +523,13 @@ def run_nl_answer(
             f"of {facts['row_count']} rows — describe any total/count/average from them as "
             f"based on that sample, and do NOT state a partial sum or count as the "
             f"full-result total.")
+    if facts.get("result_truncated"):
+        partial_line += (
+            f"\nNOTE: the result was TRUNCATED — these {facts.get('rows_shown')} rows are one page "
+            f"of a larger result and the true total is UNKNOWN. Never say 'out of "
+            f"{facts.get('rows_shown')}', never state a percentage or proportion, and never "
+            f"describe this page as 'the properties'/'the records'/'this dataset'. Answer only "
+            f"about the rows shown.")
 
     if _mode == "analytical":
         role_line = (

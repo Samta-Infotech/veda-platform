@@ -135,12 +135,26 @@ if APIRouter is not None:
     async def run_hybrid_query_stream_route(req: "HybridRequest", request: Request):
         import asyncio
 
-        from veda_core.context import try_current, with_context
+        from contextvars import copy_context
+
         from veda_core.veda_hybrid import run_hybrid_query
 
         loop = asyncio.get_event_loop()
         events: "asyncio.Queue[tuple[str, dict] | None]" = asyncio.Queue()
-        parent_ctx = try_current()  # snapshot: the worker thread starts with no context (§4.1)
+        # Snapshot the WHOLE context, not just the RequestContext.
+        #
+        # This used to be `with_context(try_current(), _run)`, which re-binds only
+        # the (source, tenant) RequestContext. `_source_profiles` is a SEPARATE
+        # ContextVar, so it was silently dropped in the worker thread — measured on
+        # the real chat path: every source resolved to the generic "a data source"
+        # label (`known: false`) even though the api tier had sent correct names,
+        # and the routing coordinator's canonical tie-break saw an empty profile map.
+        #
+        # copy_context() carries EVERY ContextVar, which is what
+        # inference.concurrency.run_in_threadpool_with_context already does for the
+        # non-streaming route — so the two paths now behave identically, and adding
+        # a third request-scoped ContextVar cannot reintroduce this class of bug.
+        parent_ctx = copy_context()
         _tid = _incoming_trace_id(request)
 
         def on_event(phase: str, message: str, extra: dict):
@@ -169,7 +183,7 @@ if APIRouter is not None:
             finally:
                 loop.call_soon_threadsafe(events.put_nowait, None)
 
-        threading.Thread(target=with_context(parent_ctx, _run), daemon=True).start()
+        threading.Thread(target=lambda: parent_ctx.run(_run), daemon=True).start()
 
         async def gen():
             while True:

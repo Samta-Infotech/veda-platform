@@ -599,6 +599,35 @@ DATALAKE_VALUE_GROUNDING_ENABLED = _os.environ.get("DATALAKE_VALUE_GROUNDING_ENA
 SOURCE_ISOLATED_RETRIEVAL_ENABLED = _os.environ.get("SOURCE_ISOLATED_RETRIEVAL_ENABLED", "1") == "1"
 DATALAKE_VALUE_SAMPLE_LIMIT      = int(_os.environ.get("DATALAKE_VALUE_SAMPLE_LIMIT", "500"))  # distinct/text col
 
+# Datalake SEMANTIC LAYER (ingestion/datalake_semantic.py). Default OFF.
+# The relational path enriches a source through semantic_layer_v2 (L3) and the biencoder embeds its
+# `retrieval_documents`; the datalake path (_dispatch_datalake -> _run_schema_pipeline) never called
+# it, so a datalake column was embedded as the bare structural string and retrieval could only match
+# on column-name similarity. Measured before this flag, from column_embeddings_v2:
+#   homzhub  "COLUMN: carpet area | ROLE: MEASURE | DEFINITION: The area of the asset's carpet ..."
+#   datalake "amount, maintenance, column amount in table maintenance, a monetary amount"
+# When ON, the SAME semantic layer runs over the datalake's own schema (+ the connector's existing
+# sample values as evidence) and its docs are passed DIRECTLY to the biencoder. The model is written
+# to <ARTIFACT_ROOT>/<source_id>/veda_semantic_model.json — never SEMANTIC_MODEL_FILE, which is
+# unscoped and holds the primary relational model. Adds one SLM pass per datalake ingest (a handful
+# of tiny datasets); no dataset scan. Rollback = DATALAKE_SEMANTIC_LAYER_ENABLED=0.
+#
+# MEASURED, AND THE REASON THIS STAYS OFF (2026-09-08). The enrichment itself works — real profiles
+# were produced for all three datasets (vendors/maintenance/amenities_catalog: business purpose,
+# primary entity, table type, measure columns, 13 retrieval docs, 42 domain synonyms). But swapping
+# the column EMBEDDING TEXT for those docs does not help retrieval. Ranking each datalake column
+# against all 1915 live columns (homzhub 1902 + datalake 13) on 7 business queries — the exact
+# queries this was meant to fix ("How many vendors are there?", "What amenities are available?") —
+# the datalake column lands at RANK #1 in:
+#       structural (today) 7/7      doc 5/7      hybrid (doc+structural) 6/7
+# Retrieval was never the bottleneck for these queries; the prose doc loses the lexical edge the
+# structural string has where homzhub owns a literally-named column (services_value.asset_city,
+# assets_assetadditionalinfo.maintenance*). So: generate the model (it carries entities/synonyms/
+# concepts other consumers can use), but do NOT enable it to drive column embedding text until a
+# measurement shows a win. The datalake_bench refusals ("How many vendors are there?" -> refused)
+# are therefore NOT a retrieval-semantics problem and must be traced downstream.
+DATALAKE_SEMANTIC_LAYER_ENABLED = _os.environ.get("DATALAKE_SEMANTIC_LAYER_ENABLED", "0") == "1"
+
 # Aggregate-verb completeness (shared correctness gate, all SQL paths, default OFF). The
 # qualifier_completeness gate treats every content noun the user named as a token that must appear
 # in the SQL; an aggregate VERB ("average", "mean", "total") is satisfied by the SQL aggregate
@@ -694,6 +723,35 @@ ROUTING_DOMINANCE_FLOOR = float(_os.environ.get("ROUTING_DOMINANCE_FLOOR", "0.35
 ROUTING_DOMINANT_GAP   = float(_os.environ.get("ROUTING_DOMINANT_GAP", "0.10"))
 ROUTING_COMPETE_WINDOW = float(_os.environ.get("ROUTING_COMPETE_WINDOW", "0.08"))
 
+# Per-source relevance QUALIFICATION for the federated route (query/cross_source_composer.py,
+# consumed by query/federated_route.run_federated). Default OFF -> byte-identical.
+#
+# The problem it fixes: with MULTISOURCE_ROUTING_SHADOW on (the default) the routing policy's
+# decision is discarded, and federation is decided solely by `should_federate(cols)` — "did the
+# RETRIEVED columns come from >=2 sources". That is a PRESENCE test, not a relevance test, and
+# there is no score floor anywhere before it. Measured over the 182-query benchmark (whose ground
+# truth is homzhub-only for all 182): 182/182 federated, because a 4-column datalake source
+# (amenities_catalog) landed in every single selected column set at cosines of 0.28-0.36 against a
+# homzhub top of ~0.63 — never competitive, merely present.
+#
+# It cannot be gated on `select_retrieval`'s own column score: that field is the RERANKED score and
+# collapses (a homzhub column's 0.5 true cosine reads ~0.07), which is why
+# source_coordinator._default_evidence_provider deliberately bypasses it for the clean per-source
+# cosine. The gate therefore qualifies on that same clean routing evidence.
+#
+# NO new threshold: the margin reused is ROUTING_COMPETE_WINDOW above, whose documented meaning is
+# already exactly this — "how close a runner-up must be to count as genuine competition". A source
+# whose best clean cosine is more than that below the top source's is not competing, it is present.
+# Default ON (2026-09-06): measured on the 182-query benchmark, whose ground truth is homzhub-only
+# for all 182 — federated 182/182 -> 12/182 (170 fixed, 93%), 170 queries now select source 2 alone.
+# Genuine cross-source queries: 5/6 preserved, and the surviving ones keep the RIGHT partners
+# (amenities_catalog is dropped from maintenance/vendor joins). One regression accepted:
+# "Which assets have maintenance tickets?" routes SINGLE to the datalake (its homzhub side sits
+# 0.117 below the top, outside ROUTING_COMPETE_WINDOW). Rollback is per-flag:
+# FEDERATION_SOURCE_QUALIFICATION_ENABLED=0.
+FEDERATION_SOURCE_QUALIFICATION_ENABLED = _os.environ.get(
+    "FEDERATION_SOURCE_QUALIFICATION_ENABLED", "1") == "1"
+
 # Required-Source Escalation (docs/multisource_routing/REQUIRED_SOURCE_ESCALATION_REPORT.md). When a
 # dominant SINGLE is about to be returned deterministically, escalate to the SAME bounded SLM ONLY
 # when a secondary candidate is BOTH (1) edge-connected to the dominant source (a discovered
@@ -701,6 +759,32 @@ ROUTING_COMPETE_WINDOW = float(_os.environ.get("ROUTING_COMPETE_WINDOW", "0.08")
 # dataset). Two orthogonal signals, no new threshold, no keywords. Default OFF → the dominant-SINGLE
 # fast path is byte-identical; only qualifying cases can reach the new branch.
 REQUIRED_SOURCE_ESCALATION_ENABLED = _os.environ.get("REQUIRED_SOURCE_ESCALATION_ENABLED", "1") == "1"
+
+# RSE item-prior COMPETITIVENESS guard (query/source_coordinator._required_secondary). Default ON.
+#
+# RSE escalates a clearly-dominant SINGLE to the bounded SLM when a secondary is (1) edge-connected
+# to the top and (2) item-prior-POSITIVE. Both signals turned out to be near-vacuous in a deployed
+# scope: every datalake source is permanently edge-connected to the primary by its VALID
+# cross_source_fk edges, and `top_item_score > 0.0` is a raw BGE-M3 cosine, which is positive for
+# essentially any text pair. Measured over the 182-query benchmark: RSE fired on 123/182 (68%) —
+# all of them on decisions the policy itself had already called "clearly dominant" (mean top-vs-
+# runner gap 0.169 against ROUTING_DOMINANT_GAP 0.10) — and on 0/6 hand-written genuine
+# cross-source queries, which all reach the boundary through the two_strong / close_runner /
+# ambiguous branches instead.
+#
+# The guard restores signal (2)'s documented intent ("the query is semantically ABOUT this source —
+# not a bare shared-column match") by requiring the secondary's item prior to be COMPETITIVE with
+# the top's rather than merely non-zero. NO new threshold: the margin is ROUTING_COMPETE_WINDOW,
+# the same constant and meaning used by the decision boundary and the federation qualification gate.
+# Measured effect at that window: 110/123 escalations blocked (89%), 13 kept — exactly the cases
+# where the secondary really is competitive on the item signal (item gap ranged down to -0.015,
+# i.e. the secondary scoring HIGHER than the top).
+#
+# NOTE while MULTISOURCE_ROUTING_SHADOW is on: the routing DECISION is discarded, so this changes no
+# route. `plan_route` still runs before the shadow check, so the benefit is removing a wasted SLM
+# boundary call (and its latency/tokens) on ~2 of every 3 queries.
+RSE_ITEM_COMPETITIVENESS_ENABLED = _os.environ.get(
+    "RSE_ITEM_COMPETITIVENESS_ENABLED", "1") == "1"
 
 # Sharper SINGLE-vs-MULTI few-shot for the bounded routing SLM (routing_slm._SYSTEM_V2). Same task,
 # contract, and validation — only the in-prompt PATTERN teaching changes (a requiredness test + diverse
@@ -815,6 +899,21 @@ EXECUTION_REQUEST_DISPATCH_ENABLED = _os.environ.get("EXECUTION_REQUEST_DISPATCH
 # source) before any future phase considers acting on it. OFF -> zero observable behavior change,
 # not even a log line. See docs/architecture/VEDA_PHASE_C_CAPABILITY_PLANNING_AUDIT.md.
 CAPABILITY_PLANNING_SHADOW_ENABLED = _os.environ.get("CAPABILITY_PLANNING_SHADOW_ENABLED", "0") == "1"
+
+# Capability-based candidate filtering (Phase C2, default OFF — a SEPARATE flag from
+# CAPABILITY_PLANNING_SHADOW_ENABLED; C1 stays observe-only regardless of this flag). When ON,
+# source_coordinator.py's plan_route() calls query/capability_filter.py::
+# filter_candidates_by_aggregation_capability() right after build_candidates() (and after the C1
+# shadow observation, which always sees the unfiltered set first) — removing any candidate that
+# lacks SourceCapability.AGGREGATION ONLY when QueryRequirements.requires_aggregation is True.
+# Reuses C1's derive_requirements()/observe_candidate_capabilities() verbatim — no new capability
+# logic. Scope is deliberately narrow: no temporal/join/federation filtering, no detector changes.
+# Never returns an empty candidate list (falls back to the original set + a warning log if every
+# candidate would be removed) and never mutates the list it's given. OFF -> byte-identical (the
+# function returns the SAME candidate list object, unfiltered). See
+# docs/architecture/VEDA_PHASE_C1_UNBLOCKED_BENCHMARK.md for the real-query evidence behind this
+# narrow scope (🟡 LIMITED GO — aggregation-only, not general filtering).
+CAPABILITY_FILTERING_ENABLED = _os.environ.get("CAPABILITY_FILTERING_ENABLED", "0") == "1"
 
 # Source-description prior (routing, default OFF). The item-prior tiers a source on the MAX cosine over
 # its per-item summaries (source_item_embeddings) — which gives a large source (homzhub: 178 item
@@ -1039,6 +1138,31 @@ CROSS_SOURCE_CARDINALITY_RATIO   = (0.01, 100.0)
 CROSS_SOURCE_FK_HIGH_CONTAINMENT = 0.8
 CROSS_SOURCE_FK_HIGH_MIN_DISTINCT = 25
 CROSS_SOURCE_FK_MEDIUM_CONTAINMENT = 0.5
+# Absolute distinct-value floor for HIGH, which name affinity may NOT bypass.
+#
+# Why this exists: `_tier()` lets a strong name affinity promote a high-containment edge to
+# HIGH even below CROSS_SOURCE_FK_HIGH_MIN_DISTINCT, so a genuine FK is executable on a small
+# corpus. That bypass had NO lower bound, so a 1- or 2-value enum column could reach HIGH:
+# live audit found `assets_closurereason.asset_country_id` (values {1,4}) and
+# `services_valuebundlepricing.asset_country_id` (values {1}) both HIGH against the datalake's
+# `maintenance.asset_id` ({1,4,6,19,20,21,22}) purely by coincidence. HIGH is execution-grade —
+# federated_route._join_hints drops every MEDIUM edge when any HIGH exists — so a bogus HIGH
+# edge becomes the JOIN KEY of generated federated SQL.
+#
+# The floor is DERIVED from CROSS_SOURCE_FK_HIGH_CONTAINMENT, not tuned: containment over a
+# child of n distinct values can only take the n+1 values {0, 1/n, ..., 1}. When
+# n < 1/(1 - HIGH_CONTAINMENT), a single non-matching value already drops containment below the
+# threshold, so "containment >= 0.8" degenerates into "containment == 1.0" and the test carries
+# no gradation at all — coincidence and a real key are indistinguishable. At n >= that bound the
+# threshold is a genuine partial-match test again. With HIGH_CONTAINMENT = 0.8 this is 5.
+# NB: computed with an explicit rounding guard — plain float arithmetic gives
+# 1/(1-0.8) = 5.000000000000001, whose ceil is 6, which would wrongly demote a genuine
+# 5-distinct-value key (the live `vendors.city -> assets_asset.city_name` edge).
+CROSS_SOURCE_FK_AFFINITY_MIN_DISTINCT = __import__("math").ceil(
+    round(1.0 / (1.0 - CROSS_SOURCE_FK_HIGH_CONTAINMENT), 6))   # = 5 at HIGH_CONTAINMENT 0.8
+# Flag-gated, default OFF: with it off `_tier()` is byte-identical to the pre-fix behaviour.
+CROSS_SOURCE_FK_AFFINITY_FLOOR_ENABLED = _os.environ.get(
+    "CROSS_SOURCE_FK_AFFINITY_FLOOR_ENABLED", "0") == "1"
 CROSS_SOURCE_FK_TIER_WEIGHT = {"HIGH": 2.0, "MEDIUM": 1.2}
 # Distinct values sampled per column when (re)building a sketch outside the normal
 # value-sampling pass — e.g. the backfill script sketching join keys (ids) that the
@@ -1316,6 +1440,41 @@ TIER2_TIME_BUDGET_S       = 120.0
 # too generic to count as dropped qualifiers.
 QSR_REFERENT_MIN_IDF  = 0.35
 QSR_REFERENT_MAX_COLS = 20
+# Name-coverage weighting for typed anchor evidence (default OFF → byte-identical).
+# typed_anchor_evidence() scores RECALL only — how much of the QUERY a table's name
+# explains — so an exact match and a longer sibling that merely CONTAINS it tie
+# exactly: "payment transactions" scores accounts_paymenttransaction,
+# ...transactionsettlement, ...transactionsettlementlog and reminders_reminder-
+# paymenttransaction all at 1.238, and the tie is then broken arbitrarily (measured
+# 2026-09-05: 8 of 17 confirmed wrong answers in the Phase E end-to-end audit come
+# from exactly this tie). When ON, each table's score is scaled by how much of the
+# TABLE's own name the query explains (precision), so unexplained extra name tokens
+# ('settlement', 'log', 'reminder') demote a candidate below the exact match. The
+# floor keeps this a TIE-BREAK, never an override: a table can lose at most half its
+# evidence, so a strong value/entity match still outranks a weak but fully-covered
+# one. Schema-generic (token sets come from the semantic model), no word lists, no
+# per-query tuning. See docs/architecture/VEDA_PHASE_E_PIPELINE_TRUTH_AUDIT.md.
+NAME_COVERAGE_WEIGHTING_ENABLED = _os.environ.get("NAME_COVERAGE_WEIGHTING_ENABLED", "0") == "1"
+NAME_COVERAGE_FLOOR = 0.5      # score multiplier at zero coverage (1.0 at full coverage)
+# Metric table-token ranking for the fast path (default OFF → byte-identical).
+# fast_path._rank_metrics_by_named_table breaks equal-label metric ties by counting query
+# tokens that are SUBSTRINGS of the candidate's source_table. Substrings cross word
+# boundaries: for "payment transactions", 'transactions' is not inside
+# accounts_paymenttransaction (singular) but IS inside accounts_paymenttransactionsettlement
+# — the plural 's' comes from 'settlement' — so the WRONG table scored 2 and the right one 1.
+# The Phase E end-to-end audit (2026-09-06) traced 8 of 17 confirmed wrong answers to exactly
+# this. When ON, overlap uses the schema's own segmented name tokens (singular/plural aware,
+# no substrings) and ties break by COVERAGE of the table's own name, so a longer sibling with
+# unexplained tokens ranks below the exact match. Schema-generic, no table names in code.
+# Default ON (2026-09-08). Phase E measured this on the full 182-query benchmark against the real
+# DB: CORRECT 113->123 (+10), WRONG_TABLE 8->2 (-6), REGRESSED 0, aggregate category 81%->100%
+# (AGGR-23's answer went from 25.000 to 29,430,686.36). Root cause it fixes: fast_path's metric
+# tie-break matched table names by SUBSTRING, so "transactions" matched
+# ...paymenttransactionSETTLEMENT (the plural 's' came from 'settlement', not the correct singular
+# table) and the wrong sibling won 2-1 on every payment query; replaced with the schema's own
+# segmented table_tokens plus a coverage tie-break. Single-source path, so unaffected by
+# MULTISOURCE_ROUTING_SHADOW. Rollback = METRIC_TABLE_TOKEN_RANKING_ENABLED=0.
+METRIC_TABLE_TOKEN_RANKING_ENABLED = _os.environ.get("METRIC_TABLE_TOKEN_RANKING_ENABLED", "1") == "1"
 # Qualifier salvage (generic wrong-anchor recovery, any schema): when the qualifier
 # gate is about to refuse, QSR first types the dropped token (referent_tables). If
 # every referent table is OUTSIDE the generated SQL, the ANCHOR was wrong — not the
@@ -1479,6 +1638,23 @@ ANALYSIS_MAX_ROWS = int(__import__("os").environ.get("ANALYSIS_MAX_ROWS", "50000
 # the deterministic blended answer — a plainer-but-correct summary beats a
 # confident wrong number. Lenient matching (±2% / small counts) to avoid downgrading
 # good summaries; toggle off here if it ever over-rejects in the field.
+# Truncation-aware summarisation (query/result_explainer.py). Default OFF.
+# _extract_facts sets row_count = len(rows) and its own comment asserts "row_count above is always
+# the TRUE total" — which is false whenever the executed SQL carried a LIMIT. Measured on the
+# 182-query benchmark: 6 answers presented the LIMIT-100 page as the whole population, e.g.
+#   "Show invoice items where is convenience charge is true."
+#     -> "50% of the invoice items are convenience charges, with 5 out of 100 rows showing as such."
+#   "Show properties where is gated is true."  -> "9 out of 100 properties are gated."
+# Worse, the anti-hallucination guard PERMITS these: _answer_numbers_grounded whitelists any
+# integer <= max(row_count, 12) as "a count/rank/ordinal", so 9, 95 and 100 all pass.
+# When ON, a LIMIT-filled result is flagged (result_truncated / rows_shown), the narrator is told
+# the rows are one page of an unknown-larger result, and the integer whitelist is withdrawn for
+# that case. Reuses the existing metrics_partial/partial_line pattern rather than adding a second
+# mechanism. Rollback = SUMMARY_TRUNCATION_AWARE_ENABLED=0.
+# Default ON (2026-09-08). 9/9 guard tests + all 6 summariser suites (84 tests) identical in both
+# flag states; the A/B on the exact FILT-01 shape flips _answer_numbers_grounded from True (bad
+# answer shipped) to False (rejected -> deterministic fallback).
+SUMMARY_TRUNCATION_AWARE_ENABLED = _os.environ.get("SUMMARY_TRUNCATION_AWARE_ENABLED", "1") == "1"
 NL_SUMMARY_NUMERIC_GUARD = __import__("os").environ.get(
     "NL_SUMMARY_NUMERIC_GUARD", "true").strip().lower() in ("1", "true", "yes", "on")
 NL_SUMMARY_MAX_ROWS    = int(__import__("os").environ.get("NL_SUMMARY_MAX_ROWS", "20"))
@@ -1871,15 +2047,37 @@ FASTPATH_ENTITY_GLOSSARY = True
 # language-words-as-filters) that no downstream join/grain patch can. Default OFF
 # → pipeline byte-identical; graceful-degrades to the existing path on any SLM /
 # parse / grounding failure. See docs + veda/understanding/schema.py.
-QUERY_UNDERSTANDING_ENABLED = False
+QUERY_UNDERSTANDING_ENABLED = _os.environ.get("QUERY_UNDERSTANDING_ENABLED", "0") == "1"
 QUERY_UNDERSTANDING_MIN_CONFIDENCE = 0.5   # below this, degrade to existing path (don't refuse)
+# Glossary must explain the WHOLE concept, not one token of it (grounding.ground_entity).
+# Default OFF. The curated business-noun glossary is consulted BEFORE the name-token match, so a
+# human-verified mapping out-prioritizes a coincidental token hit ("tenant" -> users_user, not
+# assets_leasetenant). But the lookup also tried each INDIVIDUAL token, so a single-token hit on a
+# MULTI-token concept beat the more specific table's COMPLETE name-token match:
+#   "invoice item"  -> glossary['invoice'] = accounts_userinvoice   (correct: accounts_userinvoiceitem)
+#   "lease tenant"  -> glossary['tenant']  = users_user             (correct: assets_leasetenant)
+#   "amenity group" -> glossary['amenity'] = assets_amenity         (correct: assets_amenitygroup)
+#   "payment type"  -> glossary['payment'] = accounts_paymenttransaction (correct: accounts_paymenttype)
+# Measured on the 182-query benchmark (understanding layer, vedademo SLM): EVERY wrong anchor traced
+# to exactly 5 entries of the 14-entry glossary — one defect, not a per-query problem.
+# When ON, the glossary is matched only on the concatenated whole concept ("invoiceitem"), so a
+# single-token concept still resolves through it ("tenant") while a multi-token concept falls through
+# to the complete name-token match. Rollback = QU_GLOSSARY_WHOLE_CONCEPT_ONLY=0.
+# Default ON (2026-09-08). A/B on the 182-query benchmark (understanding layer, vedademo SLM):
+# anchor accuracy 153/182 -> 172/182 (84% -> 94%); 21 fixed, 1 regressed. aggregate/filter/ranking/
+# temporal all reached 100%. The single regression (GOLD-22 "payment method distribution for lease
+# payments") is the grounding being MORE faithful: the extractor returns grain='payment type', which
+# now correctly grounds to accounts_paymenttype -- the same mapping SMPL-16/SMPL-21 expect -- whereas
+# the old token hit accidentally overrode an imprecise extraction into accounts_paymenttransaction.
+# Rollback = QU_GLOSSARY_WHOLE_CONCEPT_ONLY=0.
+QU_GLOSSARY_WHOLE_CONCEPT_ONLY = _os.environ.get("QU_GLOSSARY_WHOLE_CONCEPT_ONLY", "1") == "1"
 # ── ANALYTICAL_SQL_V2 (Phase 1: structured analytical SQL, flag-gated, OFF) ────
 # Benchmark showed SQL-gen DROPS aggregate intent (scalar/grouped queries came back as
 # raw-row lists). Phase 1 fix: a structured AnalyticalSpec (veda/analytical_spec.py)
 # that SQL-gen CONSUMES instead of re-inferring from language. Scope: SINGLE-ANCHOR
 # analytics (scalar COUNT/SUM/AVG/MIN/MAX, grouped GROUP BY). Multi-table analytical =
 # Phase 2. Deterministic; returns None → existing path (zero regression by construction).
-ANALYTICAL_SQL_V2 = False
+ANALYTICAL_SQL_V2 = _os.environ.get("ANALYTICAL_SQL_V2", "0") == "1"
 # NOTE (RC2 routing mis-pick, 2026-07-23): TWO small routing-layer fixes were tried and
 # both reverted (VEDA_ADVERSARIAL_FAILURE_MAP.md Part 4). v1 (broad FK-child penalty in
 # select_primary_table) regressed 20→18. v2 (structural name-prefix penalty + parent
@@ -1897,6 +2095,30 @@ ANALYTICAL_SQL_V2 = False
 # the anchor's real options; unconsumed qualifier spans → falls through (refuse-
 # over-guess). This is the consumer SUPERLATIVE_JOIN_ROUTING was waiting for.
 SUPERLATIVE_PLAN_ENABLED = True
+# Phase D6b Option E (default OFF — byte-identical when off). superlative_plan.py's
+# dimension-phrase exclusion normally drops the ENTIRE dimension phrase from anchor
+# evidence (see the module docstring's "typed-role discipline"). When ON, the exclusion
+# becomes SELECTIVE: a dim-phrase word is excluded only if its dimension-column fan-out
+# (the number of distinct tables owning a matching DIMENSION-typed column — see
+# docs/architecture/VEDA_PHASE_D6_DIMENSION_PHRASE_SPECIFICITY_AUDIT.md) exceeds
+# OPTION_E_FANOUT_THRESHOLD. A generic classifier noun ("category"/"type"/"status",
+# fan-out 40-78 in the measured corpus) stays excluded exactly as today; a narrow,
+# specific dimension phrase ("amenities"/"tenant"/"project", fan-out 3-8) is left in
+# like any other content word — no new tie-break path, no change to _select_anchor(),
+# ANCHOR_MARGIN, or the dim-ownership tie-break. Per the Phase D6c validation audit
+# (docs/architecture/VEDA_PHASE_D6C_OPTION_E_VALIDATION_AUDIT.md): this does NOT fix
+# GOLD-11 (both the flag-off and flag-on paths end in an honest refusal there — the
+# flag only changes WHICH refusal), and a real regression was found at every tested
+# threshold (5-25) via an interaction with the existing _co_owner anchor-rescue
+# mechanism (GOLD-25-shaped queries). Verdict: NO-GO for enabling. Flag exists so the
+# mechanism can be exercised/tested in isolation; do not turn this on in any shared
+# config without a follow-up fix for that regression class.
+OPTION_E_DIM_REINCORPORATION_ENABLED = _os.environ.get("OPTION_E_DIM_REINCORPORATION_ENABLED", "0") == "1"
+# Candidate threshold from the Phase D6 corpus gap (safe cluster 3-9 distinct tables,
+# generic-classifier cluster 25-78; nothing observed in [10,24]). Not re-tuned here —
+# see the D6c audit's threshold-sensitivity table for why no threshold in this range
+# clears the GOLD-25 regression.
+OPTION_E_FANOUT_THRESHOLD = int(_os.environ.get("OPTION_E_FANOUT_THRESHOLD", "15"))
 # Deterministic grouped-breakdown planner (same module/machinery): "how much does
 # each <dim> contribute" → GROUP BY dim, SUM(measure) — the non-ranked sibling of
 # the superlative shape. Same refuse-over-guess guards; bails on negation/exclusion
@@ -2047,6 +2269,93 @@ ANCHOR_VET_ROUTER = True
 EXPLAIN_TRACE_ENABLED = True
 EXPLAIN_TRACE_VERBOSE = True
 EXPLAIN_TRACE_PERSIST = True
+
+# ── User-safe execution timeline / explainability v2 (traceability Phase 1) ───
+# The SAFE PROJECTION of the internal ExplainTrace: a structured, business-facing
+# timeline of what the pipeline actually DID, streamed live over the existing
+# `thinking` SSE event and summarised in the final explainability payload.
+# These are execution-state facts (a stage started / finished / warned) — never
+# model reasoning, prompts, candidate lists, scores or schema names. See
+# veda/lifecycle.py, veda/warnings.py, veda/exec_records.py, veda/safe_projection.py.
+#
+# EVERY flag here defaults OFF: with all of them off the answer path is
+# byte-identical to before (each is a _Null* object whose methods are no-ops).
+# Env-overridable (the repo's 73-flag convention) so a rollout or a live
+# verification run needs no code edit — and note that env is read at container
+# CREATE time, so flipping one needs `up -d`, not `restart` (see CLAUDE.md).
+
+# Emit the structured lifecycle timeline (phases: received → understanding →
+# access_check → source_selection → execution_plan → data_retrieval →
+# cross_source_processing → validation → result_preparation → completed).
+# Only phases that actually occur are emitted.
+LIFECYCLE_EVENTS_ENABLED = _os.environ.get("LIFECYCLE_EVENTS_ENABLED", "0") == "1"
+
+# The first-class WARNING tier — "you got an answer, but read it with this
+# caveat" (truncation, a source that did not respond, RBAC narrowing, an
+# unresolved cross-source conflict, a fallback path). Before this VEDA had only
+# pass/fail/refuse, so every one of those was silent.
+QUERY_WARNINGS_ENABLED = _os.environ.get("QUERY_WARNINGS_ENABLED", "0") == "1"
+
+# Per-source execution records: status, timestamps, duration, rows, retries,
+# fallback. The internal record may hold the raw driver error; only
+# `as_safe_dict()` (generic, category-based copy) may reach a user.
+SOURCE_EXECUTION_RECORDS_ENABLED = _os.environ.get("SOURCE_EXECUTION_RECORDS_ENABLED", "0") == "1"
+
+# Persist the ExecutionPlan (query/execution_planner.py) into the trace. It has
+# always been built and then discarded, so multi-source runs had no record of the
+# strategy or the steps. Observation only — never changes the plan.
+EXECUTION_PLAN_TRACE_ENABLED = _os.environ.get("EXECUTION_PLAN_TRACE_ENABLED", "0") == "1"
+
+# Emit the `explain` payload at version 2: adds sources / routing / execution /
+# warnings / limitations / result / cross_source / support blocks. Additive — every
+# v1 key keeps its exact shape and meaning, so an existing consumer is unaffected.
+EXPLAIN_V2_ENABLED = _os.environ.get("EXPLAIN_V2_ENABLED", "0") == "1"
+
+# Include the generated SQL in the end-user explain payload. Historically
+# build_explain() hardcoded `"sql": {"enabled": True}`, so the raw SQL went to
+# EVERY user with no way to turn it off.
+#
+# DEFAULT FLIPPED TO OFF (D2). Raw SQL names tables and columns — exactly what the
+# rest of this layer works to keep out of a user-facing explanation — so the old
+# default contradicted it. This does NOT change production behaviour: the v2
+# payload only exists when EXPLAIN_V2_ENABLED is on, and that is off by default.
+# Set EXPLAIN_EXPOSE_SQL=1 to restore the SQL block for a technical/admin view.
+EXPLAIN_EXPOSE_SQL = _os.environ.get("EXPLAIN_EXPOSE_SQL", "0") == "1"
+
+# Measure real DB-side execution time in veda/execution.py rather than inferring
+# it from the gap between trace stage offsets.
+DB_EXECUTION_TIMING_ENABLED = _os.environ.get("DB_EXECUTION_TIMING_ENABLED", "0") == "1"
+
+# Cross-source join match counts (traceability Part 10). Computed over the temp
+# tables execute_plan has ALREADY materialized in DuckDB — two local counts, no
+# source access, no extra federated round trip. Only the aggregate-pushdown path
+# can offer this cheaply; the plain execute() path would need extra federated
+# queries, so it deliberately reports no join block rather than a guess.
+FEDERATED_JOIN_STATS_ENABLED = _os.environ.get("FEDERATED_JOIN_STATS_ENABLED", "0") == "1"
+
+# Confidence below which an answer carries a user-visible "limited matching data" caveat
+# (traceability EXP-B3). The pipeline has always COMPUTED a weakest-link confidence and
+# shipped it in the payload, but nothing surfaced it — a 0.143-confidence answer looked
+# identical to a 1.0 one.
+#
+# SET TO 0.5 (D1). It sat at 0.0 — the caveat built but disabled — and a real
+# observed answer shipped at confidence 0.018 with five green validation ticks and
+# no caveat at all. 0.0 still disables it entirely if that is wanted. This does NOT
+# change production behaviour: the warning tier only exists when EXPLAIN_V2_ENABLED
+# is on, and that is off by default.
+LOW_CONFIDENCE_WARNING_BELOW = float(_os.environ.get("LOW_CONFIDENCE_WARNING_BELOW", "0.5") or 0)
+
+# ── Explainability narrator (veda/narrator.py) ────────────────────────────────
+# ONE optional SLM call per query that rewrites already-confirmed structured facts
+# into a more natural progress sentence. It is a NARRATOR, not a reasoning engine:
+# it sees only display-cleared facts, its output is validated and rejected on any
+# leakage or invented number, and it runs on its own daemon thread that nothing
+# awaits. The deterministic sentences in apps/chat/thinking_context.py are the
+# floor, so a narration that is slow, absent or rejected costs nothing.
+# Default OFF: it adds an SLM call, and this project's rule is that new behaviour
+# ships flag-gated and off.
+EXPLAIN_NARRATOR_ENABLED = _os.environ.get("EXPLAIN_NARRATOR_ENABLED", "0") == "1"
+EXPLAIN_NARRATOR_TIMEOUT_S = float(_os.environ.get("EXPLAIN_NARRATOR_TIMEOUT_S", "6") or 6)
 
 # IR Equivalence Validation (veda/ir_equivalence.py): refuse LLM-generated SQL that
 # introduces filters/grouping/ordering/joins/DISTINCT the query never licensed

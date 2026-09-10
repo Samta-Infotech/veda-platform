@@ -95,8 +95,27 @@ def temporal_alignment_ok(query, sql, sm):
         return True, ""
     if _sql_has_temporal_bucket(sql, sm, _facts(sql)):
         return True, ""
-    return False, ("this asks for a per-time-period breakdown, but the SQL groups by a non-temporal "
-                   "column — I can't produce a time-bucketed result for it")
+    return False, ("this asks for a breakdown over time, but the information it would be grouped "
+                   "by isn't a date — so a per-period breakdown can't be produced for it")
+
+
+def _plain(name: str) -> str:
+    """An internal identifier rendered as ordinary words.
+
+    These refusal strings are shown to the USER verbatim as the reply, so they may
+    not carry `column`, `table`, `SQL` or a raw identifier — the same rule the whole
+    safe-projection layer enforces on the explainability payload. Measured live on a
+    verified-cache clarify: the reply read "the query's measure lives on another
+    table than the one the SQL ranks/aggregates".
+    """
+    return " ".join(w for w in str(name).replace("_", " ").split() if w)
+
+
+def _plain_list(names) -> str:
+    vals = [_plain(n) for n in sorted(names)]
+    if len(vals) <= 1:
+        return vals[0] if vals else ""
+    return ", ".join(vals[:-1]) + " or " + vals[-1]
 
 
 # ── B. ENTITY-ANCHOR ────────────────────────────────────────────────────────────────────────────────
@@ -145,8 +164,8 @@ def entity_anchor_ok(query, sql, sm):
         or any(_col_table(c, sm) in named_tables for c in sql_cols)
     if aligned:
         return True, ""
-    return False, ("this measures a different column than the one the question names — the query's "
-                   "measure lives on another table than the one the SQL ranks/aggregates")
+    return False, ("the figure this would measure isn't the one the question names — it belongs to "
+                   "a different subject than the one being ranked")
 
 
 def alignment_ok(query, sql, sm):
@@ -192,8 +211,8 @@ def aggregate_presence_ok(query, sql, sm=None):
         return True, ""
     if _facts(sql).get("aggregations"):
         return True, ""                                  # SQL computes an aggregate → not omitted
-    return False, ("this asks for a count/total/average, but the SQL returns rows without an aggregate — "
-                   "the result would be a row list, not the requested figure")
+    return False, ("this asks for a count, total or average, but what came back is a list of "
+                   "individual records rather than the single figure requested")
 
 
 # ── C. DIMENSION referent alignment (increment 2) ──────────────────────────────────────────────────
@@ -280,10 +299,10 @@ def dimension_alignment(query, sql, sm):
         return DIM_NOT_APPLICABLE, ""                     # can't confidently build candidates → decline
     in_set = [g for g in group_cols if g in acceptable]
     if not in_set:
-        return DIM_REFUSE, ("the SQL groups by a column outside the dimension you asked for "
-                            f"({', '.join(sorted(group_cols))}) — expected one of "
-                            f"{', '.join(sorted(acceptable))}")
+        return DIM_REFUSE, ("this would be broken down by "
+                            f"{_plain_list(group_cols)}, which isn't the grouping you asked for "
+                            f"— the available groupings here are {_plain_list(acceptable)}")
     if len(acceptable) >= 2:
-        return DIM_CLARIFY, ("this dimension is ambiguous — did you mean "
-                             f"{' or '.join(sorted(acceptable))}?")
+        return DIM_CLARIFY, ("more than one grouping fits what you asked for — did you mean "
+                             f"{_plain_list(acceptable)}?")
     return DIM_ALIGNED, ""

@@ -24,6 +24,14 @@ from typing import Any, Dict, List, Optional
 
 _TRACE_LOG = "logs/explain_trace.jsonl"
 
+
+def _explain_v2_enabled() -> bool:
+    try:
+        import config
+        return bool(getattr(config, "EXPLAIN_V2_ENABLED", False))
+    except Exception:
+        return False
+
 try:
     from utils.logger import get_logger
     logger = get_logger(__name__)
@@ -40,12 +48,23 @@ except Exception:  # importable outside the engine cwd too (unit tests)
 #   slm        — per-CALL SLM ledger (purpose/model/duration/ok), appended live by
 #                call_slm() via slm_call(); complements the llm_usage totals.
 #   totals     — the final one-glance summary, built by finish().
+#   lifecycle        — the user-safe execution timeline (veda/lifecycle.py); the
+#                      ONE recorded list that both the live SSE stream and the
+#                      final explainability payload are projected from.
+#   execution_plan   — the ExecutionPlan the coordinator actually ran, incl. the
+#                      HONEST executed_mode (see veda/safe_projection.py).
+#   source_execution — per-source records: status/duration/rows/retries/fallback.
+#   federation       — cross-source provenance, merge policy, join counts.
+#   warnings         — the first-class warning tier (veda/warnings.py).
+#   versions         — pipeline/git/schema stamps for governance (Part 22).
 _SECTIONS = [
     "query_understanding", "routing", "retrieval", "rrf", "graph_expansion", "reranking",
     "schema_linking", "entity_selection", "projection", "join_planning",
     "tier1", "tier2", "sql_planning", "sql_generation", "validation",
     "execution", "result_analysis", "summary", "visualization",
     "explainability", "slm", "llm_usage", "output", "totals",
+    "lifecycle", "execution_plan", "source_execution", "federation", "warnings",
+    "versions",
 ]
 
 
@@ -223,9 +242,40 @@ class ExplainTrace:
                 self.total_tokens = u["prompt_tokens"] + u["completion_tokens"]
         except Exception:
             pass
+        self.stamp_versions()
         # The one-glance summary — built last, from what every stage recorded.
         try:
             self.sections["totals"] = self._build_totals()
+        except Exception:
+            pass
+
+    def stamp_versions(self) -> None:
+        """Record provenance stamps so a behaviour change can be attributed to a
+        code/schema change (Part 22). ADMIN-ONLY: these never enter the safe
+        projection — veda/safe_projection.py has no reader for this section.
+
+        git_sha comes from the deploy env (the MLflow sidecar already reads the
+        same vars, mlflow_observability/mapper.py); schema_version is the
+        understanding layer's typed-contract version. Absent values are simply
+        not stamped rather than recorded as "unknown"."""
+        try:
+            import os as _os
+            v = {}
+            sha = (_os.environ.get("VEDA_GIT_SHA") or _os.environ.get("GIT_SHA")
+                   or _os.environ.get("SOURCE_COMMIT"))
+            if sha:
+                v["git_sha"] = str(sha)[:40]
+            pv = _os.environ.get("VEDA_PIPELINE_VERSION")
+            if pv:
+                v["pipeline_version"] = str(pv)[:40]
+            try:
+                from veda.understanding.schema import SCHEMA_VERSION
+                v["understanding_schema_version"] = SCHEMA_VERSION
+            except Exception:
+                pass
+            v["explain_payload_version"] = 2 if _explain_v2_enabled() else 1
+            if v:
+                self.sections.setdefault("versions", {}).update(v)
         except Exception:
             pass
 
@@ -498,6 +548,56 @@ def use_trace(tr):
         unbind_trace(token)
 
 
+def summarize_explain_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Compact summary of a build_explain() payload, for the trace's
+    `explainability` section. Never the full payload — just the shape.
+
+    Reads the payload's REAL nested structure. This used to read flat top-level
+    keys ("datasets", "check_items", "filters"-as-a-list) that build_explain has
+    never emitted: it returns `data_used.datasets`, `validation.checks`, and
+    `filters.applied`. The mismatch meant every trace recorded
+    `datasets=None, validation_passed=None` even on a fully successful query
+    (reproduced live, trace_id dc96dcb1951f). Both shapes are accepted now so a
+    refusal payload (build_refusal_explain, which has neither block) and any
+    older caller still summarise cleanly instead of raising.
+    """
+    data_used = payload.get("data_used")
+    if isinstance(data_used, dict):
+        datasets = data_used.get("datasets")
+    else:                                   # legacy/flat shape, and refusal payloads
+        datasets = payload.get("datasets")
+
+    validation = payload.get("validation")
+    if isinstance(validation, dict):
+        checks = validation.get("checks") or []
+        # build_explain already computed the rollup; prefer it over re-deriving.
+        passed = validation.get("passed")
+    else:
+        checks = payload.get("check_items") or []
+        passed = None
+
+    if passed is None and checks:
+        # check_items use {"label", "passed"}; the raw ledger uses {"name", "status"}.
+        passed = all(
+            (c.get("passed") is True) if "passed" in c
+            else str(c.get("status", "")).lower() in ("pass", "true", "ok")
+            for c in checks)
+
+    filters = payload.get("filters")
+    if isinstance(filters, dict):
+        filter_count = len(filters.get("applied") or [])
+    else:
+        filter_count = len(filters or payload.get("filter_phrases") or [])
+
+    return {
+        "datasets": datasets,
+        "operation_count": len(payload.get("operations") or []),
+        "filter_count": filter_count,
+        "check_count": len(checks),
+        "validation_passed": passed,
+    }
+
+
 def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=False,
                          ictx=None, answer=None, summary_model=None, summary_ok=None,
                          visualization=None, explain_payload=None) -> None:
@@ -517,6 +617,17 @@ def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=Fa
                    row_count=row_count,
                    column_count=(len(_cols) if _cols is not None else None),
                    truncated=bool(truncated))
+            # EXP-B2: raised HERE because this is where truncation is actually decided.
+            # One signal, one raise — previously the warning tested a different (much
+            # larger) threshold in execution.py and therefore never fired on a real
+            # truncated page.
+            if truncated:
+                try:
+                    from veda import warnings as _vw
+                    _vw.add(_vw.RESULT_TRUNCATED,
+                            limit=row_count if isinstance(row_count, int) else None)
+                except Exception:
+                    pass
             if _cols and getattr(tr, "verbose", False):   # column NAMES, verbose-only
                 tr.set("execution", column_names=_cols[:40])
     except Exception:
@@ -565,14 +676,6 @@ def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=Fa
         pass
     try:  # explainability — compact only, NEVER the full payload
         if isinstance(explain_payload, dict):
-            _checks = explain_payload.get("check_items") or []
-            tr.set("explainability",
-                   datasets=explain_payload.get("datasets"),
-                   operation_count=len(explain_payload.get("operations") or []),
-                   filter_count=len(explain_payload.get("filters")
-                                    or explain_payload.get("filter_phrases") or []),
-                   validation_passed=(all(
-                       str(c.get("status")).lower() in ("pass", "true", "ok")
-                       for c in _checks) if _checks else None))
+            tr.set("explainability", **summarize_explain_payload(explain_payload))
     except Exception:
         pass

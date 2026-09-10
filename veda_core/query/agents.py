@@ -38,6 +38,11 @@ class AgentResult:
     provenance: list = field(default_factory=list)
     error: Optional[str] = None
     reason: str = ""            # refusal/clarify reason when not ok
+    # Observability (traceability Part 23). Set by query/reliability.execute_reliably
+    # when it actually re-ran this agent, so the per-source execution record can
+    # report a retry instead of the count being inferred from the `reason` string.
+    # 0 on every non-retried path, so nothing changes for an existing consumer.
+    retry_count: int = 0
 
 
 # ── delegates (lazy import; monkeypatch these in tests) ───────────────────────────────────────

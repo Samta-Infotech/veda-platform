@@ -16,6 +16,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import pytest
+
 import chatbot.nodes as nodes
 
 
@@ -264,3 +266,61 @@ def test_drill_up_regex_does_not_misfire_on_real_question_containing_back():
     assert nodes._DRILL_UP_RE.match("how many transactions came back as failed") is None
     assert nodes._DRILL_UP_RE.match("show me the backup transactions") is None
     assert nodes._DRILL_UP_RE.match("undo transactions from last week") is None
+
+
+# ---------------------------------------------------------------------------
+# Greeting coverage. The first cut matched "hi" but not "hi there!", so the
+# natural forms people actually type fell through to the full engine: measured
+# 16-23 s for a greeting, answered with "It seems like you have multiple
+# documents related to an employee handbook" (routing had sent it to document
+# retrieval at 0.50 similarity).
+# ---------------------------------------------------------------------------
+
+GREETINGS_THAT_MUST_BE_INSTANT = [
+    "hi", "hello", "hey", "yo", "hiya", "greetings", "hii", "heyyy", "hello!",
+    "how are you", "how are u", "how's it going", "how are you doing",
+    "hi there", "hey there", "hello there", "hi there!",
+    "hey there, how are you?", "hi, how are you?", "hi there, how's it going?",
+    "good morning", "good morning!",
+]
+
+MUST_STILL_REACH_THE_ENGINE = [
+    "hi how many assets are there", "hello, show me the data",
+    "how are the sales this month", "hey, list the invoices",
+    "how many", "what is the total", "good morning report",
+    "hello world table", "show me", "hi can you count the assets",
+]
+
+
+@pytest.mark.parametrize("msg", GREETINGS_THAT_MUST_BE_INSTANT)
+def test_greeting_gets_the_canned_reply_with_no_model_call(msg):
+    assert nodes._canned_smalltalk_reply(msg) is not None, msg
+
+
+@pytest.mark.parametrize("msg", MUST_STILL_REACH_THE_ENGINE)
+def test_a_data_question_is_never_swallowed_as_smalltalk(msg):
+    assert nodes._canned_smalltalk_reply(msg) is None, msg
+
+
+@pytest.mark.parametrize("msg", GREETINGS_THAT_MUST_BE_INSTANT)
+def test_social_message_is_not_overridden_into_a_followup(msg):
+    """The override that dragged greetings into the engine used the CANNED
+    regexes as its 'is this a genuine greeting' test. `_is_social` answers the
+    wider question the override actually needs."""
+    assert nodes._is_social(msg) is True, msg
+
+
+@pytest.mark.parametrize("msg", MUST_STILL_REACH_THE_ENGINE)
+def test_data_questions_are_not_social(msg):
+    assert nodes._is_social(msg) is False, msg
+
+
+@pytest.mark.parametrize("msg", [
+    "hi, what about the other one",
+    "hello, and that one?",
+    "hey, what about it",
+])
+def test_a_greeting_carrying_a_referential_followup_stays_a_followup(msg):
+    """The guard that keeps the override useful: a social opener does not make a
+    referential question social. This is the case the override exists for."""
+    assert nodes._is_social(msg) is False, msg
