@@ -82,6 +82,13 @@ class RAGResult:
     #: dropped on the wire and every document answer arrived with no explanation.
     #: HybridResult already carries this field for the same reason.
     explain:      Optional[dict] = None
+    #: True when the model DECLARED that the retrieved passages do not answer the
+    #: question. DECLARED, not inferred: there is no other signal anywhere — the
+    #: only difference between a document turn that answered and one that did not
+    #: was the English prose, which nothing could read. Must be a DECLARED field:
+    #: `dataclasses.asdict()` keeps only declared ones, and that trap already ate
+    #: `explain` once.
+    no_answer:    bool = False
 
 
 @dataclass
@@ -120,6 +127,9 @@ class HybridResult:
     # hybrid answer exactly like a plain SQL one, instead of it silently having
     # neither (the SQL rows existed, they just weren't attached to this object).
     cols:            list = field(default_factory=list)
+    #: Same contract as RAGResult.no_answer, and DECLARED for the same reason —
+    #: `asdict()` drops anything set at runtime.
+    no_answer:       bool = False
     rows:            list = field(default_factory=list)
     explain:         Optional[dict] = None
     # Deterministic post-execution analysis (result_analyzer.analytics_summary),
@@ -193,15 +203,18 @@ def _encode_rag_query_sparse(query: str, verbose: bool = False) -> Optional[dict
 _RAG_SYSTEM_PROMPT = (
     "You are a precise document Q&A assistant. "
     "Answer the user's question using ONLY the provided context passages. "
-    # "and STOP" was echoed VERBATIM into the answer the user reads — measured
-    # live: "...does not contain any information regarding response times in the
-    # maintenance policy. STOP". A bare imperative token in the instructions is
-    # exactly the kind of thing a small model copies through.
-    "If the answer cannot be found in the context, say so explicitly, in one "
-    "sentence, and write nothing further — do not summarize or describe what the passages "
-    "DO contain if it does not answer the question asked; an unrelated "
-    "passage is noise, not a consolation answer. "
-    "Cite the document name and page number when available. "
+
+    "If the context contains the answer, answer the question directly and concisely. "
+    "Put the answer first. "
+    "After the answer, on the final line, write the sources. "
+    "Use this exact source format: Sources: (document name, page N). "
+    "Do not put source citations anywhere before the final line. "
+    "Use round brackets for citations, never square brackets. "
+
+    "If the context does not contain the answer, begin your reply with the exact text "
+    "[[NO_ANSWER]] and then say in one sentence that the answer is not present in the "
+    "provided context. Do not describe or summarize unrelated information. "
+
     "Be concise and factual."
 )
 
@@ -214,7 +227,15 @@ _HYBRID_SYSTEM_PROMPT = (
     "3. Document chunks are supplementary. If they do not directly answer the user's question, IGNORE THEM completely. Do not summarize irrelevant documents.\n"
     "4. Only cite documents that appear in the context below — never invent citations.\n"
     "5. NEVER invent, fabricate, or assume any content not shown in context.\n"
-    "6. Do not complain about missing information if the SQL EXECUTION RESULTS provide a valid data point or count."
+    "6. Do not complain about missing information if the SQL EXECUTION RESULTS provide a valid data point or count.\n"
+    # Probed separately from the document prompt because the semantics differ: here
+    # the SQL results can answer even when the passages cannot, so the declaration
+    # has to be conditioned on BOTH failing. Measured 10/10 on qwen2.5:7b-instruct
+    # at temperature 0, across cases where SQL answers, the documents answer, and
+    # neither does.
+    "7. If NEITHER the SQL EXECUTION RESULTS NOR the document passages answer the "
+    "question, BEGIN your reply with the exact text [[NO_ANSWER]] and then say so in "
+    "one sentence. If either of them does answer it, never write that text."
 )
 
 
@@ -225,6 +246,45 @@ _HYBRID_SYSTEM_PROMPT = (
 #: Where the answer came from is already stated properly, by the explainability
 #: `sources` block, so the raw tags are removed rather than translated.
 _PROVENANCE_TAGS = _re.compile(r"\[(?:DB|DOC)\]\s*")
+
+
+#: What the model writes when the passages do not answer the question. Chosen by
+#: measurement, not taste — three designs were probed against 24 real questions on
+#: qwen2.5:7b-instruct at temperature 0:
+#:
+#:   marker anywhere in the reply   1 false positive  (a CORRECT answer with the
+#:                                  marker appended — the model pattern-matches the
+#:                                  bracketed citation format it is also asked for)
+#:   a bare word on its own line    3 missed          (the model put the word and
+#:                                  the sentence on ONE line)
+#:   THIS: bracketed, at the START  0 false positives, 0 missed, out of 24
+#:
+#: The prefix anchor is what makes it safe: the failure that matters is a correct
+#: answer being reported as "nothing found", and the marker only ever appeared
+#: mid-reply on exactly that case.
+_NO_ANSWER_MARKER = "[[NO_ANSWER]]"
+
+#: Used only when the model writes the marker and nothing after it.
+_NO_ANSWER_SENTENCE = ("The available documents do not contain an answer to this "
+                       "question.")
+
+
+def _split_no_answer(text: str):
+    """Return (declared_no_answer, text_without_the_marker).
+
+    FAIL-CLOSED: a reply with no marker is treated as an answer, which is exactly
+    today's behaviour. A prompt regression can therefore only lose the signal, never
+    manufacture a false "nothing found" — the direction that would be worse than
+    having no signal at all.
+    """
+    t = (text or "").lstrip()
+    if not t.startswith(_NO_ANSWER_MARKER):
+        return False, text
+    rest = t[len(_NO_ANSWER_MARKER):].lstrip()
+    # The model was asked for the marker AND a sentence, and on 4 of 6 declines in
+    # the hybrid probe it wrote the marker alone. Stripping it would then hand the
+    # user an EMPTY answer, which is worse than the prose we were replacing.
+    return True, rest or _NO_ANSWER_SENTENCE
 
 
 def _strip_provenance_tags(text: str) -> str:
@@ -534,9 +594,13 @@ def run_rag_layer(
 
     # Synthesise answer
     _emit(on_event, "rag_synthesize", "Reading through what was found")
+    _declined = False
     try:
         user_msg = _build_rag_user_message(query, chunks)
         answer   = _call_ollama(_RAG_SYSTEM_PROMPT, user_msg)
+        # Read the declaration, then remove it. The marker is an internal signal;
+        # the sentence after it is the reply the user reads, unchanged.
+        _declined, answer = _split_no_answer(answer)
     except Exception as e:
         answer = "\n\n".join(f"[{c.doc_name}] {c.text[:300]}" for c in chunks)
         if verbose:
@@ -549,6 +613,7 @@ def run_rag_layer(
 
     return RAGResult(
         answer      = answer,
+        no_answer   = _declined,
         chunks      = chunks,
         citations   = citations,
         confidence  = round(confidence, 4),
@@ -697,13 +762,16 @@ def run_hybrid_layer(
                     query, top_sql_cols, [], sql_result
                 )
                 answer = _call_ollama(_HYBRID_SYSTEM_PROMPT, user_msg)
+                _declined_h, answer = _split_no_answer(answer)
             except Exception as e:
+                _declined_h = False
                 rows = getattr(sql_result, "rows", [])
                 answer = "[DB] SQL results: " + str(rows[:5])
                 if verbose:
                     print(f"  ⚠ SLM synthesis failed ({e}) — returning raw SQL rows")
             return HybridResult(
                 answer      = answer,
+                no_answer   = _declined_h,
                 sql_columns = top_sql_cols,
                 doc_chunks  = [],
                 citations   = [],
@@ -741,9 +809,11 @@ def run_hybrid_layer(
             },
         )
 
+    _declined_h2 = False
     try:
         user_msg = _build_hybrid_user_message(query, top_sql_cols, top_doc_chunks, sql_result)
         answer   = _call_ollama(_HYBRID_SYSTEM_PROMPT, user_msg)
+        _declined_h2, answer = _split_no_answer(answer)
     except Exception as e:
         # Graceful fallback — raw context
         answer = (
@@ -768,6 +838,7 @@ def run_hybrid_layer(
 
     return HybridResult(
         answer       = answer,
+        no_answer    = _declined_h2,
         sql_columns  = top_sql_cols,
         doc_chunks   = top_doc_chunks,
         citations    = citations,

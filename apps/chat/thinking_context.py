@@ -148,7 +148,8 @@ class ThinkingContext:
                  "access_state", "found_something", "warnings",
                  "no_answer", "found_nothing", "from_cache", "failed_sources",
                  "warning_messages", "checks", "filters", "datasets",
-                 "contributions", "chart_reason", "guidance",
+                 "contributions", "chart_reason", "guidance", "combined_sources",
+                 "match_summary",
                  "source_names", "passages", "execution_type")
 
     def __init__(self):
@@ -194,6 +195,11 @@ class ThinkingContext:
         self.chart_reason: str | None = None
         #: What would help, on a turn that could not answer.
         self.guidance: list = []
+        #: Display names the FEDERATION actually combined. Distinct from
+        #: `source_names`: that is who took part, this is proof they were joined.
+        self.combined_sources: list = []
+        #: The authored sentence about how well the records matched across sources.
+        self.match_summary: str | None = None
         #: True when the answer replayed SQL from the verified-query cache.
         self.from_cache: bool = False
         #: Display names of the sources that took part. A name beats a count:
@@ -347,6 +353,16 @@ class ThinkingContext:
                 if isinstance(src, dict) and isinstance(src.get("rows"), int) \
                         and src.get("name"):
                     self.contributions[src["name"]] = src["rows"]
+            # The federation block. It has shipped on every cross-source answer and
+            # nothing read it — which is why "Analyzing", the step where the
+            # federation actually happened, was the ONLY empty step on exactly the
+            # turns that did the most work.
+            _cs = ex.get("cross_source") or {}
+            if _cs.get("used"):
+                self.combined_sources = [n for n in (_cs.get("sources") or []) if n]
+                _j = _cs.get("join") or {}
+                if _j.get("used") and _j.get("summary"):
+                    self.match_summary = str(_j["summary"])
             _viz = ex.get("visualization")
             if isinstance(_viz, dict) and _viz.get("reason"):
                 self.chart_reason = str(_viz["reason"])
@@ -619,7 +635,15 @@ class ThinkingContext:
                 rows.append(self._row(
                     ts.DETAIL_OPERATION,
                     f"{name} contributed {n} record{'' if n == 1 else 's'}"))
-        if len(self.contributions) > 1:
+        if len(self.combined_sources) > 1:
+            # Name them. "Combined across sources" is true of every federation and
+            # tells the reader nothing they cannot already see in the source rows.
+            rows.append(self._row(
+                ts.DETAIL_OPERATION,
+                "Combined " + " and ".join(self.combined_sources[:4])))
+            if self.match_summary:
+                rows.append(self._row(ts.DETAIL_OPERATION, self.match_summary))
+        elif len(self.contributions) > 1:
             rows.append(self._row(ts.DETAIL_OPERATION, "Combined across sources"))
         elif self.multi_source and self.source_count and self.source_count > 1:
             rows.append(self._row(ts.DETAIL_OPERATION,

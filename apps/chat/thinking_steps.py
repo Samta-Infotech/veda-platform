@@ -390,7 +390,20 @@ class Step:
         # overclaim on the smalltalk path — there the api tier still measures RBAC
         # while the engine is bypassed entirely, so "Finding the right information"
         # must stay pending.
-        _visible = self.started_ms is not None
+        # A step that finish() has already RESOLVED shows its content, even though
+        # no phase ever opened it. The guard below exists to stop a step that has
+        # not run yet from advertising an output it may never produce — that is a
+        # PENDING step, mid-flight. It is not this case: finish() marks a step
+        # `completed` precisely when its content proves the work happened and was
+        # simply never reported as a phase.
+        #
+        # Measured on the federated lane, which emits no phase mapping to
+        # "Analyzing": finish() saw the rows, marked the step completed — and
+        # as_dict then hid every one of them, so the step where the federation
+        # actually happened rendered as a green tick with nothing inside it. The two
+        # halves disagreed about the same step.
+        _visible = (self.started_ms is not None
+                    or self.state in (STATE_COMPLETED, STATE_WARNING, STATE_FAILED))
         rows: list = []
         if _visible:
             # Sub-checks first: authorization and validation are the framing facts,
@@ -856,7 +869,28 @@ class ThinkingStepTracker:
         # A validation failure on a SUPERSEDED attempt must not describe the answer.
         # Only downgrade when the turn actually delivered one: on a failed or
         # answerless turn the failure IS the story and stays as it is.
-        if not failed and not answered_without_result:
+        # A SQL validation result cannot describe a DOCUMENT answer at all, so it is
+        # dropped whatever else is true of the turn. The hybrid route tries SQL
+        # first; when that half produces nothing and the documents answer, its
+        # caveat is still sitting on the step — measured live on "what is the
+        # parking fee for electric vehicles", where the reader saw "The result has
+        # some limitations" above an answer that came from a PDF the caveat says
+        # nothing about.
+        #
+        # Deliberately NOT gated on `answered_without_result`: that guard exists so
+        # a SQL turn's own failure survives as the story, and it was swallowing this
+        # case, because a document turn that found nothing sets it too.
+        if not failed and self.execution_type == EXEC_DOCUMENTS:
+            for st in self.steps.values():
+                st.sub_checks = [
+                    c for c in st.sub_checks
+                    if not (c.get("kind") == "validation"
+                            and c.get("state") in (STATE_FAILED, STATE_WARNING))]
+        # A validation FAILURE on a superseded SQL attempt must not describe a SQL
+        # answer either — but there a WARNING is a real caveat on the delivered
+        # result, so only the failure is softened. Only when the turn delivered an
+        # answer: otherwise the failure IS the story.
+        elif not failed and not answered_without_result:
             for st in self.steps.values():
                 for c in st.sub_checks:
                     if c.get("kind") == "validation" and c.get("state") == STATE_FAILED:

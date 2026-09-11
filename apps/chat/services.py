@@ -531,8 +531,18 @@ class ConversationQueryService:
                 # the point: `ok`/`status` describe whether the pipeline RAN, and
                 # reading them as "did it find anything" is what put four green ticks
                 # and "Checks passed" above a reply reading "No results found."
-                _ctx.found_nothing = bool(res0.get("_no_results"))
-                _ctx.no_answer = bool(res0.get("_no_results")) or (
+                # Read from BOTH transports, because neither covers every head.
+                # `_no_results` is a plain key and survives on the dict-shaped
+                # payloads (Tier-1, Tier-2, federated). The RAG head returns a
+                # DATACLASS, and `dataclasses.asdict()` keeps only DECLARED fields —
+                # so the flag the front door sets with setattr is dropped at the
+                # wire. That is the same trap that ate `RAGResult.explain` once
+                # already. The WARNING always arrives, because it is written into
+                # the trace and projected into `explainability.warnings`, so it is
+                # the transport that works on every head.
+                _ctx.found_nothing = bool(res0.get("_no_results")) or (
+                    "no_results" in (_ctx.warnings or []))
+                _ctx.no_answer = _ctx.found_nothing or (
                     res0.get("status") in ("refused", "clarify")) or (
                     not res0.get("ok") and res0.get("status") not in ("answered", None))
                 if res0.get("_from_cache"):

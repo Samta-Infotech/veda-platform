@@ -2193,3 +2193,184 @@ def test_the_retrieved_passages_name_their_own_source(monkeypatch):
     assert seen.get("sid") == "3", (
         "the passages the answer was written from know where they came from; "
         f"the router's pick was 2, got {seen.get('sid')!r}")
+
+
+class TestTheNoAnswerDeclaration:
+    """Phase 4. The document path was the ONE case with no countable signal:
+    retrieval succeeded, 5 passages came back, and the model then said the passages
+    do not answer the question — a fact that lived only in the English prose, which
+    nothing read. The marker below was chosen by measurement, not taste."""
+
+    def _f(self):
+        from query.rag_layer import _split_no_answer
+        return _split_no_answer
+
+    def test_a_declared_decline_is_detected_and_the_marker_removed(self):
+        got, text = self._f()("[[NO_ANSWER]] The documents do not cover parking fees.")
+        assert got is True
+        assert text == "The documents do not cover parking fees."
+        assert "NO_ANSWER" not in text
+
+    def test_leading_whitespace_does_not_hide_the_marker(self):
+        assert self._f()("\n  [[NO_ANSWER]] nope")[0] is True
+
+    def test_the_marker_MID_REPLY_is_not_a_decline(self):
+        """This is the failure that matters. Probed at 24 questions: the only
+        false positive any design produced was a CORRECT answer with the marker
+        appended — the model pattern-matches the bracketed citation format it is
+        also asked for. Anchoring to the start is what makes it safe."""
+        got, text = self._f()("Employees get six (6) sick leaves. [[NO_ANSWER]]")
+        assert got is False
+        assert text == "Employees get six (6) sick leaves. [[NO_ANSWER]]"
+
+    def test_no_marker_is_fail_closed(self):
+        """A reply with no marker is an ANSWER — today's behaviour. A prompt
+        regression can only lose the signal, never manufacture a false decline."""
+        for t in ("Either party may terminate with 30 days notice.", "", None):
+            assert self._f()(t)[0] is False
+
+    def test_a_bare_marker_never_becomes_an_empty_answer(self):
+        """On 4 of 6 declines in the hybrid probe the model wrote the marker and
+        nothing else; stripping it would hand the user a blank reply."""
+        got, text = self._f()("[[NO_ANSWER]]")
+        assert got is True and text.strip()
+
+    def test_both_heads_declare_it_on_a_declared_field(self):
+        """`dataclasses.asdict()` keeps only DECLARED fields — that trap already
+        ate `RAGResult.explain` once."""
+        from query.rag_layer import RAGResult, HybridResult
+        assert "no_answer" in RAGResult.__dataclass_fields__
+        assert "no_answer" in HybridResult.__dataclass_fields__
+
+    def test_both_prompts_carry_the_instruction(self):
+        from query import rag_layer as rl
+        assert "[[NO_ANSWER]]" in rl._RAG_SYSTEM_PROMPT
+        assert "[[NO_ANSWER]]" in rl._HYBRID_SYSTEM_PROMPT
+        assert "NEITHER" in rl._HYBRID_SYSTEM_PROMPT, (
+            "the hybrid head can answer from SQL when the passages cannot, so the "
+            "declaration must be conditioned on both failing")
+
+
+class TestEmptinessPrecedence:
+    """`_mark_empty_results` weighs three signals and the order matters. Two live
+    regressions came from getting it wrong: a hybrid answer written from 5 passages
+    was reported as "nothing matched" because its SQL half returned zero rows."""
+
+    class _Payload:
+        def __init__(self, **kw):
+            for k, v in kw.items():
+                setattr(self, k, v)
+
+    def _empty(self, **kw):
+        import veda_hybrid as VH
+        from query.multi_result import MultiResult, SubResult, STATUS_OK
+        p = self._Payload(**kw)
+        VH._mark_empty_results(MultiResult(items=[
+            SubResult(sub_query="q", status=STATUS_OK, route="r", result=p)]))
+        return getattr(p, VH.EMPTY_RESULT_KEY, False)
+
+    def test_passages_beat_a_zero_row_sql_half(self):
+        assert self._empty(rows=[], doc_chunks=[1, 2, 3, 4, 5]) is False
+
+    def test_both_chunk_field_names_are_read(self):
+        """The RAG head calls them `chunks`, the hybrid head `doc_chunks`."""
+        assert self._empty(rows=[], chunks=[1, 2]) is False
+        assert self._empty(rows=[], doc_chunks=[1, 2]) is False
+
+    def test_a_declared_decline_beats_the_passages_that_were_retrieved(self):
+        assert self._empty(rows=[], doc_chunks=[1, 2, 3, 4, 5],
+                           no_answer=True) is True
+
+    def test_zero_rows_with_no_passages_is_empty(self):
+        assert self._empty(rows=[]) is True
+
+    def test_rows_returned_is_never_empty(self):
+        assert self._empty(rows=[{"a": 1}]) is False
+
+    def test_a_head_that_reports_neither_is_left_alone(self):
+        """"We cannot tell" must not be rendered as "nothing was found"."""
+        assert self._empty(answer="hello") is False
+
+
+def test_the_document_path_reports_the_period_the_user_asked_for(monkeypatch):
+    """Only Tier-1 completed PHASE_UNDERSTANDING with facts, so on a document
+    answer the first step sat on its generic fallback with nothing inside it on
+    EVERY turn — structurally, not by accident. The period is the one thing that
+    path genuinely knows about the question; the doc head computes no intent and no
+    grouping, and a route name like "rag" is not a fact about the question."""
+    import veda_hybrid as VH
+
+    seen = {}
+
+    class _TL:
+        def completed(self, phase, message=None, **facts):
+            seen[phase] = facts
+
+    class _Rec:
+        def has_records(self):
+            return True                      # skip the record branch entirely
+
+    class _TF:
+        start, end = "2025-01-01T00:00:00", "2025-12-31T23:59:59"
+
+    import veda.exec_records as er
+    import veda.lifecycle as lc
+    monkeypatch.setattr(er, "current_recorder", lambda: _Rec())
+    monkeypatch.setattr(lc, "current_timeline", lambda: _TL())
+    monkeypatch.setattr(VH, "_temporal", lambda q: _TF())
+    monkeypatch.setattr(VH, "_dispatch_single_inner", lambda *a, **k: ("rag", None))
+
+    VH._dispatch_single("leave policy in 2025")
+    assert seen.get(lc.PHASE_UNDERSTANDING, {}).get("period") == \
+        "2025-01-01T00:00:00 to 2025-12-31T23:59:59"
+
+
+def test_a_question_with_no_period_reports_none(monkeypatch):
+    """Absent, not hedged — a question that named no period must produce no row."""
+    import veda_hybrid as VH
+    seen = {}
+
+    class _TL:
+        def completed(self, phase, message=None, **facts):
+            seen[phase] = facts
+
+    class _Rec:
+        def has_records(self):
+            return True
+
+    import veda.exec_records as er
+    import veda.lifecycle as lc
+    monkeypatch.setattr(er, "current_recorder", lambda: _Rec())
+    monkeypatch.setattr(lc, "current_timeline", lambda: _TL())
+    monkeypatch.setattr(VH, "_temporal", lambda q: None)
+    monkeypatch.setattr(VH, "_dispatch_single_inner", lambda *a, **k: ("rag", None))
+    VH._dispatch_single("notice period to terminate")
+    assert lc.PHASE_UNDERSTANDING not in seen
+
+
+def test_a_tier1_route_is_left_to_report_its_own_understanding(monkeypatch):
+    """Tier-1 completes the phase itself, with richer facts. Emitting here too
+    would be a second, poorer report of the same thing."""
+    import veda_hybrid as VH
+    seen = {}
+
+    class _TL:
+        def completed(self, phase, message=None, **facts):
+            seen[phase] = facts
+
+    class _Rec:
+        def has_records(self):
+            return True
+
+    class _TF:
+        start, end = "2025-01-01", "2025-12-31"
+
+    import veda.exec_records as er
+    import veda.lifecycle as lc
+    monkeypatch.setattr(er, "current_recorder", lambda: _Rec())
+    monkeypatch.setattr(lc, "current_timeline", lambda: _TL())
+    monkeypatch.setattr(VH, "_temporal", lambda q: _TF())
+    monkeypatch.setattr(VH, "_dispatch_single_inner",
+                        lambda *a, **k: ("deterministic", None))
+    VH._dispatch_single("how many assets in 2025")
+    assert lc.PHASE_UNDERSTANDING not in seen

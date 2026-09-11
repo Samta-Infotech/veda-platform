@@ -460,6 +460,11 @@ def _serialize_history_message(msg) -> dict:
         # none — e.g. every turn recorded before this feature existed.
         if meta.get("trace_id"):
             history_meta["trace_id"] = meta["trace_id"]
+        # The four-step model, so a reloaded conversation shows the SAME progress
+        # panel the live stream did. `timeline` below is the raw backend phase list
+        # and is audit-level; it is not a substitute for this.
+        if meta.get("steps"):
+            history_meta["steps"] = meta["steps"]
         if meta.get("timeline"):
             history_meta["timeline"] = meta["timeline"]
         content = {"response": response, "metadata": history_meta}
