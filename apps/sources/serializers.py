@@ -168,8 +168,7 @@ def _serialize_config_source(cfg: dict) -> dict:
 # for those. "datalake" is the one category confirmed to already have more
 # than one connected source live (invoices_csv + catalog_parquet), so it's a
 # LIST, not a single object, to avoid silently dropping the second one.
-_SINGLE_TYPE_TO_KEY = {"DATABASE": "database", "FILE_SYSTEM": "file_system"}
-_LIST_TYPE_TO_KEY = {"DATALAKE": "datalake"}
+_SINGLE_TYPE_TO_KEY = {"DATABASE": "database", "FILE_SYSTEM": "file_system","DATALAKE": "datalake"}
 
 
 def _shape(item: dict) -> dict:
@@ -189,8 +188,6 @@ def group_by_type(items: list[dict]) -> dict:
         grouped[key] = (_shape(first) if first is not None
                         else {"status": "Not Connected", "is_connected": False, "metadata": {}})
 
-    for source_type, key in _LIST_TYPE_TO_KEY.items():
-        grouped[key] = [_shape(i) for i in items if i["source_type"] == source_type]
 
     return grouped
 
