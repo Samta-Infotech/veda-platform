@@ -2197,3 +2197,193 @@ class TestATurnThatNeverReachedTheEngineExplainsNothing:
         p = t.as_payload()
         assert p["status"] == "failed"
         assert p["error"]["code"] == "LLM_UNAVAILABLE"
+
+
+class TestTheStepModelIsPersisted:
+    """`ChatMessage.metadata` saved `thinking` as a single legacy line
+    ("Finalizing the results...") plus the RAW backend phase `timeline`, which is
+    audit-level content. The four-step model the user actually watched was not
+    saved at all, so reopening a conversation could not rebuild the panel."""
+
+    def _rec(self):
+        from apps.chat.turn_events import TurnEventAccumulator as A
+        return A()
+
+    _MODEL = {"type": "thinking", "status": "completed", "total_steps": 4,
+              "steps": [{"id": "understanding", "state": "completed"}]}
+
+    def test_the_terminal_model_is_kept(self):
+        r = self._rec()
+        r.consume("thinking", {"phase": "x", "message": "m", "steps": self._MODEL})
+        assert r.metadata()["steps"] == self._MODEL
+
+    def test_a_later_legacy_only_frame_cannot_wipe_it(self):
+        """A trailing frame carrying only phase+message must not erase the model."""
+        r = self._rec()
+        r.consume("thinking", {"phase": "x", "message": "m", "steps": self._MODEL})
+        r.consume("thinking", {"phase": "completed", "message": "Done"})
+        assert r.metadata()["steps"] == self._MODEL
+
+    def test_the_last_model_wins_over_an_earlier_partial_one(self):
+        r = self._rec()
+        r.consume("thinking", {"steps": {"status": "active", "total_steps": 4,
+                                         "steps": [{"id": "understanding"}]}})
+        r.consume("thinking", {"steps": self._MODEL})
+        assert r.metadata()["steps"]["status"] == "completed"
+
+    def test_a_turn_with_no_progress_stores_nothing(self):
+        """Absent, not null — small talk never reached the engine."""
+        r = self._rec()
+        r.consume("thinking", {"phase": "completed", "message": "Done"})
+        assert "steps" not in r.metadata()
+
+    def test_an_empty_model_is_not_stored(self):
+        r = self._rec()
+        r.consume("thinking", {"steps": {"status": "completed", "steps": []}})
+        assert "steps" not in r.metadata()
+
+
+class TestAResolvedStepShowsItsOwnContent:
+    """The federated lane emits no phase mapping to "Analyzing", so `finish()`
+    marked the step `completed` from its content — and `as_dict` then hid every
+    row, because the step had never STARTED. The two halves disagreed, and the step
+    where the federation actually happened rendered as a green tick with nothing
+    inside it (measured live on "compare invoice totals with asset counts")."""
+
+    def _turn(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("supervisor_classify", "…"))
+        t.consume(ev("result_preparation", "…"))     # analyzing is never opened
+        t.set_details("analyzing", [
+            {"type": ts.DETAIL_OPERATION, "label": "Combined homzhub and invoices_csv",
+             "state": ts.STATE_COMPLETED}], terminal=True)
+        t.finish()
+        return {s["id"]: s for s in t.as_payload()["steps"]}
+
+    def test_the_content_that_resolved_the_step_is_shown(self):
+        an = self._turn()["analyzing"]
+        assert an["state"] == ts.STATE_COMPLETED
+        assert [r["label"] for r in an["details"]] == \
+            ["Combined homzhub and invoices_csv"]
+        assert an["expandable"] is True
+
+    def test_a_step_still_pending_mid_flight_shows_nothing(self):
+        """The guard's real purpose: a step that has not run must not advertise an
+        output it may never produce."""
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("supervisor_classify", "…"))
+        t.set_details("preparing", [{"type": ts.DETAIL_OUTPUT, "label": "x",
+                                     "state": ts.STATE_COMPLETED}])
+        prep = {s["id"]: s for s in t.as_payload()["steps"]}.get("preparing")
+        assert prep is None or prep["details"] == []
+
+    def test_a_skipped_step_still_shows_nothing(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("supervisor_classify", "…"))
+        t.consume(ev("result_preparation", "…"))
+        t.finish()
+        an = {s["id"]: s for s in t.as_payload()["steps"]}["analyzing"]
+        assert an["state"] == ts.STATE_SKIPPED and an["details"] == []
+
+
+class TestTheFederationIsNamed:
+    """`explain.cross_source` shipped on every federated answer and nothing read
+    it — which is why Analyzing, the step where the federation happened, was the
+    only empty step on exactly the turns that did the most work."""
+
+    def _ctx(self, cs):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        c.absorb_explain({"cross_source": cs})
+        return [r["label"] for r in c.details("analyzing")]
+
+    def test_the_combined_sources_are_named(self):
+        assert "Combined homzhub and invoices_csv" in self._ctx(
+            {"used": True, "sources": ["homzhub", "invoices_csv"]})
+
+    def test_the_match_summary_is_carried_when_the_join_reported_one(self):
+        rows = self._ctx({"used": True, "sources": ["a", "b"],
+                          "join": {"used": True,
+                                   "summary": "84% of relevant records were matched."}})
+        assert any("84%" in r for r in rows)
+
+    def test_a_federation_that_did_not_run_names_nothing(self):
+        assert self._ctx({"used": False, "sources": ["a", "b"]}) == []
+
+    def test_a_single_source_is_not_described_as_combined(self):
+        assert not any("Combined" in r for r in
+                       self._ctx({"used": True, "sources": ["homzhub"]}))
+
+
+class TestASqlCaveatNeverDescribesADocumentAnswer:
+    """The hybrid route tries SQL first. When it produces nothing and the documents
+    answer, the SQL half's own validation caveat was still on the step: measured on
+    "what is the parking fee for electric vehicles", the reader saw "The result has
+    some limitations" above an answer that came from a PDF the caveat says nothing
+    about. The existing downgrade only matched FAILED, so a WARNING sailed through."""
+
+    def _turn(self, exec_type, status):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("supervisor_classify", "…"))
+        t.consume(ev("validation", "…", status=status))
+        t.execution_type = exec_type
+        t.finish()
+        return [c for s in t.steps.values() for c in s.sub_checks
+                if c["kind"] == "validation"]
+
+    def test_a_warning_is_dropped_on_a_document_answer(self):
+        assert self._turn(ts.EXEC_DOCUMENTS, "warning") == []
+
+    def test_a_failure_is_dropped_on_a_document_answer(self):
+        assert self._turn(ts.EXEC_DOCUMENTS, "failed") == []
+
+    def test_a_warning_on_a_SQL_answer_survives(self):
+        """There it is a real caveat on the delivered result; suppressing it would
+        hide something true."""
+        checks = self._turn(ts.EXEC_SQL, "warning")
+        assert len(checks) == 1 and checks[0]["state"] == ts.STATE_WARNING
+
+    def test_a_failure_on_a_SQL_answer_is_downgraded_not_dropped(self):
+        checks = self._turn(ts.EXEC_SQL, "failed")
+        assert len(checks) == 1 and checks[0]["state"] == ts.STATE_WARNING
+        assert checks[0]["message"] == ts._VALIDATION_SUPERSEDED
+
+    def test_a_passing_check_is_untouched_on_both(self):
+        for shape in (ts.EXEC_DOCUMENTS, ts.EXEC_SQL):
+            checks = self._turn(shape, "completed")
+            assert len(checks) == 1 and checks[0]["state"] == ts.STATE_COMPLETED
+
+    def test_a_failed_turn_keeps_its_failure(self):
+        """On a failed or answerless turn the failure IS the story."""
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("validation", "…", status="failed"))
+        t.execution_type = ts.EXEC_DOCUMENTS
+        t.finish(failed=True)
+        checks = [c for s in t.steps.values() for c in s.sub_checks
+                  if c["kind"] == "validation"]
+        assert len(checks) == 1 and checks[0]["state"] == ts.STATE_FAILED
+
+
+def test_a_document_turn_that_found_nothing_still_drops_the_sql_caveat():
+    """The `answered_without_result` guard exists so a SQL turn's own failure
+    survives as the story — and it was swallowing the document case, because a
+    document turn that found nothing sets that flag too. Measured on "what is the
+    parking fee for electric vehicles"."""
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("supervisor_classify", "…"))
+    t.consume(ev("validation", "…", status="warning"))
+    t.execution_type = ts.EXEC_DOCUMENTS
+    t.finish(answered_without_result=True)
+    assert [c for s in t.steps.values() for c in s.sub_checks
+            if c["kind"] == "validation"] == []
+
+
+def test_a_SQL_turn_that_produced_nothing_keeps_its_failure():
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("supervisor_classify", "…"))
+    t.consume(ev("validation", "…", status="failed"))
+    t.execution_type = ts.EXEC_SQL
+    t.finish(answered_without_result=True)
+    checks = [c for s in t.steps.values() for c in s.sub_checks
+              if c["kind"] == "validation"]
+    assert len(checks) == 1 and checks[0]["state"] == ts.STATE_FAILED

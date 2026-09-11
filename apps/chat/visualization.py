@@ -63,6 +63,9 @@ class VisualizationSpec:
         return d
 
 
+_INF = float("inf")
+
+
 def _to_number(v: Any):
     """psycopg2 returns Decimal for NUMERIC/SUM/AVG columns — Decimal isn't a
     JSON number, so anything headed into chart_data is normalized to float."""
@@ -70,7 +73,14 @@ def _to_number(v: Any):
 
 
 def _is_numeric(v: Any) -> bool:
-    return isinstance(v, (int, float, Decimal)) and not isinstance(v, bool)
+    """NaN/Infinity are excluded deliberately: they are unplottable, and
+    json.dumps emits them as the bare tokens NaN/Infinity, which are NOT valid
+    JSON — a strict frontend JSON.parse rejects the whole response. A NaN
+    measure is therefore treated exactly like a NULL one (row skipped), on
+    every chart path, rather than leaking into chart_data."""
+    if isinstance(v, bool) or not isinstance(v, (int, float, Decimal)):
+        return False
+    return not (isinstance(v, (float, Decimal)) and (v != v or v in (_INF, -_INF)))
 
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?")
@@ -106,6 +116,14 @@ _TEXT_AVG_LEN_THRESHOLD = 40  # avg sampled value length above this reads as fre
 
 _MAX_PIE_SLICES = 6
 _TOP_N_CATEGORIES = 9  # + 1 "Other" bucket for the long tail = 10 slices/bars, still readable
+
+# Row-preserving listing charts (RANKING / DETAIL_TABLE) — see _row_listing.
+# A listing is NOT a breakdown: every row is its own entity, so it is charted
+# one-bar-per-row in the SQL's own order. The cap truncates the tail (keeping
+# the rows the ORDER BY put first — for "cheapest N" that IS the answer) rather
+# than folding it into an "Other" bucket, which would hide individual results.
+_MAX_ROW_BARS = 25
+_LISTING_SHAPES = ("RANKING", "DETAIL_TABLE")
 
 # Below this, no chart is returned at all — a table-only response is always
 # safer than a low-confidence or borderline-meaningless chart.
@@ -197,6 +215,17 @@ class VisualizationRecommender:
         temporal_idx = [i for i, k in enumerate(kinds) if k == "temporal" and not is_id[i]]
         categorical_idx = [i for i, k in enumerate(kinds) if k == "categorical" and not is_id[i]]
         dimension_idx = temporal_idx[:1] or categorical_idx[:1]
+
+        # A listing (RANKING / DETAIL_TABLE) is charted row-per-row, BEFORE any of
+        # the aggregating branches below can touch it. Those branches exist for
+        # breakdowns (GROUPED/DISTRIBUTION/TREND), where summing per category is
+        # correct; on a raw listing every row is a distinct entity, and summing
+        # them, re-sorting them by value, or bucketing the tail into "Other"
+        # produces a chart that contradicts the table it sits next to.
+        if (analytics or {}).get("result_shape") in _LISTING_SHAPES:
+            spec = self._row_listing(cols, rows, kinds, is_id, analytics)
+            if spec is not None:
+                return [spec]
 
         # A dimension with TWO measures is the frontend's line_histogram: a
         # combo chart correlating two metrics over the same axis (e.g. sales
@@ -343,6 +372,103 @@ class VisualizationRecommender:
         return self._line(cols, rows, x_idx, y_idx)
 
     # --- chart builders ------------------------------------------------------
+
+    def _row_listing(self, cols: list, rows: list, kinds: list, is_id: list,
+                     analytics: dict | None) -> VisualizationSpec | None:
+        """One bar per RESULT ROW, in the result's own order — the chart for a
+        listing (RANKING / DETAIL_TABLE), where each row is a separate entity
+        rather than a bucket of a whole.
+
+        Three things this deliberately does NOT do, each of which was a real
+        observed bug on "cheapest properties on the market" (2026-09-11):
+        - no summing of rows that share a label (two listings in the same
+          building are two properties, not one at the combined price);
+        - no re-sort by value and no "Other" bucket (the question asked for the
+          cheapest — a value-DESC top-N leads with the most expensive and hides
+          the actual answer inside "Other");
+        - no positional column guessing (`numeric_idx[0]` / `categorical_idx[0]`
+          picked whatever the SELECT list happened to start with — e.g.
+          `cancellation_reason_title`, a column the user never saw in the table).
+        """
+        measure_idx = self._listing_measure(cols, kinds, is_id, analytics)
+        if measure_idx is None:
+            return None
+        label_idx = self._listing_label(cols, rows, kinds, is_id, measure_idx)
+        if label_idx is None:
+            return None
+
+        plotted = [row for row in rows if _is_numeric(row[measure_idx])]
+        if len(plotted) < 2:
+            return None
+        truncated = len(plotted) > _MAX_ROW_BARS
+        plotted = plotted[:_MAX_ROW_BARS]          # head, not top-N: keeps the ORDER BY's own answer
+
+        # Two rows can legitimately carry the same label (same building, same
+        # project). They stay SEPARATE bars; the suffix only keeps the axis
+        # labels distinguishable instead of silently overlaying them.
+        labels, used = [], set()
+        for row in plotted:
+            name = "—" if row[label_idx] is None else str(row[label_idx])
+            label, n = name, 1
+            while label in used:            # the suffixed form can itself already be in
+                n += 1                      # the data ("X", "X (2)", "X") — keep going
+                label = f"{name} ({n})"
+            used.add(label)
+            labels.append(label)
+
+        title = f"{_fmt_axis(cols[measure_idx])} by {_fmt_axis(cols[label_idx])}"
+        return VisualizationSpec(
+            type=ChartType.BAR, title=title,
+            sub_title=(f"First {len(plotted)} of {len(rows)} rows, in result order"
+                       if truncated else None),
+            x_axis_title=_fmt_axis(cols[label_idx]),
+            y_axis_title=_fmt_axis(cols[measure_idx]),
+            chart_data={"labels": labels,
+                        "values": [_to_number(row[measure_idx]) for row in plotted]},
+            confidence=0.85,
+        )
+
+    @staticmethod
+    def _listing_measure(cols: list, kinds: list, is_id: list, analytics: dict | None) -> int | None:
+        """The measure a listing is ABOUT is the one its ORDER BY ranked on — the
+        engine ships the SQL's own orderings in analytics, so this is read, not
+        guessed. Falls back to the first real numeric column only when the result
+        carries no usable ordering (e.g. a federated result with no analytics)."""
+        numeric = [i for i, k in enumerate(kinds) if k == "numeric" and not is_id[i]]
+        if not numeric:
+            return None
+        by_name = {str(c).lower(): i for i, c in enumerate(cols)}
+        for entry in (analytics or {}).get("orderings") or []:
+            name = entry[0] if isinstance(entry, (list, tuple)) and entry else entry
+            i = by_name.get(str(name).lower().split(".")[-1])
+            if i is not None and i in numeric:
+                return i
+        return numeric[0]
+
+    @staticmethod
+    def _listing_label(cols: list, rows: list, kinds: list, is_id: list,
+                       measure_idx: int) -> int | None:
+        """The column that NAMES each row. In a listing the identifying label is
+        near-unique per row (building/project/property name) while a status,
+        reason or type column repeats across rows — so the most distinct
+        non-numeric column is the right axis, and a low-cardinality status column
+        can no longer win just by appearing first in the SELECT list. Identifiers
+        are the last resort (a listing keyed by id still beats no chart — the same
+        allowance the RANKING rescue below already makes)."""
+        def _distinct(i: int) -> int:
+            return len({str(row[i]) for row in rows})
+
+        def _pick(pool: list) -> int | None:
+            # Most distinct wins; ties break on SELECT-list order (stable sort).
+            return max(pool, key=_distinct) if pool else None
+
+        named = [i for i, k in enumerate(kinds)
+                 if i != measure_idx and k != "numeric" and not is_id[i]]
+        picked = _pick(named)
+        if picked is not None:            # `or` would discard a legitimate index 0
+            return picked
+        return _pick([i for i in range(len(cols))
+                      if i != measure_idx and kinds[i] != "numeric"])
 
     def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> list[VisualizationSpec]:
         # SQL upstream doesn't guarantee GROUP BY on the category column, so the

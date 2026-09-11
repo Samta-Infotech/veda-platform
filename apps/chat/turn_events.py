@@ -41,6 +41,10 @@ class TurnEventAccumulator:
         self.content_blocks: list = []
         self.explainability: dict | None = None
         self.thinking_text: str = ""
+        #: The normalized four-step model, as it stood at the LAST frame that
+        #: carried one — i.e. the terminal frame. Only the terminal frame is worth
+        #: keeping: the intermediate ones are the same model part-way through.
+        self.steps: dict | None = None
         self.summary_text: str = ""
         self.usage: dict = {}
         self.insights: dict | None = None
@@ -61,6 +65,13 @@ class TurnEventAccumulator:
         """
         if kind == "thinking":
             self.thinking_text = payload.get("message", "")
+            # Last-write-wins, but ONLY over a frame that actually carries the
+            # model. A trailing legacy-only frame (phase + message, no `steps`)
+            # must not wipe the terminal one — and a turn that bypassed the engine
+            # carries no model at all, which is correctly stored as absent.
+            _st = payload.get("steps")
+            if isinstance(_st, dict) and _st.get("steps"):
+                self.steps = _st
             if payload.get("phase") and payload.get("status"):
                 self.timeline.append({
                     "phase": payload.get("phase"),
@@ -90,6 +101,13 @@ class TurnEventAccumulator:
         """
         md = {"thinking": self.thinking_text, "explainability": self.explainability,
               "usage": self.usage}
+        # The four-step model the user actually watched. Without it, reopening a
+        # conversation could not rebuild the progress panel: `thinking` is a single
+        # legacy line ("Finalizing the results...") and `timeline` is the RAW
+        # backend phase list, which is audit-level content and not what was shown.
+        # Absent, not null, for a turn that produced no progress.
+        if self.steps:
+            md["steps"] = self.steps
         if self.timeline:
             md["timeline"] = self.timeline
         trace_id = ((self.explainability or {}).get("support") or {}).get("trace_id")

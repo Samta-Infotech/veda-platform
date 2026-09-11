@@ -1327,15 +1327,39 @@ def _mark_empty_results(result) -> None:
             _get = (payload.get if isinstance(payload, dict)
                     else lambda k, d=None: getattr(payload, k, d))
             rows = _get("rows")
+            # BOTH NAMES. The RAG head calls them `chunks`, the HYBRID head calls
+            # them `doc_chunks` — reading only the first meant a hybrid turn looked
+            # like it had retrieved nothing, so its SQL half's zero rows decided the
+            # outcome and an answer written from 5 passages was reported as "nothing
+            # matched". `thinking_steps._absorb_evidence` already reads both names
+            # for the same reason.
             chunks = _get("chunks")
+            if chunks is None:
+                chunks = _get("doc_chunks")
             empty = None
+            # THE MODEL'S OWN DECLARATION, where it exists. The document head is the
+            # one case with no countable signal: retrieval succeeded, passages came
+            # back, and the model then said the passages do not answer the question
+            # — a fact that lived only in the English prose until `no_answer` was
+            # added to RAGResult. It is authoritative when true, and says nothing
+            # when false, so the counted checks below still decide every other path.
+            _declared = _get("no_answer") is True
             if isinstance(rows, list):
                 empty = len(rows) == 0
-            if empty in (None, True) and isinstance(chunks, (list, int)):
+            if not _declared and isinstance(chunks, (list, int)):
                 _n = len(chunks) if isinstance(chunks, list) else chunks
                 # Passages found means the document half had something, even when
-                # the SQL half returned no rows — a hybrid turn is not empty then.
+                # the SQL half returned no rows — a HYBRID turn is not empty then.
+                # This must be able to OVERRIDE the row check above; gating it on
+                # `empty is not True` broke exactly the case it exists for, and a
+                # hybrid answer written from 5 passages was reported as "nothing
+                # matched" because its SQL half returned zero rows.
                 empty = False if _n > 0 else True
+            if _declared:
+                # THE MODEL'S OWN DECLARATION WINS. It is the only signal on the one
+                # path with nothing countable: retrieval succeeded, passages came
+                # back, and the model then said they do not answer the question.
+                empty = True
             if empty is not True:
                 continue
             if isinstance(payload, dict):
@@ -2095,10 +2119,39 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
     no database in that path, so the two numbers legitimately mean different things.
     """
     from veda import exec_records as _erd
+    # COMPLETE THE UNDERSTANDING PHASE for the heads that never reach pipeline.py.
+    # Only Tier-1 completes it with facts, so on a document answer the first step
+    # sat on its generic fallback sentence with nothing inside it on every single
+    # turn — structurally, not by accident.
+    #
+    # The one thing this path genuinely knows about the QUESTION is the period the
+    # user asked for: `_temporal(query)` is already parsed here (twice, further
+    # down) and is a local parse, no network. Nothing else is available without
+    # inventing it — the doc path computes no intent and no grouping, and a route
+    # name like "rag" is not a fact about the question.
+    #
+    # Emitted from the same single seam that already adds the data_retrieval record
+    # for these heads, and AFTER the dispatch because that is when the route is
+    # known — classifying a second time here would be both wasteful and capable of
+    # disagreeing with the route actually taken. Arriving late costs nothing: the
+    # api tier's step model is monotonic (a late phase cannot reopen a finished
+    # step) and the FACT is absorbed independently of which step the event lands on.
     _rec_before = _erd.current_recorder().has_records()
     route, res = _dispatch_single_inner(query, verbose=verbose,
                                         precomputed_sql=precomputed_sql,
                                         on_event=on_event)
+    try:
+        if _ROUTE_ENGINE.get(route):
+            _tfu = _temporal(query)
+            if _tfu is not None and (getattr(_tfu, "start", None)
+                                     or getattr(_tfu, "end", None)):
+                from veda import lifecycle as _lcu
+                _lcu.current_timeline().completed(
+                    _lcu.PHASE_UNDERSTANDING,
+                    period=f"{getattr(_tfu, 'start', None) or '?'} to "
+                           f"{getattr(_tfu, 'end', None) or '?'}")
+    except Exception:
+        pass
     try:
         _recorder = _erd.current_recorder()
         _engine = _ROUTE_ENGINE.get(route)

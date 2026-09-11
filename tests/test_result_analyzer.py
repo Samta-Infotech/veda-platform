@@ -278,3 +278,56 @@ def test_chart_confidence_lower_for_non_canonical():
     canonical = chart_confidence("TREND", "line", "date", "measure")
     noncanonical = chart_confidence("TREND", "pie", "date", "measure")
     assert noncanonical < canonical
+
+
+# ---------------------------------------------------------------------------
+# result_shape — an all-NULL "temporal" column is not a time axis (2026-09-11)
+# ---------------------------------------------------------------------------
+
+_CHEAPEST_SQL = (
+    'SELECT "t0"."id" AS "salelisting_id", "t0"."expected_price", '
+    '"t0"."booking_amount_grace_period", "t1"."project_name" '
+    'FROM "assets_salelisting" AS "t0" '
+    'JOIN "assets_asset" AS "t1" ON "t1"."id" = "t0"."asset_id" '
+    'ORDER BY "t0"."expected_price" ASC LIMIT 100'
+)
+_CHEAPEST_COLUMNS = ["salelisting_id", "expected_price",
+                     "booking_amount_grace_period", "project_name"]
+_CHEAPEST_ROWS = [
+    {"salelisting_id": 180, "expected_price": 4.0,
+     "booking_amount_grace_period": None, "project_name": "Shri sai reality"},
+    {"salelisting_id": 87, "expected_price": 150.0,
+     "booking_amount_grace_period": None, "project_name": "Hanuman Road"},
+    {"salelisting_id": 192, "expected_price": 465.0,
+     "booking_amount_grace_period": None, "project_name": "Information Technology Park"},
+]
+
+
+def test_all_null_temporal_column_does_not_make_a_trend():
+    """`booking_amount_grace_period` is a duration that is never populated, but its
+    name alone reads as temporal — which classified a plain cheapest-properties
+    LISTING as a TREND, and had the api tier chart it as a time series against a
+    column of nothing but NULLs. A column with no values is not a time axis."""
+    ctx = analyze_result("cheapest properties for sale", _CHEAPEST_SQL,
+                         _CHEAPEST_COLUMNS, _CHEAPEST_ROWS)
+    assert ctx.result_shape == "RANKING"        # limit + ORDER BY, no aggregation
+
+
+def test_populated_temporal_column_still_makes_a_trend():
+    """Guard the other side: a real, populated date column must still yield TREND."""
+    sql = ('SELECT "created_date", "expected_price" FROM "assets_salelisting" '
+           'ORDER BY "expected_price" ASC LIMIT 100')
+    rows = [{"created_date": f"2026-0{i}-01", "expected_price": 100.0 * i}
+            for i in range(1, 4)]
+    ctx = analyze_result("prices over time", sql, ["created_date", "expected_price"], rows)
+    assert ctx.result_shape == "TREND"
+
+
+def test_analytics_summary_carries_orderings_and_limit():
+    """The api tier charts a listing on the measure the SQL ranked by, in the SQL's
+    own order — it can only do that if the orderings cross the HTTP boundary."""
+    from veda.result_analyzer import analytics_summary
+    a = analytics_summary(analyze_result("cheapest properties for sale", _CHEAPEST_SQL,
+                                         _CHEAPEST_COLUMNS, _CHEAPEST_ROWS))
+    assert a["orderings"] == [["expected_price", False]]   # False == not DESC == ASC
+    assert a["limit"] == 100
