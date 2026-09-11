@@ -140,7 +140,7 @@ class ThinkingContext:
     __slots__ = ("intent", "period", "grouped", "output", "source_count",
                  "multi_source", "operations", "row_count", "truncated",
                  "access_state", "found_something", "warnings",
-                 "no_answer", "from_cache",
+                 "no_answer", "found_nothing", "from_cache", "failed_sources",
                  "source_names", "passages", "execution_type")
 
     def __init__(self):
@@ -161,6 +161,12 @@ class ThinkingContext:
         #: expected to succeed and guessing otherwise would be worse than generic
         #: copy. Only ever narrows what is claimed — never adds a claim.
         self.no_answer: bool = False
+        #: The turn RAN and found nothing — distinct from a refusal, which declined
+        #: to run and can say what would help instead. "See the reply for what's
+        #: needed" is wrong copy for an empty result: there is nothing to supply.
+        self.found_nothing: bool = False
+        #: {display name: user-safe reason} for sources that did NOT deliver.
+        self.failed_sources: dict = {}
         #: True when the answer replayed SQL from the verified-query cache.
         self.from_cache: bool = False
         #: Display names of the sources that took part. A name beats a count:
@@ -242,6 +248,20 @@ class ThinkingContext:
                 name = src.get("name") if isinstance(src, dict) else None
                 if name and name not in self.source_names:
                     self.source_names.append(name)
+            # A source that FAILED must not be rendered as a completed tick. The
+            # per-source execution records carry the outcome and were being ignored
+            # here — measured live on a datalake turn whose payload said
+            # `status: "failed", message: "This data source could not be reached"`
+            # while the Finding step showed `catalog_parquet ✓` and "Relevant
+            # information available ✓". The panel contradicted the payload it was
+            # built from.
+            for rec in ((ex.get("execution") or {}).get("sources") or []):
+                if not isinstance(rec, dict):
+                    continue
+                nm = rec.get("name")
+                if nm and rec.get("status") in ("failed", "refused", "skipped"):
+                    self.failed_sources[nm] = (rec.get("message")
+                                               or "This data source did not respond.")
             if isinstance(res.get("row_count"), int):
                 self.row_count = res["row_count"]
             if res.get("truncated") is not None:
@@ -337,6 +357,8 @@ class ThinkingContext:
         # phase message is already honest ("Could not answer this from the
         # available data") but this sentence OVERWRITES it at the terminal frame,
         # so the honest text never reached the user — measured live on a clarify.
+        if self.found_nothing:
+            return "No matching data was found for this question."
         if self.no_answer:
             return "Couldn't answer this one — see the reply for what's needed."
         noun = _OUTPUT_NOUN.get(self.output or "")
@@ -394,7 +416,11 @@ class ThinkingContext:
         # something a "1" cannot. The count is the fallback when no name is known.
         if self.source_names:
             for name in self.source_names[:6]:
-                rows.append(self._row(ts.DETAIL_SOURCE, name))
+                _why = self.failed_sources.get(name)
+                rows.append(self._row(
+                    ts.DETAIL_SOURCE,
+                    f"{name} — {_why}" if _why else name,
+                    ts.STATE_WARNING if _why else ts.STATE_COMPLETED))
         elif self.source_count:
             plural = "s" if self.source_count > 1 else ""
             rows.append(self._row(
@@ -404,7 +430,9 @@ class ThinkingContext:
             plural = "s" if self.passages > 1 else ""
             rows.append(self._row(ts.DETAIL_EVIDENCE,
                                   f"{self.passages} relevant passage{plural} retrieved"))
-        if self.found_something is True and not (self.source_names or self.passages):
+        if self.failed_sources and len(self.failed_sources) >= len(self.source_names or [1]):
+            pass                       # every source that ran failed — say nothing more
+        elif self.found_something is True and not (self.source_names or self.passages):
             rows.append(self._row(ts.DETAIL_EVIDENCE, "Relevant information available",
                                   generic=True))
         elif self.found_something is False:
@@ -429,11 +457,27 @@ class ThinkingContext:
         instead — reading the passages and synthesising them. Nothing is listed for
         an execution shape that reported neither.
         """
-        rows = [self._row(ts.DETAIL_OPERATION, op) for op in self.operations]
+        # "Limited to the top results" on a COUNT is not merely redundant, it is
+        # WRONG: the deterministic head appends `LIMIT 100` to every statement, so a
+        # `SELECT COUNT(...)` that can only ever return one row was telling the
+        # reader their answer had been cut short (measured on 4 of 14 turns). A limit
+        # is only a fact worth stating when the result was actually truncated.
+        _ops = [op for op in self.operations
+                if op != _OP_PHRASING["limit"] or self.truncated]
+        rows = [self._row(ts.DETAIL_OPERATION, op) for op in _ops]
         if not rows and self.execution_type == ts.EXEC_DOCUMENTS and self.passages:
-            rows = [self._row(ts.DETAIL_OPERATION, "Reading relevant passages"),
+            # PLACEHOLDERS, marked generic. The real operations only arrive with the
+            # final explainability payload, and until then these two are all we can
+            # honestly say. Without the generic mark both sets survived and the step
+            # listed the same work twice in two tenses — measured live on a contract
+            # question: "Reading relevant passages" AND "Read the relevant passages",
+            # "Synthesizing the retrieved information" AND "Synthesized the retrieved
+            # information". A specific row supersedes a generic one of the same type.
+            rows = [self._row(ts.DETAIL_OPERATION, "Reading relevant passages",
+                              generic=True),
                     self._row(ts.DETAIL_OPERATION,
-                              "Synthesizing the retrieved information")]
+                              "Synthesizing the retrieved information",
+                              generic=True)]
         if self.multi_source and self.source_count and self.source_count > 1:
             rows.append(self._row(ts.DETAIL_OPERATION,
                                   "Comparing information across sources"))
@@ -444,6 +488,10 @@ class ThinkingContext:
         # Nothing was produced, so list nothing. "Supporting summary" used to be
         # appended unconditionally, which on a clarify claimed an output that does
         # not exist.
+        if self.found_nothing:
+            return [self._row(ts.DETAIL_OUTPUT,
+                              "Nothing matched — there is no result to show.",
+                              ts.STATE_WARNING)]
         if self.no_answer:
             return [self._row(ts.DETAIL_OUTPUT,
                               "No answer could be produced for this question.",

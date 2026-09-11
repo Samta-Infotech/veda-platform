@@ -42,6 +42,13 @@ UNMATCHED_RECORDS = "unmatched_records"
 SOURCE_CONFLICT = "source_conflict"
 FALLBACK_USED = "fallback_used"
 LOW_EVIDENCE = "low_evidence"
+#: The turn ran to completion and found NOTHING to answer with. Not a refusal —
+#: the question was understood, the search ran, and it came back empty. Added
+#: 2026-09-11 because there was no way to say this: a zero-row SQL answer, a
+#: zero-chunk document answer and a federated join that matched nothing all
+#: reported four green ticks, "Checks passed" and an empty warning list above a
+#: reply reading "No results found." (measured live on the Tier-1 path).
+NO_RESULTS = "no_results"
 
 #: code -> (severity, default user-safe message). The message never names a
 #: table, column, source the user can't see, or an internal component.
@@ -68,6 +75,9 @@ CATALOG: Dict[str, tuple] = {
         # off because it could not answer, not because anything was down. A genuinely
         # unreachable source is PARTIAL_SOURCE_FAILURE, which has its own copy.
         "The primary method could not answer this, so an alternate method was used."),
+    NO_RESULTS: (
+        SEVERITY_WARNING,
+        "No matching data was found for this question."),
     LOW_EVIDENCE: (
         SEVERITY_WARNING,
         "There was limited matching data for this question, so the answer may be incomplete."),

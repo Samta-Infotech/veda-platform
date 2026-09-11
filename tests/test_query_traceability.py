@@ -91,6 +91,14 @@ def test_the_intended_default_flag_state(flags_on=None):
             "additive by contract, checked key-by-key against a live capture",
         "DB_EXECUTION_TIMING_ENABLED":
             "measured rather than inferred from stage gaps",
+        # Moved from the OFF list on 2026-09-11. D2 had flipped this default off;
+        # the user then explicitly asked for the SQL back in explainability, "like
+        # it used to come". The SQL is the one part of the explanation a reader can
+        # verify instead of trust, and that is worth the identifiers it exposes.
+        "EXPLAIN_EXPOSE_SQL":
+            "the generated SQL is what lets a user VERIFY the answer rather than "
+            "trust it; restored ON at the user's explicit request (supersedes D2). "
+            "An operator can still hide it with EXPLAIN_EXPOSE_SQL=0",
     }
     for name, why in on.items():
         assert getattr(config, name) is True, f"{name} should ship ON — {why}"
@@ -103,9 +111,6 @@ def test_the_intended_default_flag_state(flags_on=None):
         "FEDERATED_JOIN_STATS_ENABLED":
             "never exercised against a real multi-source query; multi-source "
             "routing is itself disabled on accuracy evidence",
-        "EXPLAIN_EXPOSE_SQL":
-            "decision D2 — raw SQL names tables and columns, which is what this "
-            "whole layer keeps out of a user-facing explanation",
     }
     for name, why in off.items():
         assert getattr(config, name) is False, f"{name} must stay OFF — {why}"
@@ -733,17 +738,23 @@ def test_sync_scales_linearly(flags_on):
     fail on a loaded machine (measured 329 ms) while the behaviour was correct —
     the ratio is what the fix actually claims.
     
-    TIMING-SENSITIVE: this measures a RATIO, not a wall clock, which is what makes
-    it meaningful — an earlier wall-clock version of this test PASSED while the
-    code was still quadratic. But a ratio can still wobble when the machine is
-    loaded (observed once during a parallel test run, passing 5/5 immediately
-    after in isolation). If it fails, re-run it alone before treating it as a
-    regression; a real regression fails consistently and by a wide margin
-    (14.8x was the measured pre-fix figure, against a 6x ceiling).
+    TIMING-SENSITIVE, and handled rather than tolerated. A ratio is what makes this
+    meaningful — an earlier WALL-CLOCK version passed while the code was still
+    quadratic — but a ratio built from ONE sample each is at the mercy of the
+    scheduler: a single hiccup inside the 200-record run inflates it. That is
+    exactly how this test failed under a parallel run (1 in 8, reproduced) while
+    passing 13/13 alone.
+
+    The fix is min-of-k, the standard microbenchmark answer: the FASTEST observed
+    time is the one least polluted by whatever else the machine was doing, so it is
+    closest to the true cost. Taking the minimum makes the measurement tighter, not
+    more forgiving — noise can only ever make a run look slower, so it cannot hide
+    a real regression. The pre-fix figure was 14.8x against this 8x ceiling, so a
+    genuine regression still fails by a wide margin.
     """
     import time
 
-    def cost(n):
+    def once(n):
         tr = ExplainTrace(query="q", trace_id="scale")
         r = er.ExecutionRecorder(trace=tr)
         t0 = time.perf_counter()
@@ -751,15 +762,19 @@ def test_sync_scales_linearly(flags_on):
             r.close(r.open(str(i)), er.COMPLETED, rows=1)
         return (time.perf_counter() - t0), len(tr.sections[er.TRACE_SECTION]["records"])
 
-    cost(50)                      # warm up, discard
+    def cost(n, k=5):
+        once(n)                                  # warm up, discard
+        runs = [once(n) for _ in range(k)]
+        return min(t for t, _ in runs), runs[-1][1]
+
     t50, n50 = cost(50)
     t200, n200 = cost(200)
     assert (n50, n200) == (50, 200)
     ratio = t200 / max(t50, 1e-6)
     assert ratio < 8, (
         f"4x the records cost {ratio:.1f}x the time — still superlinear "
-        f"(linear ~4x, quadratic ~16x). Re-run this test ALONE before treating "
-        f"it as a regression — see its docstring.")
+        f"(linear ~4x, quadratic ~16x). This is min-of-5, so machine load is "
+        f"already accounted for; treat it as a real regression.")
 
 
 def test_recorder_reports_whether_anything_was_recorded(flags_on, trace):
@@ -1521,9 +1536,13 @@ def test_an_existing_explain_is_never_overwritten(flags_on, trace):
     assert payload["explain"]["understanding"]["summary"] == "mine"
 
 
-def test_a_refusal_is_not_backfilled(flags_on, trace):
-    """A refusal already has its own payload; a turn that produced nothing has
-    nothing to explain."""
+def test_a_refusal_with_no_payload_of_its_own_IS_backfilled(flags_on, trace):
+    """CHANGED 2026-09-10. This used to assert the opposite — that only an answered
+    turn is backfilled. Measured live: a permission denial and the federated
+    `refuse` path both return without building a payload, so the api tier shipped
+    its empty fallback and the turn arrived with every block empty, no warning code
+    and NO `support.trace_id` — the one thing a user needs to hand to support.
+    A refusal that DID build its own payload is still left alone (below)."""
     import veda_hybrid as VH
     from veda.explain import bind_trace
 
@@ -1538,7 +1557,26 @@ def test_a_refusal_is_not_backfilled(flags_on, trace):
         items = [_Item()]
 
     VH._backfill_missing_explain(_Res())
-    assert "explain" not in _Item.result
+    assert _Item.result.get("explain"), "a refusal needs its support trace id too"
+
+
+def test_a_refusal_that_built_its_own_payload_is_left_alone(flags_on, trace):
+    import veda_hybrid as VH
+    from veda.explain import bind_trace
+
+    bind_trace(trace)
+    lc.new_timeline(trace=trace).completed(lc.PHASE_RECEIVED)
+    mine = {"version": "2.0", "why": "mine"}
+
+    class _Item:
+        status = "refused"
+        result = {"answer": None, "explain": mine}
+
+    class _Res:
+        items = [_Item()]
+
+    VH._backfill_missing_explain(_Res())
+    assert _Item.result["explain"] is mine
 
 
 def test_the_backfilled_payload_keeps_the_frozen_v1_shape(flags_on, trace):
@@ -1845,3 +1883,229 @@ class TestSourcesBlockPresence:
         ext = sp.build_explain_extension(self._trace(row_count=20), trace_id="t")
         assert "id" not in ext["sources"][0], "a source id is an internal key"
         assert ext["audit"]["sources"][0]["id"] == "2", "it is MOVED, not dropped"
+
+
+class TestFlowOperationsStayInSyncWithV1:
+    """`flow` is assembled while the v1 operations are still the SQL-derived ones;
+    a document answer's real operations are written afterwards. The two disagreed —
+    v1 said retrieval/read/synthesis while the flow the reader follows still said
+    "List records" (measured live on a contract question answered from a PDF)."""
+
+    def _explain(self):
+        return {
+            "operations": [{"type": "select", "summary": "List records"}],
+            "flow": {"stages": [
+                {"stage": "request", "label": "Your request"},
+                {"stage": "operations", "label": "Operations applied",
+                 "items": ["List records"]},
+                {"stage": "answer", "label": "Answer"}]},
+        }
+
+    def _ops_stage(self, ex):
+        return next(s for s in ex["flow"]["stages"]
+                    if s["stage"] == "operations"
+                    and s["label"] == "Operations applied")
+
+    def test_document_operations_reach_the_flow(self):
+        import veda_hybrid as vh
+        ex = self._explain()
+        vh._apply_document_v1(ex, {"documents": ["msa_green_tower.pdf"], "passages": 5})
+        assert self._ops_stage(ex)["items"] == [o["summary"] for o in ex["operations"]]
+        assert "List records" not in self._ops_stage(ex)["items"]
+
+    def test_the_cross_source_stage_is_left_alone(self):
+        """It carries the same stage name but is a separate federation-only
+        statement, and rewriting its items would be wrong."""
+        import veda_hybrid as vh
+        ex = self._explain()
+        ex["flow"]["stages"].insert(2, {"stage": "operations",
+                                        "label": "Combined across sources"})
+        vh._apply_document_v1(ex, {"documents": ["a.pdf"], "passages": 2})
+        cs = next(s for s in ex["flow"]["stages"]
+                  if s.get("label") == "Combined across sources")
+        assert cs == {"stage": "operations", "label": "Combined across sources"}
+
+    def test_no_flow_block_is_not_an_error(self):
+        import veda_hybrid as vh
+        ex = {"operations": []}
+        vh._apply_document_v1(ex, {"documents": ["a.pdf"], "passages": 1})
+        assert "flow" not in ex
+
+
+class TestSynthesisOutputIsCleaned:
+    """The hybrid prompt asks the model to prefix insights with '[DB]' / '[DOC]'.
+    Those are internal component markers and they reached the reader verbatim —
+    measured live: `[DOC] The document does not mention any "casual leaves." …`."""
+
+    def _f(self):
+        from query.rag_layer import _strip_provenance_tags
+        return _strip_provenance_tags
+
+    def test_a_leading_marker_is_removed(self):
+        assert self._f()("[DOC] The document does not mention casual leaves.") == \
+            "The document does not mention casual leaves."
+
+    def test_markers_are_removed_anywhere_in_the_text(self):
+        assert self._f()("[DB] There are 7,550 assets.  [DOC] The handbook says 12.") == \
+            "There are 7,550 assets. The handbook says 12."
+
+    def test_text_without_markers_is_returned_unchanged(self):
+        for t in ("No markers here at all.", "", "A [note] in brackets stays."):
+            assert self._f()(t) == t
+
+    def test_the_prompt_no_longer_carries_a_bare_imperative_token(self):
+        """"and STOP" was echoed verbatim into the answer the user reads."""
+        from query import rag_layer as rl
+        assert "and STOP" not in rl._RAG_SYSTEM_PROMPT
+
+
+class TestADenialNamesNoSource:
+    """The `sources` block means "where we looked". A denial refused BEFORE
+    searching, so naming the source next to "you don't have permission to access
+    this data" reads as "we used it" — measured live on a denied csv_lake question,
+    which reported `sources: [{"name": "invoices_csv", ...}]`."""
+
+    def _trace(self, access_status):
+        from veda import explain as _ex
+        from veda.explain import new_trace, bind_trace
+        from veda import lifecycle as lc
+        try:
+            _ex._CURRENT_TRACE.set(None)
+        except Exception:
+            pass
+        tr = new_trace("q")
+        bind_trace(tr)
+        tl = lc.new_timeline(trace=tr)
+        tl.started(lc.PHASE_ACCESS_CHECK)
+        (tl.failed if access_status == "failed" else tl.completed)(
+            lc.PHASE_ACCESS_CHECK)
+        return tr
+
+    def _profiles(self, prof):
+        import importlib
+        for name in ("context", "veda_core.context"):
+            try:
+                importlib.import_module(name).set_source_profiles(prof)
+            except Exception:
+                pass
+
+    def test_a_granted_turn_still_names_where_we_looked(self):
+        from veda import safe_projection as sp
+        self._profiles({"4": {"name": "invoices_csv", "source_type": "datalake"}})
+        tr = self._trace("completed")
+        assert [s["name"] for s in sp.build_data_sources(tr)] == ["invoices_csv"]
+
+    def test_a_denied_turn_names_nothing(self):
+        from veda import safe_projection as sp
+        self._profiles({"4": {"name": "invoices_csv", "source_type": "datalake"}})
+        tr = self._trace("failed")
+        assert sp.build_data_sources(tr) == []
+
+
+class TestFederatedAnswerNamesItsSources:
+    """The coordinator's INDEPENDENT strategy records each source it runs; the
+    FEDERATED strategy returns before that loop, so a cross-source answer had no
+    execution records at all — measured live: "There are 7 invoices compared to 96
+    assets", an answer that demonstrably combined two sources, shipped
+    `sources: null`. The federation section is proof of participation in its own
+    right: the federated SQL was validated against, and run over, those catalogs."""
+
+    def _trace(self, **federation):
+        from veda import explain as _ex
+        from veda.explain import new_trace
+        try:
+            _ex._CURRENT_TRACE.set(None)
+        except Exception:
+            pass
+        tr = new_trace("compare")
+        if federation:
+            tr.set("federation", **federation)
+        return tr
+
+    def _profiles(self):
+        import importlib
+        prof = {"2": {"name": "homzhub", "source_type": "relational"},
+                "4": {"name": "invoices_csv", "source_type": "datalake"}}
+        for name in ("context", "veda_core.context"):
+            try:
+                importlib.import_module(name).set_source_profiles(prof)
+            except Exception:
+                pass
+
+    def test_both_federated_sources_are_named(self):
+        from veda import safe_projection as sp
+        self._profiles()
+        out = sp.build_data_sources(
+            self._trace(used=True, source_ids=["2", "4"]))
+        assert [s["name"] for s in out] == ["homzhub", "invoices_csv"]
+        assert [s["type"] for s in out] == ["Database", "Data Lake"]
+
+    def test_a_federation_that_did_not_run_names_nothing(self):
+        """`used` is the gate: a section written for a federation that never
+        executed is not proof of participation."""
+        from veda import safe_projection as sp
+        self._profiles()
+        assert sp.build_data_sources(
+            self._trace(used=False, source_ids=["2", "4"])) == []
+
+    def test_ids_are_still_confined_to_audit(self):
+        from veda import safe_projection as sp
+        self._profiles()
+        ext = sp.build_explain_extension(
+            self._trace(used=True, source_ids=["2", "4"]), trace_id="t")
+        assert all("id" not in s for s in ext["sources"])
+        assert {s["id"] for s in ext["audit"]["sources"]} == {"2", "4"}
+
+
+class TestTheExecutedSourceIsNamed:
+    """With SEVERAL sources in scope the single-scope fallback correctly declines
+    to guess — but a Tier-1/Tier-2 answer still executed against exactly ONE of
+    them, and the request context holds which. Without this an ordinary answer
+    under the default all-sources scope named nothing at all."""
+
+    def _trace(self, **execution):
+        from veda import explain as _ex
+        from veda.explain import new_trace
+        try:
+            _ex._CURRENT_TRACE.set(None)
+        except Exception:
+            pass
+        tr = new_trace("q")
+        if execution:
+            tr.set("execution", **execution)
+        return tr
+
+    def _scope(self, source_id, profiles):
+        """Bind through BOTH module names — two module objects, two ContextVars."""
+        import importlib
+        for name in ("context", "veda_core.context"):
+            try:
+                m = importlib.import_module(name)
+                m.set_source_profiles(profiles)
+                m.set_context(m.RequestContext(source_id=source_id, tenant="t"))
+            except Exception:
+                pass
+
+    _PROF = {"2": {"name": "homzhub", "source_type": "relational"},
+             "4": {"name": "invoices_csv", "source_type": "datalake"}}
+
+    def test_the_source_that_ran_is_named(self):
+        from veda import safe_projection as sp
+        self._scope("4", self._PROF)
+        out = sp.build_data_sources(self._trace(row_count=100))
+        assert [s["name"] for s in out] == ["invoices_csv"]
+
+    def test_a_turn_that_executed_nothing_names_nothing(self):
+        """The context id is set for the whole turn, refusals included. Naming a
+        source there would claim we queried data we never read."""
+        from veda import safe_projection as sp
+        self._scope("4", self._PROF)
+        assert sp.build_data_sources(self._trace()) == []
+
+    def test_a_federated_answer_is_not_narrowed_to_its_primary(self):
+        from veda import safe_projection as sp
+        self._scope("2", self._PROF)
+        tr = self._trace(row_count=12)
+        tr.set("federation", used=True, source_ids=["2", "4"])
+        assert [s["name"] for s in sp.build_data_sources(tr)] == [
+            "homzhub", "invoices_csv"]

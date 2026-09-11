@@ -43,6 +43,8 @@ MONOTONIC BY CONSTRUCTION
 """
 from __future__ import annotations
 
+import json
+
 import time
 
 # ── the four fixed steps ─────────────────────────────────────────────────────
@@ -144,6 +146,11 @@ SUB_CHECK_PHASES = {
 
 #: Sub-check status -> the sentence shown. Never names a policy, role, permission id
 #: or any other authorization internal — only the outcome, in the user's terms.
+#: How severe each state is, for the ratchet in _record_sub_check. A later event
+#: may RAISE a sub-check's severity, never lower it.
+_SEVERITY = {STATE_ACTIVE: 0, STATE_PENDING: 0, STATE_SKIPPED: 0,
+             STATE_COMPLETED: 1, STATE_WARNING: 2, STATE_FAILED: 3}
+
 _ACCESS_COPY = {
     STATE_COMPLETED: "You have permission to access the required information",
     STATE_WARNING: ("Access is limited for some information. "
@@ -196,6 +203,94 @@ EXEC_MULTI_SOURCE = "multi_source"
 EXEC_UNKNOWN = "unknown"
 
 #: route/intent value on the engine's `route` event -> execution shape.
+def correct_multi_source_claim(shape, *, source_count=None, source_names=None,
+                               passages=None, has_rows=False):
+    """Downgrade a `multi_source` shape that only ONE source actually served.
+
+    The shape is read from an event's `intent`, and the HYBRID head reports
+    `hybrid` — which means "tried the database, then the documents", not "several
+    sources". A handbook question answered from one PDF therefore reported
+    `execution: {"type": "multi_source"}` while its own `sources` block named a
+    single source (measured live). `multi_source` is a claim about how many
+    sources contributed, so it must be checked against how many did.
+
+    Corrects in BOTH directions, because `multi_source` is a countable claim and
+    the count is the authority: it is dropped when one source served the turn, and
+    applied when more than one did. Anything else is returned untouched.
+    """
+    names = list(source_names or [])
+    several = len(names) > 1 or (isinstance(source_count, int) and source_count > 1)
+    if shape != EXEC_MULTI_SOURCE:
+        # UPGRADE. The shape comes from an event's `intent`, and the federated lane
+        # reports the SQL it built rather than the federation — so a cross-source
+        # answer that named two participating sources in its own payload still
+        # reported `execution: {"type": "sql"}` (measured live). More than one
+        # source having contributed IS what multi_source means, so the payload's
+        # own source list settles it.
+        return EXEC_MULTI_SOURCE if several else shape
+    if several:
+        return shape                      # genuinely more than one
+    if isinstance(passages, int) and passages > 0:
+        return EXEC_DOCUMENTS
+    if has_rows:
+        return EXEC_SQL
+    return shape
+
+
+#: Engine statuses that mean "the turn ran to completion and told the user why it
+#: cannot answer" — a refusal or a request for clarification, NOT an error. This is
+#: derived, not enumerated: see terminal_outcome().
+ERROR_ACCESS_DENIED = "access_denied"
+
+#: Engine statuses that mean the turn BROKE, as opposed to declining to answer.
+#: Deliberately a DENY-list, not an allow-list of acceptable outcomes. The previous
+#: rule listed the non-failures — and it named `clarify` but not `refuse` or
+#: `qualifier_dropped`, so two refusals out of three were reported as failures.
+#: Refusal vocabulary grows as the engine learns new ways to decline; the set of
+#: ways it can break is small and stable, so that is the half worth enumerating.
+#: Anything not listed here and not answered is treated as a refusal, which is the
+#: safe direction: a refusal shown as an error alarms the reader, while an error
+#: shown as a refusal still tells them the question was not answered.
+ERROR_STATUSES = frozenset({
+    "error", "exec_error", "tier2_exec_error", "invalid", "internal_error",
+})
+
+
+def terminal_outcome(*, ok, engine_status, has_refusal_explanation=False,
+                     access_denied=False):
+    """Whether this turn FAILED, and the error code if so.
+
+    Two turns with the identical user-visible outcome were reporting different
+    terminal statuses. Measured live: three clarifications — an unscoped question,
+    a filter on a value that does not exist, and a prompt-injection attempt — came
+    back `failed`, while three others of exactly the same shape came back
+    `completed`. The difference was an ALLOW-LIST of engine statuses that happened
+    to name `clarify` but not `qualifier_dropped` or `refuse`; all three are
+    refusals. The rule is now a DENY-list of the ways the engine can BREAK
+    (ERROR_STATUSES) — a small, stable set — so a refusal the engine learns to
+    emit tomorrow is not mistaken for a crash.
+
+    The distinction that actually matters to a reader:
+
+      completed — the turn produced its intended output. An answer, or a
+                  clarification request, which IS an output: the system worked out
+                  that it needs more from the user and said so.
+      failed    — the turn could not proceed at all. No permission, or an error.
+
+    So a refusal is `completed` with a `warning` step, and only a denial or a
+    genuine error is `failed`. Access denial is checked FIRST and independently of
+    `ok`, because the denial is delivered as an ordinary reply — that is exactly
+    how it went out looking like a completed answer.
+    """
+    if access_denied:
+        return True, ERROR_ACCESS_DENIED
+    if ok:
+        return False, None
+    if has_refusal_explanation:
+        return False, None          # a refusal explained itself: not an error
+    return (str(engine_status or "").strip().lower() in ERROR_STATUSES), None
+
+
 def execution_shape_from_evidence(*, source_count=None, source_names=None,
                                   passages=None, has_rows=False):
     """The execution shape a turn DEMONSTRABLY had, from facts already established.
@@ -345,11 +440,19 @@ class ThinkingStepTracker:
 
     # -- ingest --------------------------------------------------------------
     def consume(self, payload: dict) -> bool:
-        """Fold one ``thinking`` payload in. Returns True when the model changed.
+        """Fold one ``thinking`` payload in. Returns True when the model CHANGED.
+
+        It used to return True for any phase it recognised, which is a different
+        question — "did I handle this event", not "is there anything new to show".
+        The caller re-serialises the whole model on a True, so 10 of every 18 frames
+        on a real turn differed from the one before only in `duration_ms` (measured
+        across 20 captured turns). The comparison below is against a snapshot with
+        timing removed, because a clock tick is not a change the reader can see.
 
         Never raises: a malformed or unknown event is ignored rather than allowed to
         break the turn's event stream.
         """
+        _before = self._shape()
         try:
             self._absorb_evidence(payload)
             phase = (payload or {}).get("phase")
@@ -407,13 +510,33 @@ class ThinkingStepTracker:
                     self._advance_to(step_key, now)
                 else:
                     self._ensure_started(step_key, now)
-                return True
+                return self._shape() != _before
 
             self._advance_to(target, now)
             self._apply_status(target, status)
-            return True
+            return self._shape() != _before
         except Exception:
             return False
+
+    def _shape(self) -> str:
+        """Everything about the model a reader can SEE, with timing removed.
+
+        Durations advance on every frame by definition, so including them would
+        make every frame look changed and defeat the comparison in consume().
+        """
+        try:
+            return json.dumps([
+                (k, st.state, st.summary,
+                 [(c.get("kind"), c.get("state"), c.get("message"))
+                  for c in st.sub_checks],
+                 [(d.get("type"), d.get("label"), d.get("state"))
+                  for d in st.details])
+                for k, st in self.steps.items()
+            ] + [self._current, self.status, sorted(self.evidence.items()),
+                 self.execution_type], sort_keys=True, default=str)
+        except Exception:
+            # A shape we cannot compute must not silently suppress a frame.
+            return str(_now_ms())
 
     def _absorb_evidence(self, payload: dict) -> None:
         """Counted facts and the execution shape, taken from events as they pass.
@@ -559,7 +682,17 @@ class ThinkingStepTracker:
             st.sub_checks.append(existing)
 
         if status in (STATE_COMPLETED, STATE_WARNING, STATE_FAILED):
-            existing["state"] = status
+            # SEVERITY IS A RATCHET. The engine emits the access check TWICE on a
+            # denial — `failed` ("this question needs data you do not have
+            # permission for") and then `warning` ("some available data could not
+            # be included") — and the second call was overwriting the first, so a
+            # DENIAL was displayed as a partial-access warning. Measured live on a
+            # csv_lake question the user is not permitted: sub-check state
+            # `warning`, under a step marked `completed`. This is the same class of
+            # bug as the denial that reported as granted; only the severity of a
+            # LATER event may raise the state, never lower it.
+            if _SEVERITY[status] >= _SEVERITY.get(existing["state"], 0):
+                existing["state"] = status
             # A measured duration from the api tier is authoritative — never
             # overwrite it with the event-gap estimate (see set_sub_check_duration).
             if not existing.get("_measured") and existing.get("_started_ms"):
@@ -603,6 +736,36 @@ class ThinkingStepTracker:
             return False
         if not terminal and st.started_ms is None:
             return False
+        if terminal:
+            # AT THE TERMINAL FRAME THE BUILDER'S LIST IS THE WHOLE TRUTH, so it
+            # REPLACES what accumulated during the turn instead of merging into it.
+            #
+            # Merging kept rows the outcome had already invalidated. Measured on 8 of
+            # 8 refusals: `_preparing_details` correctly returns only the warning row
+            # once the turn is known to have failed, but "Preparing summary" had been
+            # appended on an earlier frame and this method only ever appended — so the
+            # step ended up asserting both "Preparing summary ✓" and "No answer could
+            # be produced ⚠" at once.
+            #
+            # Sub-checks are untouched: they live in `st.sub_checks` and are folded in
+            # by as_dict(), so authorization and validation survive the replacement.
+            _kept = [e for e in st.details if e.get("_pinned")]
+            _new = []
+            for row in details:
+                if not isinstance(row, dict):
+                    continue
+                kind, label = row.get("type"), row.get("label")
+                if kind not in DETAIL_TYPES or not label:
+                    continue
+                entry = {"type": kind, "label": str(label)[:160],
+                         "state": row.get("state") or STATE_COMPLETED}
+                if entry not in _kept and entry not in _new:
+                    _new.append(entry)
+            replaced = _kept + _new
+            if replaced == st.details:
+                return False
+            st.details = replaced
+            return True
         changed = False
         for row in details:
             if not isinstance(row, dict):
@@ -673,6 +836,17 @@ class ThinkingStepTracker:
                         st.details = []
                 if st.sub_checks:
                     st.sub_checks = []
+        # A step cannot read `completed` while a check INSIDE it failed. Measured
+        # live on a permission denial: the access sub-check said the required data
+        # is not available with this access, under "Finding the right information"
+        # marked completed with a green tick. `warning`, not `failed`: the step's
+        # other work (understanding the request, locating a source) did happen —
+        # what failed is one check within it, and that check states its own outcome.
+        for st in self.steps.values():
+            if st.state == STATE_COMPLETED and any(
+                    c.get("state") == STATE_FAILED for c in st.sub_checks):
+                st.state = STATE_WARNING
+
         # A validation failure on a SUPERSEDED attempt must not describe the answer.
         # Only downgrade when the turn actually delivered one: on a failed or
         # answerless turn the failure IS the story and stays as it is.
@@ -740,6 +914,18 @@ class ThinkingStepTracker:
 
     def current_step(self) -> str | None:
         return self._current
+
+    def access_denied(self) -> bool:
+        """Did the authorization check FAIL?
+
+        Read from the recorded sub-check rather than from the reply text: the
+        denial is delivered as an ordinary answer, and matching on its wording
+        would break the moment the copy changes. The engine's `access_check:
+        failed` event is the fact; the severity ratchet in _record_sub_check is
+        what makes it survive the `warning` that follows it.
+        """
+        return any(c.get("kind") == "access" and c.get("state") == STATE_FAILED
+                   for st in self.steps.values() for c in st.sub_checks)
 
     def has_progress(self) -> bool:
         """Did ANY step actually begin?

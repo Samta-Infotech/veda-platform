@@ -230,7 +230,7 @@ measurement is not proof of good complexity.
 | # | Decision | Blocks | Recommendation |
 |---|---|---|---|
 | ~~D1~~ | ~~Confidence threshold for a "low confidence" caveat~~ | — | ✅ **RESOLVED — set to 0.5.** Live: a 0.294-confidence answer now carries `low_evidence`; it previously shipped silently. Inert in prod (the warning tier is off) |
-| ~~D2~~ | ~~Should all users see the generated SQL? Currently yes, everyone~~ | — | ✅ **RESOLVED — default flipped to OFF.** Live: payload keeps the block for contract stability but as `{enabled: false, query: null}`; no SQL and no table name anywhere in it. `EXPLAIN_EXPOSE_SQL=1` restores it for an admin view |
+| ~~D2~~ | ~~Should all users see the generated SQL? Currently yes, everyone~~ | — | ✅ **RESOLVED — ON, after a reversal.** Flipped to OFF 2026-09-09 on the table/column-naming argument, then flipped **back ON 2026-09-11 at the user's explicit request**: the SQL is the one part of the explanation a reader can verify rather than trust. The naming trade-off stands and is accepted. `src_<id>` catalog qualifiers are rewritten to source DISPLAY NAMES before publication (`business_explain._name_catalogs`), so a cross-source statement no longer carries the source ids that `demote_source_ids` removes everywhere else. A head that ran no SQL still reports `{enabled: false, query: null}`. `EXPLAIN_EXPOSE_SQL=0` hides it again. Note there is **no per-role gating** — the flag is all-or-nothing |
 | D3 | Enable the flags in staging? All are off | Rollout | Enable together — they are interdependent |
 | D4 | Turn on access-denial auditing? Currently off | Compliance | Enable — the table answers nothing while off |
 | D5 | Frontend design for the two-level view | Frontend build | Needs design |
