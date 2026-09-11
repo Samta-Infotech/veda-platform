@@ -287,7 +287,12 @@ def _executed_source(trace) -> List[str]:
     ran; with none, this says nothing. Deliberately AFTER the federation check, so
     a cross-source answer is never narrowed to its primary source.
     """
-    if _sane_count(_sec(trace, "execution").get("row_count")) is None:
+    # A row count of ZERO is not proof that this source contributed. On a HYBRID
+    # turn the SQL half runs, returns nothing, and the documents answer — and a
+    # `row_count: 0` was enough to make this name the SQL source for an answer that
+    # came out of a PDF. Contribution means rows, not an attempt.
+    _rc = _sane_count(_sec(trace, "execution").get("row_count"))
+    if not _rc:
         return []
     import importlib
     for name in _CONTEXT_MODULE_NAMES:

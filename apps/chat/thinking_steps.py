@@ -395,7 +395,13 @@ class Step:
         if _visible:
             # Sub-checks first: authorization and validation are the framing facts,
             # and they carry a measured duration the other rows do not.
+            _named = {d.get("type") for d in self.details}
             for c in self.sub_checks:
+                # "Checking the result is complete and safe" exists to say that
+                # checking HAPPENED. Once the checks are listed BY NAME it says
+                # nothing the named rows do not, and the step showed both.
+                if c["kind"] == "validation" and "validation" in _named:
+                    continue
                 row = {"type": c["kind"], "label": c.get("label") or "",
                        "state": c.get("state")}
                 if c.get("duration_ms") is not None:

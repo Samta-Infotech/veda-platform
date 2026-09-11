@@ -2109,13 +2109,32 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
             # PDF, but this stamped the ambient context's source_id — 2, the
             # relational database — so the user was told "Retrieving data from
             # homzhub" for an answer that came from the employee handbook.
+            # STRONGEST EVIDENCE FIRST: the passages the answer was written from
+            # carry the id of the source they were retrieved out of. On the HYBRID
+            # route the router picks the relational source (the SQL half is tried
+            # first), so preferring the routing decision named `homzhub` for an
+            # answer that came entirely from the employee handbook — measured live
+            # on "How many casual leaves do employees get per year?", which returned
+            # `rows: 0` from SQL, 5 passages from the documents, and reported
+            # `sources: ["homzhub"]`. The chunks know better than the router did.
             _sid = None
             try:
-                _routed = (_cur_trace().sections.get("routing") or {}).get("source_ids")
-                if _routed:
-                    _sid = _routed[0]
+                _chunks = (getattr(res, "chunks", None)
+                           or getattr(res, "doc_chunks", None) or [])
+                for _c in _chunks:
+                    _cs = getattr(_c, "source_id", None)
+                    if _cs:
+                        _sid = _cs
+                        break
             except Exception:
                 _sid = None
+            if _sid is None:
+                try:
+                    _routed = (_cur_trace().sections.get("routing") or {}).get("source_ids")
+                    if _routed:
+                        _sid = _routed[0]
+                except Exception:
+                    _sid = None
             if _sid is None:
                 _ctx = _current_ctx()
                 _sid = getattr(_ctx, "source_id", None) if _ctx is not None else None
