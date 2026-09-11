@@ -84,7 +84,9 @@ _NO_EXPLAIN = {
     "validation": {"passed": None, "checks": []},
     # `enabled: False`, not True. This fallback ships precisely when NO SQL ran (the
     # comment above says so), so advertising the SQL block as enabled was wrong on its
-    # own terms — and it contradicted EXPLAIN_EXPOSE_SQL, which now defaults off (D2).
+    # own terms. This stays False regardless of EXPLAIN_EXPOSE_SQL (default ON again
+    # since 2026-09-11): that flag decides whether SQL that EXISTS may be shown, and
+    # here none exists to show.
     # Observed on a document answer: the payload said `enabled: true, query: null`,
     # which reads as "SQL is available and we are withholding it" rather than "this
     # question was not answered with SQL at all".
@@ -489,18 +491,38 @@ class ConversationQueryService:
         # moment it renders the answer. Absorbs the final explainability payload first
         # so the "Preparing" step can say what was actually produced (chart / table /
         # summary) rather than guessing from the live stream alone.
+        _vizzes = None
         _steps = getattr(self, "_steps", None)
         if _steps is not None and not _steps.finished:
             _ctx = getattr(self, "_step_ctx", None)
-            _failed = not bool(res0.get("ok")) and res0.get("status") not in (
-                "answered", "clarify", None)
+            # Was this an error, or a turn that ran to completion and explained
+            # why it cannot answer? An ALLOW-LIST of engine statuses answered that
+            # question before, and it named `clarify` but not `qualifier_dropped` —
+            # so identical clarifications reported different terminal statuses. The
+            # decision now rests on what the turn PRODUCED. See terminal_outcome().
+            _explain0 = res0.get("explain") or {}
+            _has_refusal = bool(_explain0.get("why")
+                                or _explain0.get("what_would_help")
+                                or _explain0.get("suggestions"))
+            _failed, _err_code = ts_mod.terminal_outcome(
+                ok=bool(res0.get("ok")), engine_status=res0.get("status"),
+                has_refusal_explanation=_has_refusal,
+                access_denied=_steps.access_denied())
             if _ctx is not None:
                 _ctx.absorb_explain(res0.get("explain") or {})
                 # The turn's OUTCOME, known only here. Without it the Preparing step
                 # said "Putting your answer together." on a refusal — this sentence
                 # overwrites the phase's own honest message at the terminal frame,
                 # so the honest text never reached the user.
-                _ctx.no_answer = res0.get("status") in ("refused", "clarify") or (
+                # `_no_results` is the engine's own decision, made once at its front
+                # door (veda_hybrid._mark_empty_results) from the rows/passages the
+                # turn actually produced. Reading it here rather than re-deriving is
+                # the point: `ok`/`status` describe whether the pipeline RAN, and
+                # reading them as "did it find anything" is what put four green ticks
+                # and "Checks passed" above a reply reading "No results found."
+                _ctx.found_nothing = bool(res0.get("_no_results"))
+                _ctx.no_answer = bool(res0.get("_no_results")) or (
+                    res0.get("status") in ("refused", "clarify")) or (
                     not res0.get("ok") and res0.get("status") not in ("answered", None))
                 if res0.get("_from_cache"):
                     _ctx.from_cache = True
@@ -537,6 +559,19 @@ class ConversationQueryService:
                     if _shape:
                         _steps.execution_type = _shape
                         _ctx.execution_type = _shape
+                # `multi_source` is a claim about how many sources contributed, so
+                # it is checked against how many did. The hybrid head reports
+                # `hybrid` for "database first, then documents" — one source, two
+                # attempts — and that was being read as several sources.
+                _fixed = ts_mod.correct_multi_source_claim(
+                    _steps.execution_type,
+                    source_count=_ctx.source_count,
+                    source_names=_ctx.source_names,
+                    passages=_ctx.passages,
+                    has_rows=bool(_rows0) if isinstance(_rows0, list) else False)
+                if _fixed != _steps.execution_type:
+                    _steps.execution_type = _fixed
+                    _ctx.execution_type = _fixed
                 # Context and details are applied BEFORE finish(), not after.
                 # finish() decides what to do with a step that never started, and
                 # that decision depends on whether the step has content: content
@@ -545,6 +580,16 @@ class ConversationQueryService:
                 # whereas no content means it genuinely did not run. Setting details
                 # afterwards hid that distinction and left the step `pending`
                 # between two completed ones.
+                # Computed BEFORE the terminal frame, deliberately. It used to run
+                # after, and announced itself with its own `thinking` event — which
+                # arrived AFTER the frame that had already said `status: completed`,
+                # telling the client the turn was over and then sending it more
+                # progress (measured on every charted turn). The fact is real, so it
+                # belongs IN the model rather than after it.
+                _vizzes = self._build_visualizations(res0)
+                if _vizzes:  # noqa: SIM102 — the chart fact belongs in the model
+                    _ctx.output = ("chart+summary" if _ctx.output == "summary"
+                                   else "chart")
                 for _k in _steps.steps:
                     _steps.set_context(_k, _ctx.sentence(_k))
                     _steps.set_details(_k, _ctx.details(_k), terminal=True)
@@ -554,7 +599,9 @@ class ConversationQueryService:
             # only one of them: a canned greeting still shipped four empty circles.
             # `_terminal_step_frame` re-applies context/details itself, so the loop
             # above is now only about the evidence the api tier contributes.
-            yield from self._terminal_step_frame(failed=_failed)
+            yield from self._terminal_step_frame(
+                failed=_failed, error_code=_err_code,
+                retryable=(False if _err_code == ts_mod.ERROR_ACCESS_DENIED else None))
         # Audit facts for this turn (traceability Part 19), stashed on the
         # per-request service instance rather than emitted as an event: they are
         # for the QueryLog row only and must never cross the wire. The view reads
@@ -576,14 +623,12 @@ class ConversationQueryService:
         # Computed (fast, synchronous, no LLM — same call as before) BEFORE any
         # content streams, so the thinking message below completes the
         # "thinking" sequence rather than interleaving mid-answer.
-        vizzes = self._build_visualizations(res0)
-        if vizzes:
-            # Only emitted when a chart is actually about to be shown — a
-            # text/table-only answer never yields this, so it's never a
-            # "thinking" message describing work that isn't happening.
-            yield {"event": "thinking",
-                  "data": {"phase": "visualization_prep",
-                           "message": business_friendly_message("visualization_prep", "")}}
+        # Reused, never recomputed: the terminal block above already built these in
+        # order to report the chart as part of the step model. It is None only when
+        # that block did not run (no tracker, or an already-finished one).
+        vizzes = _vizzes if _vizzes is not None else self._build_visualizations(res0)
+        # NO `thinking` event here. The turn has already reported its one terminal
+        # state, and a progress frame after that contradicts it.
         for block in self._build_content_blocks(response, res0):
             yield {"event": "content", "data": block}
         if vizzes:

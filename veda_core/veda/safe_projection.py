@@ -229,6 +229,19 @@ def build_data_sources(trace) -> List[Dict[str, Any]]:
     records = _sec(trace, er.TRACE_SECTION).get("records") or []
     ids = [r.get("source_id") for r in records if isinstance(r, dict) and r.get("source_id")]
     if not ids:
+        # FEDERATED execution. The coordinator's independent strategy records each
+        # source it runs, but the federated strategy returns before that loop, so a
+        # cross-source answer had NO records — measured live: "There are 7 invoices
+        # compared to 96 assets", an answer that demonstrably combined two sources,
+        # shipped `sources: null`.
+        #
+        # The federation section is proof of participation in its own right: the
+        # federated SQL was validated against, and executed over, exactly these
+        # catalogs. Read only when the federation actually ran (`used`).
+        _f = _sec(trace, "federation")
+        if _f.get("used"):
+            ids = [str(x) for x in (_f.get("source_ids") or [])]
+    if not ids:
         # Fall back to the routing decision ONLY when it actually chose the sources.
         # Under MULTISOURCE_ROUTING_SHADOW the decision is observe-only, so naming
         # its sources here claimed a source had contributed data when it had not —
@@ -239,7 +252,13 @@ def build_data_sources(trace) -> List[Dict[str, Any]]:
         if not _r.get("shadow"):
             ids = list(_r.get("source_ids") or [])
     if not ids:
-        ids = _scoped_single_source()
+        # A DENIAL never got to look anywhere. The scoped-source fallback below is
+        # "this is where we looked", and on a denial that is not true — we refused
+        # before searching, so naming the source alongside "you don't have
+        # permission to access this data" reads as "we used it". Nothing to name.
+        if _access_denied(trace):
+            return []
+        ids = _scoped_single_source() or _executed_source(trace)
     out = sn.describe_all(ids)
     _attach_contribution(out, records, trace)
     return out
@@ -250,6 +269,46 @@ def build_data_sources(trace) -> List[Dict[str, Any]]:
 #: separate ContextVars. Read through both or the value set by the other half of
 #: the process is invisible (the same trap documented in inference/routes/hybrid.py).
 _CONTEXT_MODULE_NAMES = ("veda_core.context", "context")
+
+
+def _executed_source(trace) -> List[str]:
+    """The source the execution actually connected to, when work actually ran.
+
+    With SEVERAL sources in scope, `_scoped_single_source` correctly declines to
+    guess — but a Tier-1/Tier-2 answer still executed against exactly ONE of them,
+    and the request context holds which: `storage_adapters.reader` resolves the
+    connection from that id and fail-closes when it is unset, so it is the source
+    of truth for what was queried, not an assumption. Without this a perfectly
+    ordinary answer with the default all-sources scope named nothing at all.
+
+    GATED ON EXECUTION. The context id is set for the whole turn, including turns
+    that refuse before touching anything — naming a source there would claim we
+    queried data we never read. A recorded row count is the proof that something
+    ran; with none, this says nothing. Deliberately AFTER the federation check, so
+    a cross-source answer is never narrowed to its primary source.
+    """
+    if _sane_count(_sec(trace, "execution").get("row_count")) is None:
+        return []
+    import importlib
+    for name in _CONTEXT_MODULE_NAMES:
+        try:
+            ctx = importlib.import_module(name).try_current()
+        except Exception:
+            continue
+        sid = getattr(ctx, "source_id", None) if ctx is not None else None
+        if sid:
+            return [str(sid)]
+    return []
+
+
+def _access_denied(trace) -> bool:
+    """Did the authorization check FAIL for this turn? Read from the timeline the
+    engine actually wrote, not from any reply text."""
+    try:
+        return any(e.get("phase") == "access_check" and e.get("status") == "failed"
+                   for e in build_timeline(trace))
+    except Exception:
+        return False
 
 
 def _scoped_single_source() -> List[str]:
@@ -363,8 +422,11 @@ def build_limitations(trace) -> List[str]:
     # warning but an empty `limitations` array (caught while verifying EXP-B3).
     # FALLBACK_USED is deliberately NOT limiting — an alternate path still produced a
     # complete answer; it is informational, not a caveat on the result.
-    limiting = {vw.RESULT_TRUNCATED, vw.RESTRICTED_DATA, vw.PARTIAL_SOURCE_FAILURE,
-                vw.SOURCE_CONFLICT, vw.UNMATCHED_RECORDS, vw.LOW_EVIDENCE}
+    # NO_RESULTS is the strongest caveat there is — there is no answer to read —
+    # so it belongs here above all the others.
+    limiting = {vw.NO_RESULTS, vw.RESULT_TRUNCATED, vw.RESTRICTED_DATA,
+                vw.PARTIAL_SOURCE_FAILURE, vw.SOURCE_CONFLICT,
+                vw.UNMATCHED_RECORDS, vw.LOW_EVIDENCE}
     return [w["message"] for w in build_warnings(trace) if w.get("code") in limiting]
 
 
@@ -515,7 +577,7 @@ def build_flow(trace, *, operations=None,
     return {"stages": stages}
 
 
-def _demote_source_ids(out: Dict[str, Any]) -> None:
+def demote_source_ids(out: Dict[str, Any]) -> None:
     """Move raw source IDENTIFIERS out of the user-facing blocks into `audit`.
 
     §3/§9: a source id is an internal key, not something a normal client renders —
@@ -525,6 +587,13 @@ def _demote_source_ids(out: Dict[str, Any]) -> None:
 
     Runs LAST, after every block that can carry a source has been assembled: an
     earlier pass missed the top-level `sources` list, which is built further down.
+
+    PUBLIC because there are TWO assemblers, not one — the answered path
+    (build_explain_extension) and the refusal path (_apply_v2_refusal). When the
+    refusal path started emitting `sources` it shipped the raw ids, because this
+    ran only inside the other one. Same "wired to one path" mistake as EXP-B1/B4/B5,
+    the terminal step frame and the refusal timeline_summary; caught here by the
+    invariant checker rather than in production.
     """
     try:
         ids: List[Dict[str, Any]] = []
@@ -608,5 +677,5 @@ def build_explain_extension(trace, *, trace_id: str = "",
         pass
     if trace_id:
         out["support"] = {"trace_id": trace_id}
-    _demote_source_ids(out)
+    demote_source_ids(out)
     return out

@@ -745,8 +745,15 @@ def _run_coordinator(query, verbose=False, on_event=None):
                         except Exception:
                             pass
                         _emit(on_event, "answer", _deny_msg)
+                        # Built AFTER the warning above, so the payload carries it.
+                        # Without this the denial arrived with every block empty and
+                        # no `support.trace_id` — the one thing a user needs to hand
+                        # to support about a permission problem (measured live).
+                        _deny_ex = _explain_from_trace_only()
                         return MultiResult.single(
-                            query, STATUS_REFUSED, "no_access", refuse_reason=_deny_msg)
+                            query, STATUS_REFUSED, "no_access",
+                            refuse_reason=_deny_msg,
+                            result=({"explain": _deny_ex} if _deny_ex else None))
             except Exception:
                 pass
 
@@ -961,7 +968,38 @@ def _maybe_federated(query, verbose=False, strict=False):
             if not _fed_sql and isinstance(payload.get("plan"), dict):
                 _mets = payload["plan"].get("metrics") or []
                 _fed_sql = next((m.get("sql") for m in _mets if m.get("sql")), None)
-            explain = build_explain(sql=_fed_sql or "", table="federated", sm=None)
+            # Record WHICH sources the federation ran over, then build WITH the
+            # trace. Both were missing: this composer called build_explain with no
+            # trace at all, so no v2 extension was assembled — and nothing wrote
+            # the federation section, so even a trace would have had no source
+            # evidence to project. A real cross-source answer therefore shipped
+            # `sources: null` and `execution: {"type": "sql"}` while its own text
+            # compared figures from two sources (measured live: "There are 7
+            # invoices compared to 96 assets").
+            #
+            # `catalogs` is the strongest proof available — the catalogs the
+            # EXECUTED SQL actually referenced, as returned by the federated
+            # executor (`src_<id>`). `payload["sources"]`, the source ids among
+            # the selected columns, is the fallback for the shapes that carry no
+            # catalog list.
+            _tr_f, _tid_f = None, ""
+            try:
+                from veda.explain import current_trace as _ct_f
+                _tr_f = _ct_f()
+                if _tr_f is not None and getattr(_tr_f, "enabled", False):
+                    _cats = [str(c)[4:] for c in (r.get("catalogs") or [])
+                             if str(c).startswith("src_")]
+                    _fids = _cats or [str(x) for x in (payload.get("sources") or [])]
+                    if _fids:
+                        _tr_f.set("federation", used=True, operation="combined",
+                                  source_ids=_fids, result_status="complete")
+                    _tid_f = getattr(_tr_f, "trace_id", "") or ""
+                else:
+                    _tr_f = None
+            except Exception:
+                _tr_f = None
+            explain = build_explain(sql=_fed_sql or "", table="federated", sm=None,
+                                    trace=_tr_f, trace_id=_tid_f)
         except Exception as e:
             if verbose:
                 print(f"  [federated] business_explain failed ({type(e).__name__}: {e}) — explainability omitted")
@@ -1225,6 +1263,9 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
             _clean_refuse_on_empty_error(result)
             # Decide the access-check outcome from the TURN's terminal feedback,
             # before the timeline is closed and re-read into the payload.
+            # BEFORE the backfill: the warning it raises has to be in the trace by
+            # the time the explainability payload is assembled from it.
+            _mark_empty_results(result)
             _backfill_missing_explain(result)   # before the timeline refresh reads it
             _sync_reported_row_count(result)
             _reconcile_access_check(result, _tl)
@@ -1241,6 +1282,76 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
                 pass
 
 
+
+
+#: The key every head's payload carries once the outcome is decided, and the ONLY
+#: thing the api tier reads to answer "did this turn actually produce anything?".
+EMPTY_RESULT_KEY = "_no_results"
+
+
+def _mark_empty_results(result) -> None:
+    """Decide, once, whether a turn found ANYTHING — and say so on the payload.
+
+    Measured live on the mainstream SQL path: the reply read "No results found.",
+    `result.row_count` was 0, `warnings` was empty, and all four progress steps were
+    green with "Checks passed" and "Relevant information available". The panel said
+    the work succeeded; the answer said nothing was found. The same shape was
+    confirmed on Tier-2, NoSQL, federated, cache replay, RAG-with-zero-chunks and
+    hybrid — seven heads, one missing fact.
+
+    The fact was missing because no head recorded it: `ok`/`status` describe whether
+    the PIPELINE ran, not whether it found anything, and the two were being read as
+    the same thing. So this decides it from the only evidence that means "found
+    something" — rows for a tabular answer, passages for a document one.
+
+    Sited HERE, at the one exit every head passes through, for the reason
+    `_raise_low_confidence_caveat`, `_backfill_missing_explain` and
+    `_sync_reported_row_count` are: wiring this per head is the recurring
+    "wired to one path" bug that produced EXP-B1/B4/B5, and a head added next year
+    gets this for free.
+
+    DELIBERATELY CONSERVATIVE. It marks a turn empty only on POSITIVE evidence of
+    emptiness — a rows list that is present and empty, or a reported passage count
+    of zero. A head that reports neither (a refusal, small talk, a plain text
+    answer) is left alone, because "we cannot tell" must not be rendered as "nothing
+    was found". It never touches a turn that already refused: a refusal has its own,
+    better explanation of why there is no answer.
+    """
+    try:
+        for item in (getattr(result, "items", None) or []):
+            if getattr(item, "status", None) != STATUS_OK:
+                continue                      # a refusal explains itself
+            payload = getattr(item, "result", None)
+            if payload is None:
+                continue
+            _get = (payload.get if isinstance(payload, dict)
+                    else lambda k, d=None: getattr(payload, k, d))
+            rows = _get("rows")
+            chunks = _get("chunks")
+            empty = None
+            if isinstance(rows, list):
+                empty = len(rows) == 0
+            if empty in (None, True) and isinstance(chunks, (list, int)):
+                _n = len(chunks) if isinstance(chunks, list) else chunks
+                # Passages found means the document half had something, even when
+                # the SQL half returned no rows — a hybrid turn is not empty then.
+                empty = False if _n > 0 else True
+            if empty is not True:
+                continue
+            if isinstance(payload, dict):
+                payload[EMPTY_RESULT_KEY] = True
+            else:
+                try:
+                    setattr(payload, EMPTY_RESULT_KEY, True)
+                except Exception:
+                    pass
+            try:
+                from veda import warnings as _vwe
+                _vwe.add(_vwe.NO_RESULTS)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 
 def _reconcile_access_check(result, timeline) -> None:
@@ -1377,6 +1488,37 @@ def _document_evidence(payload) -> dict:
     return out
 
 
+def _resync_flow_operations(explain: dict) -> None:
+    """Rebuild the flow's "Operations applied" stage from the FINAL v1 operations.
+
+    `flow` is assembled by build_explain_extension while the v1 operations are still
+    the SQL-derived ones, and the document operations are written afterwards, here.
+    So the two disagreed: v1 `operations` correctly said retrieval / read /
+    synthesis while the flow the reader follows still said "List records" — measured
+    live on a contract question answered entirely from a PDF.
+
+    Only the operations stage is touched. "Combined across sources" carries the same
+    stage name but is a separate, federation-only statement and is left alone, as is
+    every other stage.
+    """
+    try:
+        stages = (explain.get("flow") or {}).get("stages")
+        if not isinstance(stages, list):
+            return
+        ops = [o.get("summary") for o in (explain.get("operations") or [])
+               if isinstance(o, dict) and o.get("summary")]
+        for st in stages:
+            if isinstance(st, dict) and st.get("stage") == "operations" \
+                    and st.get("label") == "Operations applied":
+                if ops:
+                    st["items"] = ops[:8]
+                else:
+                    st.pop("items", None)
+                return
+    except Exception:
+        pass
+
+
 def _apply_document_v1(explain: dict, ev: dict) -> dict:
     """Fill the v1 blocks with what a DOCUMENT answer actually did.
 
@@ -1406,6 +1548,7 @@ def _apply_document_v1(explain: dict, ev: dict) -> dict:
                         "summary": "Synthesized the retrieved information"})
         if ops:
             explain["operations"] = ops
+            _resync_flow_operations(explain)
         if docs or n:
             where = docs[0] if len(docs) == 1 else f"{len(docs)} documents"
             bits = [f"Answered from {where}"] if docs else []
@@ -1464,6 +1607,32 @@ def _merge_document_evidence(explain: dict, ev: dict) -> dict:
         pass
     return explain
 
+def _explain_from_trace_only() -> dict | None:
+    """An explainability payload for a turn that never reached the pipeline.
+
+    Built from the trace alone, with the v1 blocks emptied — there is no SQL, no
+    operations and no filters, and inventing them would be worse than saying
+    nothing. What survives is the part that matters on a refusal: the warnings,
+    where we looked, and `support.trace_id`.
+
+    Used by the permission-denial branch, which returns EARLY and so never reaches
+    the front door's shared post-processing. The explainability belongs next to the
+    denial it describes for the same reason the negative `access_check` emit does:
+    a sweep at the exit is what lost that emit once already.
+    """
+    try:
+        from veda.business_explain import build_explain
+        from veda.explain import current_trace
+        tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return None
+        return _strip_invented_v1(build_explain(
+            sql="", table="", sm=None, trace=tr,
+            trace_id=getattr(tr, "trace_id", "") or ""))
+    except Exception:
+        return None
+
+
 def _backfill_missing_explain(result) -> None:
     """Give an ANSWERED turn an explainability payload when its head produced none.
 
@@ -1482,12 +1651,15 @@ def _backfill_missing_explain(result) -> None:
     The v1 blocks come out EMPTY and that is deliberate: there is no SQL, no
     operations and no filters to describe, and inventing them would be worse than
     saying nothing. What the reader gains is the v2 half — routing, execution,
-    sources, warnings, flow, audit — assembled from what actually happened.
+    sources, warnings, flow, audit — assembled from what actually happened. On a
+    refusal or a denial those blocks are mostly absent too, because each one
+    appears only where the trace holds evidence for it; what survives is the part
+    that matters there — the warnings, where we looked, and the support trace id.
 
     ADDITIVE and safe for a client: a payload that was all-empty gains keys; no v1
-    key changes shape (CHAT_API_CONTRACT.md §1e — "never require a block"). Only a
-    turn that ANSWERED is backfilled; a refusal already has its own payload, and one
-    that produced nothing has nothing to explain.
+    key changes shape (CHAT_API_CONTRACT.md §1e — "never require a block"). An item
+    that already carries a payload is never touched, so a refusal that built its own
+    keeps it.
     """
     try:
         from veda.business_explain import build_explain
@@ -1496,8 +1668,13 @@ def _backfill_missing_explain(result) -> None:
         if tr is None or not getattr(tr, "enabled", False):
             return
         for item in (getattr(result, "items", None) or []):
-            if getattr(item, "status", None) != STATUS_OK:
-                continue
+            # ANY item with no explainability of its own, not only an answered one.
+            # A permission DENIAL and the federated `refuse` path both return
+            # without building a payload, so the api tier shipped its empty
+            # fallback — measured live: a denied csv_lake question arrived with
+            # every block empty, no warning code, and NO `support.trace_id`, which
+            # is the one thing a user needs to hand to support. An item that
+            # already has a payload is left alone.
             payload = getattr(item, "result", None)
             if isinstance(payload, dict):
                 if not payload.get("explain"):
@@ -1585,7 +1762,15 @@ def _refresh_persisted_timeline(result, timeline) -> None:
                                # RESTRICTED_DATA is raised by
                                # _reconcile_access_check, which by design runs after
                                # pipeline._done has already built the payload.
-                               ("warnings", sp.build_warnings, "top")):
+                               ("warnings", sp.build_warnings, "top"),
+                               # `limitations` is PROJECTED FROM the same warnings,
+                               # so refreshing one without the other makes the two
+                               # blocks disagree about the same turn. Measured on a
+                               # zero-row answer: `warnings: ["no_results"]` beside
+                               # `limitations: []`. Latent since the refresh was
+                               # added — every warning raised after _done (
+                               # RESTRICTED_DATA, NO_RESULTS) had the same split.
+                               ("limitations", sp.build_limitations, "top")):
             try:
                 fresh[key] = (fn(tr), where)
             except Exception:

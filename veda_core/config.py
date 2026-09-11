@@ -2363,12 +2363,25 @@ EXPLAIN_V2_ENABLED = _os.environ.get("EXPLAIN_V2_ENABLED", "1") == "1"
 # build_explain() hardcoded `"sql": {"enabled": True}`, so the raw SQL went to
 # EVERY user with no way to turn it off.
 #
-# DEFAULT FLIPPED TO OFF (D2). Raw SQL names tables and columns — exactly what the
-# rest of this layer works to keep out of a user-facing explanation — so the old
-# default contradicted it. This does NOT change production behaviour: the v2
-# payload only exists when EXPLAIN_V2_ENABLED is on, and that is off by default.
-# Set EXPLAIN_EXPOSE_SQL=1 to restore the SQL block for a technical/admin view.
-EXPLAIN_EXPOSE_SQL = _os.environ.get("EXPLAIN_EXPOSE_SQL", "0") == "1"
+# DEFAULT ON (2026-09-11) — this is the CURRENT decision, and it restores the
+# behaviour the payload has had for its whole life. Seeing the exact SQL is how a
+# user checks that the answer means what the sentence above it claims: it is the
+# one part of the explanation that cannot be paraphrased, and without it the
+# explainability payload asks to be trusted rather than letting itself be
+# verified.
+#
+# HISTORY, so nobody re-litigates this from the code alone: the default was
+# flipped OFF on 2026-09-09 under decision D2, then flipped back ON here at the
+# user's explicit request ("bring the SQL back, like it used to come").
+#
+# The D2 reasoning still stands as the TRADE-OFF being accepted, not as a
+# refutation: raw SQL names tables and columns, which is exactly the vocabulary
+# the rest of this layer works to keep out of a user-facing explanation. We are
+# choosing verifiability over that concealment, deliberately. An operator who
+# wants the old, stricter behaviour sets EXPLAIN_EXPOSE_SQL=0 and the block stays
+# present as `{enabled: false, query: null}` — shape preserved, so no consumer
+# breaks — with no SQL and no identifier anywhere in it.
+EXPLAIN_EXPOSE_SQL = _os.environ.get("EXPLAIN_EXPOSE_SQL", "1") == "1"
 
 # Measure real DB-side execution time in veda/execution.py rather than inferring
 # it from the gap between trace stage offsets.

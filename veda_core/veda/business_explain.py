@@ -286,6 +286,36 @@ def _expose_sql() -> bool:
         return True
 
 
+#: The federated executor attaches every source under a catalog named `src_<id>`
+#: (query/federated_executor.py::catalog_name), so a cross-source statement reads
+#: `src_2.homzhub."assets_asset"`. That is the SOURCE ID, in the one string this
+#: layer publishes verbatim — it would walk straight past `demote_source_ids`,
+#: which exists precisely to keep ids out of the user-facing blocks.
+_CATALOG_REF = re.compile(r"\bsrc_([A-Za-z0-9_]+)\b")
+
+
+def _name_catalogs(sql):
+    """Replace `src_<id>` catalog qualifiers with the source's display NAME.
+
+    The reader gets the same statement, still says which source each table came
+    from, and no longer carries an internal identifier. An unknown or unauthorised
+    source resolves to the generic label rather than its id — display_name never
+    falls back to the raw id, which is what makes this safe rather than cosmetic.
+
+    Always quoted, because a display name may contain spaces or dots. A statement
+    with no `src_` in it — every single-source query — comes back untouched.
+    """
+    if not sql:
+        return sql or None
+    try:
+        from veda import source_names as _sn
+        return _CATALOG_REF.sub(
+            lambda m: '"%s"' % _sn.display_name(m.group(1)).replace('"', ""), sql)
+    except Exception:
+        # Never publish the raw catalog because the lookup failed.
+        return _CATALOG_REF.sub('"a data source"', sql)
+
+
 def _apply_v2(out: Dict[str, Any], *, trace: Any = None, trace_id: str = "") -> None:
     """Merge the v2 blocks (sources / routing / execution / warnings / result /
     cross_source / support) into an already-built v1 payload, in place.
@@ -433,12 +463,21 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
                        "checks": check_items},
         # SQL visibility is now a decision, not a constant. This used to be a
         # hardcoded True, so the generated SQL reached EVERY end user with no way
-        # to turn it off. EXPLAIN_EXPOSE_SQL defaults True — existing behaviour is
-        # preserved byte-for-byte — and the api tier can gate it per-role by
+        # to turn it off. EXPLAIN_EXPOSE_SQL defaults True again (2026-09-11, after
+        # a brief spell defaulting off under D2) — and the api tier can gate it by
         # setting the flag or stripping the block for non-technical users. When
         # off, the key stays present with query=None so no consumer has to
         # null-check the block itself.
-        "sql": {"enabled": _expose_sql(), "query": (sql or None) if _expose_sql() else None},
+        # `enabled` means "there IS SQL and you may see it", not merely "you may
+        # see SQL". Both halves matter now that EXPLAIN_EXPOSE_SQL defaults ON
+        # again (2026-09-11): a head that ran NO SQL — a document answer, a
+        # refusal — would otherwise advertise `enabled: true, query: null`, which
+        # reads as "SQL exists and we are withholding it" rather than "this
+        # question was not answered with SQL at all". That exact contradiction was
+        # observed live on a document answer and is what apps/chat/services.py's
+        # `_NO_EXPLAIN` fallback already guards against on its own path.
+        "sql": {"enabled": bool(sql) and _expose_sql(),
+                "query": _name_catalogs(sql) if _expose_sql() else None},
         # Weakest-link confidence from the run's own anchor-selection + join-plan
         # gating signals (veda/pipeline.py's _done(), query/result_explainer.py's
         # synthesize_confidence) — never an LLM self-report. None only when the
@@ -522,6 +561,19 @@ def _apply_v2_refusal(out: Dict[str, Any], *, trace: Any = None, trace_id: str =
         from veda import safe_projection as sp
         out["warnings"] = sp.build_warnings(tr)
         out["limitations"] = sp.build_limitations(tr)
+        # WHERE WE LOOKED. A refusal executed nothing, so no source "participated"
+        # — but the reader still needs to know which data was searched, and the
+        # thinking model was already telling them one source was found while this
+        # payload named none. Two true facts that read as a contradiction.
+        #
+        # Safe against overclaiming: build_data_sources only ever names a source
+        # with proof it was in play, and the per-source `rows` it can attach is
+        # absent here because nothing was retrieved — so the block says "this is
+        # where we looked", never "this is what answered".
+        _srcs = sp.build_data_sources(tr)
+        if _srcs:
+            out["sources"] = _srcs
+            sp.demote_source_ids(out)      # ids belong in `audit`, on BOTH paths
         # Under `audit` — level 3 (§9), the same as the answered path. Keeping a
         # top-level copy here is how `source_selection` was still reaching the
         # normal UX on refusals after the answered path had been moved: the SAME

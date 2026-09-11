@@ -134,12 +134,17 @@ carries a `low_evidence` entry in `explainability.warnings` and `limitations`
 none at all, so warning on `null` put a caveat on every federated answer,
 including correct ones. Absent evidence is a gap in the SIGNAL, not a signal.
 
-**`sql.query` is now withheld by default.** `sql.enabled` reflects
-`EXPLAIN_EXPOSE_SQL`, whose default changed from on to **off**: raw SQL names
-tables and columns, which is exactly what the rest of this payload keeps out of
-a user-facing explanation. The block keeps its shape either way — a client
-reading `sql.query` gets `null` rather than a missing key — and
-`EXPLAIN_EXPOSE_SQL=1` restores it for a technical/admin view.
+**`sql.query` is populated by default.** `sql.enabled` reflects
+`EXPLAIN_EXPOSE_SQL`, which defaults **on**: the generated SQL is the one part
+of the explanation a reader can verify rather than take on trust, so a client
+should expect the text to be there. This default was briefly flipped off (D2,
+2026-09-09) on the grounds that raw SQL names tables and columns — the
+vocabulary the rest of this payload keeps out of a user-facing explanation — and
+was restored on 2026-09-11 at the user's explicit request; that exposure is the
+accepted trade-off, not an oversight. An operator can set `EXPLAIN_EXPOSE_SQL=0`
+to withhold it again for a non-technical audience. The block keeps its shape
+either way — a client reading `sql.query` gets `null` rather than a missing key
+— so nothing needs to change on the client when the flag moves.
 
 On an engine error mid-turn: `502` — `message` is a safe user-displayable
 string (never raw exception text) and `data.code` is one of the error codes in
@@ -590,3 +595,4 @@ must not assume the answered-turn shape.
 | 2026-09-10 (progressive steps) | `thinking.steps` now reveals **one step at a time** — a step enters the array when the turn reaches it, instead of all four being listed from the first frame. Added `total_steps` (always `4`) so a client can still render "step 2 of 4"; `steps.length` is now the progress so far. The array only grows, and a step already present never disappears or moves. A step the turn has moved past appears with a resolved state (`completed`/`skipped`), never as `pending` between two ticks — the same rule the terminal frame already applied, now applied live so consecutive frames cannot contradict each other. |
 | 2026-09-10 (legacy message) | The legacy top-level `message` shipped **empty** on most `thinking` frames (9 of the 12 a normal relational turn emits) — most internal phases have no user-facing copy of their own — so a client rendering it showed a status line that appeared, blanked and reappeared several times per turn. It now falls back to the running step's `summary`: never empty, and never able to disagree with the step model. **`phase` and `message` are legacy**; a client that renders `steps` must not render them too, or the same progress appears twice. |
 | 2026-09-10 (sources) | `explainability.sources` — "where did this answer come from" — was built only from proof of participation: a per-source execution record, or a routing decision that actually drove execution. A plain single-source query produces **neither** (only the cross-source coordinator writes execution records, and the routing decision is observe-only under shadow mode), so the commonest query in the system shipped **no `sources` block at all** (measured: a Tier-1 relational answer, `sources: null`). It now falls back to the one source the request was scoped to, when there is exactly one — with two or more and no record of which answered, the list stays empty rather than naming a guess. Each entry may now carry `rows`, that source's own recorded contribution, omitted when never recorded. Source identifiers remain confined to `audit.sources`. |
+| 2026-09-11 (sql restored) | `explainability.sql` is **populated by default again**: `EXPLAIN_EXPOSE_SQL` returns to defaulting **on**, reversing the 2026-09-10 row's flip to off (decision D2). Restored at the user's explicit request — the generated SQL is what lets a reader verify an answer instead of trusting it, and that is worth the table/column names it discloses. No shape change: `sql` is still always present, and `EXPLAIN_EXPOSE_SQL=0` still yields `{enabled: false, query: null}`. |

@@ -16,6 +16,7 @@
 # Called by main.py query mode based on query_router intent classification.
 # =============================================================================
 
+import re as _re
 import sys
 import os
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
@@ -192,8 +193,12 @@ def _encode_rag_query_sparse(query: str, verbose: bool = False) -> Optional[dict
 _RAG_SYSTEM_PROMPT = (
     "You are a precise document Q&A assistant. "
     "Answer the user's question using ONLY the provided context passages. "
+    # "and STOP" was echoed VERBATIM into the answer the user reads — measured
+    # live: "...does not contain any information regarding response times in the
+    # maintenance policy. STOP". A bare imperative token in the instructions is
+    # exactly the kind of thing a small model copies through.
     "If the answer cannot be found in the context, say so explicitly, in one "
-    "sentence, and STOP — do not summarize or describe what the passages "
+    "sentence, and write nothing further — do not summarize or describe what the passages "
     "DO contain if it does not answer the question asked; an unrelated "
     "passage is noise, not a consolation answer. "
     "Cite the document name and page number when available. "
@@ -213,16 +218,38 @@ _HYBRID_SYSTEM_PROMPT = (
 )
 
 
+#: The provenance tags the HYBRID prompt asks the model to write ("prefix any
+#: database insights with '[DB]' and any document insights with '[DOC]'"). They are
+#: internal component markers, and they were reaching the reader verbatim —
+#: measured live: `[DOC] The document does not mention any "casual leaves." …`.
+#: Where the answer came from is already stated properly, by the explainability
+#: `sources` block, so the raw tags are removed rather than translated.
+_PROVENANCE_TAGS = _re.compile(r"\[(?:DB|DOC)\]\s*")
+
+
+def _strip_provenance_tags(text: str) -> str:
+    """Remove the [DB]/[DOC] markers and tidy the whitespace they leave behind."""
+    if not text or "[" not in text:
+        return text
+    out = _PROVENANCE_TAGS.sub("", text)
+    out = _re.sub(r"[ \t]{2,}", " ", out)
+    return _re.sub(r"\n{3,}", "\n\n", out).strip()
+
+
 def _call_ollama(system_prompt: str, user_message: str) -> str:
-    """Single SLM call with configurable system prompt (§10 seam)."""
-    return call_slm(
+    """Single SLM call with configurable system prompt (§10 seam).
+
+    Every synthesis call in this module goes through here, which makes it the one
+    place the model's raw output is cleaned before anything else can read it.
+    """
+    return _strip_provenance_tags(call_slm(
         user_message,
         system=system_prompt,
         purpose="rag_synthesis",
         temperature=SLM_TEMPERATURE,
         num_predict=SLM_MAX_TOKENS,
         timeout=SLM_TIMEOUT_SECS,
-    ).strip()
+    ).strip())
 
 
 # =============================================================================

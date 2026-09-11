@@ -1550,3 +1550,295 @@ def test_the_running_step_always_has_a_summary_to_fall_back_to():
             f"{phase} leaves the running step with nothing to say")
         rendered = {s["id"]: s for s in t.as_payload()["steps"]}
         assert rendered[cur]["summary"].strip(), "a rendered step must never be blank"
+
+
+# ------------------------------------------------- document answer, no duplicates
+def test_a_document_answer_lists_each_operation_once():
+    """The placeholder operations shown while the real ones are unknown must be
+    SUPERSEDED, not kept. Measured live on a contract question: the step listed
+    'Reading relevant passages' AND 'Read the relevant passages', and
+    'Synthesizing the retrieved information' AND 'Synthesized the retrieved
+    information' — the same work twice, in two tenses."""
+    from apps.chat.thinking_context import ThinkingContext
+    c = ThinkingContext()
+    c.execution_type = ts.EXEC_DOCUMENTS
+    c.passages = 5
+    live = c.details("analyzing")                    # nothing known yet
+    assert [r["label"] for r in live] == ["Reading relevant passages",
+                                          "Synthesizing the retrieved information"]
+    assert all(r.get("_generic") for r in live), "placeholders must be supersedable"
+
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("rag_synthesize", "…"))
+    t.set_details("analyzing", live)
+    # the real operations arrive with the final payload
+    c.operations = ["Retrieved 5 relevant passages", "Read the relevant passages",
+                    "Synthesized the retrieved information"]
+    t.set_details("analyzing", c.details("analyzing"), terminal=True)
+    labels = [r["label"] for r in
+              {s["id"]: s for s in t.as_payload()["steps"]}["analyzing"]["details"]]
+    assert labels == c.operations, f"expected the real operations only, got {labels}"
+    assert "Reading relevant passages" not in labels
+    assert "Synthesizing the retrieved information" not in labels
+
+
+# ------------------------------------------- multi_source is a checkable claim
+def test_a_hybrid_document_answer_is_not_called_multi_source():
+    """The hybrid head reports `hybrid` — "database first, then documents" — which
+    is one source and two attempts, not several sources. A handbook question
+    answered from one PDF reported execution.type "multi_source" while its own
+    sources block named a single source (measured live)."""
+    assert ts.correct_multi_source_claim(
+        ts.EXEC_MULTI_SOURCE, source_count=1, passages=5) == ts.EXEC_DOCUMENTS
+
+
+def test_a_hybrid_answer_that_came_from_rows_is_sql():
+    assert ts.correct_multi_source_claim(
+        ts.EXEC_MULTI_SOURCE, source_count=1, has_rows=True) == ts.EXEC_SQL
+
+
+def test_a_genuine_multi_source_answer_keeps_its_shape():
+    assert ts.correct_multi_source_claim(
+        ts.EXEC_MULTI_SOURCE, source_count=2, passages=5) == ts.EXEC_MULTI_SOURCE
+    assert ts.correct_multi_source_claim(
+        ts.EXEC_MULTI_SOURCE,
+        source_names=["homzhub", "invoices_csv"]) == ts.EXEC_MULTI_SOURCE
+
+
+def test_with_nothing_to_re_derive_from_the_shape_is_left_alone():
+    """Downgrading to `unknown` would throw away the only thing we were told."""
+    assert ts.correct_multi_source_claim(
+        ts.EXEC_MULTI_SOURCE, source_count=1) == ts.EXEC_MULTI_SOURCE
+
+
+def test_a_shape_is_upgraded_when_several_sources_actually_contributed():
+    """CHANGED 2026-09-11: the correction is two-way. The federated lane reports
+    the SQL it built rather than the federation, so a cross-source answer that
+    named two participating sources in its own payload still reported
+    execution.type "sql" (measured live: "There are 7 invoices compared to 96
+    assets"). The count is the authority for a countable claim."""
+    for shape in (ts.EXEC_SQL, ts.EXEC_DOCUMENTS, ts.EXEC_UNKNOWN):
+        assert ts.correct_multi_source_claim(
+            shape, source_count=2) == ts.EXEC_MULTI_SOURCE
+        assert ts.correct_multi_source_claim(
+            shape, source_names=["homzhub", "invoices_csv"]) == ts.EXEC_MULTI_SOURCE
+
+
+def test_a_shape_is_left_alone_when_one_source_served_the_turn():
+    for shape in (ts.EXEC_SQL, ts.EXEC_DOCUMENTS, ts.EXEC_UNKNOWN):
+        assert ts.correct_multi_source_claim(
+            shape, source_count=1, passages=99, has_rows=True) == shape
+        assert ts.correct_multi_source_claim(shape) == shape, (
+            "with no source evidence at all, nothing may be upgraded")
+
+
+# ================================================= one normalized terminal state
+class TestTerminalOutcome:
+    """Three clarifications of identical shape — an unscoped question, a filter on
+    a value that does not exist, and a prompt-injection attempt — came back
+    `failed`, while three others came back `completed`. The rule was an allow-list
+    of engine statuses that named `clarify` but not `refuse`/`qualifier_dropped`."""
+
+    def test_an_answered_turn_is_not_a_failure(self):
+        assert ts.terminal_outcome(ok=True, engine_status="answered") == (False, None)
+
+    def test_every_refusal_vocabulary_the_engine_uses_is_completed(self):
+        for st in ("clarify", "refuse", "qualifier_dropped", "no_answer",
+                   "something_new_next_year"):
+            failed, code = ts.terminal_outcome(ok=False, engine_status=st)
+            assert failed is False, f"{st!r} is a refusal, not a crash"
+            assert code is None
+
+    def test_the_ways_the_engine_can_break_are_failures(self):
+        for st in ("exec_error", "tier2_exec_error", "invalid", "error",
+                   "internal_error", "EXEC_ERROR"):
+            failed, code = ts.terminal_outcome(ok=False, engine_status=st)
+            assert failed is True, f"{st!r} is a real error"
+            assert code is None
+
+    def test_a_refusal_that_explained_itself_is_never_a_failure(self):
+        """Even an error-shaped status: if the payload carries why/what_would_help,
+        the reader was given guidance, not a crash."""
+        assert ts.terminal_outcome(ok=False, engine_status="exec_error",
+                                   has_refusal_explanation=True) == (False, None)
+
+    def test_a_denial_is_a_failure_with_a_code_whatever_else_is_true(self):
+        """The denial is delivered as an ordinary reply, which is exactly how it
+        went out looking like a completed answer. It is checked first."""
+        for ok in (True, False):
+            for st in ("answered", "exec_error", "clarify", None):
+                assert ts.terminal_outcome(
+                    ok=ok, engine_status=st, has_refusal_explanation=True,
+                    access_denied=True) == (True, ts.ERROR_ACCESS_DENIED)
+
+    def test_a_missing_status_is_not_invented_into_a_failure(self):
+        assert ts.terminal_outcome(ok=False, engine_status=None) == (False, None)
+        assert ts.terminal_outcome(ok=False, engine_status="") == (False, None)
+
+
+# ============================================ severity never silently downgrades
+class TestAccessDenialSurvives:
+    """The engine emits the access check TWICE on a denial — `failed`, then
+    `warning` — and the second overwrote the first, so a DENIAL displayed as a
+    partial-access warning under a step marked completed (measured live)."""
+
+    def _denied(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("access_check", "Checking your access", status="started"))
+        t.consume(ev("access_check", "…", status="failed"))
+        t.consume(ev("access_check", "…", status="warning"))
+        return t
+
+    def test_a_later_warning_cannot_soften_a_failed_check(self):
+        t = self._denied()
+        acc = [c for s in t.steps.values() for c in s.sub_checks
+               if c["kind"] == "access"]
+        assert [c["state"] for c in acc] == [ts.STATE_FAILED]
+
+    def test_the_denial_is_reported_by_the_tracker(self):
+        assert self._denied().access_denied() is True
+
+    def test_an_ordinary_turn_reports_no_denial(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("access_check", "…", status="started"))
+        t.consume(ev("access_check", "…", status="completed"))
+        assert t.access_denied() is False
+
+    def test_a_partial_access_warning_is_not_a_denial(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("access_check", "…", status="started"))
+        t.consume(ev("access_check", "…", status="warning"))
+        assert t.access_denied() is False
+
+    def test_the_step_holding_a_failed_check_is_not_shown_completed(self):
+        t = self._denied()
+        t.consume(ev("result_preparation", "…", status="completed"))
+        t.finish()
+        finding = {s["id"]: s for s in t.as_payload()["steps"]}["finding"]
+        assert finding["state"] == ts.STATE_WARNING, (
+            "a green tick over a failed access check reads as granted")
+
+
+# =========================================== Phase 1: the panel must not lie
+class TestTheTerminalFrameIsAuthoritative:
+    """Merging the terminal builder's rows into what accumulated during the turn
+    kept rows the outcome had already invalidated. Measured on 8 of 8 refusals:
+    the step asserted "Preparing summary ✓" and "No answer could be produced ⚠"
+    at the same time."""
+
+    def _turn(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("result_preparation", "…"))
+        t.set_details("preparing", [{"type": ts.DETAIL_OUTPUT,
+                                     "label": "Preparing summary",
+                                     "state": ts.STATE_COMPLETED}])
+        return t
+
+    def test_a_row_the_outcome_invalidated_is_dropped(self):
+        t = self._turn()
+        assert "Preparing summary" in [r["label"] for r in t.steps["preparing"].details]
+        t.set_details("preparing", [{"type": ts.DETAIL_OUTPUT,
+                                     "label": "No answer could be produced for this question.",
+                                     "state": ts.STATE_WARNING}], terminal=True)
+        labels = [r["label"] for r in t.steps["preparing"].details]
+        assert labels == ["No answer could be produced for this question."]
+        assert "Preparing summary" not in labels
+
+    def test_sub_checks_survive_the_replacement(self):
+        """Authorization and validation live in sub_checks, not details."""
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("access_check", "…", status="started"))
+        t.consume(ev("access_check", "…", status="completed"))
+        t.consume(ev("result_preparation", "…"))
+        t.set_details("preparing", [{"type": ts.DETAIL_OUTPUT, "label": "x",
+                                     "state": ts.STATE_COMPLETED}], terminal=True)
+        t.finish()
+        finding = {s["id"]: s for s in t.as_payload()["steps"]}["finding"]
+        assert any(r["type"] == "access" for r in finding["details"])
+
+    def test_an_empty_terminal_list_does_not_wipe_the_step(self):
+        t = self._turn()
+        t.set_details("preparing", [], terminal=True)
+        assert [r["label"] for r in t.steps["preparing"].details] == ["Preparing summary"]
+
+
+class TestAnEmptyResultReadsAsEmpty:
+    """The mainstream SQL path showed four green ticks, "Checks passed" and an
+    empty warning list above a reply reading "No results found."."""
+
+    def _ctx(self, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        for k, v in kw.items():
+            setattr(c, k, v)
+        return c
+
+    def test_found_nothing_gets_its_own_sentence(self):
+        assert self._ctx(found_nothing=True, no_answer=True).sentence("preparing") == \
+            "No matching data was found for this question."
+
+    def test_a_refusal_keeps_the_guidance_wording(self):
+        """"See the reply for what's needed" is right for a refusal, which can say
+        what would help — and wrong for an empty result, where nothing would."""
+        s = self._ctx(no_answer=True).sentence("preparing")
+        assert "what's needed" in s and "No matching data" not in s
+
+    def test_the_only_preparing_row_is_the_warning(self):
+        rows = self._ctx(found_nothing=True, no_answer=True).details("preparing")
+        assert [r["state"] for r in rows] == [ts.STATE_WARNING]
+        assert "Nothing matched" in rows[0]["label"]
+
+    def test_an_ordinary_answer_is_unaffected(self):
+        s = self._ctx(row_count=5).sentence("preparing")
+        assert "No matching data" not in s and "what's needed" not in s
+
+
+class TestAFailedSourceIsNotATick:
+    """A datalake turn's payload said `status: failed, message: "This data source
+    could not be reached"` while the Finding step showed the source completed."""
+
+    def _ctx_with(self, status, message="This data source could not be reached"):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        c.absorb_explain({"sources": [{"name": "catalog_parquet"}],
+                          "execution": {"sources": [{"name": "catalog_parquet",
+                                                     "status": status,
+                                                     "message": message}]}})
+        return c
+
+    def test_a_failed_source_renders_as_a_warning_with_the_reason(self):
+        rows = self._ctx_with("failed").details("finding")
+        src = [r for r in rows if r["type"] == ts.DETAIL_SOURCE]
+        assert len(src) == 1
+        assert src[0]["state"] == ts.STATE_WARNING
+        assert "could not be reached" in src[0]["label"]
+
+    def test_a_completed_source_is_still_a_plain_tick(self):
+        rows = self._ctx_with("completed").details("finding")
+        src = [r for r in rows if r["type"] == ts.DETAIL_SOURCE]
+        assert src[0]["state"] == ts.STATE_COMPLETED
+        assert src[0]["label"] == "catalog_parquet"
+
+    def test_nothing_claims_information_was_available_when_every_source_failed(self):
+        labels = [r["label"] for r in self._ctx_with("failed").details("finding")]
+        assert not any("Relevant information available" in l for l in labels)
+
+
+class TestALimitThatCannotTruncateIsNotStated:
+    """The deterministic head appends LIMIT 100 to every statement, so a COUNT that
+    can only return one row was telling the reader it had been cut short."""
+
+    def _ctx(self, truncated):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        c.operations = ["Counting the records", "Limited to the top results"]
+        c.truncated = truncated
+        return c
+
+    def test_the_row_is_dropped_when_nothing_was_truncated(self):
+        assert [r["label"] for r in self._ctx(False).details("analyzing")] == \
+            ["Counting the records"]
+
+    def test_the_row_survives_a_real_truncation(self):
+        assert "Limited to the top results" in \
+            [r["label"] for r in self._ctx(True).details("analyzing")]
