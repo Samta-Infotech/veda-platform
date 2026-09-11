@@ -77,6 +77,12 @@ _OP_PHRASING = {
 _FIELD_FROM_SUMMARY = __import__("re").compile(
     r"^(?:Group by|Sort by|Calculate \w+)\s+(.+?)(?:\s*\(.*\))?$", __import__("re").I)
 
+#: The document head's retrieval operation, whichever count it carries. Matched on
+#: its shape rather than compared to a fixed string because the number is part of
+#: the sentence ("Retrieved 5 relevant passages"). See _analyzing_details.
+_RETRIEVED_PASSAGES = __import__("re").compile(
+    r"^Retrieved\s+\d+\s+relevant\s+passages?$", __import__("re").I)
+
 
 def _plain_operation(op: dict) -> str:
     """One operation, in plain language rather than SQL vocabulary."""
@@ -141,6 +147,8 @@ class ThinkingContext:
                  "multi_source", "operations", "row_count", "truncated",
                  "access_state", "found_something", "warnings",
                  "no_answer", "found_nothing", "from_cache", "failed_sources",
+                 "warning_messages", "checks", "filters", "datasets",
+                 "contributions", "chart_reason", "guidance",
                  "source_names", "passages", "execution_type")
 
     def __init__(self):
@@ -167,6 +175,25 @@ class ThinkingContext:
         self.found_nothing: bool = False
         #: {display name: user-safe reason} for sources that did NOT deliver.
         self.failed_sources: dict = {}
+        #: Authored, user-safe warning SENTENCES. `warnings` holds the codes, which
+        #: were collected and then never rendered anywhere — the clearest case of
+        #: "absorbed but never displayed" in this file.
+        self.warning_messages: list = []
+        #: The safety checks BY NAME. The payload carries five hand-written labels
+        #: ("Read-only query", "Duplicate-safe (no double-counting)", …) and the
+        #: panel collapsed all of them into one line saying a check happened.
+        self.checks: list = []
+        #: Filters the query actually applied, as plain phrases.
+        self.filters: list = []
+        #: Document/dataset names the answer drew on — "msa green tower" tells the
+        #: reader more than the connector name "docs_contracts" ever could.
+        self.datasets: list = []
+        #: {source display name: rows it contributed} on a cross-source answer.
+        self.contributions: dict = {}
+        #: Why THIS chart was chosen, in the deterministic authored wording.
+        self.chart_reason: str | None = None
+        #: What would help, on a turn that could not answer.
+        self.guidance: list = []
         #: True when the answer replayed SQL from the verified-query cache.
         self.from_cache: bool = False
         #: Display names of the sources that took part. A name beats a count:
@@ -296,6 +323,39 @@ class ThinkingContext:
             for w in (ex.get("warnings") or []):
                 if isinstance(w, dict) and w.get("code") and w["code"] not in self.warnings:
                     self.warnings.append(w["code"])
+                    _m = w.get("message")
+                    if _m and _m not in self.warning_messages:
+                        self.warning_messages.append(_m)
+            # The five safety checks BY NAME. `_CHECK_LABELS` in business_explain is
+            # already user-facing authored copy, and the flow block already tells the
+            # reader "5 checks passed" — so the number is public and the names are
+            # safe. Only the collapsed one-liner was reaching the panel.
+            for c in ((ex.get("validation") or {}).get("checks") or []):
+                if isinstance(c, dict) and c.get("label"):
+                    self.checks.append((c["label"], bool(c.get("passed"))))
+            for f in ((ex.get("filters") or {}).get("applied") or []):
+                if not isinstance(f, dict):
+                    continue
+                _t = " ".join(str(f.get(k)) for k in ("field", "operator", "value")
+                              if f.get(k) not in (None, ""))
+                if _t and _t not in self.filters:
+                    self.filters.append(_t)
+            for d in ((ex.get("data_used") or {}).get("datasets") or []):
+                if d and d not in self.datasets:
+                    self.datasets.append(str(d))
+            for src in (ex.get("sources") or []):
+                if isinstance(src, dict) and isinstance(src.get("rows"), int) \
+                        and src.get("name"):
+                    self.contributions[src["name"]] = src["rows"]
+            _viz = ex.get("visualization")
+            if isinstance(_viz, dict) and _viz.get("reason"):
+                self.chart_reason = str(_viz["reason"])
+            for g in (ex.get("suggestions") or []):
+                if g and g not in self.guidance:
+                    self.guidance.append(str(g))
+            _wwh = ex.get("what_would_help")
+            if _wwh and _wwh not in self.guidance:
+                self.guidance.insert(0, str(_wwh))
         except Exception:
             pass
 
@@ -408,6 +468,12 @@ class ThinkingContext:
             rows.append(self._row(ts.DETAIL_OPERATION, f"Period: {self.period}"))
         if self.grouped:
             rows.append(self._row(ts.DETAIL_OPERATION, "Broken down by category"))
+        # What the question NARROWED to. The payload has carried this all along and
+        # nothing displayed it, so a reader could not tell whether the filter they
+        # asked for had actually been applied — the single most common way a wrong
+        # answer looks right.
+        for f in self.filters[:4]:
+            rows.append(self._row(ts.DETAIL_OPERATION, f"Filtered to {f}"))
         return rows
 
     def _finding_details(self) -> list:
@@ -421,7 +487,31 @@ class ThinkingContext:
                     ts.DETAIL_SOURCE,
                     f"{name} — {_why}" if _why else name,
                     ts.STATE_WARNING if _why else ts.STATE_COMPLETED))
-        elif self.source_count:
+        # The DOCUMENTS, by name. "docs_contracts" is the connector; "msa green
+        # tower" is what the reader recognises and can go and check.
+        #
+        # DOCUMENT ANSWERS ONLY. On a SQL turn the same `data_used.datasets` key
+        # holds the humanized TABLE name ("Assets", "Maintenances"), which is engine
+        # vocabulary and exactly what this layer keeps out of the panel — it showed
+        # up as a source row beside `homzhub` the moment this was added.
+        if self.execution_type == ts.EXEC_DOCUMENTS:
+            for d in self.datasets[:4]:
+                rows.append(self._row(ts.DETAIL_SOURCE, d))
+        # "1 relevant source found" IS A PLACEHOLDER FOR A NAME, so it is emitted
+        # only when this build produced no named source row at all. It used to be
+        # the `elif` of `source_names`, which is a narrower test than it looks: a
+        # DOCUMENT answer names its sources through `datasets` (rendered just above,
+        # added after this fallback was written) while `source_names` stays empty,
+        # so that build emitted "1 relevant source found" and "msa green tower"
+        # side by side — the same fact, once vaguely. Across the live stream the row
+        # is still right and still shown, because until the terminal payload arrives
+        # no name is known; the supersede rule in
+        # `ThinkingStepTracker.set_details` then drops it when the name comes.
+        #
+        # `evidence.sources` in the same payload states the count a second time even
+        # at the terminal frame, but that key is a documented part of the frontend
+        # contract that other clients read, so the ROW is the half that goes.
+        if not rows and self.source_count:
             plural = "s" if self.source_count > 1 else ""
             rows.append(self._row(
                 ts.DETAIL_SOURCE,
@@ -430,9 +520,30 @@ class ThinkingContext:
             plural = "s" if self.passages > 1 else ""
             rows.append(self._row(ts.DETAIL_EVIDENCE,
                                   f"{self.passages} relevant passage{plural} retrieved"))
+        # "Relevant information available" is ENTAILED by every named row above it.
+        # If we can say the answer came from `homzhub`, or that 5 passages came
+        # back, then "relevant information available" adds nothing the reader did
+        # not just read — and it was measured in the FINAL frame of 12 of 14
+        # database turns, sitting directly beneath the named source row `homzhub`.
+        # It survived the deduplication that should have caught it because the
+        # generic-supersede rule in `ThinkingStepTracker.set_details` only replaces
+        # a generic row of the SAME type, and this row is `evidence` while the
+        # named source is `source`.
+        #
+        # The condition is therefore what this build ACTUALLY produced, not the two
+        # attributes the old guard happened to name (`source_names` / `passages`):
+        # a document answer names its sources through `datasets`, which neither
+        # attribute covers, so that path still emitted the row beside a named
+        # document. The one case it was written for survives untouched — the turn
+        # found something and can name nothing, where a bare generic count row is
+        # not a name.
+        _named_something = any(
+            not r.get("_generic") and r["type"] in (ts.DETAIL_SOURCE,
+                                                    ts.DETAIL_EVIDENCE)
+            for r in rows)
         if self.failed_sources and len(self.failed_sources) >= len(self.source_names or [1]):
             pass                       # every source that ran failed — say nothing more
-        elif self.found_something is True and not (self.source_names or self.passages):
+        elif self.found_something is True and not _named_something:
             rows.append(self._row(ts.DETAIL_EVIDENCE, "Relevant information available",
                                   generic=True))
         elif self.found_something is False:
@@ -464,6 +575,29 @@ class ThinkingContext:
         # is only a fact worth stating when the result was actually truncated.
         _ops = [op for op in self.operations
                 if op != _OP_PHRASING["limit"] or self.truncated]
+        # THE DOCUMENT TRIPLE. `_apply_document_v1` (veda_core/veda_hybrid.py) emits
+        # exactly three operations for every document answer —
+        #   "Retrieved 5 relevant passages" / "Read the relevant passages" /
+        #   "Synthesized the retrieved information"
+        # — and only the last of them describes work that is not already stated
+        # elsewhere in the panel:
+        #
+        #  * The retrieval row is the Finding step's "5 relevant passages retrieved"
+        #    with the same number and the wording reversed, so the reader is told the
+        #    same event twice, one step apart. It is dropped only when that Finding
+        #    row was ACTUALLY built in this turn (`passages` reported and non-zero),
+        #    because on a turn where the count never reached us the retrieval row is
+        #    the only place the passages are mentioned at all.
+        #  * "Read the relevant passages" and "Synthesized the retrieved
+        #    information" are not separable events in this pipeline — nothing
+        #    retrieves without reading, and the synthesis row is the one that names
+        #    work the panel states nowhere else. So reading is folded into it, and
+        #    only when the synthesis row is genuinely present in the same list.
+        _passages_reported = isinstance(self.passages, int) and self.passages > 0
+        _synthesis_present = any(op.startswith("Synthesized") for op in _ops)
+        _ops = [op for op in _ops
+                if not (_passages_reported and _RETRIEVED_PASSAGES.match(op))
+                and not (_synthesis_present and op == "Read the relevant passages")]
         rows = [self._row(ts.DETAIL_OPERATION, op) for op in _ops]
         if not rows and self.execution_type == ts.EXEC_DOCUMENTS and self.passages:
             # PLACEHOLDERS, marked generic. The real operations only arrive with the
@@ -478,36 +612,90 @@ class ThinkingContext:
                     self._row(ts.DETAIL_OPERATION,
                               "Synthesizing the retrieved information",
                               generic=True)]
-        if self.multi_source and self.source_count and self.source_count > 1:
+        # WHAT EACH SOURCE CONTRIBUTED. On a cross-source answer this step was
+        # completely empty — the one step where the federation actually happened.
+        for name, n in list(self.contributions.items())[:4]:
+            if len(self.contributions) > 1:
+                rows.append(self._row(
+                    ts.DETAIL_OPERATION,
+                    f"{name} contributed {n} record{'' if n == 1 else 's'}"))
+        if len(self.contributions) > 1:
+            rows.append(self._row(ts.DETAIL_OPERATION, "Combined across sources"))
+        elif self.multi_source and self.source_count and self.source_count > 1:
             rows.append(self._row(ts.DETAIL_OPERATION,
                                   "Comparing information across sources"))
             rows.append(self._row(ts.DETAIL_OPERATION, "Reconciling results"))
+        # The checks BY NAME, replacing the single line that said only that
+        # checking had occurred. A failed check is named too — that is the case
+        # where knowing WHICH one matters most.
+        for label, passed in self.checks[:6]:
+            rows.append(self._row(ts.DETAIL_VALIDATION, label,
+                                  ts.STATE_COMPLETED if passed else ts.STATE_WARNING))
         return rows
 
     def _preparing_details(self) -> list:
         # Nothing was produced, so list nothing. "Supporting summary" used to be
         # appended unconditionally, which on a clarify claimed an output that does
         # not exist.
-        if self.found_nothing:
-            return [self._row(ts.DETAIL_OUTPUT,
-                              "Nothing matched — there is no result to show.",
-                              ts.STATE_WARNING)]
-        if self.no_answer:
-            return [self._row(ts.DETAIL_OUTPUT,
-                              "No answer could be produced for this question.",
-                              ts.STATE_WARNING)]
+        if self.found_nothing or self.no_answer:
+            rows = [self._row(
+                ts.DETAIL_OUTPUT,
+                "Nothing matched — there is no result to show." if self.found_nothing
+                else "No answer could be produced for this question.",
+                ts.STATE_WARNING)]
+            # WHAT WOULD HELP. The payload carries the guidance the refusal was
+            # written to give ("tell me what 'atlanti' refers to — a column, or a
+            # value to filter on?") and the panel showed only the bare statement
+            # that nothing was produced, which tells the reader nothing they can act
+            # on. A turn that found NOTHING has no guidance to give, so this is the
+            # refusal case only.
+            if not self.found_nothing:
+                for g in self.guidance[:3]:
+                    rows.append(self._row(ts.DETAIL_OUTPUT, g, ts.STATE_WARNING))
+            return rows
         rows = []
         if self.output in ("chart", "chart+summary"):
-            rows.append(self._row(ts.DETAIL_OUTPUT, "Preparing visualization"))
+            # WHY THIS CHART. `_CHART_REASON_TEMPLATES` is deterministic authored
+            # copy, never the model's prose — and it was being read as a boolean and
+            # thrown away.
+            rows.append(self._row(ts.DETAIL_OUTPUT,
+                                  self.chart_reason or "Preparing visualization"))
         if isinstance(self.row_count, int) and self.row_count > 1:
             plural = "s" if self.row_count != 1 else ""
             rows.append(self._row(ts.DETAIL_OUTPUT,
                                   f"Preparing table · {self.row_count} row{plural}"))
-        rows.append(self._row(ts.DETAIL_OUTPUT, "Preparing summary"))
+        # "Preparing summary" USED TO BE APPENDED HERE, unconditionally. It was
+        # emitted on 14 of 14 measured turns because it is true of every turn that
+        # produces any answer at all, so it distinguishes nothing and carries no
+        # per-turn fact — and the step's own collapsed line already says it, in the
+        # same words: `_preparing_sentence` returns "Putting your answer together."
+        # (or "Putting together a summary." when the output is known). The reader
+        # was being shown one fact twice, once as the heading of the thing it
+        # duplicates.
+        #
+        # CHECKED BEFORE REMOVING, because `ThinkingStepTracker.finish()` decides
+        # `completed` vs `skipped` for a step that never started by whether it
+        # carries details, and this was the only unconditional row here. The
+        # decision is unreachable for THIS step: both that branch and the matching
+        # one in `snapshot(reached_only=True)` are gated on a LATER step having
+        # started, and "preparing" is the last entry in STEP_ORDER, so `later_ran`
+        # is always False for it. A never-started "preparing" is withheld from the
+        # snapshot entirely and never reclassified. The only visible consequence is
+        # `expandable: False` on a plain-summary turn, which is correct — there is
+        # now genuinely nothing inside the step that the collapsed line does not say.
         if self.truncated:
             rows.append(self._row(ts.DETAIL_OUTPUT,
                                   "Showing the first page of results only",
                                   ts.STATE_WARNING))
+        # The authored warning SENTENCES. Their codes were collected and never
+        # rendered — so a caveat the engine had already written for the reader
+        # ("There was limited matching data for this question, so the answer may be
+        # incomplete.") reached the payload and stopped there. Truncation is skipped
+        # because the row above already says it, in the same step.
+        for m in self.warning_messages[:3]:
+            if "limited to the first" in m.lower():
+                continue
+            rows.append(self._row(ts.DETAIL_OUTPUT, m, ts.STATE_WARNING))
         return rows
 
     # -- what the narrator is allowed to see ---------------------------------

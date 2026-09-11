@@ -481,6 +481,17 @@ class ConversationQueryService:
         # reads those is unaffected.
         if _steps.has_progress():
             _frame["steps"] = _steps.as_payload()
+        elif not failed:
+            # NOTHING HAPPENED, so say nothing. A canned greeting never reaches the
+            # engine, and this still shipped `phase: completed, message: "Finalizing
+            # the results..."` — there were no results to finalize. The four steps
+            # were already suppressed here for the same reason; the legacy line was
+            # left behind and kept narrating work that did not occur.
+            #
+            # A FAILED turn still emits: the frame is how the error code and the
+            # failed step reach the client, and the outage path has no progress
+            # either.
+            return
         yield {"event": "thinking", "data": _frame}
 
     def _build_reply_events(self, response: dict):
@@ -651,7 +662,17 @@ class ConversationQueryService:
         # (veda/pipeline.py's _done(), query/result_explainer.py's
         # synthesize_confidence) — never an LLM self-report — always present for
         # an answered Tier-1 query, regardless of INSIGHT_ENGINE_ENABLED.
-        yield {"event": "explainability", "data": res0.get("explain") or _NO_EXPLAIN}
+        # `_NO_EXPLAIN` is the fixed-shape fallback for a turn the engine answered
+        # without building a payload. It is NOT for a turn the engine never saw: a
+        # canned greeting shipped every block empty — `sql.enabled: false`,
+        # `validation.passed: null`, "No filters applied." — which a client renders
+        # as a "how this answer was generated" panel explaining nothing. There is
+        # no explanation because there was no query.
+        _explain0 = res0.get("explain")
+        _bypassed = not (getattr(self, "_steps", None)
+                         and self._steps.has_progress()) and not _explain0
+        if not _bypassed:
+            yield {"event": "explainability", "data": _explain0 or _NO_EXPLAIN}
         # Token usage (veda_core/slm/_call_slm.py's usage accumulator, surfaced
         # via veda/pipeline.py's _done() / veda_hybrid.py's Tier-2 dispatch).
         # Always a 3-key dict — {0,0,0} for deterministic fast paths that never

@@ -2109,3 +2109,87 @@ class TestTheExecutedSourceIsNamed:
         tr.set("federation", used=True, source_ids=["2", "4"])
         assert [s["name"] for s in sp.build_data_sources(tr)] == [
             "homzhub", "invoices_csv"]
+
+
+class TestADocumentAnswerNamesTheDocumentSource:
+    """Measured live on "How many casual leaves do employees get per year?": the
+    HYBRID route tries SQL first, so the ROUTER had picked the relational source —
+    and the turn reported `sources: ["homzhub"]` for an answer written entirely
+    from the employee handbook, with `rows: 0` from SQL and 5 passages from the
+    documents. The passages carry the id of the source they came out of; the
+    router's pick does not."""
+
+    def _trace(self, **execution):
+        from veda import explain as _ex
+        from veda.explain import new_trace
+        try:
+            _ex._CURRENT_TRACE.set(None)
+        except Exception:
+            pass
+        tr = new_trace("q")
+        if execution:
+            tr.set("execution", **execution)
+        return tr
+
+    def _scope(self, source_id):
+        import importlib
+        prof = {"2": {"name": "homzhub", "source_type": "relational"},
+                "3": {"name": "docs_contracts", "source_type": "document"}}
+        for name in ("context", "veda_core.context"):
+            try:
+                m = importlib.import_module(name)
+                m.set_source_profiles(prof)
+                m.set_context(m.RequestContext(source_id=source_id, tenant="t"))
+            except Exception:
+                pass
+
+    def test_a_zero_row_sql_attempt_does_not_claim_the_source(self):
+        """A row count of ZERO is an attempt, not a contribution — and it was
+        enough to name the SQL source for an answer that came out of a PDF."""
+        from veda import safe_projection as sp
+        self._scope("2")
+        assert sp.build_data_sources(self._trace(row_count=0)) == []
+
+    def test_rows_that_were_actually_returned_still_name_their_source(self):
+        from veda import safe_projection as sp
+        self._scope("2")
+        assert [s["name"] for s in
+                sp.build_data_sources(self._trace(row_count=1))] == ["homzhub"]
+
+
+def test_the_retrieved_passages_name_their_own_source(monkeypatch):
+    """The recording site preferred `routing.source_ids[0]`, which on the hybrid
+    route is the relational source because SQL is tried first."""
+    import veda_hybrid as VH
+
+    class _Chunk:
+        source_id = "3"
+
+    class _Res:
+        doc_chunks = [_Chunk()]
+        rows = []
+        error = None
+
+    seen = {}
+
+    class _Rec:
+        def has_records(self):
+            return False
+
+        def open(self, sid, **kw):
+            seen["sid"] = sid
+            return object()
+
+        def close(self, *a, **k):
+            pass
+
+    import veda.exec_records as er
+    monkeypatch.setattr(er, "current_recorder", lambda: _Rec())
+    monkeypatch.setattr(VH, "_dispatch_single_inner",
+                        lambda *a, **k: ("hybrid", _Res()))
+    monkeypatch.setattr(VH, "_cur_trace",
+                        lambda: type("T", (), {"sections": {"routing": {"source_ids": ["2"]}}})())
+    VH._dispatch_single("q")
+    assert seen.get("sid") == "3", (
+        "the passages the answer was written from know where they came from; "
+        f"the router's pick was 2, got {seen.get('sid')!r}")

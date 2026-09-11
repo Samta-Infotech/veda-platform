@@ -1577,7 +1577,15 @@ def test_a_document_answer_lists_each_operation_once():
     t.set_details("analyzing", c.details("analyzing"), terminal=True)
     labels = [r["label"] for r in
               {s["id"]: s for s in t.as_payload()["steps"]}["analyzing"]["details"]]
-    assert labels == c.operations, f"expected the real operations only, got {labels}"
+    # CHANGED (Phase 2): the assertion used to be `labels == c.operations`, pinning
+    # all three of the document head's operations. Two of them are now dropped as
+    # duplicates — the retrieval row repeats the Finding step's passage count, and
+    # "Read the relevant passages" is not an event separable from synthesising them
+    # (see TestTheDocumentStepStatesEachEventOnce). What this test exists to prove is
+    # unchanged and still proved: the live PLACEHOLDERS are superseded rather than
+    # kept alongside the real operations.
+    assert labels == ["Synthesized the retrieved information"], (
+        f"expected the real operations only, got {labels}")
     assert "Reading relevant passages" not in labels
     assert "Synthesizing the retrieved information" not in labels
 
@@ -1842,3 +1850,350 @@ class TestALimitThatCannotTruncateIsNotStated:
     def test_the_row_survives_a_real_truncation(self):
         assert "Limited to the top results" in \
             [r["label"] for r in self._ctx(True).details("analyzing")]
+
+
+# ============================== Phase 3: show what the payload already knows
+class TestThePayloadIsActuallyRead:
+    """`absorb_explain` read 6 keys out of a payload carrying roughly twenty, and
+    one of the six (`warnings`) was stored and never rendered anywhere."""
+
+    def _ctx(self, explain, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        for k, v in kw.items():
+            setattr(c, k, v)
+        c.absorb_explain(explain)
+        return c
+
+    def _labels(self, c, step):
+        return [r["label"] for r in c.details(step)]
+
+    def test_the_safety_checks_are_named(self):
+        c = self._ctx({"validation": {"passed": True, "checks": [
+            {"label": "Read-only query", "passed": True},
+            {"label": "Duplicate-safe (no double-counting)", "passed": True}]}})
+        assert "Read-only query" in self._labels(c, "analyzing")
+
+    def test_a_failed_check_is_named_and_flagged(self):
+        """Knowing WHICH check failed is the case where the name matters most."""
+        c = self._ctx({"validation": {"checks": [
+            {"label": "No requested filters were ignored", "passed": False}]}})
+        row = [r for r in c.details("analyzing") if r["type"] == ts.DETAIL_VALIDATION][0]
+        assert row["state"] == ts.STATE_WARNING
+
+    def test_the_collapsed_line_goes_once_the_checks_are_named(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("validation", "…", status="completed"))
+        t.set_details("analyzing", [{"type": ts.DETAIL_VALIDATION,
+                                     "label": "Read-only query",
+                                     "state": ts.STATE_COMPLETED}], terminal=True)
+        labels = [r["label"] for r in
+                  {s["id"]: s for s in t.as_payload()["steps"]}["analyzing"]["details"]]
+        assert "Read-only query" in labels
+        assert "Checking the result is complete and safe" not in labels, (
+            "the collapsed line says only that checking happened")
+
+    def test_filters_are_shown(self):
+        c = self._ctx({"filters": {"applied": [
+            {"field": "City Name", "operator": "is", "value": "Pune"}]}})
+        assert "Filtered to City Name is Pune" in self._labels(c, "understanding")
+
+    def test_document_names_are_shown_for_a_document_answer(self):
+        c = self._ctx({"data_used": {"datasets": ["msa green tower"]}},
+                      execution_type=ts.EXEC_DOCUMENTS)
+        assert "msa green tower" in self._labels(c, "finding")
+
+    def test_a_sql_turn_never_shows_its_table_name_as_a_source(self):
+        """The same key holds the humanized TABLE name on a SQL turn ("Assets") —
+        engine vocabulary, and it appeared as a source row beside `homzhub`."""
+        c = self._ctx({"data_used": {"datasets": ["Assets", "Maintenances"]}},
+                      execution_type=ts.EXEC_SQL)
+        labels = self._labels(c, "finding")
+        assert "Assets" not in labels and "Maintenances" not in labels
+
+    def test_each_source_contribution_is_shown_on_a_cross_source_answer(self):
+        c = self._ctx({"sources": [{"name": "homzhub", "rows": 96},
+                                   {"name": "invoices_csv", "rows": 7}]})
+        labels = self._labels(c, "analyzing")
+        assert "homzhub contributed 96 records" in labels
+        assert "invoices_csv contributed 7 records" in labels
+        assert "Combined across sources" in labels
+
+    def test_a_single_source_contribution_is_not_narrated(self):
+        c = self._ctx({"sources": [{"name": "homzhub", "rows": 96}]})
+        assert not any("contributed" in l for l in self._labels(c, "analyzing"))
+
+    def test_the_refusal_guidance_reaches_the_reader(self):
+        c = self._ctx({"what_would_help": "Name the column to group by.",
+                       "suggestions": ["Try one figure at a time."]},
+                      no_answer=True)
+        labels = self._labels(c, "preparing")
+        assert "Name the column to group by." in labels
+        assert labels[0].startswith("No answer could be produced")
+
+    def test_an_empty_result_offers_no_guidance_because_there_is_none(self):
+        c = self._ctx({"what_would_help": "x"}, found_nothing=True, no_answer=True)
+        assert len(c.details("preparing")) == 1
+
+    def test_the_chart_reason_replaces_the_bare_line(self):
+        c = self._ctx({"visualization": {"type": "bar", "reason": "Bar chart selected "
+                                         "because the query compares a measure."}})
+        labels = self._labels(c, "preparing")
+        assert any("Bar chart selected" in l for l in labels)
+        assert "Preparing visualization" not in labels
+
+    def test_warning_sentences_are_rendered_not_just_collected(self):
+        c = self._ctx({"warnings": [{"code": "low_evidence",
+                                     "message": "There was limited matching data."}]})
+        assert "There was limited matching data." in self._labels(c, "preparing")
+
+    def test_the_truncation_sentence_is_not_said_twice(self):
+        c = self._ctx({"result": {"truncated": True, "row_count": 100},
+                       "warnings": [{"code": "result_truncated",
+                                     "message": "The result was limited to the first 100 records."}]})
+        labels = self._labels(c, "preparing")
+        assert sum(1 for l in labels if "first" in l.lower()) == 1
+
+
+# ============================ Phase 2: each fact is stated once, in one place
+class TestASourceThatIsNamedIsNotAlsoDescribedVaguely:
+    """"Relevant information available" was measured in the FINAL frame of 12 of 14
+    database turns, sitting directly beneath the named source row `homzhub`. If we
+    can name the source we found, the vaguer row states nothing further — and it
+    escaped the generic-supersede rule in `set_details`, which only replaces a
+    generic row of the SAME type (this one is `evidence`, the source row is
+    `source`)."""
+
+    def _ctx(self, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        c.found_something = True
+        for k, v in kw.items():
+            setattr(c, k, v)
+        return c
+
+    def _labels(self, c):
+        return [r["label"] for r in c.details("finding")]
+
+    def test_the_vague_row_goes_once_the_source_is_named(self):
+        labels = self._labels(self._ctx(source_names=["homzhub"]))
+        assert "homzhub" in labels, "the survivor must be present in the same build"
+        assert "Relevant information available" not in labels
+
+    def test_the_vague_row_goes_once_passages_are_reported(self):
+        labels = self._labels(self._ctx(passages=5))
+        assert "5 relevant passages retrieved" in labels
+        assert "Relevant information available" not in labels
+
+    def test_the_vague_row_goes_when_a_document_is_named(self):
+        """A document answer names its sources through `datasets`, not
+        `source_names` — the attribute the old guard tested — so this build showed
+        "msa green tower" and "Relevant information available" together."""
+        labels = self._labels(self._ctx(execution_type=ts.EXEC_DOCUMENTS,
+                                        datasets=["msa green tower"]))
+        assert "msa green tower" in labels
+        assert "Relevant information available" not in labels
+
+    def test_it_survives_for_the_case_it_was_written_for(self):
+        """Something WAS found and nothing about it can be named. There is no
+        survivor to carry the fact, so the row is the only thing saying it."""
+        assert self._labels(self._ctx()) == ["Relevant information available"]
+
+    def test_a_failed_source_still_reads_as_a_warning(self):
+        """A WARNING is an outcome, not noise: naming a source never silences it."""
+        c = self._ctx(source_names=["catalog_parquet"],
+                      failed_sources={"catalog_parquet": "This data source could "
+                                                         "not be reached"})
+        row = [r for r in c.details("finding") if r["type"] == ts.DETAIL_SOURCE][0]
+        assert row["state"] == ts.STATE_WARNING
+
+
+class TestTheSourceCountIsOnlyAPlaceholderForAName:
+    """"1 relevant source found" is correctly superseded by the named source at the
+    terminal frame, but within ONE build the document path emitted both: it names
+    its sources through `datasets`, so `source_names` stayed empty and the `elif`
+    that was meant to hold the count back never fired."""
+
+    def _ctx(self, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        c.found_something = True
+        c.source_count = 1
+        for k, v in kw.items():
+            setattr(c, k, v)
+        return c
+
+    def _labels(self, c):
+        return [r["label"] for r in c.details("finding")]
+
+    def test_the_count_goes_when_the_source_is_named_in_the_same_build(self):
+        labels = self._labels(self._ctx(source_names=["homzhub"]))
+        assert "homzhub" in labels
+        assert "1 relevant source found" not in labels
+
+    def test_the_count_goes_when_a_document_is_named_in_the_same_build(self):
+        labels = self._labels(self._ctx(execution_type=ts.EXEC_DOCUMENTS,
+                                        datasets=["msa green tower"]))
+        assert "msa green tower" in labels
+        assert "1 relevant source found" not in labels
+
+    def test_the_count_survives_while_no_name_is_known(self):
+        """The live stream reaches the panel long before the terminal payload names
+        anything; until then the count is all there is to say."""
+        labels = self._labels(self._ctx())
+        assert labels[0] == "1 relevant source found"
+
+    def test_the_counted_evidence_key_is_untouched(self):
+        """`evidence.sources` states the same number a second time and STAYS: it is
+        a documented part of the frontend contract that other clients read. The ROW
+        is the half that goes."""
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("source_selection", "…", source_count=1))
+        assert t.as_payload()["evidence"]["sources"] == 1
+
+
+class TestTheDocumentStepStatesEachEventOnce:
+    """The `analyzing` step listed all three operations `_apply_document_v1` emits:
+    "Retrieved 5 relevant passages", "Read the relevant passages", "Synthesized the
+    retrieved information". The first is the Finding step's "5 relevant passages
+    retrieved" — same number, same event, wording reversed — and reading is not an
+    event separable from retrieving in this pipeline. Only the synthesis row names
+    work the panel states nowhere else."""
+
+    _TRIPLE = ["Retrieved 5 relevant passages", "Read the relevant passages",
+               "Synthesized the retrieved information"]
+
+    def _ctx(self, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        c.execution_type = ts.EXEC_DOCUMENTS
+        c.passages = 5
+        c.operations = list(self._TRIPLE)
+        for k, v in kw.items():
+            setattr(c, k, v)
+        return c
+
+    def test_only_the_synthesis_row_survives(self):
+        c = self._ctx()
+        assert [r["label"] for r in c.details("analyzing")] == \
+            ["Synthesized the retrieved information"]
+
+    def test_the_finding_step_still_carries_the_passage_count(self):
+        """The survivor for the dropped retrieval row lives in a DIFFERENT step, so
+        it is checked on the same context rather than assumed."""
+        assert "5 relevant passages retrieved" in \
+            [r["label"] for r in self._ctx().details("finding")]
+
+    def test_the_retrieval_row_stays_when_no_passage_count_was_reported(self):
+        """`passages` is None when the live stream never carried `chunks` /
+        `doc_chunks`. The Finding row is then not built at all, so dropping the
+        retrieval row would delete the only mention of the passages."""
+        c = self._ctx(passages=None)
+        labels = [r["label"] for r in c.details("analyzing")]
+        assert "Retrieved 5 relevant passages" in labels
+        assert not any("passage" in r["label"]
+                       for r in c.details("finding")), "no survivor in Finding"
+
+    def test_reading_is_only_folded_into_a_synthesis_row_that_exists(self):
+        c = self._ctx(operations=["Retrieved 5 relevant passages",
+                                  "Read the relevant passages"])
+        assert [r["label"] for r in c.details("analyzing")] == \
+            ["Read the relevant passages"]
+
+    def test_a_database_answers_operations_are_untouched(self):
+        c = self._ctx(execution_type=ts.EXEC_SQL, passages=None,
+                      operations=["Counting the records", "Broken down by City"])
+        assert [r["label"] for r in c.details("analyzing")] == \
+            ["Counting the records", "Broken down by City"]
+
+
+class TestPreparingSummaryIsTheStepsOwnHeadline:
+    """"Preparing summary" was emitted on 14 of 14 turns: it is true of every turn
+    that produces any answer, so it distinguishes nothing — and the step's collapsed
+    line already says it in the same words ("Putting your answer together.")."""
+
+    def _ctx(self, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        for k, v in kw.items():
+            setattr(c, k, v)
+        return c
+
+    def test_the_row_is_gone(self):
+        assert "Preparing summary" not in \
+            [r["label"] for r in self._ctx(row_count=5).details("preparing")]
+
+    def test_the_collapsed_line_still_says_it(self):
+        """The survivor is the step's own summary, not another row."""
+        assert self._ctx().sentence("preparing") == "Putting your answer together."
+        assert self._ctx(output="summary").sentence("preparing") == \
+            "Putting together a summary."
+
+    def test_the_rows_that_carry_a_real_fact_are_kept(self):
+        labels = [r["label"] for r in
+                  self._ctx(row_count=42, output="chart", truncated=True,
+                            chart_reason="Bar chart selected because the query "
+                                         "compares a measure.").details("preparing")]
+        assert "Bar chart selected because the query compares a measure." in labels
+        assert "Preparing table · 42 rows" in labels
+        assert "Showing the first page of results only" in labels
+
+    def test_a_warning_row_is_never_dropped(self):
+        rows = self._ctx(truncated=True, row_count=100).details("preparing")
+        assert any(r["state"] == ts.STATE_WARNING for r in rows)
+
+    def test_a_step_that_never_started_is_unaffected_by_having_no_rows(self):
+        """finish() picks `completed` vs `skipped` for a never-started step from
+        whether it has details, and this was the only unconditional row here. The
+        branch is unreachable for "preparing": it is gated on a LATER step having
+        started, and preparing is last in STEP_ORDER — a never-started preparing is
+        withheld from the snapshot entirely."""
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("supervisor_classify", "…"))
+        t.consume(ev("rag_retrieve", "…"))
+        t.finish()
+        assert t.steps["preparing"].state == ts.STATE_PENDING
+        assert "preparing" not in {s["id"] for s in t.as_payload()["steps"]}
+
+    def test_a_plain_summary_turn_leaves_the_step_unexpandable(self):
+        """Which is the honest rendering: there is nothing inside the step that the
+        collapsed line does not already say."""
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("result_preparation", "…"))
+        c = self._ctx(output="summary")
+        t.set_context("preparing", c.sentence("preparing"))
+        t.set_details("preparing", c.details("preparing"), terminal=True)
+        t.finish()
+        step = {s["id"]: s for s in t.as_payload()["steps"]}["preparing"]
+        assert step["expandable"] is False
+        assert step["summary"] == "Putting together a summary."
+
+
+class TestATurnThatNeverReachedTheEngineExplainsNothing:
+    """A canned greeting is answered in ~100 ms without the engine ever being
+    called. It still shipped a `thinking` frame reading "Finalizing the results…"
+    — there were no results — and a full `explainability` skeleton with every block
+    empty, which a client renders as a "how this answer was generated" panel
+    explaining nothing. The four steps were already suppressed for exactly this
+    reason; the other two surfaces were left behind."""
+
+    def test_no_progress_means_no_progress_event(self):
+        t = ts.ThinkingStepTracker()
+        t.finish()
+        assert t.has_progress() is False, (
+            "has_progress() is the gate both suppressions hang on")
+
+    def test_a_turn_that_ran_still_reports_progress(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("supervisor_classify", "…"))
+        t.finish()
+        assert t.has_progress() is True
+
+    def test_a_failed_turn_with_no_progress_still_reports(self):
+        """The outage path has no progress either, and its frame is how the error
+        code reaches the client — suppressing it would lose the failure."""
+        t = ts.ThinkingStepTracker()
+        t.finish(failed=True, error_code="LLM_UNAVAILABLE", retryable=True)
+        p = t.as_payload()
+        assert p["status"] == "failed"
+        assert p["error"]["code"] == "LLM_UNAVAILABLE"
