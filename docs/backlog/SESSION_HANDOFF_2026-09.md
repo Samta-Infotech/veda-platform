@@ -1,9 +1,13 @@
 # Session handoff — VEDA platform work log (2026-09-09 → 2026-09-15)
 
-Written so a fresh chat session can pick this repo up with full context. Everything described
-here is **already committed** on branch `feat/refinements-pipeline` (the user committed it
+Written so a fresh chat session can pick this repo up with full context. Everything through
+§7 below is **already committed** on branch `feat/refinements-pipeline` (the user committed it
 personally between turns — commits `db18171` "md files add" and `e4fbc54` "changes"; nothing in
-this session was committed by the assistant, per this repo's `CLAUDE.md` rule below).
+that part of the session was committed by the assistant, per this repo's `CLAUDE.md` rule below).
+**§8 and §9 (2026-09-15, a follow-up session) are NOT committed** — 8 modified files + 4 new
+files total (listed at the end of §8.5 and §9.4), plus a few live DB rows (an RBAC grant, a DRF
+token) and a regenerated gitignored artifact — still sitting as uncommitted changes in the
+working tree.
 
 ## The one rule that matters most
 
@@ -144,6 +148,292 @@ moves retrieval ranking (that's the whole point of P1-2's fix), so blind additio
 failure mode the fix was closing. Not fixed this session; needs a real eval pass with a larger
 labelled query set than was available.
 
+**→ Fixed in §8 below (2026-09-15 follow-up session)**, exactly the way this paragraph
+prescribed: labelled precision/recall check first, then the grammar fix — plus a second,
+deeper bug the fix uncovered.
+
+---
+
+## 8. Follow-up session (2026-09-15): the P1-2 grammar gap, a real intent-boost bug, and MySQL dialect support
+
+A fresh session picked up the 3 items this handoff's own "What's left" summary named open
+(grammar gap / non-Postgres dialect support / thin eval infra), explicitly leaving item 4
+(standing infra risk notes, §"Environment gotchas" above) untouched. **`METAL_EMBED_URL` was
+reachable and fast again at the start of this session** — confirmed live (`curl .../encode_query`
+round-trip: 0.7s, not the 60s CPU-fallback timeout) before relying on it. This one fact is what
+made the rest of this section possible: gotcha #4 below (CPU-only eval taking 40+ minutes) simply
+didn't apply this time.
+
+### 8.1 Full 24-query P1-2 eval, now that Metal is fast
+
+One `eng.retrieve()` call: ~1.7s (was several seconds/batch on CPU). Full 24-query (21 gradeable)
+sweep: ~90s, not 40+ minutes. Ran it clean, before touching any code, as a sanity check on the
+2026-09-11 8-query finding above — **BASELINE and AFTER came back byte-identical again** on the
+full set (recall@5=0.1936, recall@15=0.3734, mrr=0.4139, table_recall@3=0.7619 both conditions).
+Not a sampling artifact; something structural.
+
+### 8.2 The grammar-coverage gap — fixed, data-backed (as prescribed above)
+
+Built the labelled check this doc's §7 said was required before touching the word list, rather
+than guessing:
+- **`evaluation/grouping_grammar_labels.jsonl`** (new, 25 rows) — true positives for every
+  existing + candidate grouping phrase (including the exact golden-set query cited above), and
+  true-negative *distractors* sharing the surface word "by" that must NOT trigger grouping
+  (`increased by`, `sorted by`, `divided by`, `backed by`, `measured by`, `followed by`,
+  `given by`, `accompanied by`, `differ by`, plus the pre-existing ratio-wording case).
+- **`scripts/eval_grouping_grammar.py`** (new) — runs `grouped_mode()` over that set,
+  BASELINE `QUERY_GRAMMAR["grouping"]` vs a CANDIDATE list, never mutating `config.py` itself.
+  BASELINE: precision=1.0, recall=0.417 (7/12 false negatives — every one a "broken down by" /
+  "broken out by" / "break down" / "split by" / "segmented by" / "categorized by" phrasing).
+  CANDIDATE (adding exactly those 6 phrasings): precision=1.0, recall=1.0 — zero new false
+  positives against the distractor set.
+- **Applied**: `veda_core/config.py`'s `QUERY_GRAMMAR["grouping"]` now includes those 6 phrasings
+  alongside the original `per/each/grouped by/breakdown`. Bare "by" deliberately never added.
+- **No regression**: hand-invoked all 15 parametrized assertions from
+  `tests/test_grouped_aggregation_operators.py` (pytest still isn't installed) — unchanged. Full
+  64/65 routing suite re-confirmed. Live-confirmed: the cited golden-set query now classifies
+  `AGGREGATE` instead of `SIMPLE`.
+
+### 8.3 The deeper bug this uncovered: `IntentBooster` was a permanent no-op
+
+Re-ran the P1-2 eval expecting a change after 8.2 — **got the exact same byte-identical numbers a
+third time.** Diffed per-column rankings for the query that now triggers AGGREGATE: SIMPLE and
+AGGREGATE produced **identical ranked output**, not just identical metrics — meaning the boost
+itself wasn't firing, independent of intent classification. Root cause:
+`retrieval/intent_boosting.py::IntentBooster._get_column_metadata()` walks
+`semantic_model["tables"][t]["columns"][c]` — but no table entry in the real
+`veda_semantic_model.json` has a `"columns"` sub-dict at all (confirmed live: a real entry's keys
+are `table_name/business_purpose/primary_entity/table_type/candidate_temporal_columns/
+candidate_measure_columns`). Column metadata (`analytics_role` — the field every `boost_*` method
+reads) actually lives in the model's own **top-level flat `columns` dict**, keyed `"table.column"`
+(1902 entries for source 2; confirmed `currency_id`→`IDENTIFIER`, `paid_amount`→`MEASURE` both
+present there with the expected roles). So the lookup always returned `{}`, `role` was always
+`""`, and `boost_aggregate`/`boost_temporal`/`boost_multi_table` have been **unconditional no-ops
+for every intent, always** — not a grammar problem; the boost could never have fired even with
+perfect grammar coverage. This is almost certainly the real reason both the 2026-09-11 8-query
+eval and this session's first 24-query re-run (8.1) showed zero effect.
+
+**Fixed**: reads the flat `columns` dict first (O(1), was an O(tables×columns) walk), falling
+back to the old nested-walk shape only on a miss. No dedicated tests existed for
+`intent_boosting.py` (checked — zero references). Live-verified: `paid_amount` (MEASURE) jumped
+rank 12→2 under AGGREGATE intent; `currency_id` (IDENTIFIER) dropped out of the top 15 (the
+`-0.40`-scaled IDENTIFIER penalty firing as designed).
+
+**Definitive P1-2 eval, both fixes applied, full 24-query set, Metal fast:**
+
+| metric | BASELINE | AFTER | Δ |
+|---|---|---|---|
+| recall@5 | 0.1936 | 0.2571 | **+33% relative** |
+| recall@15 | 0.3734 | 0.3907 | +5% relative |
+| mrr | 0.4139 | 0.4790 | **+16% relative** |
+| table_recall@3 | 0.7619 | 0.7143 | **−6% relative** |
+
+Genuinely mixed, not a clean win. The table_recall@3 dip is explainable, not a bug: the
+IDENTIFIER penalty demotes columns like `currency_id` even when a query wants that column as a
+GROUP BY dimension rather than something to sum — IDENTIFIER-vs-grouping-dimension is a real
+conflict this fix surfaces but doesn't resolve. **Kept, not further tuned** — flagged as a follow-
+up, not reverted from a 21-query sample (matching this doc's own "did NOT revert based on
+inconclusive data" precedent above, except this result is no longer inconclusive, just mixed).
+Full 64/65 routing suite re-confirmed clean.
+
+### 8.4 Non-Postgres SQL dialect support — MySQL added, live-verified
+
+The P0-2 gap above: `_can_sql_introspect()` gated full SQL introspection to Postgres only, "since
+there is no live [non-Postgres] one to verify dialect-specific SQL against." Found
+`connectors/relational.py::MySQLConnector` already existed for L1 schema extraction (dialect-
+correct information_schema queries, backtick quoting) — but `ingestion/relationship_graph.py`
+never used it; it hardcoded its own `psycopg2` connection and Postgres-only SQL (double-quoted
+identifiers, `::text` casts, `= ANY(%s)` array binds) for PK/cardinality/polymorphic detection.
+
+Stood up a throwaway MySQL 8 container (`veda-test-mysql`, on `veda-platform_veda_net`, removed
+after verification) with a small `customers`/`orders` schema (real FK,
+`orders.customer_id → customers.id`, multiple orders per customer) — the live source this gap
+always lacked.
+
+**Found and fixed 3 real bugs, not just added new code:**
+1. **`mysql-connector-python` was never installed anywhere in this deployment** — `MySQLConnector`
+   has depended on it since it was written. Added to `requirements/inference.txt` (shared by
+   `inference` + `ingest-worker`) and `requirements/host-ingest.txt`.
+2. **`connectors/relational.py::RelationalConnector.connect()`'s own health-check ping never
+   drained its `SELECT 1` result before closing the cursor.** Harmless on psycopg2/sqlite3; fatal
+   on mysql-connector-python's C extension, which leaves the whole *connection* flagged "has
+   unread result" until something fetches it — so the very next `get_schema()` call blew up
+   immediately with `InternalError: Unread result found`, before running any real query. A real,
+   previously-unexercised bug in the shared connector base class, unrelated to this fix's own
+   changes — never triggered before because MySQL was never actually runnable (bug #1). Fixed:
+   drain via `cur.fetchall()` before `cur.close()`.
+3. **`relationship_graph.py` dialect support** — added `_engine_of()`, `_ident()` (backtick vs
+   double-quote), `_cast_text()` (`CAST(x AS CHAR)` vs `x::text`), `_in_clause()` (dialect-neutral
+   `IN (%s,%s,...)`, replacing Postgres-only `= ANY(%s)` — unsupported by mysql-connector-python or
+   most non-psycopg2 drivers) — threaded through `_conn` (now dispatches on `ctx.engine`),
+   `_table_meta`, `_cardinality`, `_polymorphic_edges`. `_can_sql_introspect()` now accepts
+   `mysql` (still declared-FK-only for SQL Server/Oracle/etc — no live instance yet). Also fixed
+   the schema default: MySQL has no `"public"` schema — `information_schema.*`'s schema filter IS
+   the database name there; Postgres's `"public"` default unchanged.
+
+**Live-verified** (`scripts/verify_mysql_relationship_graph.py`, new — a one-off repro script, not
+a permanent test): `build_relationship_graph()` returned `mode: "sql"` (full introspection, not
+the fallback), found the 1 real FK edge, computed `cardinality: "N:1"` correctly from real data
+correlation. **No regression on the real Postgres path**: rebuilt source 2's graph through the
+same patched code — **178 tables / 609 edges / 0 polymorphic, byte-identical** to the pre-existing
+stats recorded above. Full 64/65 suite re-confirmed clean.
+
+**Still not done**: SQL Server, Oracle, or any other dialect — still declared-FK-only, no live
+instance to verify against. `mysql-connector-python` is a live pip install in the running
+containers this session; tracked in `requirements/*.txt` for the next image rebuild, not yet
+baked into one.
+
+### 8.5 Files touched this session (all uncommitted)
+
+Modified: `veda_core/config.py`, `veda_core/retrieval/intent_boosting.py`,
+`veda_core/ingestion/relationship_graph.py`, `veda_core/connectors/relational.py`,
+`requirements/inference.txt`, `requirements/host-ingest.txt`,
+`docs/backlog/query-engine-open-items.md` (detailed write-up, same content as this section in
+more depth).
+New: `evaluation/grouping_grammar_labels.jsonl`, `scripts/eval_grouping_grammar.py`,
+`scripts/verify_mysql_relationship_graph.py`, this file's §8 itself.
+
+Full 64/65 routing test suite re-confirmed clean after every one of 8.2/8.3/8.4's changes, not
+just once at the end — same discipline as the rest of this doc.
+
+Two new resolvable follow-ups, neither fixed this session: the IDENTIFIER-vs-grouping-dimension
+tension in `boost_aggregate` (8.3), and full non-Postgres-non-MySQL dialect support (8.4).
+
+---
+
+## 9. Same follow-up session, continued: chat API auth, a live "why did this fail" trace, and a real pipeline gap fixed
+
+The user asked for the chat API to converse with VEDA directly (not just the one-shot
+`/api/v1/query` endpoint) and then hit a real refusal live — this section is that whole thread,
+kept in one place since each step fed the next.
+
+### 9.1 The chat API, and how auth actually works in this deployment
+
+Endpoint: `POST /api/v1/conversations/query {message, chat_id?, stream?}` (mounted under
+`api/v1/` by `apps/chat/urls.py`; `chat_id: null` starts a new conversation, `stream: false` gives
+one buffered JSON reply instead of the SSE default — best for curl/terminal checks). Also:
+`POST /api/v1/conversations/create`, `GET /api/v1/conversations/list`,
+`GET /api/v1/conversations/history?chat_id=...`. Local stack: `http://localhost:8080/...`
+(nginx → api container).
+
+**Two real gaps hit getting a login to actually work, not just config trivia:**
+1. `admin` (username `admin`/password `admin123`, `user_id=2`, `is_staff=False`) had **no RBAC
+   role row** — `apps/authentication/services.py`'s login flow refuses any non-`is_staff` account
+   with zero `UserRole` rows (`NO_ROLE_ASSIGNED`, by design — "is_superuser does NOT bypass this
+   ... an admin-app account still needs a real role assigned"). Fixed by granting the existing
+   `Admin` role (`access_management_role.id=1`) directly via a `access_management_userrole` insert
+   (`role_id=1, user_id=2, granted_by_id=NULL`) — a real, reversible RBAC grant on the local DB.
+2. **This deployment's `.env` has `VEDA_JWT_AUTH` off** (`config/settings/base.py:172`,
+   default `"0"`) — while off, login returns a literal placeholder string
+   (`LEGACY_ACCESS_TOKEN = "dummy_access_token"`, `apps/authentication/services.py:83`) that
+   authenticates NOTHING; there's also no session-cookie fallback (no `Set-Cookie` on the login
+   response, confirmed via `curl -i`). Rather than flip `VEDA_JWT_AUTH=1` (a deployment-wide
+   behavior change needing a container recreate), created a real DRF `Token` for `admin` directly
+   (`rest_framework.authtoken.models.Token.objects.get_or_create(user=admin)`) — smaller, local,
+   reversible (delete the row). **Use `Authorization: Token <key>`, not `Bearer`** — DRF's
+   `TokenAuthentication` uses its own scheme. Live-verified: a real `chat_id`/`message_id` got
+   persisted through a full `POST /api/v1/conversations/query` call.
+
+### 9.2 "how many properties are there?" — traced live, not guessed
+
+The user's very first real chat query refused (`"I couldn't work out a reliable total for
+this..."`). Traced it with the real trace object (`veda_hybrid.run_hybrid_query(..., verbose=True)`
+→ `MultiResult.items[0].result["trace"]`), not by assuming the old documented bug still applied:
+
+- **The OLD documented anchor-routing bug (§ "Multi-source coordinator" above, and
+  `docs/backlog/query-engine-open-items.md`'s "routes to `assets_listingvisit` instead of the
+  properties table") is NOT what's happening now.** Routing correctly picks `assets_asset` (the
+  real properties table) — confirmed in the trace's `entity_selection`/`schema_linking` sections.
+- **The real cause**: `query_understanding.aggregation` correctly detects a bare COUNT
+  (`aggregate_mode()`'s "counting" branch fires on "how many" — this is right). But
+  `veda/pipeline.py`'s SQL-planning branch chain (the `if/elif` chain choosing HOW to build the
+  SQL — multi-hop FK / arbiter value filter / temporal predicate / ranked-temporal) never
+  consulted that signal at all. A bare "how many X are there" — no filter, no date window, no
+  ranking — matches none of those specific branches and falls to the generic catch-all, which
+  builds a plain row-listing `SELECT` (confirmed: 46 columns, zero aggregate functions —
+  `sql_planning: {"action": "single_table", ...}`). `veda/intent_sql_alignment.py::
+  aggregate_presence_ok()` then correctly refuses — "how many" intent + an aggregate-less SQL —
+  rather than show that row list as if it were the count. **Working safety net, real upstream
+  gap.** (`veda/planning.py::build_aggregate_sql`, which exists for exactly this, is never called
+  anywhere in `pipeline.py` — confirmed, zero references.)
+- Contrast: `"how many users are there"` already worked — but via a completely different path,
+  `query/fast_path.py`'s pre-registered metric shortcut (`metric.count`), confirmed from this same
+  session's earlier P0-5 work. `assets_asset`/"properties" has no equivalent registered count
+  metric, so fast_path never even attempts it and the gap above is what actually answers (or
+  refuses) it.
+- **Side effect surfaced along the way, unrelated to the refusal itself**: the trace also logged
+  `[UnifiedGraph] ⚠ STALE — rebuilt inputs since last build: relationship_graph` — caused by this
+  session's own §8.4 MySQL-verification work, which regenerated source 2's relationship graph file
+  (same real data, fresh mtime) without also refreshing the unified graph that depends on it.
+  **Fixed**: `ingestion/unified_graph_builder.py`'s CLI only rebuilds the flat legacy file
+  (`data/veda_unified_graph.json`) — source 2 actually reads its own per-source copy
+  (`data/default/2/veda_unified_graph.json`), so rebuilt THAT one directly
+  (`write_unified_graph(source_id=2, tenant="default")`, same 17,134 nodes / 33,551 edges as the
+  2026-09-10 build). Confirmed live: the staleness warning is gone on the next query.
+
+### 9.3 Fixed: `veda/pipeline.py` now answers bare-count queries deterministically
+
+Per the user's explicit ask ("update pipeline to accept these types of queries as well"), added a
+new deterministic branch to the SQL-planning `if/elif` chain (`veda/pipeline.py`, right before the
+existing `elif _tpred:` temporal-only branch, so it takes priority and can also compose with a date
+window):
+
+```python
+_bare_count = bool(_agg) and _agg.get("op") is None and _agg.get("threshold") is None \
+    and not _agg.get("top_n") and not _agg.get("ranked")
+...
+elif _bare_count:
+    sql = f'SELECT COUNT(*) AS count FROM "{primary}"' + (f' WHERE {_tpred}' if _tpred else '')
+    ...
+    _llm_sql = False   # deterministic — skip IR-equivalence
+```
+
+`_agg` is the SAME `aggregate_mode(query)` dict already computed near the top of `run_query()` —
+the guard deliberately excludes `threshold`/`op`/`top_n`/`ranked` so this never intercepts a
+per-anchor child-count ("X with more than one Y") or a ranked count ("top 5 X by count"), which
+have their own existing, unrelated handling. Placed BEFORE `_arb_filters`'s/`_mh`'s/`_fk`'s
+branches in priority is deliberately NOT how this landed — those still own their own SQL shape;
+`_bare_count` only fires when none of them matched, i.e. genuinely no filter at all (plus optional
+date window via `_tpred`).
+
+**Live-verified**: `"how many properties are there?"` → `SELECT COUNT(*) AS "count" FROM
+"assets_asset" LIMIT 100` → **6,402**, `status: ok`, real persisted answer through the actual chat
+API. **Regression-checked**:
+- Full 64/65 routing suite — unchanged.
+- `"how many users are there"` — still fast_path, untouched (the new branch is in a different code
+  path fast_path never reaches).
+- `"list top 5 properties by monthly rent"` — still the grouped/ranked SQL, not hijacked into a
+  bare count.
+- `"show all vendors"` — unaffected plain row list (no aggregate signal at all).
+
+**Found, NOT fixed — flagged, not chased**: `"how many properties were added last month"` still
+refuses, but for a completely different, pre-existing, unrelated reason — `aggregate_mode()`
+returns `ranked: True` for it (the word "last" ALSO triggers the ranking-word detector; "last N"
+vs. "last month" is a genuine, separate ambiguity this session did not touch), so it deliberately
+skips the new `_bare_count` branch (which excludes `ranked=True` on purpose, to avoid stepping on
+real ranking queries), falls into the existing temporal-only branch, and THAT routes to the wrong
+anchor (`reminders_reminder`) and hits an unrelated value-grounding refusal on the literal word
+"property". Same discipline as §8.2's grammar work: not touching `QUERY_LANGUAGE["ranking"]`'s
+word list without its own labelled precision/recall check first.
+
+**Also noticed, not chased**: `result_explainer.run_nl_answer` logs `SLM unavailable/failed
+(RuntimeError: SLM unreachable at http://host.docker.internal:11434/api/generate: HTTP Error 404:
+Not Found)` on every query that reaches it, even though a direct `curl` with the CORRECT model
+name (`.env`'s real `SLM_MODEL_NAME=qwen2.5-coder:7b`, confirmed present in `ollama list`) succeeds
+in under a second. `result_explainer.py` appears to request a different/wrong model name than
+`SLM_MODEL_NAME` for this specific call — degrades gracefully to a working fallback answer
+("The count is 6,402."), so nothing user-visible broke, but it means every NL-narrated answer in
+this deployment is currently using the fallback path, not the LLM one. Not investigated further
+this session.
+
+### 9.4 Files touched in §9 (also uncommitted)
+
+Modified: `veda_core/veda/pipeline.py` (the `_bare_count` branch). Data changes, not files:
+one `access_management_userrole` row (admin's RBAC grant), one `authtoken_token` row (admin's DRF
+token), and a regenerated `data/default/2/veda_unified_graph.json` (gitignored, not part of
+`git status` either way). No `docs/backlog/query-engine-open-items.md` entry was added for this
+section — ask if you want one written up in that doc's fuller style too.
+
 ---
 
 ## Test suite — how to actually run it
@@ -191,11 +481,14 @@ functions (no `__main__` block), since pytest isn't available.
    (including, surprisingly, `query/source_coordinator.py`'s routing tests, which call real dense
    encoding despite claiming "no DB/SLM/model" in their docstring) take up to 60s per call. For
    fast iteration, override `METAL_EMBED_URL=` (empty) or `METAL_EMBED_TIMEOUT=2` on the specific
-   command — never edit the real `.env` for this.
-4. **CPU-only BGE-M3 is slow for bulk eval.** With no working Metal backend, a full 24-query
-   retrieval eval sweep (2 conditions) took 40+ minutes and had to be abandoned/reduced to 8
-   queries. Budget for this or find a way to get Metal reachable before running a real
-   before/after retrieval eval.
+   command — never edit the real `.env` for this. **Was unreachable at the end of the 2026-09-09
+   session; was reachable and fast again (0.7s round-trip) at the start of the 2026-09-15 follow-
+   up (§8)** — exactly the flakiness this note warns about. Always `curl` the URL first; don't
+   assume either state.
+4. **CPU-only BGE-M3 is slow for bulk eval — but only when Metal is actually down.** With no
+   working Metal backend, a full 24-query retrieval eval sweep (2 conditions) took 40+ minutes and
+   had to be abandoned/reduced to 8 queries. With Metal reachable (§8), the same full sweep took
+   ~90s. Check Metal reachability before assuming an eval needs to be shrunk.
 5. **Rapid successive file edits trigger reload storms.** `uvicorn --reload --reload-dir /app`
    watches the WHOLE app directory, including one-off scratch/eval scripts under `scripts/`. Many
    edits in quick succession (each triggering a ~40-60s CPU rewarm) can compound with a
@@ -210,10 +503,10 @@ functions (no `__main__` block), since pytest isn't available.
 
 ## Where to look for more detail
 
-- **`docs/backlog/query-engine-open-items.md`** — the complete, itemized record of every fix in
-  this session (P0-1 through P2-3), each with exact evidence, the fix applied, and live
-  verification transcripts. This is the single most detailed source if you need to verify or
-  extend any specific item above.
+- **`docs/backlog/query-engine-open-items.md`** — the complete, itemized record of every fix
+  across both sessions (P0-1 through P2-3, then the 2026-09-15 follow-up's grammar/intent-boost/
+  MySQL work), each with exact evidence, the fix applied, and live verification transcripts. This
+  is the single most detailed source if you need to verify or extend any specific item above.
 - **`docs/INGESTION_AND_QUERY_PIPELINES.md`** — the one-read architecture walkthrough.
 - **`docs/MULTI_SOURCE.md`** §0/§2/§7 — the coordinator's scoped-authoritative design and why.
 - **`docs/RETRIEVAL.md`** §2 — the P1-1 boost-only fix and the eval-harness gap, in place.

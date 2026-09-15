@@ -1235,6 +1235,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             # all (e.g. "last 10 ledger entries" — "last" without a time unit sets no
             # temporal_filter), so ORDER BY has something to sort by.
             _want_rank_order = _rank.top_n is not None and _rank.basis == "temporal"
+            # Bare-count shape (2026-09-15): "how many X are there" — aggregate_mode()'s
+            # "counting" branch (veda/planning.py) already flags this correctly in
+            # query_understanding.aggregation (_agg here), but nothing downstream in this
+            # branch chain used to CONSUME that signal for the plain, unqualified case (no
+            # value filter, no per-anchor threshold, no top-N/ranking) — it fell all the way
+            # to the generic `else` below, which builds a row-list SELECT with zero aggregate
+            # functions. veda/intent_sql_alignment.py::aggregate_presence_ok then correctly
+            # refused ("I couldn't work out a reliable total...") rather than show that row
+            # list as if it were the count — a real, working safety net catching a real,
+            # upstream gap (confirmed live: "how many properties are there?" against source 2,
+            # anchor correctly resolved to assets_asset, SQL gen still produced a 46-column row
+            # list). `_agg` is the SAME dict computed once near the top of this function
+            # (aggregate_mode(query)) — deliberately excludes threshold/op/top_n/ranked so this
+            # never intercepts a per-anchor child-count ("X with more than one Y") or a ranked
+            # count ("top 5 X by count"), which have their own existing handling elsewhere.
+            _bare_count = bool(_agg) and _agg.get("op") is None and _agg.get("threshold") is None \
+                and not _agg.get("top_n") and not _agg.get("ranked")
             _tcol = (_resolve_temporal_column(primary, sm)
                     if (tf and (tf.start or tf.end)) or _want_rank_order else None)
             # "latest 10 X" ALSO makes L1 match the vague-recency word and derive a
@@ -1421,6 +1438,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 _tick("sql_planning", "Applying your filters")
                 print(f"  [L4c] value filter {primary} WHERE {' AND '.join(_wparts)}"
                       "  — deterministic, no LLM")
+            elif _bare_count:
+                # "how many X are there" (optionally + a date window, e.g. "how many X
+                # were added last month") — see `_bare_count`'s own comment above for why
+                # this is needed. Checked BEFORE `_tpred` on purpose: a bare count with a
+                # date window should still COUNT, not fall into the temporal_only row-list
+                # branch below and get refused the same way. No value/FK filter here (those
+                # already matched `_arb_filters`/`_mh`/`_fk` above, which own their own SQL
+                # shape) — this is deliberately the plain "just count everything (optionally
+                # in a window)" case only.
+                sql = f'SELECT COUNT(*) AS count FROM "{primary}"' + (f' WHERE {_tpred}' if _tpred else '')
+                allowed_columns = allowed_columns + ([_tcol] if _tcol else [])
+                _llm_sql = False                 # deterministic — skip IR-equivalence
+                tr.set("sql_planning", action="bare_count", table=primary, temporal=_tcol)
+                _tick("sql_planning", "Counting the matching rows")
+                print(f"  [L4f] Bare count   COUNT(*) FROM {primary}"
+                      + (f" WHERE {_tcol} in window" if _tpred else "")
+                      + "  — deterministic, no LLM")
             elif _tpred:
                 # Temporal-only deterministic projection ("users created last month") — no
                 # value/FK filter, just the date window on the canonical temporal column.
