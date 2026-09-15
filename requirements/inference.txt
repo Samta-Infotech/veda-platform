@@ -23,6 +23,9 @@ fastapi
 uvicorn[standard]
 anyio
 psycopg2-binary
+mysql-connector-python  # P0-2 follow-up (2026-09-15): connectors/relational.py::MySQLConnector
+                        # and ingestion/relationship_graph.py's MySQL dialect path both need
+                        # this — was never actually installed anywhere in this deployment.
 redis
 langgraph
 langgraph-checkpoint-redis  # chatbot/checkpointer.py (imported via chatbot.run in the worker)

@@ -12,6 +12,7 @@ scipy==1.11.4           # WP5: PPR transition matrix
 scikit-learn==1.9.0
 dateparser
 psycopg2-binary
+mysql-connector-python  # P0-2 follow-up (2026-09-15) — see requirements/inference.txt
 sqlglot
 langgraph
 langchain-core

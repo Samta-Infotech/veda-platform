@@ -51,10 +51,31 @@ class IntentBooster:
 
         Returns:
             Column metadata dict
-        """
-        # Try to find in semantic model
-        tables = self.semantic_model.get("tables", {})
 
+        P1-2 follow-up (2026-09-15): this used to ONLY walk
+        `tables[table_name]["columns"][col_name]` — but no entry in `sm["tables"]`
+        actually has a "columns" sub-dict (confirmed live against
+        veda_core/data/veda_semantic_model.json: a real table entry's keys are
+        `table_name/business_purpose/primary_entity/table_type/
+        candidate_temporal_columns/candidate_measure_columns` — no "columns" key at
+        all). Column metadata (including `analytics_role`, the field every boost_*
+        method below reads) actually lives in the semantic model's own TOP-LEVEL
+        flat `columns` dict, keyed exactly `"table.column"` (1902 entries for
+        source 2). So this always returned `{}`, `role` was always `""`, and every
+        boost_* method below was an unconditional no-op for every intent — found
+        while re-verifying P1-2 after fixing the separate aggregate/grouped_mode
+        grammar-coverage gap (docs/backlog/query-engine-open-items.md) still showed
+        a byte-identical before/after eval; this is the real reason, not just grammar
+        coverage. Reads the real flat shape first (O(1) dict lookup, was O(n) table
+        walk); keeps the old nested walk as a fallback for any differently-shaped
+        model passed in some other call site.
+        """
+        flat = self.semantic_model.get("columns", {})
+        meta = flat.get(col_id)
+        if meta is not None:
+            return meta
+
+        tables = self.semantic_model.get("tables", {})
         for table_name, table_meta in tables.items():
             columns = table_meta.get("columns", {})
             for col_name, col_meta in columns.items():

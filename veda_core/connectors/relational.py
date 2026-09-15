@@ -285,6 +285,18 @@ class RelationalConnector(BaseConnector):
                 # Quick ping — use direct execute for SQLite compatibility
                 cur = self._conn.cursor()
                 cur.execute("SELECT 1;")
+                # P0-2 follow-up (2026-09-15): MUST drain the ping's own result before
+                # closing — psycopg2/sqlite3 don't care, but mysql-connector-python's C
+                # extension leaves the whole CONNECTION (not just this cursor) flagged
+                # "has unread result" if you close a cursor without fetching, and every
+                # later cursor() call on that connection then raises
+                # `InternalError: Unread result found` immediately — confirmed live
+                # against a real MySQL 8 container: get_schema()'s first
+                # `with self._conn.cursor()` blew up before running any real query.
+                try:
+                    cur.fetchall()
+                except Exception:
+                    pass
                 try:
                     cur.close()
                 except Exception:

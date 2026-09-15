@@ -1,0 +1,25 @@
+{"query": "average carpet area per project", "label": true, "note": "existing trigger: per"}
+{"query": "total revenue per city", "label": true, "note": "existing trigger: per"}
+{"query": "how much does each type contribute", "label": true, "note": "existing trigger: each"}
+{"query": "average revenue grouped by region", "label": true, "note": "existing trigger: grouped by"}
+{"query": "breakdown of total revenue by region", "label": true, "note": "existing trigger: breakdown (needs a measure word too, per grouped_mode's own contract)"}
+{"query": "what is the average payment amount when broken down by specific currency configurations", "label": true, "note": "gap: broken down by (real golden-set query)"}
+{"query": "show total rent broken down by property type", "label": true, "note": "gap: broken down by"}
+{"query": "average rating broken out by service location", "label": true, "note": "gap: broken out by"}
+{"query": "can you break down total revenue by region", "label": true, "note": "gap: break down ... by"}
+{"query": "total maintenance cost split by vendor", "label": true, "note": "gap: split by"}
+{"query": "average payment amount segmented by currency", "label": true, "note": "gap: segmented by"}
+{"query": "total invoices categorized by status", "label": true, "note": "gap: categorized by"}
+{"query": "average price increased by 10 percent last quarter", "label": false, "note": "distractor: increased by (not grouping)"}
+{"query": "sort the recent payments by their currency configuration", "label": false, "note": "distractor: sort ... by (ordering, not grouping)"}
+{"query": "what is the ratio of completed payment value to pending value", "label": false, "note": "distractor: ratio_mode territory"}
+{"query": "the invoice was followed by a penalty notice", "label": false, "note": "distractor: followed by"}
+{"query": "the total is given by the sum of all line items", "label": false, "note": "distractor: given by"}
+{"query": "the delay was accompanied by a rent increase", "label": false, "note": "distractor: accompanied by"}
+{"query": "what is the total paid amount divided by the number of tenants", "label": false, "note": "distractor: divided by (arithmetic, not grouping)"}
+{"query": "the loan is backed by a fixed deposit", "label": false, "note": "distractor: backed by"}
+{"query": "vendor performance is measured by average rating", "label": false, "note": "distractor: measured by"}
+{"query": "the totals differ by less than one percent", "label": false, "note": "distractor: differ by"}
+{"query": "average carpet area", "label": false, "note": "negative: no grouping word at all"}
+{"query": "list all users", "label": false, "note": "negative: no aggregate, no grouping"}
+{"query": "which project has the highest carpet area", "label": false, "note": "negative: superlative owns this, not grouped_mode"}

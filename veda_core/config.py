@@ -1700,7 +1700,19 @@ QUERY_GRAMMAR = {
     "counting":  ["how many", "count", "number of"],
     "quantity":  ["more than", "at least", "fewer than", "less than", "greater than",
                   "exactly", "over", "between"],
-    "grouping":  ["per", "each", "grouped by", "breakdown"],
+    # 2026-09-15: added "broken down by"/"broken out by"/"break down"/"split by"/
+    # "segmented by"/"categorized by" — synonyms of "grouped by"/"breakdown" that were
+    # silently missing (docs/backlog/query-engine-open-items.md's P1-2 follow-up flagged
+    # "broken down by" specifically, confirmed live against a real golden-set query).
+    # Data-backed, not blind: evaluation/grouping_grammar_labels.jsonl +
+    # scripts/eval_grouping_grammar.py measure precision/recall against a labelled set of
+    # true positives AND "by"-distractors (increased by / sorted by / divided by / backed
+    # by / measured by / followed by / given by / accompanied by / differ by) — the
+    # candidate list scores precision=1.0, recall=1.0 (zero new false positives). Bare
+    # "by" is deliberately never added — that's exactly what would catch the distractors.
+    "grouping":  ["per", "each", "grouped by", "breakdown", "broken down by",
+                  "broken out by", "break down", "split by", "segmented by",
+                  "categorized by"],
     # superlatives are grammar too: "which X ... highest Y" declares a ranked
     # aggregation (GROUP BY dim ORDER BY agg LIMIT 1), not a row lookup.
     "superlative_max": ["highest", "most", "largest", "greatest", "maximum", "biggest"],

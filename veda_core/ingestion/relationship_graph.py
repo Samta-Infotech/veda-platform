@@ -62,8 +62,48 @@ _POLY_VALUE_SAMPLE = 200      # object_id values sampled per discriminator value
 _MATCH_FLOOR = 0.80           # min correlation to accept a polymorphic/inferred edge
 
 
+def _engine_of(ctx) -> str:
+    """Normalized engine name for a ctx (or the legacy ctx-less Postgres default)."""
+    return ((ctx.engine if ctx is not None else None) or "postgresql").lower()
+
+
+# Dialect-specific identifier quoting / value-list / text-cast helpers (P0-2 follow-up,
+# 2026-09-15). Everything below this point used to be written ONLY against Postgres
+# syntax (double-quoted identifiers, `::text` casts, `= ANY(%s)` array binds) even
+# though `_table_meta`'s information_schema query was already ANSI-portable — these
+# three were the actual remaining Postgres-only dependencies. Verified live against a
+# throwaway MySQL 8 container (see docs/backlog/query-engine-open-items.md) — mysql's
+# `information_schema.table_constraints`/`key_column_usage` join matches Postgres's
+# shape exactly, so only quoting/casting/set-membership syntax needed to change.
+_MYSQL_ENGINES = ("mysql",)
+
+
+def _ident(engine: str, name: str) -> str:
+    """Quote a bare identifier for the given engine dialect."""
+    if engine in _MYSQL_ENGINES:
+        return f"`{name.replace(chr(96), '')}`"
+    return f'"{name}"'
+
+
+def _cast_text(engine: str, quoted_ident: str) -> str:
+    """Cast an already-quoted identifier to a text/string type, per dialect."""
+    if engine in _MYSQL_ENGINES:
+        return f"CAST({quoted_ident} AS CHAR)"
+    return f"{quoted_ident}::text"
+
+
+def _in_clause(n: int) -> str:
+    """A dialect-neutral `(%s, %s, ...)` for `col IN (...)` with n bound params —
+    avoids Postgres-only `= ANY(%s)` array binding, which mysql-connector-python
+    (and most non-psycopg2 DB-API drivers) don't support."""
+    return "(" + ",".join(["%s"] * n) + ")"
+
+
 def _conn(ctx=None):
-    """A DB-API connection to the source being ingested.
+    """A DB-API connection to the source being ingested, dialect-dispatched on
+    ``ctx.engine`` (P0-2 follow-up, 2026-09-15 — was unconditionally psycopg2;
+    ``_can_sql_introspect`` gated every non-Postgres engine to declared-FK-only mode
+    specifically BECAUSE this function couldn't connect to anything else yet).
 
     ``ctx`` (an ``ingestion.contracts.SourceContext``) carries the ingesting
     source's OWN connection dict — passed in by ``layers/l5_publish.py`` (P0-2,
@@ -74,6 +114,14 @@ def _conn(ctx=None):
     ingestion model that fallback is byte-identical to passing ``ctx``: the
     injected source IS the one being ingested in that process either way."""
     cfg = (ctx.connection if ctx is not None and ctx.connection else None) or get_primary_relational_source()
+    engine = _engine_of(ctx)
+
+    if engine in _MYSQL_ENGINES:
+        import mysql.connector
+        return mysql.connector.connect(
+            host=cfg["host"], port=cfg.get("port", 3306), database=cfg["dbname"],
+            user=cfg["user"], password=cfg.get("password", ""))
+
     conn = psycopg2.connect(host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
                             user=cfg["user"], password=cfg.get("password", ""))
     # P0-2: the unqualified "{table}" identifiers in _polymorphic_edges/_cardinality below
@@ -122,13 +170,18 @@ def _q(cur, sql, args=None):
     return cur.fetchall()
 
 
-def _table_meta(cur, tables, schema="public"):
+def _table_meta(cur, tables, schema="public", engine="postgresql"):
     """Per table: columns, PK, unique 'key-like' columns, and column data types.
     ``schema`` (P0-2) is the SOURCE's declared schema, not a hardcoded 'public' —
     a Postgres source using a non-default schema previously got empty metadata for
-    every table (the information_schema filter never matched)."""
+    every table (the information_schema filter never matched). ``engine`` (P0-2
+    follow-up) only affects identifier quoting below — the INFORMATION_SCHEMA query
+    itself is unchanged, verified ANSI-portable to MySQL's `table_constraints`/
+    `key_column_usage` (same join shape, same PK marker `constraint_type='PRIMARY
+    KEY'`)."""
     meta = {}
     for t in tables:
+        qt = _ident(engine, t)
         rows = _q(cur,
             "SELECT column_name, data_type FROM information_schema.columns "
             "WHERE table_schema=%s AND table_name=%s", [schema, t])
@@ -146,7 +199,7 @@ def _table_meta(cur, tables, schema="public"):
             " AND kcu.table_schema = tc.table_schema "
             "WHERE tc.constraint_type = 'PRIMARY KEY' "
             "  AND tc.table_schema = %s AND tc.table_name = %s", [schema, t])]
-        rowcount = _q(cur, f'SELECT count(*) FROM "{t}"')[0][0]
+        rowcount = _q(cur, f"SELECT count(*) FROM {qt}")[0][0]
         # key-like = PK + columns that are unique (candidate business keys)
         key_cols = list(pks)
         for c in cols:
@@ -154,7 +207,7 @@ def _table_meta(cur, tables, schema="public"):
                 continue
             # cheap uniqueness check only for id/key/code/no-suffixed columns
             if re.search(r"(_id|_no|_code|_key|_number)$", c) or c.endswith("id"):
-                d = _q(cur, f'SELECT count(DISTINCT "{c}") FROM "{t}"')[0][0]
+                d = _q(cur, f"SELECT count(DISTINCT {_ident(engine, c)}) FROM {qt}")[0][0]
                 if rowcount and d >= rowcount * 0.95:
                     key_cols.append(c)
         meta[t] = {"columns": cols, "pk": pks, "rowcount": rowcount,
@@ -179,13 +232,15 @@ def _name_affinity(disc_value, target_table):
     return v in tbl_tokens or any(v in tok or tok in v for tok in tbl_tokens)
 
 
-def _cardinality(cur, child_t, child_col, parent_t, parent_col):
+def _cardinality(cur, child_t, child_col, parent_t, parent_col, engine="postgresql"):
     """1:1 / N:1 / 1:N from distinctness on each side."""
     try:
-        ch_rows = _q(cur, f'SELECT count(*) FROM "{child_t}"')[0][0]
-        ch_distinct = _q(cur, f'SELECT count(DISTINCT "{child_col}") FROM "{child_t}"')[0][0]
-        pa_distinct = _q(cur, f'SELECT count(DISTINCT "{parent_col}") FROM "{parent_t}"')[0][0]
-        pa_rows = _q(cur, f'SELECT count(*) FROM "{parent_t}"')[0][0]
+        qct, qcc = _ident(engine, child_t), _ident(engine, child_col)
+        qpt, qpc = _ident(engine, parent_t), _ident(engine, parent_col)
+        ch_rows = _q(cur, f"SELECT count(*) FROM {qct}")[0][0]
+        ch_distinct = _q(cur, f"SELECT count(DISTINCT {qcc}) FROM {qct}")[0][0]
+        pa_distinct = _q(cur, f"SELECT count(DISTINCT {qpc}) FROM {qpt}")[0][0]
+        pa_rows = _q(cur, f"SELECT count(*) FROM {qpt}")[0][0]
         child_unique = ch_rows and ch_distinct >= ch_rows * 0.95
         parent_unique = pa_rows and pa_distinct >= pa_rows * 0.95
         if child_unique and parent_unique:
@@ -214,7 +269,7 @@ def _declared_fk_edges(schema_tables):
     return edges
 
 
-def _polymorphic_edges(cur, tables, meta):
+def _polymorphic_edges(cur, tables, meta, engine="postgresql"):
     """Detect *_id + (*_type|model_name) pairs and resolve each discriminator value
     to a target table.column by DATA CORRELATION (not string matching)."""
     edges = []
@@ -225,12 +280,13 @@ def _polymorphic_edges(cur, tables, meta):
         if not id_cols or not disc_cols:
             continue
         id_col, disc_col = id_cols[0], disc_cols[0]
+        qt, qid, qdisc = _ident(engine, t), _ident(engine, id_col), _ident(engine, disc_col)
 
-        for (val,) in _q(cur, f'SELECT DISTINCT "{disc_col}" FROM "{t}" '
-                              f'WHERE "{disc_col}" IS NOT NULL'):
+        for (val,) in _q(cur, f"SELECT DISTINCT {qdisc} FROM {qt} "
+                              f"WHERE {qdisc} IS NOT NULL"):
             sample = [r[0] for r in _q(cur,
-                f'SELECT "{id_col}" FROM "{t}" WHERE "{disc_col}"=%s '
-                f'AND "{id_col}" IS NOT NULL LIMIT {_POLY_VALUE_SAMPLE}', [val])]
+                f"SELECT {qid} FROM {qt} WHERE {qdisc}=%s "
+                f"AND {qid} IS NOT NULL LIMIT {_POLY_VALUE_SAMPLE}", [val])]
             if not sample:
                 continue
             sample = [str(x) for x in sample]
@@ -240,9 +296,13 @@ def _polymorphic_edges(cur, tables, meta):
                 if cand_t == t:
                     continue
                 for kc in meta[cand_t]["key_cols"]:
+                    qct, qkc = _ident(engine, cand_t), _cast_text(engine, _ident(engine, kc))
+                    # dialect-neutral `IN (...)` (P0-2 follow-up) — Postgres's `= ANY(%s)`
+                    # array bind isn't supported by mysql-connector-python or most other
+                    # non-psycopg2 DB-API drivers.
                     present = _q(cur,
-                        f'SELECT count(DISTINCT "{kc}"::text) FROM "{cand_t}" '
-                        f'WHERE "{kc}"::text = ANY(%s)', [sample])[0][0]
+                        f"SELECT count(DISTINCT {qkc}) FROM {qct} "
+                        f"WHERE {qkc} IN {_in_clause(len(sample))}", sample)[0][0]
                     rate = present / len(set(sample))
                     if rate < _MATCH_FLOOR:
                         continue
@@ -273,18 +333,24 @@ def _polymorphic_edges(cur, tables, meta):
     return edges
 
 
+_SQL_INTROSPECTABLE_ENGINES = ("postgresql", "postgres") + _MYSQL_ENGINES
+
+
 def _can_sql_introspect(ctx) -> bool:
     """True when this source has a live, dialect-known SQL connection this module
-    knows how to introspect for cardinality/PK (Postgres today). False for a
+    knows how to introspect for cardinality/PK (Postgres and, as of the P0-2
+    follow-up 2026-09-15, MySQL — live-verified against a throwaway MySQL 8
+    container, see docs/backlog/query-engine-open-items.md). False for a
     file-backed tabular source (no SQL server at all) or a relational engine this
-    module hasn't been verified against (P0-2) — both fall back to declared-FK-only
-    edges rather than crashing or guessing at unverified SQL."""
+    module STILL hasn't been verified against (e.g. SQL Server, Oracle — no live
+    instance available to verify dialect-specific SQL against) — both fall back to
+    declared-FK-only edges rather than crashing or guessing at unverified SQL."""
     if ctx is None:
         return True   # legacy ctx-less call: byte-identical to pre-fix behaviour
     engine = (ctx.engine or "postgresql").lower()
     if engine in _TABULAR_ENGINES:
         return False
-    return ctx.type == "relational" and engine in ("postgresql", "postgres")
+    return ctx.type == "relational" and engine in _SQL_INTROSPECTABLE_ENGINES
 
 
 def build_relationship_graph(tables=None, verbose=False, ctx=None):
@@ -333,21 +399,29 @@ def build_relationship_graph(tables=None, verbose=False, ctx=None):
             f"matched the requested `tables` scope (stale/foreign semantic model?)")
 
     if sql_mode:
+        engine = _engine_of(ctx)
+        # MySQL has no "public" schema — information_schema.*'s "schema" IS the
+        # database name there (mirrors connectors/relational.py::MySQLConnector's
+        # own `db = schema or self._config.get("dbname", "")`); Postgres keeps its
+        # existing "public" default unchanged.
+        default_schema = (ctx.connection.get("dbname") if ctx is not None and ctx.connection
+                          and engine in _MYSQL_ENGINES else None) or "public"
         schema_name = (ctx.schema_filter if ctx is not None else None) \
             or (ctx.connection.get("schema") if ctx is not None and ctx.connection else None) \
-            or "public"
+            or default_schema
         conn = _conn(ctx)
         cur = conn.cursor()
         try:
-            meta = _table_meta(cur, tables, schema=schema_name)
+            meta = _table_meta(cur, tables, schema=schema_name, engine=engine)
 
             edges = _declared_fk_edges([by_name[t] for t in tables])
             edges = [e for e in edges if e["target_table"] in tables]
-            edges += _polymorphic_edges(cur, tables, meta)
+            edges += _polymorphic_edges(cur, tables, meta, engine=engine)
 
             for e in edges:
                 e["cardinality"] = _cardinality(cur, e["source_table"], e["source_column"],
-                                                e["target_table"], e["target_column"])
+                                                e["target_table"], e["target_column"],
+                                                engine=engine)
                 e["weight"] = _WEIGHT.get(e["relationship_type"], 3)
         finally:
             cur.close(); conn.close()

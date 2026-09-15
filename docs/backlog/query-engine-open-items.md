@@ -772,6 +772,171 @@ cleanup) reconfirmed clean after this removal.
 implemented-and-measured, verified-as-already-fine, or explicitly deferred with a documented
 reason (P1-2's grammar-classifier follow-up).
 
+## Session-handoff follow-ups (2026-09-15): grammar gap, intent-boost bug, MySQL dialect
+
+Picked up the 3 items the 2026-09-09→15 session handoff left open (its own §"What's
+left", items 1–3; item 4 — standing infra risk notes — deliberately left alone).
+`METAL_EMBED_URL` (`192.168.1.39:11435`) was reachable and fast again at the start of
+this pass (curl `encode_query` round-trip: 0.7s, not the 60s CPU-fallback timeout) —
+confirmed live before relying on it for eval runs.
+
+### Item 3 first: full 24-query P1-2 eval, now that Metal is fast
+
+The 2026-09-11 P1-2 write-up above ran only 8/24 golden queries (CPU-only BGE-M3 made
+the full sweep take 40+ minutes and it was abandoned). With Metal reachable, one
+`retrieve()` call now takes ~1.7s (was multiple seconds/batch on CPU) — the full
+24-query (21 gradeable) sweep completes in ~90s. Ran it as a clean baseline BEFORE
+touching any code: **BASELINE and AFTER (grammar-derived intent) came back
+byte-identical** on all 4 metrics (recall@5=0.1936, recall@15=0.3734, mrr=0.4139,
+table_recall@3=0.7619) — confirming the earlier 8-query finding wasn't a sampling
+artifact; it reproduces on the full set too. This made items 1 (grammar gap) and the
+eval-infra gap moot to investigate separately — they're the same investigation.
+
+### Item 1: the `aggregate_mode`/`grouped_mode` grammar-coverage gap — fixed, data-backed
+
+Per this doc's own P1-2 entry: "retuning a grammar classifier without a labelled
+precision/recall check of its own would be exactly the kind of blind change this whole
+exercise was trying to avoid." Built that check before touching anything:
+
+- **`evaluation/grouping_grammar_labels.jsonl`** — 25 hand-labelled queries: true
+  positives for every existing + candidate grouping phrase (including the real golden-
+  set query cited in the P1-2 entry, "...when broken down by specific currency
+  configurations"), and true-negative *distractors* that share the surface word "by"
+  but must NOT trigger grouping (`increased by`, `sorted by`, `divided by`, `backed
+  by`, `measured by`, `followed by`, `given by`, `accompanied by`, `differ by`, plus
+  the pre-existing ratio-wording case).
+- **`scripts/eval_grouping_grammar.py`** — runs `veda.planning.grouped_mode()` over
+  that set against BASELINE `QUERY_GRAMMAR["grouping"]` vs a CANDIDATE list (never
+  mutates `config.py` itself). Result: BASELINE precision=1.0 recall=0.417 (7/12 false
+  negatives, all "broken down by"/"broken out by"/"break down"/"split by"/"segmented
+  by"/"categorized by" phrasings); CANDIDATE (adding exactly those 6 phrasings)
+  precision=1.0 recall=1.0 — **zero new false positives against the distractor set**.
+- **Applied**: `veda_core/config.py`'s `QUERY_GRAMMAR["grouping"]` now includes
+  `"broken down by", "broken out by", "break down", "split by", "segmented by",
+  "categorized by"` alongside the original `per/each/grouped by/breakdown`. Bare "by"
+  deliberately never added (that's exactly what would catch the distractors).
+- **Verified no regression**: hand-invoked all 15 parametrized assertions from
+  `tests/test_grouped_aggregation_operators.py` (pytest still isn't installed in these
+  containers) — all pass unchanged. Full 64/65 routing suite re-confirmed.
+- **Confirmed live**: the exact golden-set query now classifies `AGGREGATE` instead of
+  `SIMPLE` (`aggregate_mode`/`grouped_mode` now fire on it), as intended.
+
+### The deeper bug this uncovered: `IntentBooster._get_column_metadata` always returned `{}`
+
+Re-ran the full P1-2 eval after the grammar fix, expecting a change — **got the exact
+same byte-identical numbers again.** Traced why by diffing per-column rankings for the
+one query that now triggers AGGREGATE: SIMPLE and AGGREGATE intent produced **identical
+ranked output**, not just identical aggregate metrics. `retrieval/intent_boosting.py`'s
+`IntentBooster._get_column_metadata()` walks `semantic_model["tables"][t]["columns"][c]`
+— but no table entry in the real `veda_semantic_model.json` HAS a `"columns"` sub-dict
+(confirmed live: a real table entry's keys are `table_name/business_purpose/
+primary_entity/table_type/candidate_temporal_columns/candidate_measure_columns`).
+Column metadata (`analytics_role`, the field every `boost_*` method reads) actually
+lives in the model's own **top-level flat `columns` dict**, keyed `"table.column"`
+(1902 entries for source 2 — confirmed both `currency_id`→`IDENTIFIER` and
+`paid_amount`→`MEASURE` exist there with the expected roles). So `_get_column_metadata`
+always returned `{}`, `role` was always `""`, and `boost_aggregate`/`boost_temporal`/
+`boost_multi_table` have been **unconditional no-ops for every intent, always** — not
+a grammar-coverage problem at all; the boost could never have fired even with perfect
+grammar coverage. This is almost certainly the REAL reason the 2026-09-11 8-query eval
+(and this session's own first 24-query re-run) showed zero effect.
+
+**Fixed**: `_get_column_metadata` now reads the real flat `columns` dict first (O(1)
+lookup, was an O(tables×columns) nested walk), falling back to the old nested-walk
+shape only if the flat lookup misses (back-compat for any differently-shaped model).
+No dedicated tests existed for `intent_boosting.py` (checked: zero test files reference
+it). Live-verified: re-ran the diagnostic query — `paid_amount` (MEASURE) jumped from
+rank 12 to rank 2 under AGGREGATE intent; `currency_id` (IDENTIFIER) dropped out of the
+top 15 (the `-0.40`-scaled IDENTIFIER penalty firing as designed — a real trade-off,
+not a bug, discussed below).
+
+**Definitive P1-2 eval, both fixes applied, full 24-query set, Metal fast:**
+
+| metric | BASELINE (intent=SIMPLE) | AFTER (grammar-derived intent) | Δ |
+|---|---|---|---|
+| recall@5 | 0.1936 | 0.2571 | **+33% relative** |
+| recall@15 | 0.3734 | 0.3907 | +5% relative |
+| mrr | 0.4139 | 0.4790 | **+16% relative** |
+| table_recall@3 | 0.7619 | 0.7143 | **−6% relative** |
+
+A genuine, non-identical, mixed result — not an unambiguous win. The regression on
+table_recall@3 is explainable, not a bug: `boost_aggregate`'s IDENTIFIER penalty
+(`-0.40`, by design — "don't aggregate IDs") demotes columns like `currency_id` even
+when the query actually wants that column as a GROUP BY dimension, not something to
+sum — a real tension between "IDENTIFIER" and "grouping dimension" that this fix
+surfaces but does not resolve. Full 64/65 routing suite re-confirmed clean after this
+change too. Given this doc's own standing instruction ("did NOT revert based on
+inconclusive data" — the 2026-09-11 entry), and that this result is no longer
+inconclusive but genuinely mixed, flagging as **kept, not further tuned this pass** —
+the IDENTIFIER-vs-grouping-dimension conflict is a real follow-up, not a blind
+revert-or-keep call to make from a 21-query sample.
+
+### Item 2: non-Postgres SQL dialect support — MySQL added and live-verified
+
+The gap: `_can_sql_introspect()` gated full SQL introspection (PK detection,
+cardinality, polymorphic-edge correlation) to Postgres only, "since there is no live
+[non-Postgres] one to verify dialect-specific SQL against." Discovered
+`connectors/relational.py::MySQLConnector` already existed (dialect-correct
+information_schema queries, backtick quoting) for **L1 schema extraction** — but
+`ingestion/relationship_graph.py` never used it; it hardcoded its own `psycopg2`
+connection and Postgres-only SQL (double-quoted identifiers, `::text` casts, `= ANY(%s)`
+array binds) for PK/cardinality/polymorphic detection specifically.
+
+Stood up a throwaway MySQL 8 container (`veda-test-mysql`, on `veda-platform_veda_net`,
+removed after verification) with a small `customers`/`orders` schema (real FK,
+`orders.customer_id → customers.id`, multiple orders per customer) to get the "live
+source to verify against" this gap always lacked.
+
+**Found and fixed 3 real bugs along the way, not just added new code:**
+
+1. **`mysql-connector-python` was never installed anywhere in this deployment** —
+   `MySQLConnector` has depended on it since it was written, but it's absent from
+   every `requirements/*.txt`. Added to `requirements/inference.txt` (used by both
+   `inference` and `ingest-worker`, per `docker-compose.yml`'s shared
+   `Dockerfile.inference`) and `requirements/host-ingest.txt`.
+2. **`connectors/relational.py::RelationalConnector.connect()`'s own health-check
+   ping never drained its `SELECT 1` result before closing the cursor.** Harmless on
+   psycopg2/sqlite3; fatal on mysql-connector-python's C extension, which leaves the
+   whole *connection* (not just that cursor) flagged "has unread result" until
+   something fetches it — so the very next `get_schema()` call blew up immediately on
+   `self._conn.cursor()` with `InternalError: Unread result found`, before running any
+   real query. This is a real, previously-unexercised bug in the shared connector base
+   class (not specific to my changes) — never triggered before because MySQL was never
+   actually runnable. Fixed: drain via `cur.fetchall()` before `cur.close()`.
+3. **`ingestion/relationship_graph.py` dialect support** — added `_engine_of()`,
+   `_ident()` (backtick vs double-quote), `_cast_text()` (`CAST(x AS CHAR)` vs
+   `x::text`), `_in_clause()` (dialect-neutral `IN (%s,%s,...)`, replacing Postgres-only
+   `= ANY(%s)` array binding — not supported by mysql-connector-python or most other
+   DB-API drivers) — threaded through `_conn` (now dispatches `mysql.connector.connect`
+   vs `psycopg2.connect` on `ctx.engine`), `_table_meta`, `_cardinality`,
+   `_polymorphic_edges`. `_can_sql_introspect()` now accepts `mysql` (still declared-
+   FK-only for anything else — SQL Server, Oracle, etc. — no live instance to verify
+   against yet). Also fixed the schema default: MySQL has no `"public"` schema —
+   `information_schema.*`'s "schema" filter IS the database name there (mirrors
+   `MySQLConnector`'s own `db = schema or dbname` fallback); Postgres's `"public"`
+   default is unchanged.
+
+**Live-verified against the throwaway MySQL container**
+(`scripts/verify_mysql_relationship_graph.py`, not a permanent test — a one-off repro
+script, kept for reference): `build_relationship_graph()` returned `mode: "sql"` (full
+introspection, not the declared-FK-only fallback), found exactly the 1 real FK edge
+(`orders.customer_id → customers.id`), and computed `cardinality: "N:1"` correctly from
+real data correlation (2 customers have multiple orders, 1 doesn't — the distinctness
+check landed on the right answer).
+
+**No regression on the real Postgres path**: rebuilt source 2's (homzhub) graph through
+the same patched code — **178 tables / 609 edges / 0 polymorphic, byte-identical** to
+the pre-existing stats recorded in this doc's P0-1/P0-2 section above. Full 64/65
+routing suite re-confirmed clean.
+
+**Still not done** (out of scope for this pass, same as before): SQL Server, Oracle, or
+any other non-Postgres/non-MySQL relational dialect — still declared-FK-only, still no
+live instance available to verify against. `mysql-connector-python` is a live pip
+install in the running `inference`/`ingest-worker` containers for this session (now
+also tracked in `requirements/inference.txt`/`host-ingest.txt` for the next image
+rebuild — not yet baked into a rebuilt image, since these containers weren't rebuilt
+this pass).
+
 ## Compose note (unrelated, found while verifying the above)
 
 The local `pg_data` volume (494 MB, created 2026-07-05) is PG16-formatted; `docker-compose.yml`
