@@ -118,18 +118,59 @@ ENGINE_CACHE_MAX = int(os.environ.get("ENGINE_CACHE_MAX", "4"))
 _SEARCHER = None
 
 
-_GRAPH = None
+# ONE relationship-graph cache for the whole process (P0-1, 2026-09-10) — replaces
+# three separate process-global caches (this one, veda.graph_guard._GRAPH,
+# query.fast_path._GRAPH_CACHE) that all loaded the same unscoped flat file, so
+# ingesting/querying source B silently saw source A's join graph (and vice versa).
+# graph_guard and fast_path now both delegate to get_graph() below instead of
+# loading their own copy. Keyed by (tenant, str(source_id)); a source with no graph
+# on disk gets an EMPTY graph for ITSELF, never another source's file.
+_GRAPH_CACHE: dict = {}
 
 
 JOIN_CONFIDENCE_FLOOR = 0.55
 
 
-def get_graph():
-    global _GRAPH
-    if _GRAPH is None:
+def _resolve_graph_scope(source_id=None):
+    """(tenant, str(source_id)) to key the graph cache by. Explicit source_id wins;
+    otherwise resolved from the ambient request context (unset context → source_id
+    None, which load_graph() turns into an empty graph rather than guessing)."""
+    tenant = "default"
+    sid = source_id
+    if sid is None:
+        ctx = context.try_current()
+        if ctx is not None:
+            sid = ctx.source_id
+            tenant = ctx.tenant or tenant
+    return tenant, (str(sid) if sid is not None else None)
+
+
+def get_graph(source_id=None):
+    """The relationship graph for ONE source. This is the only graph accessor in
+    the codebase — every consumer (planning, routing, the FK value filter,
+    signal_builder's Signals 3/4, retrieval_v2, the graph_guard firewall,
+    fast_path) reads through here, directly or via graph_guard/fast_path's thin
+    delegation. Cached per (tenant, source_id) for the life of the process; see
+    invalidate_graph_cache() for rehydrate."""
+    tenant, sid = _resolve_graph_scope(source_id)
+    key = (tenant, sid)
+    if key not in _GRAPH_CACHE:
         from query.join_planner import load_graph
-        _GRAPH = load_graph()
-    return _GRAPH
+        _GRAPH_CACHE[key] = load_graph(source_id=sid, tenant=tenant)
+    return _GRAPH_CACHE[key]
+
+
+def invalidate_graph_cache(source_id=None):
+    """Drop the cached graph for one source, or every source when source_id is
+    None. Call after any relationship-graph rewrite reaches disk — ingestion
+    publish and both rehydrate paths (P0-6) — so a re-ingested source's stale
+    graph doesn't keep answering joins/firewall checks until a process restart."""
+    if source_id is None:
+        _GRAPH_CACHE.clear()
+        return
+    sid = str(source_id)
+    for key in [k for k in _GRAPH_CACHE if k[1] == sid]:
+        del _GRAPH_CACHE[key]
 
 
 def _internal_db_config() -> dict:
@@ -183,8 +224,11 @@ def _engine_scope():
 
 def _load_one_sm(source_id, tenant):
     """One source's semantic model. Redis-first (the Django assembler publishes
-    `veda:sm:{source}:{tenant}`, §3.6) so one warm worker serves N sources; on-disk
-    `SEMANTIC_MODEL_FILE` fallback (dev / cache miss)."""
+    `veda:sm:{source}:{tenant}`, §3.6) so one warm worker serves N sources;
+    on-disk fallback (dev / cache miss) prefers THIS source's own per-source file
+    over the flat `SEMANTIC_MODEL_FILE` every source used to share (P0-5,
+    2026-09-11) — falls back to the flat file automatically when no per-source
+    copy exists yet."""
     if os.environ.get("VEDA_SM_REDIS", "").strip().lower() in ("1", "true", "yes", "on"):
         try:
             import redis as _redis
@@ -194,8 +238,9 @@ def _load_one_sm(source_id, tenant):
                 return json.loads(raw)
         except Exception:
             pass
-    from config import SEMANTIC_MODEL_FILE
-    with open(SEMANTIC_MODEL_FILE) as f:
+    from config import resolve_source_artifact
+    sm_path = resolve_source_artifact("veda_semantic_model.json", source_id, tenant)
+    with open(sm_path) as f:
         return json.load(f)
 
 

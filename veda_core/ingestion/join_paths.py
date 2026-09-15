@@ -17,7 +17,12 @@ from typing import Dict, List
 MAX_HOPS = 4
 
 
-def _index_path() -> str:
+def _index_path(source_id=None, tenant: str = "default") -> str:
+    """Per-(tenant, source) when source_id is given (P0-5, 2026-09-10) — unconditionally,
+    via config.source_artifact_path(), not gated behind VEDA_ARTIFACT_SCOPE (P0-7)."""
+    if source_id is not None:
+        from config import source_artifact_path
+        return source_artifact_path("veda_join_paths.json", source_id, tenant)
     from config import artifact_path
     return artifact_path("veda_join_paths.json")
 
@@ -35,8 +40,8 @@ def _edges_from_scan(scan_result) -> List[dict]:
     return edges
 
 
-def build_join_paths(scan_result, source_id: str = "", verbose: bool = False,
-                     max_hops: int = MAX_HOPS) -> Dict[str, dict]:
+def build_join_paths(scan_result, source_id: str = "", tenant: str = "default",
+                     verbose: bool = False, max_hops: int = MAX_HOPS) -> Dict[str, dict]:
     """BFS over the undirected FK graph → shortest path per table pair (<= max_hops)."""
     edges = _edges_from_scan(scan_result)
 
@@ -73,22 +78,58 @@ def build_join_paths(scan_result, source_id: str = "", verbose: bool = False,
                 q.append((nbr, new_path))
 
     out = {"pairs": paths, "max_hops": max_hops, "tables": len(tables)}
-    path_file = _index_path()
+    path_file = _index_path(source_id or None, tenant)
     os.makedirs(os.path.dirname(path_file) or ".", exist_ok=True)
     with open(path_file, "w") as f:
         json.dump(out, f)
     if verbose:
         print(f"  [join_paths] {len(paths)} pairs over {len(tables)} tables → {path_file}")
+
+    # P0-6: drop this source's cached map so the next planner read sees the fresh one.
+    try:
+        invalidate_join_paths_cache(source_id or None)
+    except Exception:
+        pass
+
     return paths
 
 
-def load_join_paths() -> Dict[str, dict]:
-    """Query-tier loader for join_planner: {"<from>|<to>": {...path...}} or {} if absent."""
-    path = _index_path()
+# (tenant, str(source_id) | "") -> {"<from>|<to>": {...}} — per-source (P0-5, 2026-09-10).
+_JOIN_PATHS_CACHE: dict = {}
+
+
+def load_join_paths(source_id=None, tenant=None) -> Dict[str, dict]:
+    """Query-tier loader for join_planner: {"<from>|<to>": {...path...}} or {} if absent.
+    Resolves source_id/tenant from the ambient request context when not given."""
+    if source_id is None:
+        from veda_core import context
+        ctx = context.try_current()
+        if ctx is not None:
+            source_id = ctx.source_id
+            tenant = ctx.tenant or tenant
+    key = (tenant or "default", str(source_id) if source_id is not None else "")
+    if key in _JOIN_PATHS_CACHE:
+        return _JOIN_PATHS_CACHE[key]
+    path = _index_path(source_id, tenant or "default")
     if not os.path.exists(path):
+        _JOIN_PATHS_CACHE[key] = {}
         return {}
     try:
         with open(path) as f:
-            return json.load(f).get("pairs", {})
+            data = json.load(f).get("pairs", {})
+        _JOIN_PATHS_CACHE[key] = data
+        return data
     except Exception:
         return {}
+
+
+def invalidate_join_paths_cache(source_id=None):
+    """Drop the cached join-paths map for one source, or every source when source_id
+    is None. Call after build_join_paths() rewrites the artifact and from both
+    rehydrate paths (P0-6)."""
+    if source_id is None:
+        _JOIN_PATHS_CACHE.clear()
+        return
+    sid = str(source_id)
+    for key in [k for k in _JOIN_PATHS_CACHE if k[1] == sid]:
+        del _JOIN_PATHS_CACHE[key]

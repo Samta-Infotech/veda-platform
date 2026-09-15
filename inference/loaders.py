@@ -22,7 +22,10 @@ import os
 logger = logging.getLogger("inference.loaders")
 
 _STATE: dict = {"ready": False, "semantic_model": False, "engine_warm": False,
-                "nl_summary_model_warm": False}
+                "nl_summary_model_warm": False, "degraded": []}
+# "degraded" (P1-4, 2026-09-10): names of components that warmed in a reduced-quality
+# mode, surfaced non-gating in /readyz — a missing reranker model or unreachable SLM
+# used to be discoverable only by grepping container logs.
 
 
 async def hydrate() -> dict:
@@ -35,6 +38,7 @@ async def hydrate() -> dict:
     _STATE["semantic_model"] = os.path.exists(sm_path)
     if not _STATE["semantic_model"]:
         logger.warning("semantic model not found at %s — run ingestion first", sm_path)
+        _STATE["degraded"].append("semantic_model_missing")
 
     # 2) Warm the retrieval engine / encoders so the first query isn't cold.
     try:
@@ -45,6 +49,7 @@ async def hydrate() -> dict:
             _STATE["engine_warm"] = True
     except Exception as exc:  # non-fatal: engine also lazy-loads on first query
         logger.warning("engine warm-load deferred to first query: %s", exc)
+        _STATE["degraded"].append("engine_cold_at_startup")
 
     # 3) Explicitly warm the heavy per-query models (BGE-M3 dense+sparse, the cross-encoder
     #    reranker, and the SLM). These lazy-init on first use, and cold BGE-M3 load alone is
@@ -56,9 +61,15 @@ async def hydrate() -> dict:
         from veda_core.ingestion import m3_encoder
         m3_encoder.encode_query("warm up the dense and sparse encoders")   # dense + sparse
         m3_encoder.encode_sparse(["warm up the sparse index encoder"])
-        _p("✓ BGE-M3 (dense+sparse)")
+        _p(f"✓ BGE-M3 (dense+sparse) [{m3_encoder.get_embed_backend()}]")
+        if m3_encoder.get_embed_backend() == "cpu" and os.environ.get("METAL_EMBED_URL", "").strip():
+            # METAL_EMBED_URL is set but the very first call already fell back to CPU —
+            # a real perf degrade (see m3_encoder.py's own module comment: ~28s/retrieval
+            # on CPU vs. Metal-offloaded), not just "unset, using CPU by design".
+            _STATE["degraded"].append("embed_backend_cpu_fallback")
     except Exception as exc:
         _p(f"BGE-M3 warm deferred: {exc}")
+        _STATE["degraded"].append("bge_m3_warm_failed")
     try:
         from veda_core.query import reranker as _rr
         _r = _rr._get_reranker()
@@ -68,14 +79,22 @@ async def hydrate() -> dict:
             if _score is not None:
                 _score([["warm up", "cross encoder reranker"]])
                 _p("✓ cross-encoder reranker")
+        else:
+            # Not an exception — _get_reranker() returns None on a load failure
+            # (already logged at ERROR there); this is where that fact becomes
+            # visible outside container logs (P1-4).
+            _p("reranker unavailable — retrieval will be pure RRF (degraded) for every query")
+            _STATE["degraded"].append("reranker_unavailable")
     except Exception as exc:
         _p(f"reranker warm deferred: {exc}")
+        _STATE["degraded"].append("reranker_warm_failed")
     try:
         from veda_core.slm._call_slm import prewarm
         prewarm()               # loads + pins the SLM on the (host Metal) backend
         _p("✓ SLM")
     except Exception as exc:
         _p(f"SLM warm deferred: {exc}")
+        _STATE["degraded"].append("slm_unreachable")
 
     try:
         from veda_core.slm._call_slm import prewarm
@@ -93,6 +112,7 @@ async def hydrate() -> dict:
         # template answers) — but surfaced in /readyz so a missing/unpulled
         # NL_SUMMARY_MODEL is an observable operational fact, not a silent one.
         _p(f"NL summary SLM warm deferred: {exc}")
+        _STATE["degraded"].append("nl_summary_slm_unreachable")
 
     _STATE["ready"] = _STATE["semantic_model"]
     _p(f"hydrate complete: {_STATE}")

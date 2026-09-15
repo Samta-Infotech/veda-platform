@@ -296,8 +296,8 @@ api/worker/inference logs are aggregatable (`docker logs` / journald / Loki).
   `inference`/`vllm`/`ollama` so a model load can't OOM the host.
 - [ ] **CI gate** — `manage.py check --deploy`, `pytest tests/`, migration-drift check
   (`makemigrations --check --dry-run`).
-- [ ] **Delete vestigial stub** — `inference/engine.py:get_engine()` raises `NotImplementedError` but
-  is unused (the real warm-load is `inference/loaders.py:44`). Remove to avoid confusion.
+- [x] **Delete vestigial stub** — `inference/engine.py:get_engine()` raised `NotImplementedError`
+  and was unused (the real warm-load is `inference/loaders.py:44`). Deleted 2026-09-10.
 - [ ] **nginx `/readyz`** — optionally expose for external uptime checks (internal-only like `/metrics`).
 
 ---

@@ -49,23 +49,37 @@ BGE-M3 across every per-source engine).
 
 ## 2. Six signals, not five — definitive
 
-The class name/docstring (`retrieval_engine_phase3.py:3,76-90`) and
-`docs/ARCHITECTURE.md:145-147` (older revisions) say "5-Signal" / "BM25Ranker". Reality:
 `retrieve()` builds **six** and `RRFMerger` logs `"Merging 6 signals via weighted RRF"`
-(`rrf_merger.py:82`). `docs/ARCHITECTURE.md` §5 and `docs/RETRIEVAL_DECISION_LAYER_AUDIT.md`
-§1 are the correct references.
+(`rrf_merger.py:82`); the class name/docstring said "5-Signal"/"BM25Ranker" until this was
+corrected 2026-09-10 (P2-2) alongside `docs/ARCHITECTURE.md`. `docs/ARCHITECTURE.md` §5 and
+`docs/RETRIEVAL_DECISION_LAYER_AUDIT.md` §1 are the correct references.
 
 | # | Signal | Built by | Key space | Character |
 |---|--------|----------|-----------|-----------|
 | 1 | **Dense semantic** | `semantic_search.py` — BGE-M3 dense, `k=50`, HNSW cosine | `table.col` (after `DENSE_ID_REMAP`) | raw query only (WP1); `ef_search` per source |
 | 2 | **Learned-sparse** | `sparse_ranker.py` — BGE-M3 lexical weights, `top_k=50` | `table.col` | **replaced BM25** (WP3); carries query enrichment |
-| 3 | **FK subgraph** | `signal_builder._compute_column_signals` `subgraph_signal` | `table.col` | static: `min(table_degree/10, 1.0)` |
-| 4 | **FK path / join-key** | `signal_builder._compute_column_signals` `fk_signal` | `table.col` | static: `0.5` if FK, `0.7` if referenced |
+| 3 | **FK subgraph** | `signal_builder._compute_column_signals` `subgraph_signal` | `table.col` | static: `min(table_degree/10, 1.0)`; **boost-only since 2026-09-10 (P1-1)** — see below |
+| 4 | **FK path / join-key** | `signal_builder._compute_column_signals` `fk_signal` | `table.col` | static: `0.5` if FK, `0.7` if referenced; **boost-only since 2026-09-10 (P1-1)** |
 | 5 | **Value index** | `signal_builder.build_value_index` + `value_filter._query_value_tokens` | `col_id` | literal-in-query → the column that holds that value |
 | 6 | **Table-first prior** | `retrieval_v2.table_prior_scores` (dense) ⊕ `sparse_ranker.table_scores` | `table_name` | WP4; **soft** — boosts existing candidates only, never adds |
 
 Signals 3 and 4 are **not graph traversal at query time** — they are per-column scalars
 computed once at warm from the relationship-graph edge list.
+
+**P1-1 fix (2026-09-10):** Signals 3/4 used to be added to `rrf_merger.py`'s candidate UNION
+directly (unlike Signal 6, which was always boost-only) — 25 tables have structural degree
+≥ 10 (`users_user` = 275), so `min(degree/10, 1)` saturated to a virtual rank-1 hit for
+**every column** of those tables, regardless of the query: a query-independent hub-table bias
+that also inflated the candidate pool. Now Signals 3/4 match Signal 6's shape exactly — they
+still fully contribute to the RRF SCORE of any candidate dense/sparse/value/table-prior
+already surfaced, they just never introduce a candidate none of those found relevant.
+Mechanical fix, not a weight retune (`config.FUSION_WEIGHTS["subgraph"]`/`["fk"]` untouched);
+`scripts/retrieval_eval.py`'s golden-set harness targets `query/retrieval_select.py`, a
+DIFFERENT retrieval path that doesn't call `RRFMerger` at all, so it could not measure this
+change — verified instead via a live query through the real 6-signal path (`veda/pipeline.py`'s
+own `[L2] Retrieval ...` log line was also corrected the same day: it said "5-signal
+(BGE-M3 + BM25 + ...)", stale on both counts) completing without error and producing a sane,
+unambiguous candidate set.
 
 ---
 
@@ -337,14 +351,18 @@ Tier-1 spine (`suggest_expansions`) does not see these edges. Config: `SEMANTIC_
 | Item | State |
 |---|---|
 | `RetrievalCache` (`retrieval_cache.py`) | code complete but `RETRIEVAL_CACHE_ENABLED=False` (`config.py:2113`); `retrieve()` always called with `use_cache=False`. Module-level `_cache_instance` + `cache_retrieval_results` / `get_cached_results` helpers unused. |
-| `retrieval/__init__.py` docstring | references filenames that no longer exist: `embedding_layer.py`, `bm25_ranker`, `cross_encoder.py`, `retrieval_engine.py` (→ `_phase3`) |
-| `RetrievalEnginePhase3` class name / docstring "5-Signal" | stale — it builds 6 |
-| `signal_builder.py:19` `from schema.real_schema import get_real_schema` | **dead import** — WP7 removed the live-introspection path; `build_signals` only reads the substrate |
-| `sparse_ranker.fit()` | dev fallback only; on a real model (>300 docs) Signal 2 is silently **skipped** rather than encoded live |
-| `semantic_search.py` engine-store path (`VEDA_ANN_VIA_ADAPTER=0`) | dev/CLI only; historically returned 0 rows because `db_config` pointed at the wrong DB. The `storage_adapters` adapter path (`=1`, default) is the real one |
-| `graph_retriever.py:281` `# BFS expansion` comment | stale — PPR replaced it (WP5) |
+| `sparse_ranker.fit()` | dev fallback only; on a real model (>300 docs) Signal 2 is silently **skipped** rather than encoded live. Now surfaced per query (P1-4, 2026-09-10) as `sparse_active` in the explain trace's `retrieval_health` section, and `/readyz`'s `degraded` list catches an unavailable reranker/BGE-M3/SLM at startup — no longer log-only. |
+| `semantic_search.py` engine-store path (`VEDA_ANN_VIA_ADAPTER=0`) | dev/CLI only — a direct, unscoped read against the engine's pgvector store, no source filter. The `storage_adapters` adapter path (`=1`, default) is the real one, and it ALSO had a real bug until 2026-09-10: `storage_adapters/reader.py::ann_search` queried `column_embeddings_v2` (lives in `veda_engine`) through the Django-targeted connection, not the engine's internal one — fixed same day as this doc; see `docs/backlog/query-engine-open-items.md`'s "ann_search database target" entry for the full incident. |
 | `schema/simulate_schema.py` | POC synthetic schema; only ingestion fallbacks import it, no query path |
 | `__main__` demo blocks in every `retrieval/*.py` | dead |
+
+Fixed since the last pass (no longer dormant/stale, 2026-09-10): `retrieval/__init__.py`'s
+docstring (was a filename list from before BM25's removal — see the file itself for the
+corrected component list); `RetrievalEnginePhase3`'s class name/docstring said "5-Signal" (it
+builds 6, including the boost-only table-first prior); `signal_builder.py:19`'s dead
+`from schema.real_schema import get_real_schema` import (removed); `graph_retriever.py:281`'s
+stale `# BFS expansion` comment (now correctly describes the seed-collection step it actually
+labels, with a pointer to the real PPR section below it).
 
 ---
 

@@ -35,13 +35,17 @@ except Exception:  # importable outside the engine cwd too (unit tests)
 # Tier-1 (pipeline.py), Tier-2 (veda_hybrid/slm_langgraph), retrieval, summary,
 # visualization — records into the SAME ExplainTrace, reached via the ambient
 # `current_trace()` contextvar (below) so no stage has to thread a `tr` param.
+#   retrieval_health — sparse_active/reranker_active/embed_backend (P1-4, 2026-09-10):
+#                whether Signal 2, the cross-encoder, and the metal/cpu embed backend
+#                are actually live for THIS query, not just "the process warmed ok".
 #   llm_usage  — per-purpose SLM TOKEN totals, stamped by finish() from
 #                slm/_call_slm.py::get_usage().
 #   slm        — per-CALL SLM ledger (purpose/model/duration/ok), appended live by
 #                call_slm() via slm_call(); complements the llm_usage totals.
 #   totals     — the final one-glance summary, built by finish().
 _SECTIONS = [
-    "query_understanding", "routing", "retrieval", "rrf", "graph_expansion", "reranking",
+    "query_understanding", "routing", "retrieval", "retrieval_health", "rrf",
+    "graph_expansion", "reranking",
     "schema_linking", "entity_selection", "projection", "join_planning",
     "tier1", "tier2", "sql_planning", "sql_generation", "validation",
     "execution", "result_analysis", "summary", "visualization",

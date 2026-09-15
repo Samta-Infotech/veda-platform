@@ -73,6 +73,52 @@ def _start_rehydrate_subscriber():
                         _gr.clear_ppr_cache()
                     except Exception:
                         pass
+                    try:                       # P0-6 (2026-09-10): re-ingest rewrote the
+                        # relationship graph (join planner / firewall) — drop the ONE
+                        # graph cache (veda.runtime.get_graph) so graph_guard/fast_path,
+                        # which now both delegate to it, stop serving the pre-ingest copy.
+                        from veda.runtime import invalidate_graph_cache
+                        invalidate_graph_cache()
+                    except Exception:
+                        pass
+                    try:                       # P0-5/P0-6 (2026-09-10): re-ingest rewrote
+                        # the precomputed rerank-doc artifact — drop the per-source cache
+                        # so the reranker stops serving pre-ingest cross-encoder text.
+                        from ingestion.rerank_docs import invalidate_rerank_docs_cache
+                        invalidate_rerank_docs_cache()
+                    except Exception:
+                        pass
+                    try:                       # P0-5/P0-6 (2026-09-10): re-ingest rewrote
+                        # the precomputed join-paths map — drop the per-source cache.
+                        from ingestion.join_paths import invalidate_join_paths_cache
+                        invalidate_join_paths_cache()
+                    except Exception:
+                        pass
+                    try:                       # P0-5/P0-6 (2026-09-10): re-ingest rewrote
+                        # the merged enrichment index — drop the per-source cache.
+                        from ingestion.enrichment_index import invalidate_enrichment_index_cache
+                        invalidate_enrichment_index_cache()
+                    except Exception:
+                        pass
+                    try:                       # P0-5/P0-6 (2026-09-10): drop the cached
+                        # unified graph too (belt-and-braces — it also self-invalidates
+                        # via mtime/size, but this frees it immediately).
+                        from graph.query_graph import invalidate_unified_graph_cache
+                        invalidate_unified_graph_cache()
+                    except Exception:
+                        pass
+                    try:                       # P0-5/P0-6 (2026-09-11): re-ingest rewrote
+                        # domain synonyms — drop both per-source caches (the raw-shape
+                        # one in veda/validation.py and reranker.py's lowercased sibling).
+                        from veda.validation import invalidate_domain_synonyms_cache as _inv1
+                        _inv1()
+                    except Exception:
+                        pass
+                    try:
+                        from query.reranker import invalidate_domain_synonyms_cache as _inv2
+                        _inv2()
+                    except Exception:
+                        pass
         except Exception:
             return  # non-fatal: a replica catches up on its next lifespan warm-load
 

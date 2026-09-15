@@ -98,8 +98,22 @@ def _reg_scope():
             os.environ.get("VEDA_SM_TENANT", "default"))
 
 
-def _load_file(name):
-    path = _REG_FILES.get(name) or os.path.join(_HERE, name)
+def _load_file(name, scope=None):
+    """`scope` (P0-5, 2026-09-11): (source_id, tenant) to prefer a per-source copy
+    of `name` via config.resolve_source_artifact() — before this, every scope's
+    cache entry (see `_CACHE` above) loaded from the SAME flat `_REG_FILES` path
+    computed once at import time, so the per-scope cache KEY was correct but the
+    CONTENT behind every key was identical regardless of source. Falls back to
+    the flat `_REG_FILES` path exactly as before when scope is absent or the
+    per-source copy doesn't exist yet."""
+    flat = _REG_FILES.get(name) or os.path.join(_HERE, name)
+    path = flat
+    if scope is not None:
+        try:
+            from config import resolve_source_artifact
+            path = resolve_source_artifact(name, scope[0], scope[1], flat_default=flat)
+        except Exception:
+            path = flat
     if not os.path.exists(path):
         return {}, None
     blob = json.load(open(path))
@@ -138,9 +152,9 @@ def _load_scope(scope):
     st = _load_from_redis(scope)
     if st is not None:
         return st
-    c, h1 = _load_file("concepts.json")
-    d, _  = _load_file("dimensions.json")
-    m, _  = _load_file("metrics.json")
+    c, h1 = _load_file("concepts.json", scope)
+    d, _  = _load_file("dimensions.json", scope)
+    m, _  = _load_file("metrics.json", scope)
     return {"loaded": True, "concepts": c, "dimensions": d, "metrics": m, "source_hash": h1}
 
 
@@ -175,6 +189,18 @@ def clear() -> None:
     _STATE.clear()
     _STATE.update({"loaded": False, "concepts": {}, "dimensions": {}, "metrics": {},
                    "source_hash": None})
+
+
+def invalidate_cache(source_id=None, tenant: str = "default") -> None:
+    """Drop the cached registry for one (source_id, tenant) scope (P0-6, 2026-09-11)
+    — called by compile_semantic_layer.compile_all() right after it rewrites that
+    source's compiled registries, so this process doesn't keep serving the
+    pre-compile copy until something else happens to call clear(). `source_id=None`
+    behaves like `clear()` (drop everything)."""
+    if source_id is None:
+        clear()
+        return
+    _CACHE.pop((str(source_id), str(tenant)), None)
 
 
 def is_ready() -> bool:

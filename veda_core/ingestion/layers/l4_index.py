@@ -1,8 +1,12 @@
 """L4 INDEX — embeddings + search structures (the model-inference layer).
 
-Graph persist/embed, ensemble encoder + vector store, BGE biencoder, and the NEW
-precompute indexes (BM25 Q-2, enrichment Q-3, rerank docs Q-4 — wired in P6/P7).
-All model-bound cost is isolated here.
+Graph persist/embed, BGE-M3 biencoder (dense) + learned-sparse index (Q-2, replaced
+BM25/the MiniLM ensemble — see the note below), and the precompute indexes
+(enrichment Q-3, rerank docs Q-4). All model-bound cost is isolated here.
+
+(P2-2, 2026-09-10: this docstring said "ensemble encoder + vector store" and "BM25
+Q-2" — both removed in WP3; see this module's own inline note on the ensemble
+removal, right above the BGE biencoder stage below.)
 """
 from __future__ import annotations
 
@@ -51,7 +55,7 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # --- BGE biencoder (column_embeddings_v2) — non-fatal ---------------------
     if BIENCODER_ENABLED:
         try:
-            if ctx.resume and _biencoder_embeddings_exist():
+            if ctx.resume and _biencoder_embeddings_exist(source_id):
                 out.append(StageOutcome("biencoder", True, detail="skipped (resume)"))
             else:
                 from ingestion.biencoder import run_biencoder_ingestion
@@ -74,7 +78,7 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # --- enrichment index (NEW, Q-3) — non-fatal ------------------------------
     try:
         from ingestion.enrichment_index import build_enrichment_index
-        ei = build_enrichment_index(source_id=source_id, verbose=verbose)
+        ei = build_enrichment_index(source_id=source_id, tenant=ctx.tenant, verbose=verbose)
         out.append(StageOutcome("enrichment_index", True, detail=f"{ei.get('terms', 0)} terms"))
     except Exception as e:
         out.append(StageOutcome("enrichment_index", False, fatal=False, error=str(e)))
@@ -82,7 +86,11 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # --- rerank docs (NEW, Q-4) — precomputed cross-encoder text — non-fatal --
     try:
         from ingestion.rerank_docs import build_rerank_docs
-        rd = build_rerank_docs(source_id=source_id, verbose=verbose)
+        # P0-5 (2026-09-10): per-source output path + this run's own in-memory
+        # semantic model (never a re-read of the flat file, which could be another
+        # source's) — same fix shape as the relationship graph's P0-4.
+        rd = build_rerank_docs(source_id=source_id, tenant=ctx.tenant, verbose=verbose,
+                               semantic_model=state.get("semantic_model"))
         out.append(StageOutcome("rerank_docs", True, detail=f"{rd.get('cols', 0)} cols"))
     except Exception as e:
         out.append(StageOutcome("rerank_docs", False, fatal=False, error=str(e)))
@@ -90,14 +98,18 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     return out
 
 
-def _biencoder_embeddings_exist() -> bool:
+def _biencoder_embeddings_exist(source_id) -> bool:
+    """True only if THIS source already has rows — a bare unfiltered check would let source B's
+    resume see source A's embeddings and skip biencoder entirely, leaving B with no Signal 1
+    (P0-3, 2026-09-10). source_id is TEXT (same bug class as the ann_search fix, 2026-09-10)."""
     from config import BIENCODER_COL_TABLE
     try:
         from ingestion.db_abstraction import get_internal_connection, release_internal_connection
         conn = get_internal_connection()
         try:
             with conn.cursor() as cur:
-                cur.execute(f"SELECT 1 FROM {BIENCODER_COL_TABLE} LIMIT 1")
+                cur.execute(f"SELECT 1 FROM {BIENCODER_COL_TABLE} WHERE source_id = %s LIMIT 1",
+                            [str(source_id)])
                 return cur.fetchone() is not None
         finally:
             release_internal_connection(conn)

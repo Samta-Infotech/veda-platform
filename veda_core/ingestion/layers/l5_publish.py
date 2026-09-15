@@ -19,18 +19,29 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
 
     if DERIVED_ARTIFACTS_ENABLED:
         # relationship graph (join planner / fast path) — non-fatal
+        # P0-1/P0-2/P0-4 (2026-09-10): pass ctx (this source, for a per-source path +
+        # connector-aware schema fetch) and tables from THIS RUN's own in-memory
+        # semantic model / scan result — never re-read from a file another source
+        # could have written (see ingestion/relationship_graph.py's docstring).
         try:
             from ingestion.relationship_graph import build_relationship_graph
-            g = build_relationship_graph(verbose=verbose)
+            _rg_tables = None
+            _sm = state.get("semantic_model") or {}
+            if _sm.get("tables"):
+                _rg_tables = sorted(_sm["tables"].keys())
+            elif state.get("scan_result") is not None:
+                _rg_tables = sorted(t.table_name for t in state["scan_result"].tables)
+            g = build_relationship_graph(tables=_rg_tables, verbose=verbose, ctx=ctx)
             n = len(g.get("edges", [])) if isinstance(g, dict) else 0
-            out.append(StageOutcome("relationship_graph", True, detail=f"{n} edges"))
+            _mode = (g.get("stats") or {}).get("mode", "sql") if isinstance(g, dict) else "sql"
+            out.append(StageOutcome("relationship_graph", True, detail=f"{n} edges ({_mode})"))
         except Exception as e:
             out.append(StageOutcome("relationship_graph", False, fatal=False, error=str(e)))
 
         # semantic registry (fast-path registry, incl. fast-path expansion Q-6) — non-fatal
         try:
             from semantic.compile_semantic_layer import compile_all
-            compiled = compile_all(write=True)
+            compiled = compile_all(write=True, source_id=ctx.source_id, tenant=ctx.tenant)
             out.append(StageOutcome("semantic_registry", True, detail=(
                 f"{len(compiled.get('concepts', {}))} concepts, "
                 f"{len(compiled.get('metrics', {}))} metrics")))
@@ -115,8 +126,8 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # siblings above. A failure is still non-fatal but is now printed, not swallowed.
     try:
         from ingestion.unified_graph_builder import build_unified_graph, write_unified_graph
-        ug = build_unified_graph()
-        path = write_unified_graph(ug)
+        ug = build_unified_graph(ctx.source_id, ctx.tenant)
+        path = write_unified_graph(ug, ctx.source_id, ctx.tenant)
         out.append(StageOutcome("unified_graph", True, detail=(
             f"{len(ug.get('nodes', []))} nodes, {len(ug.get('edges', []))} edges → {path}")))
     except Exception as e:

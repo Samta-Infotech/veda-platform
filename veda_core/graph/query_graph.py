@@ -235,10 +235,55 @@ class UnifiedGraph:
         return []
 
 
-# ── module-level singleton (load once per process, re-loaded when the file changes) ──
-_GRAPH: Optional[UnifiedGraph] = None
-_GRAPH_SIG: Optional[tuple] = None      # (mtime, size) of the loaded artifact
+# ── per-(resolved path) cache, re-loaded when the file changes (P0-5, 2026-09-10) ──
+# Was a single process-wide slot: source B's query silently got source A's unified
+# graph (or vice versa, whichever loaded first in this worker). Keyed by the resolved
+# artifact path, which is itself per-source once _resolve_unified_graph_path() finds a
+# source in the ambient context — a source with no unified graph of its own falls back
+# to the legacy flat _GRAPH_FILE path/slot, unchanged from before.
+_GRAPH: Dict[str, UnifiedGraph] = {}
+_GRAPH_SIG: Dict[str, Optional[tuple]] = {}     # path -> (mtime, size) of the loaded artifact
 _STALE_WARNED: set = set()              # fingerprints already warned about (log once)
+
+
+def _resolve_unified_graph_path(source_id=None, tenant=None) -> str:
+    """Per-(tenant, source) unified-graph path when a source is known — unconditionally
+    via config.source_artifact_path(), not gated behind VEDA_ARTIFACT_SCOPE (P0-7).
+    Resolves source_id/tenant from the ambient request context when not given; with
+    neither, falls back to the legacy flat _GRAPH_FILE (dev-CLI / no-context callers)."""
+    if source_id is None:
+        try:
+            from veda_core import context
+            ctx = context.try_current()
+            if ctx is not None:
+                source_id = ctx.source_id
+                tenant = ctx.tenant or tenant
+        except Exception:
+            pass
+    if source_id is not None:
+        try:
+            from config import source_artifact_path
+            return source_artifact_path("veda_unified_graph.json", source_id, tenant or "default")
+        except Exception:
+            pass
+    return _GRAPH_FILE
+
+
+def _resolve_source(source_id=None, tenant=None):
+    """(source_id, tenant) resolved from the ambient context when not given — the
+    SAME resolution _resolve_unified_graph_path() does, exposed separately so
+    _warn_if_stale() can check freshness against the inputs the CURRENT source's
+    graph was actually built from, not always the flat file's."""
+    if source_id is None:
+        try:
+            from veda_core import context
+            ctx = context.try_current()
+            if ctx is not None:
+                source_id = ctx.source_id
+                tenant = ctx.tenant or tenant
+        except Exception:
+            pass
+    return source_id, (tenant or "default")
 
 
 def _file_sig(path: str) -> Optional[tuple]:
@@ -250,13 +295,15 @@ def _file_sig(path: str) -> Optional[tuple]:
         return None
 
 
-def _warn_if_stale(data: dict, path: str) -> None:
+def _warn_if_stale(data: dict, path: str, source_id=None, tenant: str = "default") -> None:
     """Log ONCE per (artifact, stale-input-set) when the graph predates its own inputs.
     Silent staleness was the real hazard: expansion kept serving synonyms/metrics from
-    an older data model with nothing anywhere reporting it."""
+    an older data model with nothing anywhere reporting it. `source_id`/`tenant`
+    (P0-5, 2026-09-10): must match what built `data`, so staleness is checked
+    against the SAME resolved input paths the builder used for this source."""
     try:
         from ingestion.unified_graph_builder import stale_inputs
-        stale = stale_inputs(data)
+        stale = stale_inputs(data, source_id, tenant)
         if not stale:
             return
         key = (path, tuple(stale))
@@ -270,27 +317,50 @@ def _warn_if_stale(data: dict, path: str) -> None:
         pass          # freshness reporting must never break a query
 
 
-def get_graph(path: str = _GRAPH_FILE, force_reload: bool = False) -> Optional[UnifiedGraph]:
-    """Return the cached UnifiedGraph; None if the artifact is missing/unreadable.
+def get_graph(path: str = None, force_reload: bool = False) -> Optional[UnifiedGraph]:
+    """Return the cached UnifiedGraph for `path` (default: the ambient-context-resolved
+    per-source path, else the legacy flat file); None if the artifact is missing/unreadable.
 
     Re-loads automatically when the artifact changes on disk (one stat() per call).
     Without this the process-level singleton pinned whatever was loaded first, so a
     long-lived query worker kept serving the pre-ingestion graph until restarted —
-    and no caller anywhere passes force_reload=True.
+    and no caller anywhere passes force_reload=True. Now also per-source (P0-5,
+    2026-09-10): see _resolve_unified_graph_path().
     """
-    global _GRAPH, _GRAPH_SIG
+    _sid, _tenant = _resolve_source()
+    if path is None:
+        path = _resolve_unified_graph_path(_sid, _tenant)
     sig = _file_sig(path)
-    if _GRAPH is not None and not force_reload and sig == _GRAPH_SIG:
-        return _GRAPH
+    if path in _GRAPH and not force_reload and sig == _GRAPH_SIG.get(path):
+        return _GRAPH[path]
     try:
         with open(path) as f:
             data = json.load(f)
     except (OSError, ValueError):
         return None
-    _GRAPH = UnifiedGraph(data)
-    _GRAPH_SIG = sig
-    _warn_if_stale(data, path)
-    return _GRAPH
+    g = UnifiedGraph(data)
+    _GRAPH[path] = g
+    _GRAPH_SIG[path] = sig
+    _warn_if_stale(data, path, _sid, _tenant)
+    return g
+
+
+def invalidate_unified_graph_cache(source_id=None):
+    """Drop the cached unified graph for one source (or every resolved path when
+    source_id is None). Not strictly required — get_graph() already self-invalidates
+    via the on-disk mtime/size signature — but wired into rehydrate (P0-6) alongside
+    the other P0-5 artifacts for consistency and to free the memory immediately
+    rather than on next access."""
+    if source_id is None:
+        _GRAPH.clear()
+        _GRAPH_SIG.clear()
+        return
+    try:
+        path = _resolve_unified_graph_path(source_id)
+    except Exception:
+        return
+    _GRAPH.pop(path, None)
+    _GRAPH_SIG.pop(path, None)
 
 
 # ── thin module-level wrappers (the names the spec lists) ─────────────────────

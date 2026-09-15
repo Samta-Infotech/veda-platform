@@ -53,6 +53,18 @@ _QUERY_ENCODE_CACHE_SIZE = 64
 # transport error falls back to the in-process CPU model, so it never fails a query.
 _METAL_URL = os.environ.get("METAL_EMBED_URL", "").strip()
 
+# P1-4 (2026-09-10): which backend actually served the LAST encode call. A Metal
+# transport failure falls back to CPU silently (only a stdout print, above) — this
+# makes that fact readable by a caller (the query explain trace, /readyz) instead of
+# only existing in container logs. "unset" until the first encode call in this process.
+_LAST_EMBED_BACKEND = {"v": "unset" if _METAL_URL else "cpu"}
+
+
+def get_embed_backend() -> str:
+    """"metal" | "cpu" | "unset" — whichever backend served the most recent encode_*
+    call in this process. Best-effort observability, not a per-call audit log."""
+    return _LAST_EMBED_BACKEND["v"]
+
 
 def _metal_post(path: str, payload: dict) -> dict:
     req = _u.Request(_METAL_URL.rstrip("/") + path, data=_json.dumps(payload).encode(),
@@ -105,14 +117,18 @@ def encode_dense(texts: List[str]) -> np.ndarray:
         return np.zeros((0, 1024), dtype=np.float32)
     if _METAL_URL:
         try:
-            return np.asarray(_metal_post("/encode_dense", {"texts": list(texts)})["vecs"],
+            vecs = np.asarray(_metal_post("/encode_dense", {"texts": list(texts)})["vecs"],
                               dtype=np.float32)
+            _LAST_EMBED_BACKEND["v"] = "metal"
+            return vecs
         except Exception as _e:
             print(f"  [m3] metal encode_dense failed ({_e}) — CPU fallback", flush=True)
+            _LAST_EMBED_BACKEND["v"] = "cpu"
     out = _get_model().encode(
         texts, batch_size=BIENCODER_BATCH_SIZE, max_length=512,
         return_dense=True, return_sparse=False, return_colbert_vecs=False,
     )
+    _LAST_EMBED_BACKEND["v"] = "cpu"
     dense = np.asarray(out["dense_vecs"], dtype=np.float32)
     return _l2_normalize(dense)
 
@@ -123,14 +139,18 @@ def encode_sparse(texts: List[str]) -> List[Dict[str, float]]:
         return []
     if _METAL_URL:
         try:
-            return [{str(k): float(v) for k, v in d.items()}
-                    for d in _metal_post("/encode_sparse", {"texts": list(texts)})["sparse"]]
+            result = [{str(k): float(v) for k, v in d.items()}
+                      for d in _metal_post("/encode_sparse", {"texts": list(texts)})["sparse"]]
+            _LAST_EMBED_BACKEND["v"] = "metal"
+            return result
         except Exception as _e:
             print(f"  [m3] metal encode_sparse failed ({_e}) — CPU fallback", flush=True)
+            _LAST_EMBED_BACKEND["v"] = "cpu"
     out = _get_model().encode(
         texts, batch_size=BIENCODER_BATCH_SIZE, max_length=512,
         return_dense=False, return_sparse=True, return_colbert_vecs=False,
     )
+    _LAST_EMBED_BACKEND["v"] = "cpu"
     return [_clean_sparse(lw) for lw in out["lexical_weights"]]
 
 
@@ -142,14 +162,17 @@ def _encode_single_cached(text: str) -> Tuple[Tuple[float, ...], Tuple[Tuple[str
     if _METAL_URL:
         try:
             r = _metal_post("/encode_query", {"text": text})
+            _LAST_EMBED_BACKEND["v"] = "metal"
             return (tuple(float(x) for x in r["dense"]),
                     tuple((str(k), float(v)) for k, v in r["sparse"].items()))
         except Exception as _e:
             print(f"  [m3] metal encode_query failed ({_e}) — CPU fallback", flush=True)
+            _LAST_EMBED_BACKEND["v"] = "cpu"
     out = _get_model().encode(
         [text], batch_size=1, max_length=512,
         return_dense=True, return_sparse=True, return_colbert_vecs=False,
     )
+    _LAST_EMBED_BACKEND["v"] = "cpu"
     dense = _l2_normalize(np.asarray(out["dense_vecs"], dtype=np.float32))[0]
     sparse = _clean_sparse(out["lexical_weights"][0])
     return tuple(dense.tolist()), tuple(sparse.items())

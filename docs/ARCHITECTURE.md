@@ -168,7 +168,7 @@ when authenticated, else `data["tenant"] or "default"`.
 |---|------|------------------|
 | 1 | **L0 NL simplifier** | `NL_SIMPLIFIER_ENABLED = False` → skipped. |
 | 2 | **L0 runtime context** | `RUNTIME_CONTEXT_ENABLED = True`. Pure system-value questions ("what's the current date") answer here, before retrieval. |
-| 3 | **Multi-source routing coordinator** | `MULTISOURCE_ROUTING_ENABLED = 1` **and** `MULTISOURCE_ROUTING_SHADOW = 1` → the coordinator computes a `RoutingDecision`, records it to the trace, and **returns `None`**. The legacy path answers. Only with `SHADOW=0` does the decision drive the answer (`NO_MATCH` → refuse, `ROUTED/SINGLE` → source agent, `ROUTED/MULTI` → federate / merge). See [`MULTI_SOURCE.md`](MULTI_SOURCE.md). |
+| 3 | **Multi-source routing coordinator** | `MULTISOURCE_ROUTING_ENABLED = 1`. The coordinator always computes a `RoutingDecision` and records it to the trace. **As of 2026-09-10, scoped-authoritative**: a `MODE_MULTI` decision drives the answer (doc+data grounding → federated → independent-merge) regardless of `MULTISOURCE_ROUTING_SHADOW`; every other decision (`SINGLE` / `NO_MATCH` / `CLARIFICATION_REQUIRED`) stays gated by `SHADOW` (`=1` in `.env`) and **returns `None`** — the legacy path answers. Full-authoritative (`SHADOW=0` unscoped) was tried and reverted: it let the coordinator's own weaker routing-evidence check refuse plain single-source questions the real engine answers fine. See [`MULTI_SOURCE.md`](MULTI_SOURCE.md). |
 | 4 | **Cross-source federated route** (`_maybe_federated`) | No-op unless the ambient context carries **≥ 2 source_ids**. Then `run_federated` → a `federated` `SubResult` with real cross-source SQL. |
 | 5 | **Decomposition** | `QUERY_DECOMPOSE_ENABLED = False` ("splits join queries wrongly") → straight to `_dispatch_single(query)`. The whole `run_decomposer` / `_fan_out` / compound-`MultiResult` path is unreachable. |
 
@@ -323,7 +323,7 @@ falls back to unscoped when no context is set; `all_tenants()` is the explicit e
 
 | Group | Models | Backs |
 |-------|--------|-------|
-| Structural | `SchemaTable`, `SchemaColumn`, `FkEdge`, `TableMetadata` | schema scan; `FkEdge` is the join engine's FK source of truth (undeclared FKs from the data graph carry `is_declared=False`, `overlap_score`). |
+| Structural | `SchemaTable`, `SchemaColumn`, `FkEdge`, `TableMetadata` | schema scan. `FkEdge` (`is_declared=False`/`overlap_score` for undeclared FKs) is **not** what the join engine reads at query time — that's the per-source `veda_relationship_graph.json` file (`ingestion/relationship_graph.py`, P0-1, 2026-09-10). No writer for `FkEdge` was found in the codebase at all; treat this row as substrate schema present but not populated until confirmed otherwise (P2-2, 2026-09-10: this row previously claimed `FkEdge` was the join engine's FK source of truth — corrected). |
 | Semantic / language | `SemanticType`, `GlossaryEntry`, `Synonym`, `SyntheticPair`, `SemanticConcept` | semantic-type inference, glossary/synonyms, compiled concepts. |
 | Value grounding | `ColumnValueSample`, `ColumnProfile` | value sampler (mirrored to Redis) + profiler. |
 | Embeddings (`managed=False`) | `ChunkEmbedding`, `GraphNodeEmbedding` | pgvector mirrors for **admin visibility only**. The legacy `ColumnEmbedding` / `_LT` / `_Hybrid` / `_BGE` / `RelgtStructural` models and tables were **dropped** (migrations 0006–0008). The live ANN store `column_embeddings_v2` / `table_embeddings_v2` is engine-owned in `veda_engine` — no Django migration. |
@@ -376,8 +376,9 @@ Three routing surfaces exist in `veda_core/query/`:
   scope. Live.
 - **The multi-source coordinator** (`source_coordinator.py`, `routing_policy.py`,
   `agents.py`, …) — which source(s) answer a question, presence tiers, per-source agents,
-  independent-result merge with conflict detection. **Runs in shadow only**
-  (`MULTISOURCE_ROUTING_SHADOW = 1`): computes and traces a decision, does not act on it.
+  independent-result merge with conflict detection. **Scoped authoritative**: a `MODE_MULTI`
+  decision drives the answer regardless of `MULTISOURCE_ROUTING_SHADOW`; `SINGLE` / `NO_MATCH`
+  decisions stay in shadow (compute + trace, don't act) — see [`MULTI_SOURCE.md`](MULTI_SOURCE.md) §0.
 - **The federated route** (`federated_route.py`, `federated_executor.py`,
   `cross_source_composer.py`) — when the ambient scope spans ≥ 2 sources and retrieval hits
   more than one, generate + run a cross-source query (DuckDB over materialized parquet +
@@ -521,7 +522,7 @@ Full treatment: [`OBSERVABILITY.md`](OBSERVABILITY.md).
 | Router off / single relational source | `classify` → `route_query` → `sql` unconditionally | deterministic head |
 | Count / aggregate ("how many users") | `run_query` → `try_fast_path` (no retrieval / LLM) → firewall → execute | `answered`, fast |
 | Repeat of a verified query | `run_query` → `verified_cache_lookup` (pgvector, scoped) + evidence + qualifier re-check | `answered`, `cache_hit=True` |
-| Join query | `try_multitable` pins the skeleton from `FkEdge`; LLM fills SELECT/WHERE; graph guard | `answered` / `invalid` / `refuse` |
+| Join query | `try_multitable` pins the skeleton from the per-source relationship graph (P2-2, 2026-09-10: was documented as `FkEdge` — not what's actually read, see §4); LLM fills SELECT/WHERE; graph guard | `answered` / `invalid` / `refuse` |
 | "with / without X" | `existence_mode` → deterministic EXISTS/NOT EXISTS; never cached | `answered` |
 | Filter value absent | `value_grounding` fails | `ungrounded` |
 | User qualifier dropped | `qualifier_completeness` fails → salvage re-anchor → grounded clarify | `qualifier_dropped` / `clarify` |
@@ -583,14 +584,20 @@ route.
 
 **Skeleton / dormant / dead:**
 - `query_decompose` (whole compound path — `QUERY_DECOMPOSE_ENABLED = False`).
-- The multi-source coordinator's authoritative branches (`MULTISOURCE_ROUTING_SHADOW = 1`).
+- The multi-source coordinator's `SINGLE` / `NO_MATCH` / `CLARIFICATION_REQUIRED` branches
+  (`MULTISOURCE_ROUTING_SHADOW = 1`) — deliberately, after the unscoped-authoritative regression
+  (see [`MULTI_SOURCE.md`](MULTI_SOURCE.md) §0). `MODE_MULTI` decisions ARE authoritative.
 - `veda/understanding/` (5 files), `veda/analytical_spec.py`, `veda/query_enhancement.py`,
   the Tier-2 repair loop — all flag-OFF.
-- `veda/routing_slm.py` — empty file. `veda/canonical_intent_shadow.py` — observe-only.
+- `veda/canonical_intent_shadow.py` — observe-only. (P2-2, 2026-09-10: this line used
+  to also list `veda/routing_slm.py` as "empty file" — that path doesn't exist; the
+  real file is `query/routing_slm.py`, 244 lines, live — imported by
+  `query/source_coordinator.py` for the multi-source boundary resolver, not dead code.)
 - `query_engine/intent_detector.py` — deliberately not called by the head.
-- `inference/engine.py::get_engine`, `storage_adapters.writer.store_column_embeddings`,
-  `_slm_circuit_breaker`, the ten-task Celery ingestion chain — all `NotImplementedError`
-  or pass-through.
+- `storage_adapters.writer.store_column_embeddings`, `_slm_circuit_breaker`, the ten-task
+  Celery ingestion chain — all `NotImplementedError` or pass-through.
+  (`inference/engine.py::get_engine` was the same class of stub — deleted 2026-09-10,
+  P2-3; the real warm-load has always been `veda/runtime.py::get_engine`.)
 - `ingestion/chunk_linker.py` — 0 callers, superseded by `entity_linker.py`.
 - Tenant-from-principal, per-source HNSW auto-tuning at scale (`artifact_scope` OFF by
   default), prod deployment hardening (B1–B13).

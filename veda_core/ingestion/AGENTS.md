@@ -58,7 +58,6 @@ and the non-relational dispatcher. Full reference: [../../docs/INGESTION.md](../
 ## Dead / skeleton
 | File | State |
 |------|-------|
-| `chunk_linker.py` | **0 callers.** Superseded by `entity_linker.py`. Delete candidate. |
 | `INGESTION.md` | now a pointer doc (was badly stale). |
 
 ## Gotchas

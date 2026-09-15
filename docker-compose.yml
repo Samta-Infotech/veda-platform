@@ -34,7 +34,13 @@ volumes:
 
 services:
   postgres:
-    image: pgvector/pgvector:pg17   # MUST match pg_data PG_VERSION (17)
+    image: pgvector/pgvector:pg16   # MUST match pg_data PG_VERSION. Pinned back from pg17
+                                     # 2026-09-10: the local `pg_data` volume (created
+                                     # 2026-07-05, ~500MB of real dev data) is PG16-formatted
+                                     # and Postgres refuses to start a newer major version
+                                     # against an older data directory. Re-bump to pg17 via a
+                                     # proper pg_dumpall-and-restore (or pg_upgrade) when
+                                     # convenient — see docs/backlog/query-engine-open-items.md.
     restart: unless-stopped
     ports: ["15432:5432"]   # DEV: host access for bare-metal ingestion (writes veda_engine)
     environment:

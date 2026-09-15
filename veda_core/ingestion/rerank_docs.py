@@ -17,18 +17,34 @@ import os
 from typing import Dict, Optional
 
 
-def _index_path() -> str:
+def _index_path(source_id=None, tenant: str = "default") -> str:
+    """Per-(tenant, source) when source_id is given (P0-5, 2026-09-10) — unconditionally,
+    via config.source_artifact_path(), not gated behind the VEDA_ARTIFACT_SCOPE flag
+    (P0-7). source_id-less callers (legacy/dev-CLI) keep the flat artifact_path()."""
+    if source_id is not None:
+        from config import source_artifact_path
+        return source_artifact_path("veda_rerank_docs.json", source_id, tenant)
     from config import artifact_path
     return artifact_path("veda_rerank_docs.json")
 
 
-def build_rerank_docs(source_id: str = "", verbose: bool = False) -> Dict:
-    from config import SEMANTIC_MODEL_FILE
-
-    if not os.path.exists(SEMANTIC_MODEL_FILE):
-        raise FileNotFoundError(f"semantic model not found: {SEMANTIC_MODEL_FILE}")
-    with open(SEMANTIC_MODEL_FILE) as f:
-        sm = json.load(f)
+def build_rerank_docs(source_id: str = "", tenant: str = "default", verbose: bool = False,
+                      semantic_model: Optional[Dict] = None) -> Dict:
+    """``semantic_model`` (P0-4-style fix, 2026-09-10): pass the CALLER's own in-memory
+    semantic model (``state["semantic_model"]`` from ``layers/l4_index.py``) when
+    available, rather than always re-reading the flat ``SEMANTIC_MODEL_FILE`` — the
+    same file another source's ingest could have written last (the semantic model
+    itself isn't per-source-scoped yet; see P0-5 in
+    docs/backlog/query-engine-open-items.md). Falls back to the flat file only when
+    no in-memory model is given (dev-CLI / legacy callers), unchanged from before."""
+    if semantic_model is not None:
+        sm = semantic_model
+    else:
+        from config import SEMANTIC_MODEL_FILE
+        if not os.path.exists(SEMANTIC_MODEL_FILE):
+            raise FileNotFoundError(f"semantic model not found: {SEMANTIC_MODEL_FILE}")
+        with open(SEMANTIC_MODEL_FILE) as f:
+            sm = json.load(f)
 
     col_docs = dict(sm.get("retrieval_documents", {}))   # col_id -> enriched text
 
@@ -43,29 +59,64 @@ def build_rerank_docs(source_id: str = "", verbose: bool = False) -> Dict:
         table_docs[tid] = f"{name}: columns {', '.join(col_names)}" if col_names else str(name)
 
     out = {"columns": col_docs, "tables": table_docs}
-    path = _index_path()
+    path = _index_path(source_id or None, tenant)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
     with open(path, "w") as f:
         json.dump(out, f)
     if verbose:
         print(f"  [rerank_docs] {len(col_docs)} cols, {len(table_docs)} tables → {path}")
+
+    # P0-6: drop this source's cached docs so the next read picks up what was just
+    # written instead of a stale in-process copy.
+    try:
+        invalidate_rerank_docs_cache(source_id or None)
+    except Exception:
+        pass
+
     return {"cols": len(col_docs), "tables": len(table_docs), "path": path}
 
 
-_RERANK_DOCS_CACHE: Optional[dict] = None
+# (tenant, str(source_id) | "") -> loaded dict (or None for "checked, missing").
+# Per-source (P0-5, 2026-09-10) — a single global here meant source B's query-time
+# reranker could silently read source A's precomputed rerank text (or vice versa,
+# whichever ingested/queried first in this worker process).
+_RERANK_DOCS_CACHE: dict = {}
 
 
-def load_rerank_docs() -> Optional[dict]:
-    """Query-tier loader: {"columns": {col_id: text}, "tables": {table_id: text}} or None."""
-    global _RERANK_DOCS_CACHE
-    if _RERANK_DOCS_CACHE is not None:
-        return _RERANK_DOCS_CACHE
-    path = _index_path()
+def load_rerank_docs(source_id=None, tenant=None) -> Optional[dict]:
+    """Query-tier loader: {"columns": {col_id: text}, "tables": {table_id: text}} or
+    None. Resolves source_id/tenant from the ambient request context when not given
+    (the normal query-time call shape); a source_id-less, context-less call (dev-CLI)
+    falls back to the legacy flat path, matching pre-fix behaviour."""
+    if source_id is None:
+        from veda_core import context
+        ctx = context.try_current()
+        if ctx is not None:
+            source_id = ctx.source_id
+            tenant = ctx.tenant or tenant
+    key = (tenant or "default", str(source_id) if source_id is not None else "")
+    if key in _RERANK_DOCS_CACHE:
+        return _RERANK_DOCS_CACHE[key]
+    path = _index_path(source_id, tenant or "default")
     if not os.path.exists(path):
+        _RERANK_DOCS_CACHE[key] = None
         return None
     try:
         with open(path) as f:
-            _RERANK_DOCS_CACHE = json.load(f)
-        return _RERANK_DOCS_CACHE
+            data = json.load(f)
+        _RERANK_DOCS_CACHE[key] = data
+        return data
     except Exception:
         return None
+
+
+def invalidate_rerank_docs_cache(source_id=None):
+    """Drop the cached rerank-docs artifact for one source, or every source when
+    source_id is None. Call after build_rerank_docs() rewrites the artifact, and from
+    both rehydrate paths (P0-6)."""
+    if source_id is None:
+        _RERANK_DOCS_CACHE.clear()
+        return
+    sid = str(source_id)
+    for key in [k for k in _RERANK_DOCS_CACHE if k[1] == sid]:
+        del _RERANK_DOCS_CACHE[key]

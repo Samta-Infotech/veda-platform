@@ -16,28 +16,29 @@ These run AFTER the deterministic SQL builder (LLM authors IR, builder authors S
 and BEFORE execution — alongside validate_and_parameterize. All name-based, so they
 work regardless of who/what produced the SQL.
 """
-import os
-import json
 import sqlglot
 from sqlglot import exp
 
-_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _GRAPH = {"v": None, "edges": None, "card": None}
+_GRAPH["_src"] = None   # id() of the veda.runtime.get_graph() dict this was derived from
 
 
 def _load_graph():
-    if _GRAPH["v"] is None:
-        # Route through config.RELATIONSHIP_GRAPH_FILE (tenant/source/version-scoped via
-        # artifact_path()) instead of a hardcoded repo-root path — the firewall must
-        # verify joins against the SAME graph the query tier resolved, not always the
-        # legacy default-scope file.
-        try:
-            from config import RELATIONSHIP_GRAPH_FILE
-            path = RELATIONSHIP_GRAPH_FILE if os.path.isabs(RELATIONSHIP_GRAPH_FILE) \
-                else os.path.join(_ROOT, RELATIONSHIP_GRAPH_FILE)
-        except Exception:
-            path = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
-        g = json.load(open(path)) if os.path.exists(path) else {"edges": []}
+    """The relationship graph, derived-index form ({"v", "edges", "card"}).
+
+    Delegates to ``veda.runtime.get_graph()`` — the ONE graph accessor in the
+    codebase (P0-1, 2026-09-10) — instead of loading its own copy of the file.
+    Before this fix, this module, ``query/fast_path.py`` and ``veda/runtime.py``
+    each cached the SAME unscoped flat file independently and forever, so the
+    firewall could keep validating joins against a different source's graph than
+    the one the query tier had just resolved (or a stale one after a re-ingest).
+    The (edge_set, cardinality) derived indices are still memoized here — keyed by
+    the underlying graph dict's identity, so they're recomputed only when
+    ``get_graph()`` actually returns a different object (a new source scope, or a
+    fresh graph after ``invalidate_graph_cache()`` — P0-6), not on every call."""
+    from veda.runtime import get_graph
+    g = get_graph()
+    if _GRAPH["_src"] != id(g):
         edge_set, card = set(), {}
         for e in g.get("edges", []):
             a = (e["source_table"].lower(), e["source_column"].lower())
@@ -55,7 +56,7 @@ def _load_graph():
             else:                       # 1:1 or unknown → no fan-out
                 parents = set()
             card[frozenset((a, b))] = parents
-        _GRAPH.update(v=g, edges=edge_set, card=card)
+        _GRAPH.update(v=g, edges=edge_set, card=card, _src=id(g))
     return _GRAPH
 
 

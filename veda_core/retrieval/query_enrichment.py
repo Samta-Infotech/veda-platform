@@ -66,39 +66,55 @@ class QueryEnricher:
 
         self._load_artifacts()
 
+    def _artifact_path(self, name: str) -> str:
+        """THIS source's own copy of `name` when it exists (P0-5, 2026-09-11), else
+        the flat `{self.data_dir}/{name}` this class always used. source_id/tenant
+        resolved from the ambient request context — this class is constructed
+        without either (RetrievalEnginePhase3.__init__ just does
+        `QueryEnricher()`), same as every other P0-5 reader in this codebase."""
+        try:
+            from config import resolve_source_artifact
+            return resolve_source_artifact(name, flat_default=f"{self.data_dir}/{name}")
+        except Exception:
+            return f"{self.data_dir}/{name}"
+
     def _load_artifacts(self):
         """Load L2 output files (domain_synonyms, concept_graph, glossary)."""
         try:
             # Load domain synonyms
-            with open(f"{self.data_dir}/veda_domain_synonyms.json") as f:
+            _p = self._artifact_path("veda_domain_synonyms.json")
+            with open(_p) as f:
                 self.domain_synonyms = json.load(f)
             logger.info(f"✓ Loaded domain synonyms ({len(self.domain_synonyms)} terms)")
         except FileNotFoundError:
-            logger.warning(f"Domain synonyms not found at {self.data_dir}/veda_domain_synonyms.json")
+            logger.warning(f"Domain synonyms not found at {_p}")
 
         try:
             # Load concept graph
-            with open(f"{self.data_dir}/veda_concept_graph.json") as f:
+            _p = self._artifact_path("veda_concept_graph.json")
+            with open(_p) as f:
                 self.concept_graph = json.load(f)
             logger.info(f"✓ Loaded concept graph ({len(self.concept_graph)} concepts)")
         except FileNotFoundError:
-            logger.warning(f"Concept graph not found at {self.data_dir}/veda_concept_graph.json")
+            logger.warning(f"Concept graph not found at {_p}")
 
         try:
             # Load glossary
-            with open(f"{self.data_dir}/veda_glossary.json") as f:
+            _p = self._artifact_path("veda_glossary.json")
+            with open(_p) as f:
                 self.glossary = json.load(f)
             logger.info(f"✓ Loaded glossary ({len(self.glossary)} terms)")
         except FileNotFoundError:
-            logger.warning(f"Glossary not found at {self.data_dir}/veda_glossary.json")
+            logger.warning(f"Glossary not found at {_p}")
 
         try:
             # Load semantic model (for metadata)
-            with open(f"{self.data_dir}/veda_semantic_model.json") as f:
+            _p = self._artifact_path("veda_semantic_model.json")
+            with open(_p) as f:
                 self.semantic_model = json.load(f)
             logger.info(f"✓ Loaded semantic model")
         except FileNotFoundError:
-            logger.warning(f"Semantic model not found at {self.data_dir}/veda_semantic_model.json")
+            logger.warning(f"Semantic model not found at {_p}")
 
         # WP7: load the precomputed merged enrichment index unconditionally (one
         # pre-inverted artifact built at ingestion). The per-file parse above remains a

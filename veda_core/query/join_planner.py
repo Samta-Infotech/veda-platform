@@ -31,28 +31,50 @@ _POLY_PENALTY = 0.95
 _INFERRED_PENALTY = 0.9
 
 
-_JOIN_PATHS_MAP = None   # Q-9: lazily-loaded precomputed reachability map
-
-
 def _is_reachable(adj, t, o, max_hops=4):
     """Q-9: consult the precompiled join-path map first (deterministic, O(1)); fall back
     to live shortest-path traversal for unmapped pairs or when the flag/map is absent.
-    Reachability only — the actual join edges are still computed by _shortest_path."""
-    global _JOIN_PATHS_MAP
-    # WP7: consult the precompiled join-path map first (unconditional), falling back to
-    # live shortest-path traversal for unmapped pairs or schema drift between ingestions.
+    Reachability only — the actual join edges are still computed by _shortest_path.
+
+    Reads `ingestion.join_paths.load_join_paths()` on every call (P0-5, 2026-09-10) —
+    that module now resolves + memoizes per (tenant, source) itself, so this no longer
+    keeps its own SEPARATE, unscoped, load-once-forever copy (which let source B's
+    planner silently consult source A's precomputed reachability map)."""
     try:
-        if _JOIN_PATHS_MAP is None:
-            from ingestion.join_paths import load_join_paths
-            _JOIN_PATHS_MAP = load_join_paths() or {}
-        if _JOIN_PATHS_MAP:
-            return f"{t}|{o}" in _JOIN_PATHS_MAP
+        from ingestion.join_paths import load_join_paths
+        join_paths_map = load_join_paths()
+        if join_paths_map:
+            return f"{t}|{o}" in join_paths_map
     except Exception:
         pass
     return _shortest_path(adj, t, o, max_hops=max_hops) is not None
 
 
-def load_graph(path=RELATIONSHIP_GRAPH_FILE):
+def load_graph(path=None, source_id=None, tenant=None):
+    """Load the relationship graph. Precedence (P0-1, 2026-09-10):
+
+    1. An explicit ``path`` — legacy/back-compat callers that resolved their own
+       path already (e.g. ``ingestion/value_referents.py``).
+    2. ``source_id`` (explicit, or resolved from the ambient request context when
+       both are None) — the per-source path via ``config.source_artifact_path()``.
+    3. Neither available (no context, no source_id) — the legacy flat file, for
+       byte-identical dev-CLI / no-context behaviour.
+
+    A resolved source_id with no graph on disk gets an EMPTY graph for ITSELF,
+    never another source's file — this is what makes ``veda.runtime.get_graph()``
+    (the one accessor everything should call) safe to cache per-source."""
+    if path is None:
+        if source_id is None:
+            from veda_core import context
+            ctx = context.try_current()
+            if ctx is not None:
+                source_id = ctx.source_id
+                tenant = ctx.tenant or tenant
+        if source_id is not None:
+            from config import source_artifact_path
+            path = source_artifact_path("veda_relationship_graph.json", source_id, tenant or "default")
+        else:
+            path = RELATIONSHIP_GRAPH_FILE
     if not os.path.exists(path):
         return {"tables": [], "edges": []}
     return json.load(open(path))

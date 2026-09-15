@@ -31,6 +31,16 @@ class IntentBooster:
             semantic_model: L2 semantic model (veda_semantic_model.json)
         """
         self.semantic_model = semantic_model
+        # P1-2 (2026-09-10): the deltas below (±0.10-0.40) were written against a score
+        # range that no longer matches live RRF output (measured ~0.05-0.06 at top-10,
+        # k=60) — see RETRIEVAL_INTENT_BOOST_SCALE's own comment in config.py. Read
+        # dynamically (not a module-level import) so it stays overridable per-instance
+        # for eval sweeps.
+        try:
+            from config import RETRIEVAL_INTENT_BOOST_SCALE
+            self._scale = float(RETRIEVAL_INTENT_BOOST_SCALE)
+        except Exception:
+            self._scale = 1.0
 
     def _get_column_metadata(self, col_id: str) -> Dict:
         """
@@ -85,6 +95,7 @@ class IntentBooster:
                 boost = -0.20  # Less useful for aggregation
             elif role == "TIME_DIMENSION":
                 boost = 0.10  # Nice for GROUP BY time
+            boost *= self._scale  # P1-2: rescaled to the actual RRF score range
 
             new_score = max(0.0, score + boost)  # Clamp to [0.0, 1.0]
             boosted.append((col_id, new_score))
@@ -120,6 +131,7 @@ class IntentBooster:
                 boost = 0.30  # Temporal columns most relevant
             elif role == "IDENTIFIER":
                 boost = -0.30  # IDs not relevant for time filtering
+            boost *= self._scale  # P1-2: rescaled to the actual RRF score range
 
             new_score = max(0.0, score + boost)
             boosted.append((col_id, new_score))
@@ -148,7 +160,7 @@ class IntentBooster:
             col_meta = self._get_column_metadata(col_id)
             is_fk = col_meta.get("is_foreign_key", False)
 
-            boost = 0.15 if is_fk else 0.0
+            boost = (0.15 if is_fk else 0.0) * self._scale  # P1-2: rescaled
 
             new_score = max(0.0, score + boost)
             boosted.append((col_id, new_score))

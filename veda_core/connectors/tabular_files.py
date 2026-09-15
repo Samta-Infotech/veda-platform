@@ -68,6 +68,48 @@ def _new_duckdb_conn():
     return conn
 
 
+class _DuckDBCursorShim:
+    """Enough of a DB-API cursor for ingestion/data_graph.py's SQL (double-quoted
+    identifiers, ``%s`` params, a standard ``FILTER`` clause — nothing Postgres-
+    specific) to run unchanged against a DuckDB connection. Context-manager so
+    ``with conn.cursor() as cur:`` works the same as a real psycopg2 cursor."""
+
+    def __init__(self, duckdb_conn):
+        self._conn = duckdb_conn
+        self._rel = None
+
+    def execute(self, sql, params=None):
+        self._rel = self._conn.execute(sql.replace("%s", "?"), list(params or []))
+        return self
+
+    def fetchall(self):
+        return self._rel.fetchall() if self._rel is not None else []
+
+    def fetchone(self):
+        return self._rel.fetchone() if self._rel is not None else None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False   # the owning _DuckDBConnShim.close() closes the real connection
+
+
+class _DuckDBConnShim:
+    """Connection-shaped wrapper so ``TabularFileConnector.get_sql_cursor()`` matches
+    the ``conn = ...; with conn.cursor() as cur: ...; conn.close()`` shape
+    ``ingestion/data_graph.py`` already uses for a relational client connection."""
+
+    def __init__(self, duckdb_conn):
+        self._conn = duckdb_conn
+
+    def cursor(self):
+        return _DuckDBCursorShim(self._conn)
+
+    def close(self):
+        self._conn.close()
+
+
 def table_uuid(source_id: str, table_name: str) -> str:
     """Deterministic table id: uuid5(ns, '<source_id>:<table_name>')."""
     return str(uuid.uuid5(_TABULAR_NS, f"{source_id}:{table_name}"))
@@ -295,6 +337,32 @@ class TabularFileConnector(BaseConnector):
             return self._count(scan, conn)
         finally:
             conn.close()
+
+    # -------------------------------------------------- DB-API-ish cursor (P0-2 gap)
+    # ingestion/data_graph.py's undeclared-FK discovery (value-overlap + co-null
+    # correlation) takes a plain cursor and issues portable SQL (double-quoted
+    # identifiers, %s params, a standard FILTER clause) — written against a
+    # psycopg2 cursor, but nothing in it is Postgres-specific. Before this method,
+    # a tabular source's data_graph pass went through get_client_connection(), which
+    # ignores the passed source_id (single-source-per-process — see config.get_source)
+    # and defaulted to psycopg2 with host="localhost" for an engine it didn't
+    # recognise, so it always failed closed ("Continuing without discovered edges").
+    # This gives data_graph a REAL connection instead: every table registered as a
+    # DuckDB view (same setup execute_query()/materialize_parquet() already use), so
+    # a CSV/Parquet source gets genuine value-overlap/co-null edges instead of none.
+    def get_sql_cursor(self):
+        """A DB-API-ish connection over this connector's tables — ``.cursor()``
+        (context-manager, ``execute(sql, params)`` with Postgres ``%s`` placeholders
+        translated to DuckDB's ``?``, plus ``fetchall()``/``fetchone()``) and
+        ``.close()`` — matching the ``conn = ...; with conn.cursor() as cur: ...;
+        conn.close()`` shape ``ingestion/data_graph.py`` already uses for a
+        relational source. Returns ``None`` if duckdb isn't installed."""
+        if not _DUCKDB_AVAILABLE:
+            return None
+        conn = _new_duckdb_conn()
+        for tname, scan in self.get_table_scans().items():
+            conn.execute(f'CREATE OR REPLACE VIEW "{tname}" AS SELECT * FROM {scan};')
+        return _DuckDBConnShim(conn)
 
     # -------------------------------------------------- Parquet materialization
     def materialize_parquet(self, out_dir: str) -> Dict[str, str]:

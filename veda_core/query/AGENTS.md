@@ -12,7 +12,7 @@ Full walkthrough: [../../docs/QUERY_ENGINE.md](../../docs/QUERY_ENGINE.md),
 | `routing_contracts.py` | Typed routing dataclasses (`RoutingDecision`, `CandidateSource`, tiers). |
 | `routing_policy.py` | Pure deterministic source-routing decision (`decide()`) over candidates + FK edges (presence tier, `cross_source_fk`, `is_canonical`). |
 | `routing_slm.py` | Bounded SLM ambiguity resolver — called ONLY when `routing_policy.decide` returns `AMBIGUOUS`. `resolve_boundary()`. |
-| `source_coordinator.py` | The multi-source coordinator: `plan_route()` / `execute_decision()`. **Runs in shadow only** (`MULTISOURCE_ROUTING_SHADOW=1`). Holds the `_ROUTING_QV` embed-once ContextVar. |
+| `source_coordinator.py` | The multi-source coordinator: `plan_route()` / `execute_decision()`. **Scoped authoritative** (2026-09-10, `veda_hybrid.py::_run_coordinator`): a `MODE_MULTI` decision drives the answer regardless of `MULTISOURCE_ROUTING_SHADOW`; `SINGLE`/`NO_MATCH` decisions stay shadow-gated (compute + trace only) — unscoped `SHADOW=0` was tried and regressed plain single-source queries, see `../../docs/backlog/query-engine-open-items.md`. Holds the `_ROUTING_QV` embed-once ContextVar. |
 | `source_evidence.py` | `SourceEvidence` + `group_evidence_by_source(cols, chunks)`. |
 | `operation_classifier.py` | Bounded closed-enum cross-source OPERATION classifier for a MULTI query. |
 | `execution_planner.py` | `RoutingDecision` → `ExecutionPlan` (`single` / `federated` / `independent`). |

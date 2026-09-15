@@ -368,22 +368,51 @@ def _names_entity_column(token, tables_in_sql, sm):
     return False
 
 
-_DS_SYN_CACHE = {"v": None}
+# (tenant, str(source_id) | "") -> loaded dict — per-source (P0-5, 2026-09-11). A
+# single process-wide slot here meant source B's validation gate could silently
+# consult source A's domain synonyms, or vice versa, whichever loaded first in
+# this worker.
+_DS_SYN_CACHE: dict = {}
 
 
 def _domain_synonyms() -> dict:
-    """Authoritative domain_synonyms (business phrase → [col_id]) from DOMAIN_SYNONYMS_FILE
-    — the file retrieval + scripts/enrich_synonyms.py maintain — independent of sm's
-    possibly-stale embedded copy. Cached per process; empty dict when absent."""
-    if _DS_SYN_CACHE["v"] is None:
-        try:
-            import json as _json
-            import os as _os
-            from config import DOMAIN_SYNONYMS_FILE as _p
-            _DS_SYN_CACHE["v"] = _json.load(open(_p)) if _os.path.exists(_p) else {}
-        except Exception:
-            _DS_SYN_CACHE["v"] = {}
-    return _DS_SYN_CACHE["v"]
+    """Authoritative domain_synonyms (business phrase → [col_id]) — THIS source's own
+    file when it exists (config.resolve_source_artifact), else the flat
+    DOMAIN_SYNONYMS_FILE every source used to share — independent of sm's
+    possibly-stale embedded copy. Cached per (tenant, source); empty dict when absent."""
+    try:
+        from veda_core import context
+        ctx = context.try_current()
+        sid = ctx.source_id if ctx is not None else None
+        tenant = ctx.tenant if ctx is not None else None
+    except Exception:
+        sid = tenant = None
+    key = (tenant or "default", str(sid) if sid is not None else "")
+    if key in _DS_SYN_CACHE:
+        return _DS_SYN_CACHE[key]
+    try:
+        import json as _json
+        import os as _os
+        from config import DOMAIN_SYNONYMS_FILE, resolve_source_artifact
+        _p = resolve_source_artifact("veda_domain_synonyms.json", sid, tenant,
+                                     flat_default=DOMAIN_SYNONYMS_FILE)
+        data = _json.load(open(_p)) if _os.path.exists(_p) else {}
+    except Exception:
+        data = {}
+    _DS_SYN_CACHE[key] = data
+    return data
+
+
+def invalidate_domain_synonyms_cache(source_id=None):
+    """Drop the cached domain synonyms for one source, or every source when
+    source_id is None. Call after a semantic-layer rebuild rewrites the artifact,
+    and from both rehydrate paths (P0-6)."""
+    if source_id is None:
+        _DS_SYN_CACHE.clear()
+        return
+    sid = str(source_id)
+    for key in [k for k in _DS_SYN_CACHE if k[1] == sid]:
+        del _DS_SYN_CACHE[key]
 
 
 def qualifier_completeness(query, sql, sm=None, strict=False):

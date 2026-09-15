@@ -101,6 +101,48 @@ if APIRouter is not None:
             _gr.clear_ppr_cache()
         except Exception:
             pass
+        try:                       # P0-6 (2026-09-10): drop the ONE relationship-graph
+            # cache (veda.runtime.get_graph) — graph_guard/fast_path both delegate to
+            # it now, so this one clear reaches both instead of two separate copies.
+            from veda.runtime import invalidate_graph_cache
+            invalidate_graph_cache()
+        except Exception:
+            pass
+        try:                       # P0-5/P0-6 (2026-09-10): drop the per-source
+            # rerank-docs cache so the reranker stops serving pre-ingest text.
+            from ingestion.rerank_docs import invalidate_rerank_docs_cache
+            invalidate_rerank_docs_cache()
+        except Exception:
+            pass
+        try:                       # P0-5/P0-6 (2026-09-10): drop the per-source
+            # join-paths cache.
+            from ingestion.join_paths import invalidate_join_paths_cache
+            invalidate_join_paths_cache()
+        except Exception:
+            pass
+        try:                       # P0-5/P0-6 (2026-09-10): drop the per-source
+            # enrichment-index cache.
+            from ingestion.enrichment_index import invalidate_enrichment_index_cache
+            invalidate_enrichment_index_cache()
+        except Exception:
+            pass
+        try:                       # P0-5/P0-6 (2026-09-10): drop the cached unified
+            # graph too (belt-and-braces alongside its own mtime/size self-check).
+            from graph.query_graph import invalidate_unified_graph_cache
+            invalidate_unified_graph_cache()
+        except Exception:
+            pass
+        try:                       # P0-5/P0-6 (2026-09-11): drop both per-source
+            # domain-synonyms caches.
+            from veda.validation import invalidate_domain_synonyms_cache as _inv1
+            _inv1()
+        except Exception:
+            pass
+        try:
+            from query.reranker import invalidate_domain_synonyms_cache as _inv2
+            _inv2()
+        except Exception:
+            pass
         published = 0
         try:
             import json

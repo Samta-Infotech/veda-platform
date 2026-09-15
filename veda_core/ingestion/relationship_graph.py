@@ -25,14 +25,25 @@ import re
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from config import get_primary_relational_source
+from config import get_primary_relational_source, source_artifact_path
 from utils.logger import get_logger
 import psycopg2
 from schema.real_schema import get_real_schema
 
 logger = get_logger(__name__)
 
+# Legacy flat default — kept ONLY for a ctx-less call (dev CLI / `__main__` below).
+# Every real ingestion run now persists per-(tenant, source) via
+# config.source_artifact_path() (P0-1, 2026-09-10): before this fix, EVERY source
+# wrote here, so source B's publish silently overwrote source A's graph and both
+# read whichever ran last — see docs/backlog/query-engine-open-items.md.
 RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
+
+# Mirrors ingestion/dispatcher.py's _TABULAR_ENGINES / ingestion/layers/l1_extract.py:
+# file-backed sources run the full L1-L5 pipeline over a DuckDB-backed connector, not
+# a live SQL server — there is no pg_index/INFORMATION_SCHEMA to introspect for
+# cardinality or PKs (P0-2).
+_TABULAR_ENGINES = ("csv", "csv_lake", "parquet", "xlsx", "excel")
 
 # deterministic weights by edge type (lower = preferred path)
 _WEIGHT = {
@@ -51,10 +62,59 @@ _POLY_VALUE_SAMPLE = 200      # object_id values sampled per discriminator value
 _MATCH_FLOOR = 0.80           # min correlation to accept a polymorphic/inferred edge
 
 
-def _conn():
-    cfg = get_primary_relational_source()
-    return psycopg2.connect(host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
+def _conn(ctx=None):
+    """A DB-API connection to the source being ingested.
+
+    ``ctx`` (an ``ingestion.contracts.SourceContext``) carries the ingesting
+    source's OWN connection dict — passed in by ``layers/l5_publish.py`` (P0-2,
+    2026-09-10). Falls back to ``get_primary_relational_source()`` (the
+    currently env-injected source) only for a ctx-less call — the dev-CLI
+    ``__main__`` path below, and callers on older call sites that haven't been
+    updated to pass ``ctx`` yet. In this codebase's single-source-per-process
+    ingestion model that fallback is byte-identical to passing ``ctx``: the
+    injected source IS the one being ingested in that process either way."""
+    cfg = (ctx.connection if ctx is not None and ctx.connection else None) or get_primary_relational_source()
+    conn = psycopg2.connect(host=cfg["host"], port=cfg["port"], dbname=cfg["dbname"],
                             user=cfg["user"], password=cfg.get("password", ""))
+    # P0-2: the unqualified "{table}" identifiers in _polymorphic_edges/_cardinality below
+    # rely on search_path, not the DEFAULT "public" the rest of this module used to
+    # assume — a source declaring a non-public schema (ctx.schema_filter, or a bare
+    # ctx-less call's cfg["schema"]) previously read/joined against the wrong tables
+    # (or none) whenever its schema wasn't literally "public". Same idiom veda/runtime.py
+    # already uses for the query-time connection.
+    schema = (ctx.schema_filter if ctx is not None else None) or cfg.get("schema")
+    if schema and schema != "public":
+        try:
+            from psycopg2 import sql as _sql
+            with conn.cursor() as _cur:
+                _cur.execute(_sql.SQL("SET search_path TO {}, public").format(_sql.Identifier(schema)))
+            conn.commit()
+        except Exception:
+            logger.warning("relationship_graph: could not set search_path to %r; "
+                           "continuing on the connection default", schema)
+    return conn
+
+
+def _raw_schema_for(ctx=None):
+    """The raw schema dict for the source being ingested — connector-aware, mirroring
+    ``ingestion/layers/l1_extract.py``'s own dispatch (P0-2): a file-backed tabular
+    source builds its schema from the DuckDB connector directly (``get_real_schema()``
+    always assumes a live relational connection and raises for anything else);
+    everything else uses the legacy relational shim, which is correct here because
+    this process was launched FOR ``ctx.source_id`` (single-source-per-process)."""
+    engine = ((ctx.engine if ctx is not None else "") or "").lower()
+    if ctx is not None and engine in _TABULAR_ENGINES:
+        from connectors.tabular_files import TabularFileConnector
+        path = (ctx.connection or {}).get("path") or (ctx.connection or {}).get("source_path")
+        conn = TabularFileConnector({"id": ctx.source_id, "engine": engine, "path": path})
+        st = conn.connect()
+        if not st.ok:
+            raise RuntimeError(f"relationship_graph: tabular connect failed: {st.message}")
+        try:
+            return conn.get_raw_schema_dict()
+        finally:
+            conn.disconnect()
+    return get_real_schema()
 
 
 def _q(cur, sql, args=None):
@@ -62,19 +122,30 @@ def _q(cur, sql, args=None):
     return cur.fetchall()
 
 
-def _table_meta(cur, tables):
-    """Per table: columns, PK, unique 'key-like' columns, and column data types."""
+def _table_meta(cur, tables, schema="public"):
+    """Per table: columns, PK, unique 'key-like' columns, and column data types.
+    ``schema`` (P0-2) is the SOURCE's declared schema, not a hardcoded 'public' —
+    a Postgres source using a non-default schema previously got empty metadata for
+    every table (the information_schema filter never matched)."""
     meta = {}
     for t in tables:
         rows = _q(cur,
             "SELECT column_name, data_type FROM information_schema.columns "
-            "WHERE table_schema='public' AND table_name=%s", [t])
+            "WHERE table_schema=%s AND table_name=%s", [schema, t])
         cols = [r[0] for r in rows]
         dtypes = {r[0]: r[1] for r in rows}
+        # PK via INFORMATION_SCHEMA (ANSI-standard: table_constraints + key_column_usage)
+        # instead of pg_index/pg_attribute (P0-2) — those Postgres system catalogs were
+        # the one remaining Postgres-only dependency in this function; INFORMATION_SCHEMA
+        # works identically on Postgres and is the same query a future MySQL/SQL Server
+        # source would need, so there is now only one PK-detection code path to trust.
         pks = [r[0] for r in _q(cur,
-            "SELECT a.attname FROM pg_index i "
-            "JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=ANY(i.indkey) "
-            "WHERE i.indrelid=%s::regclass AND i.indisprimary", [t])]
+            "SELECT kcu.column_name FROM information_schema.table_constraints tc "
+            "JOIN information_schema.key_column_usage kcu "
+            "  ON kcu.constraint_name = tc.constraint_name "
+            " AND kcu.table_schema = tc.table_schema "
+            "WHERE tc.constraint_type = 'PRIMARY KEY' "
+            "  AND tc.table_schema = %s AND tc.table_name = %s", [schema, t])]
         rowcount = _q(cur, f'SELECT count(*) FROM "{t}"')[0][0]
         # key-like = PK + columns that are unique (candidate business keys)
         key_cols = list(pks)
@@ -202,15 +273,46 @@ def _polymorphic_edges(cur, tables, meta):
     return edges
 
 
-def build_relationship_graph(tables=None, verbose=False):
-    """Build and persist veda_relationship_graph.json for the given tables
-    (default: the tables in the current semantic model)."""
-    raw = get_real_schema()
+def _can_sql_introspect(ctx) -> bool:
+    """True when this source has a live, dialect-known SQL connection this module
+    knows how to introspect for cardinality/PK (Postgres today). False for a
+    file-backed tabular source (no SQL server at all) or a relational engine this
+    module hasn't been verified against (P0-2) — both fall back to declared-FK-only
+    edges rather than crashing or guessing at unverified SQL."""
+    if ctx is None:
+        return True   # legacy ctx-less call: byte-identical to pre-fix behaviour
+    engine = (ctx.engine or "postgresql").lower()
+    if engine in _TABULAR_ENGINES:
+        return False
+    return ctx.type == "relational" and engine in ("postgresql", "postgres")
+
+
+def build_relationship_graph(tables=None, verbose=False, ctx=None):
+    """Build and persist the relationship graph for ONE source.
+
+    ``ctx`` (``ingestion.contracts.SourceContext``) is the source being ingested —
+    passed by ``layers/l5_publish.py`` (P0-2/P0-1, 2026-09-10). It is optional and
+    defaults to the legacy ctx-less behaviour (currently-injected source, flat
+    ``RELATIONSHIP_GRAPH_FILE``) for the ``__main__`` dev-CLI entry point below.
+
+    ``tables`` should come from the CALLER's own in-memory scan/semantic-model for
+    this run (``state["semantic_model"]`` / ``state["scan_result"]``) — never
+    re-derived from a file on disk here, which is what let one source's stale or
+    foreign semantic-model file silently produce an empty (or wrong-source) graph
+    for another source (P0-4). ``None`` still falls back to reading
+    ``SEMANTIC_MODEL_FILE`` for the ctx-less dev-CLI path only.
+    """
+    source_id = ctx.source_id if ctx is not None else None
+    tenant = (ctx.tenant if ctx is not None else None) or "default"
+    sql_mode = _can_sql_introspect(ctx)
+
+    raw = _raw_schema_for(ctx)
     schema_tables = raw.get("tables", [])
     by_name = {t["table_name"]: t for t in schema_tables}
 
     if tables is None:
-        # default to whatever the semantic model covers
+        # ctx-less dev-CLI fallback only (real ingestion runs always pass tables
+        # explicitly — see docstring). Default to whatever the semantic model covers.
         try:
             from config import SEMANTIC_MODEL_FILE
             sm = json.load(open(SEMANTIC_MODEL_FILE))
@@ -219,38 +321,80 @@ def build_relationship_graph(tables=None, verbose=False):
             tables = list(by_name.keys())
     tables = [t for t in tables if t in by_name]
 
-    conn = _conn()
-    cur = conn.cursor()
-    try:
-        meta = _table_meta(cur, tables)
+    # P0-4: a schema scan that found tables but ended up with an empty scoped list
+    # (e.g. a foreign/stale tables argument that shares no names with this source's
+    # OWN schema) is a bug upstream, not "this source has no tables" — refuse to
+    # overwrite whatever graph (if any) is already on disk for it. An honestly-empty
+    # source (0 tables in its own schema too) still gets an empty graph, correctly.
+    if not tables and by_name:
+        raise RuntimeError(
+            f"relationship_graph: refusing to write an empty graph for source "
+            f"{source_id!r} — schema scan found {len(by_name)} table(s) but none "
+            f"matched the requested `tables` scope (stale/foreign semantic model?)")
 
+    if sql_mode:
+        schema_name = (ctx.schema_filter if ctx is not None else None) \
+            or (ctx.connection.get("schema") if ctx is not None and ctx.connection else None) \
+            or "public"
+        conn = _conn(ctx)
+        cur = conn.cursor()
+        try:
+            meta = _table_meta(cur, tables, schema=schema_name)
+
+            edges = _declared_fk_edges([by_name[t] for t in tables])
+            edges = [e for e in edges if e["target_table"] in tables]
+            edges += _polymorphic_edges(cur, tables, meta)
+
+            for e in edges:
+                e["cardinality"] = _cardinality(cur, e["source_table"], e["source_column"],
+                                                e["target_table"], e["target_column"])
+                e["weight"] = _WEIGHT.get(e["relationship_type"], 3)
+        finally:
+            cur.close(); conn.close()
+    else:
+        # Tabular source, or a relational engine this module can't safely introspect
+        # yet (P0-2): declared/inferred FK edges only — no live SQL connection, so no
+        # cardinality/rowcount/polymorphic-value correlation. Real edges, just a
+        # coarser confidence than the full SQL-introspected mode; a source that used
+        # to get NO graph at all (ValueError → non-fatal stage failure) now gets one.
         edges = _declared_fk_edges([by_name[t] for t in tables])
-        # keep only edges whose both ends are in scope
         edges = [e for e in edges if e["target_table"] in tables]
-        edges += _polymorphic_edges(cur, tables, meta)
-
-        # cardinality + weight per edge
         for e in edges:
-            e["cardinality"] = _cardinality(cur, e["source_table"], e["source_column"],
-                                            e["target_table"], e["target_column"])
+            e["cardinality"] = "unknown"
             e["weight"] = _WEIGHT.get(e["relationship_type"], 3)
+        if verbose:
+            logger.info("relationship_graph: declared-FK-only mode for source %r "
+                       "(engine=%r, type=%r) — no live SQL introspection",
+                       source_id, getattr(ctx, "engine", None), getattr(ctx, "type", None))
 
-        graph = {
-            "tables": tables,
-            "edges": edges,
-            "stats": {
-                "num_tables": len(tables), "num_edges": len(edges),
-                "declared": sum(1 for e in edges if e["discovery"] == "declared_fk"),
-                "polymorphic": sum(1 for e in edges if e["polymorphic"]),
-            },
-        }
-    finally:
-        cur.close(); conn.close()
+    graph = {
+        "tables": tables,
+        "edges": edges,
+        "stats": {
+            "num_tables": len(tables), "num_edges": len(edges),
+            "declared": sum(1 for e in edges if e["discovery"] == "declared_fk"),
+            "polymorphic": sum(1 for e in edges if e["polymorphic"]),
+            "mode": "sql" if sql_mode else "declared_fk_only",
+        },
+    }
 
-    os.makedirs(os.path.dirname(RELATIONSHIP_GRAPH_FILE) or ".", exist_ok=True)
-    json.dump(graph, open(RELATIONSHIP_GRAPH_FILE, "w"), indent=2)
+    out_path = source_artifact_path("veda_relationship_graph.json", source_id, tenant) \
+        if source_id is not None else RELATIONSHIP_GRAPH_FILE
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    json.dump(graph, open(out_path, "w"), indent=2)
     if verbose:
         logger.info("%s", json.dumps(graph["stats"], indent=2))
+
+    # P0-6: drop this source's cached graph so the next read (this process or, via
+    # rehydrate, an inference worker) picks up what was just written instead of a
+    # stale in-memory copy.
+    try:
+        from veda.runtime import invalidate_graph_cache
+        invalidate_graph_cache(source_id)
+    except Exception:
+        pass
+
+    return graph
     return graph
 
 

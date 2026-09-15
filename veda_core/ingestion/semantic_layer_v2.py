@@ -1222,6 +1222,9 @@ def run_full_semantic_layer(
     profiling: Optional[Dict[str, Any]] = None,
     glossary: Optional[Dict[str, str]] = None,
     force_glossary: bool = False,
+    domain_synonyms_file: Optional[str] = None,
+    concept_graph_file: Optional[str] = None,
+    glossary_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run full L2 semantic layer (Stages 1-5 + Post-processing).
@@ -1231,11 +1234,18 @@ def run_full_semantic_layer(
         profiling: Optional profiling dict (if None, Stage 1 runs)
         glossary: Optional glossary dict (if None, Stage 2 runs)
         force_glossary: Force regeneration of glossary
+        domain_synonyms_file/concept_graph_file/glossary_file: per-source output paths
+            (P0-5, 2026-09-11) — default to the legacy flat DOMAIN_SYNONYMS_FILE/
+            CONCEPT_GRAPH_FILE/GLOSSARY_FILE constants when not given (ctx-less /
+            dev-CLI callers), so this stays byte-identical unless the caller (now
+            `layers/l3_enrich.py`) passes a per-source path.
 
     Returns:
         {table: {...}, columns: [...], retrieval_documents: {...},
          domain_synonyms: {...}, concept_graph: {...}}
     """
+    domain_synonyms_file = domain_synonyms_file or DOMAIN_SYNONYMS_FILE
+    concept_graph_file = concept_graph_file or CONCEPT_GRAPH_FILE
     logger.info(f"Starting L2 semantic layer (stages 1-5 + post-processing) on {len(schema_dict)} tables...")
     start_time = time.time()
 
@@ -1518,21 +1528,21 @@ def run_full_semantic_layer(
 
     # Save glossary
     logger.info("Saving glossary...")
-    glossary_builder.save_glossary(glossary)
+    glossary_builder.save_glossary(glossary, output_file=glossary_file)
 
     # Save domain synonyms
     logger.info("Saving domain synonyms...")
-    os.makedirs(os.path.dirname(DOMAIN_SYNONYMS_FILE) or ".", exist_ok=True)
-    with open(DOMAIN_SYNONYMS_FILE, "w") as f:
+    os.makedirs(os.path.dirname(domain_synonyms_file) or ".", exist_ok=True)
+    with open(domain_synonyms_file, "w") as f:
         json.dump(domain_synonyms, f, indent=2)
-    logger.info(f"Domain synonyms saved to {DOMAIN_SYNONYMS_FILE}")
+    logger.info(f"Domain synonyms saved to {domain_synonyms_file}")
 
     # Save concept graph
     logger.info("Saving concept graph...")
-    os.makedirs(os.path.dirname(CONCEPT_GRAPH_FILE) or ".", exist_ok=True)
-    with open(CONCEPT_GRAPH_FILE, "w") as f:
+    os.makedirs(os.path.dirname(concept_graph_file) or ".", exist_ok=True)
+    with open(concept_graph_file, "w") as f:
         json.dump(concept_graph, f, indent=2)
-    logger.info(f"Concept graph saved to {CONCEPT_GRAPH_FILE}")
+    logger.info(f"Concept graph saved to {concept_graph_file}")
 
     elapsed = time.time() - start_time
     logger.info(f"L2 semantic layer complete: {len(all_columns)} columns in {elapsed:.1f}s")

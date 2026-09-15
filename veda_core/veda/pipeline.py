@@ -367,6 +367,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if SUPERLATIVE_JOIN_ROUTING:
             intent = "AGGREGATE"
         print(f"  [L4] Intent       {intent} (superlative: {_sup['term']} → {_sup['superlative']})")
+
+    # Retrieval-only intent (P1-2, 2026-09-10): `intent` above also gates multi-table
+    # JOIN PLANNING (SUPERLATIVE_JOIN_ROUTING) and stays "SIMPLE" there deliberately —
+    # this is a SEPARATE signal, fed only to retrieve()'s intent-aware column boosting
+    # (retrieval/intent_boosting.py), which never affects planning/routing. Derived from
+    # the same grammar classifiers already computed above (_agg_mode/_grp_mode/temporal
+    # tf), so it costs nothing extra to compute. TEMPORAL takes priority over AGGREGATE
+    # when a query names both (e.g. "revenue by month" — both a date range AND a
+    # grouped measure are present; boosting the date column first is the safer default,
+    # since a wrong measure choice is more visibly wrong than a wrong time bucket).
+    if tf and (tf.start or tf.end):
+        _retrieval_intent = "TEMPORAL"
+    elif _agg or _grp:
+        _retrieval_intent = "AGGREGATE"
+    else:
+        _retrieval_intent = intent
+
     _qu = dict(query=query, intent=intent,
                temporal=({"start": tf.start, "end": tf.end}
                          if tf and (tf.start or tf.end) else None),
@@ -588,14 +605,17 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if enh and _search != query:
             print(f"  [L2+] Enhance      +{len(enh.search_terms) + len(enh.expanded_aliases)} "
                   f"search terms  ({'; '.join(enh.enhancement_trace[:3])})")
-        print("  [L2] Retrieval     5-signal (BGE-M3 + BM25 + FK subgraph/path + value) → RRF")
+        print("  [L2] Retrieval     6-signal (BGE-M3 dense+sparse + FK subgraph/path + "
+              "value + table-prior) → weighted RRF")
         try:
             from config import RETRIEVAL_CACHE_ENABLED as _RC
         except Exception:
             _RC = False
         # Pass THIS (source, tenant)'s semantic model so the engine for this scope is built
         # from the right source's BM25/signals (P5 multi-source); Signal-1 store is source-scoped.
-        results = get_engine(sm).retrieve(query=_search, intent=intent, top_k=15, use_cache=_RC)
+        # `_retrieval_intent` (P1-2), not `intent` — see its computation above for why they
+        # deliberately differ.
+        results = get_engine(sm).retrieve(query=_search, intent=_retrieval_intent, top_k=15, use_cache=_RC)
 
         # ── Unified-graph recall booster (Phase 4): ADD columns the 5-signal engine may
         # have missed, via synonym/alias resolution + FK-neighbour reach. Purely additive

@@ -153,24 +153,24 @@ def _columns_of_table(table_id: str) -> List[str]:
         return []
 
 
-_RERANK_DOCS = None
-_RERANK_DOCS_LOADED = False
-
-
 def _get_rerank_docs() -> dict:
     """The precomputed rerank-doc artifact (built at ingestion). WP7: this is the ONLY
     source of cross-encoder text — the per-query runtime assembly was removed. Fail loud
-    at first use if the artifact is missing (that means ingestion is incomplete)."""
-    global _RERANK_DOCS, _RERANK_DOCS_LOADED
-    if not _RERANK_DOCS_LOADED:
-        from ingestion.rerank_docs import load_rerank_docs
-        _RERANK_DOCS = load_rerank_docs() or {}
-        _RERANK_DOCS_LOADED = True
-        if not _RERANK_DOCS:
-            raise RuntimeError(
-                "rerank_docs artifact missing — the cross-encoder text is precomputed at "
-                "ingestion (WP7). Run ingestion to build it.")
-    return _RERANK_DOCS
+    at first use if the artifact is missing (that means ingestion is incomplete).
+
+    Delegates to ``ingestion.rerank_docs.load_rerank_docs()`` on every call (P0-5,
+    2026-09-10) instead of keeping a SECOND, unscoped cache on top of that module's
+    own — this module used to cache the first source's docs forever, independent of
+    which source a later query in the same worker was actually scoped to.
+    `load_rerank_docs()` already resolves the source from the ambient context and
+    memoizes per-source itself, so this stays cheap."""
+    from ingestion.rerank_docs import load_rerank_docs
+    docs = load_rerank_docs() or {}
+    if not docs:
+        raise RuntimeError(
+            "rerank_docs artifact missing — the cross-encoder text is precomputed at "
+            "ingestion (WP7). Run ingestion to build it.")
+    return docs
 
 
 def _precomputed_rerank_text(item_id, is_table: bool):
@@ -260,23 +260,49 @@ def _apply_cutoff(scored: list, top_n: int, n_candidate_tables: int = 1) -> list
     return kept
 
 
-_DOMAIN_SYN_CACHE = {"v": None}
+_DOMAIN_SYN_CACHE: dict = {}   # (tenant, str(source_id) | "") -> {phrase: {col, ...}}
 
 
 def _domain_synonyms() -> dict:
     """The GENERATED domain synonyms ({phrase: [table.column, ...]}) — the ONE synonym
-    source for the whole system. Absolute path (CWD-independent). Used PHRASE-level below
-    so a synonym re-adds only its mapped columns, never a loose token match."""
-    if _DOMAIN_SYN_CACHE["v"] is None:
+    source for the whole system. Used PHRASE-level below so a synonym re-adds only its
+    mapped columns, never a loose token match.
+
+    Delegates the raw load to ``veda.validation._domain_synonyms()`` (P0-5, 2026-09-11)
+    — the reference per-(tenant, source) implementation every other consumer of this
+    file (`ingestion/enrichment_index.py`, `semantic/compile_semantic_layer.py`,
+    `ingestion/unified_graph_builder.py`) already resolves through the same way
+    (`config.resolve_source_artifact`) — then just lowercases the shape THIS module
+    needs. One shared cache/load instead of a second independent copy of both."""
+    try:
+        from veda_core import context
+        ctx = context.try_current()
+        sid = ctx.source_id if ctx is not None else None
+        tenant = ctx.tenant if ctx is not None else None
+    except Exception:
+        sid = tenant = None
+    key = (tenant or "default", str(sid) if sid is not None else "")
+    if key not in _DOMAIN_SYN_CACHE:
         try:
-            _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                              "data", "veda_domain_synonyms.json")
-            d = json.load(open(_p))
-            _DOMAIN_SYN_CACHE["v"] = {str(k).lower(): {str(c).lower() for c in (v or [])}
-                                     for k, v in d.items()}
+            from veda.validation import _domain_synonyms as _raw_domain_synonyms
+            d = _raw_domain_synonyms()
+            _DOMAIN_SYN_CACHE[key] = {str(k).lower(): {str(c).lower() for c in (v or [])}
+                                      for k, v in d.items()}
         except Exception:
-            _DOMAIN_SYN_CACHE["v"] = {}
-    return _DOMAIN_SYN_CACHE["v"]
+            _DOMAIN_SYN_CACHE[key] = {}
+    return _DOMAIN_SYN_CACHE[key]
+
+
+def invalidate_domain_synonyms_cache(source_id=None):
+    """Drop this module's own lowercased domain-synonyms cache (P0-6) — separate
+    from, and in addition to, ``veda.validation.invalidate_domain_synonyms_cache()``
+    (its raw-shape sibling cache); callers should clear both."""
+    if source_id is None:
+        _DOMAIN_SYN_CACHE.clear()
+        return
+    sid = str(source_id)
+    for key in [k for k in _DOMAIN_SYN_CACHE if k[1] == sid]:
+        del _DOMAIN_SYN_CACHE[key]
 
 
 def _query_named_columns(

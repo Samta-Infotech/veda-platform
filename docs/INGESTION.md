@@ -147,19 +147,33 @@ analytics_role / sql_usage / importance_class / aliases).
 
 | Stage | fn | Produces | Consumed by | Gate |
 |---|---|---|---|---|
-| `relationship_graph` | `relationship_graph.build_relationship_graph` | `data/veda_relationship_graph.json` | query join planner / fast path / graph guard | `DERIVED_ARTIFACTS_ENABLED` |
+| `relationship_graph` | `relationship_graph.build_relationship_graph` | `data/<tenant>/<source>/veda_relationship_graph.json` (per-source since P0-1, 2026-09-10 — was one flat file shared by every source) | query join planner / fast path / graph guard | `DERIVED_ARTIFACTS_ENABLED` |
 | `semantic_registry` | `semantic.compile_semantic_layer.compile_all(write=True)` | `semantic/{concepts,dimensions,metrics,MANIFEST}.json` | query fast path | `DERIVED_ARTIFACTS_ENABLED` |
 | `value_referents` | `value_referents.write_value_referents` | `<ART>/<tenant>/<source>/veda_value_referents.json` | deterministic planners, typed anchors, Tier-2 qualifier gate | `DERIVED_ARTIFACTS_ENABLED` |
 | `hnsw_tune` | inline — `clamp(40 + (n_tables // 20) * 20, 40, 200)` — `l5_publish.py:88-93` | `data/veda_hnsw.json` + `state["hnsw_ef_search"]` | `task_warm_caches` → `SubstrateVersion.hnsw_ef_search` → pgvector `SET LOCAL ef_search` | — |
 | `value_mirror` | `value_mirror.mirror_values_to_redis` | Redis `value:{tenant}:{source}:{norm}` hashes | query value resolver / arbiter (Postgres fallback) | — |
-| `unified_graph` | `unified_graph_builder.build_unified_graph` + `write_unified_graph` | `data/veda_unified_graph.json` | query `GRAPH_EXPAND` | **ALWAYS rebuilt** — deliberately not gated on `UNIFIED_GRAPH_ENABLED` (`l5_publish.py:107-115`) |
+| `unified_graph` | `unified_graph_builder.build_unified_graph` + `write_unified_graph` | `data/<tenant>/<source>/veda_unified_graph.json` (per-source output since P0-5, 2026-09-10; the 5 non-graph inputs it fuses — semantic model, concept graph, domain synonyms, metrics, dimensions — are still flat until each gets its own per-source fix, so a source's unified graph reflects ITS relationship graph but the shared flat versions of everything else) | query `GRAPH_EXPAND` | **ALWAYS rebuilt** — deliberately not gated on `UNIFIED_GRAPH_ENABLED` (`l5_publish.py:107-115`) |
 | `cross_source_fk` | `cross_source_graph.discover_and_persist(tenant)` | `cross_source_fk` edges in `graph_edges` | query federated join planner | — (no-op until ≥2 sources have sketches) |
 
 > **"Atomic activate" is partly aspirational.** `L5_PUBLISH.md` says the query tier flips
-> once L5 publishes. Reality: `l5_publish.py` writes flat global files (`data/veda_*.json`)
-> and tunes HNSW; the actual version-flip + rehydrate happens later in `task_warm_caches`
-> → `writer.warm()`, and readiness is still gated only by `Source.ready` — there is no
-> per-artifact `SubstrateVersion` pointer yet.
+> once L5 publishes. Reality: `l5_publish.py` writes **per-source** files (P0-1/P0-5,
+> 2026-09-10 — was flat global `data/veda_*.json` for relationship_graph, rerank_docs,
+> join_paths, enrichment_index, and unified_graph's own output; the semantic model,
+> concept graph, domain synonyms, and compiled registries are still flat) and tunes HNSW;
+> the actual version-flip + rehydrate happens later in `task_warm_caches` → `writer.warm()`,
+> and readiness is still gated only by `Source.ready` — there is no per-artifact
+> `SubstrateVersion` pointer yet.
+
+> **`relationship_graph`'s builder is connector-aware, not Postgres-only (fixed 2026-09-10,
+> P0-2).** It used to call `get_real_schema()`/`get_primary_relational_source()`
+> unconditionally, which raised for anything that wasn't a live relational connection — so
+> a tabular (CSV/Parquet/Excel) source got **no relationship graph at all**, silently, every
+> ingest. It now mirrors L1's own connector dispatch (`TabularFileConnector` for a
+> file-backed source), replaced the Postgres-only `pg_index`/`pg_attribute` PK lookup with
+> ANSI `information_schema` (works on Postgres, portable to a future non-Postgres source),
+> and uses the source's own declared schema instead of a hardcoded `'public'`. A tabular
+> source, or a relational engine this module hasn't been verified against, gets
+> declared-FK-only edges (no live SQL introspection, so no cardinality) instead of nothing.
 
 ---
 
@@ -221,7 +235,7 @@ legacy dict `schema_scanner` expects.
 | Graph node embeddings | internal DB `graph_node_embeddings` (HNSW) | L4 `graph_embed` → `embed_graph_nodes` | graph seed retrieval, `semantic_linker` |
 | Enrichment index | `data/veda_enrichment_index.json` | L4 `enrichment_index` → `build_enrichment_index` | `retrieval/query_enrichment.py` |
 | Rerank docs | `data/veda_rerank_docs.json` | L4 `rerank_docs` → `build_rerank_docs` | `query/reranker.py` |
-| Relationship graph | `data/veda_relationship_graph.json` | L5 `relationship_graph` → `build_relationship_graph` | query join planner / fast path / graph guard |
+| Relationship graph | `data/<tenant>/<source>/veda_relationship_graph.json` (per-source, P0-1) | L5 `relationship_graph` → `build_relationship_graph` | query join planner / fast path / graph guard |
 | Semantic registry | `semantic/{concepts,dimensions,metrics,MANIFEST}.json` | L5 `semantic_registry` → `compile_semantic_layer.compile_all` | query fast path |
 | Value referents | `data/<tenant>/<source>/veda_value_referents.json` | L5 `value_referents` → `write_value_referents` | deterministic planners, typed anchors, Tier-2 qualifier gate |
 | HNSW tune | `data/veda_hnsw.json` | L5 `hnsw_tune` (inline) · `l5_publish.py:88-93` | `task_warm_caches` → `SubstrateVersion.hnsw_ef_search` |

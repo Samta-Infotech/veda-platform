@@ -482,10 +482,11 @@ def _phase3_deduplicate(edges: List[DiscoveredEdge]) -> List[DiscoveredEdge]:
 # =============================================================================
 
 def run_data_graph(
-    scan_result:   ScanResult,
-    semantic_map:  Dict[str, str] = None,
-    source_id:     str = None,
-    verbose:       bool = False,
+    scan_result:       ScanResult,
+    semantic_map:      Dict[str, str] = None,
+    source_id:         str = None,
+    verbose:           bool = False,
+    tabular_connector  = None,
 ) -> DataGraphResult:
     """
     Main entry point for Step 2b: Data Graph analysis.
@@ -501,6 +502,18 @@ def run_data_graph(
         {col_id → semantic_type} from semantic_type_inference.
         If None, defaults to treating all IDENTIFIER-suffixed columns as eligible.
     verbose : bool
+    tabular_connector : connectors.tabular_files.TabularFileConnector, optional
+        The SAME connector `layers/l1_extract.py` already opened for this run
+        (`state["tabular_connector"]`) when the source being ingested is a
+        file-backed CSV/Parquet/Excel source. Before this parameter existed, a
+        tabular source fell through to `get_client_connection()`, which ignores
+        the source_id it's given (single-source-per-process) and defaulted to
+        psycopg2 against `host="localhost"` for an engine it didn't recognise —
+        always failing closed (`"Continuing without discovered edges"`), so a
+        tabular source could never get a real/inferred FK edge (2026-09-10 fix,
+        see docs/backlog/query-engine-open-items.md). When given, Phase 1/2 run
+        against `tabular_connector.get_sql_cursor()` (a DuckDB view over the
+        source's own files) instead of a relational client connection.
 
     Returns
     -------
@@ -524,7 +537,7 @@ def run_data_graph(
             stats            = {"skipped": "DATA_GRAPH_ENABLED=False"},
         )
 
-    if not PSYCOPG2_AVAILABLE:
+    if tabular_connector is None and not PSYCOPG2_AVAILABLE:
         if verbose:
             print("[DataGraph] psycopg2 not available — skipping data graph analysis")
         return DataGraphResult(
@@ -589,8 +602,14 @@ def run_data_graph(
     total_skipped = 0
 
     try:
-        _source_id = source_id or get_primary_relational_source()["id"]
-        conn = get_client_connection(_source_id)
+        if tabular_connector is not None:
+            conn = tabular_connector.get_sql_cursor()
+            if conn is None:
+                raise RuntimeError("duckdb not installed — cannot run data_graph over a "
+                                   "tabular source")
+        else:
+            _source_id = source_id or get_primary_relational_source()["id"]
+            conn = get_client_connection(_source_id)
         try:
             with conn.cursor() as cur:
                 # ----------------------------------------------------------

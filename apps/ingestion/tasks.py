@@ -65,17 +65,12 @@ _DEFAULT_EMBEDDING_MODEL_ID = "bge-m3"
 # Environment keys read/written around the engine subprocess.
 _ENV_APP_DIR = "VEDA_APP_DIR"
 _DEFAULT_APP_DIR = "/app"
-_ENV_ARTIFACT_SCOPING = "VEDA_ARTIFACT_SCOPING"
-_ARTIFACT_SCOPING_ENABLED = "1"
 
 # How much engine output to retain for a failure message, and how much of that
 # tail to actually surface — bounded so a chatty pipeline can't blow up the
 # exception string or the worker's memory.
 _OUTPUT_TAIL_MAX_LINES = 200
 _ERROR_TAIL_MAX_CHARS = 1500
-# Engine progress-marker label recorded on the stage checkpoint, truncated to
-# keep the JSON checkpoint small.
-_MARKER_LABEL_MAX_CHARS = 80
 
 
 # Layered stage name (ingestion/layers) → STAGE_ORDER row name (§2.2). Multiple
@@ -97,21 +92,11 @@ _LAYER_STAGE_TO_ROW = {
     "unified_graph": "unified_graph",
 }
 
-# Engine step index (1..12, incl 7b/9b) → STAGE_ORDER row name, in order. Several
-# engine steps roll up into one observable row (e.g. steps 10-12 → derived_language).
-# Built once at import: this was previously rebuilt from a list of tuples via
-# `dict(...)` on EVERY line of subprocess output.
-_ENGINE_STEP_TO_STAGE = {
-    1: "schema_scan", 2: "fk_adjacency", 3: "data_graph", 4: "semantic_types",
-    5: "semantic_types", 6: "value_profiling", 7: "unified_graph",
-    8: "embeddings", 9: "vector_store", 10: "derived_language",
-    11: "derived_language", 12: "derived_language",
-}
-
-# "[N/NN] StageName" progress markers emitted by the engine's monolith path.
-_MARKER_RE = re.compile(r"\[(\d+)[ab]?/\d+\]\s+([A-Za-z][^\(\n]+)")
-# Layered mode (P4): "[[STAGE]] <layer> <stage> <ok|fail|fatal>" events drive
-# IngestionStage rows from real lifecycle instead of regex-parsing progress bars.
+# "[[STAGE]] <layer> <stage> <ok|fail|fatal>" events drive IngestionStage rows from
+# real lifecycle. (P2-3, 2026-09-10: this used to ALSO regex-parse "[N/NN] StageName"
+# progress markers, via _MARKER_RE/_ENGINE_STEP_TO_STAGE/_apply_step_marker — that
+# format was emitted by the pre-P7 monolith ingestion path, which no longer exists;
+# main.py::run_ingestion (the current thin shim) never prints it. Removed as dead code.)
 _STAGE_EVENT_RE = re.compile(r"\[\[STAGE\]\]\s+(\S+)\s+(\S+)\s+(ok|fail|fatal)")
 _STAGE_EVENT_OK = "ok"
 _STAGE_EVENT_FATAL = "fatal"
@@ -366,21 +351,17 @@ def _run_engine_pipeline(job, tracker: _StageTracker, source_id, tenant, *,
         cwd=veda_core_dir, env=subprocess_env,
         stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
     )
-    output_tail, active_marker_stage, active_event_row = _consume_engine_output(process, tracker)
+    output_tail, active_event_row = _consume_engine_output(process, tracker)
     process.wait()
 
     if process.returncode != 0:
         if active_event_row:
             tracker.mark([active_event_row], JobStatus.FAILED)
-        if active_marker_stage:
-            tracker.mark([active_marker_stage], JobStatus.FAILED)
         raise RuntimeError(f"run_ingestion subprocess failed (rc={process.returncode}): "
                            f"{''.join(output_tail)[-_ERROR_TAIL_MAX_CHARS:]}")
 
     if active_event_row:
         tracker.mark([active_event_row], JobStatus.SUCCESS)
-    if active_marker_stage:
-        tracker.mark([active_marker_stage], JobStatus.SUCCESS)
     # "primary_db" is the historical label for a run with no explicit source id.
     return str(source_id) if source_id else "primary_db"
 
@@ -403,11 +384,12 @@ def _build_subprocess_env(job, tracker: _StageTracker, source, source_id, tenant
     # per-stage lifecycle.
     subprocess_env["VEDA_TENANT"] = str(tenant)
 
-    # Per-source artifact scope (P3/§3.1) is OPT-IN (VEDA_ARTIFACT_SCOPING=1): only
-    # when the query tier is also scope-aware (P5) do artifacts move off the flat
-    # data/ paths. Off by default so single-source behaviour stays byte-identical.
-    if os.environ.get(_ENV_ARTIFACT_SCOPING) == _ARTIFACT_SCOPING_ENABLED:
-        subprocess_env["VEDA_ARTIFACT_SCOPE"] = f"{tenant}/{source_id}/{job.pk}"
+    # Per-source artifact paths (P0-1/P0-5) are resolved unconditionally by each
+    # layer from ctx.source_id/ctx.tenant via config.source_artifact_path() /
+    # resolve_source_artifact() — no env var needed (P0-7, 2026-09-11: removed
+    # the old VEDA_ARTIFACT_SCOPING opt-in flag/VEDA_ARTIFACT_SCOPE env, which
+    # this repo never actually turned on; see
+    # docs/backlog/query-engine-open-items.md's P0-7 entry).
 
     # Resume (§4.2a/P8-B5): auto-detect from a prior failed job for this source, OR
     # explicit resume=True. VEDA_RESUME=1 makes the engine skip the expensive stages
@@ -455,15 +437,14 @@ def _build_engine_command(source, subprocess_env: dict, *, skip_llm: bool) -> st
     )
 
 
-def _consume_engine_output(process, tracker: _StageTracker) -> tuple[list[str], str | None, str | None]:
+def _consume_engine_output(process, tracker: _StageTracker) -> tuple[list[str], str | None]:
     """Stream the subprocess stdout, driving live IngestionStage updates.
 
-    Returns ``(output_tail, active_marker_stage, active_event_row)`` — the retained
-    tail for a failure message, plus whichever stage/row each of the two progress
-    protocols left in flight, so the caller can close them out as SUCCESS or FAILED.
+    Returns ``(output_tail, active_event_row)`` — the retained tail for a failure
+    message, plus whichever row the "[[STAGE]]" event protocol left in flight, so
+    the caller can close it out as SUCCESS or FAILED.
     """
     output_tail: list[str] = []
-    active_marker_stage: str | None = None   # "[N/NN]" marker protocol
     active_event_row: str | None = None      # "[[STAGE]]" event protocol
 
     for line in process.stdout:
@@ -478,13 +459,8 @@ def _consume_engine_output(process, tracker: _StageTracker) -> tuple[list[str], 
         stage_event = _STAGE_EVENT_RE.search(line)
         if stage_event:
             active_event_row = _apply_stage_event(tracker, stage_event, active_event_row)
-            continue
 
-        marker = _MARKER_RE.search(line)
-        if marker:
-            active_marker_stage = _apply_step_marker(tracker, marker, active_marker_stage)
-
-    return output_tail, active_marker_stage, active_event_row
+    return output_tail, active_event_row
 
 
 def _apply_stage_event(tracker: _StageTracker, stage_event, active_event_row: str | None) -> str | None:
@@ -514,19 +490,3 @@ def _apply_stage_event(tracker: _StageTracker, stage_event, active_event_row: st
     return row_name
 
 
-def _apply_step_marker(tracker: _StageTracker, marker, active_marker_stage: str | None) -> str | None:
-    """Handle one ``[N/NN] StageName`` progress marker; returns the stage now active."""
-    from apps.ingestion.models import JobStatus
-
-    engine_step = int(marker.group(1))
-    stage_name = _ENGINE_STEP_TO_STAGE.get(engine_step)
-    if not stage_name or stage_name == active_marker_stage:
-        return active_marker_stage
-
-    if active_marker_stage:
-        tracker.mark([active_marker_stage], JobStatus.SUCCESS)
-    tracker.mark([stage_name], JobStatus.RUNNING)
-    # Record which engine step is in-flight for stage-6 batch visibility (§4.2a).
-    tracker.update_checkpoint(stage_name, engine_step=engine_step,
-                              marker=marker.group(2).strip()[:_MARKER_LABEL_MAX_CHARS])
-    return stage_name

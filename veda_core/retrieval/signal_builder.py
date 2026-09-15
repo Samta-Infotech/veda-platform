@@ -16,7 +16,6 @@ from typing import Dict, List, Tuple, Set
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from schema.real_schema import get_real_schema
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -70,7 +69,11 @@ class SignalBuilder:
     def __init__(self):
         """Initialize signal builder."""
         self.schema = None
-        self.fk_graph = {}  # column_id -> list of referenced column_ids
+        self.fk_graph = {}  # column_id -> SET of referenced column_ids (P1-3, 2026-09-10:
+        # was a plain str->str dict, so a polymorphic column with multiple targets kept
+        # only the last edge — the comment already said "list" but the code never did).
+        self._referenced_cols = set()  # precomputed union of fk_graph.values() — see
+        # _compute_column_signals(), which used to be O(n) per column (O(n²) overall).
         self.table_adjacency = {}  # table_name -> list of related table_names
         self.column_signals = {}  # column_id -> {fk_score, subgraph_score}
 
@@ -134,8 +137,9 @@ class SignalBuilder:
                 s, sc = e.get("source_table"), e.get("source_column")
                 t, tc = e.get("target_table"), e.get("target_column")
                 if s and sc and t and tc:
-                    self.fk_graph[f"{s}.{sc}"] = f"{t}.{tc}"
+                    self.fk_graph.setdefault(f"{s}.{sc}", set()).add(f"{t}.{tc}")
             logger.info(f"✓ Found {len(self.fk_graph)} foreign keys (relationship graph)")
+            self._finalize_fk_graph()
             return
 
         logger.info("Building FK graph...")
@@ -153,26 +157,35 @@ class SignalBuilder:
 
                     if fk_ref_table and fk_ref_col:
                         ref_col_id = f"{fk_ref_table}.{fk_ref_col}"
-                        self.fk_graph[col_id] = ref_col_id
+                        self.fk_graph.setdefault(col_id, set()).add(ref_col_id)
 
         logger.info(f"✓ Found {len(self.fk_graph)} foreign keys")
+        self._finalize_fk_graph()
+
+    def _finalize_fk_graph(self):
+        """Precompute the union of every referenced column (P1-3, 2026-09-10) — once,
+        here, instead of scanning all of fk_graph.values() per column inside
+        _compute_column_signals() (O(n) per call, O(n²) across all columns)."""
+        self._referenced_cols = set().union(*self.fk_graph.values()) if self.fk_graph else set()
 
     def _build_table_adjacency(self):
         """Build table adjacency graph from FK relationships."""
         logger.info("Building table adjacency...")
 
         tables_set = {}
-        for col_id, ref_col_id in self.fk_graph.items():
+        for col_id, ref_col_ids in self.fk_graph.items():
             table1 = col_id.split(".")[0]
-            table2 = ref_col_id.split(".")[0]
-
             if table1 not in tables_set:
                 tables_set[table1] = set()
-            if table2 not in tables_set:
-                tables_set[table2] = set()
-
-            tables_set[table1].add(table2)
-            tables_set[table2].add(table1)
+            # ref_col_ids is a SET now (P1-3): a polymorphic column pointing at
+            # multiple target tables must connect to ALL of them, not just the last
+            # one a plain str->str dict happened to keep.
+            for ref_col_id in ref_col_ids:
+                table2 = ref_col_id.split(".")[0]
+                if table2 not in tables_set:
+                    tables_set[table2] = set()
+                tables_set[table1].add(table2)
+                tables_set[table2].add(table1)
 
         self.table_adjacency = {
             table: list(adjacent) for table, adjacent in tables_set.items()
@@ -191,8 +204,10 @@ class SignalBuilder:
         fk_signal = 0.0
         if col_id in self.fk_graph:
             fk_signal = 0.5  # This column references another
-        # Check if referenced
-        if any(ref == col_id for ref in self.fk_graph.values()):
+        # Check if referenced — O(1) against the precomputed set (P1-3, 2026-09-10;
+        # was `any(ref == col_id for ref in self.fk_graph.values())`, O(n) per column
+        # and therefore O(n²) across every column in the schema).
+        if col_id in self._referenced_cols:
             fk_signal = max(fk_signal, 0.7)  # This column is referenced
 
         # Subgraph signal: connectivity to other tables

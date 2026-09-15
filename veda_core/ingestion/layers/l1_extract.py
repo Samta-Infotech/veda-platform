@@ -85,7 +85,12 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     try:
         from ingestion.data_graph import run_data_graph, to_fk_adjacency_rows
         from ingestion.vector_store import store_fk_adjacency
-        dg_result = run_data_graph(scan_result, source_id=source_id, verbose=verbose)
+        # P0-2 gap fix (2026-09-10): a tabular source has no relational client
+        # connection at all — hand data_graph the SAME DuckDB connector L1 already
+        # opened (state["tabular_connector"]) instead of letting it fall through to
+        # get_client_connection(), which always failed closed for this case.
+        dg_result = run_data_graph(scan_result, source_id=source_id, verbose=verbose,
+                                   tabular_connector=state.get("tabular_connector"))
         state["dg_result"] = dg_result
         if dg_result.discovered_edges:
             rows = to_fk_adjacency_rows(dg_result, include_soft=False)

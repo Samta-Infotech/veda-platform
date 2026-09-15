@@ -12,20 +12,22 @@ see), reaches the correct data source, federates across several, or is refused. 
 
 ## 0. The three routing surfaces
 
-They are independent and answer different questions. Only two are live.
+They are independent and answer different questions.
 
 | Surface | Question it answers | File(s) | State |
 |---|---|---|---|
 | **Keyword router** | Which *modality* — SQL / RAG / hybrid / NoSQL — within a scope? | `query/query_router.py`, invoked from `veda_hybrid.classify()` | **live** |
-| **Multi-source coordinator** | Which *source(s)* answer this, and how are their results combined? | `query/source_coordinator.py` + `routing_policy.py` + `routing_slm.py` + `source_evidence.py` + `operation_classifier.py` + `execution_planner.py` + `agents.py` + `result_orchestrator.py` + `reliability.py` | **shadow only** — `MULTISOURCE_ROUTING_SHADOW=1` (`config.py:982-983`): computes + traces a `RoutingDecision`, returns `None`, the legacy path answers |
-| **Federated route** | Scope spans ≥2 sources and the question genuinely crosses them — generate + run one cross-source query | `query/federated_route.py` + `federated_executor.py` + `cross_source_composer.py` + `cross_source_guard.py` | **live** — fires when the ambient context carries ≥2 `source_ids` |
+| **Multi-source coordinator** | Which *source(s)* answer this, and how are their results combined? | `query/source_coordinator.py` + `routing_policy.py` + `routing_slm.py` + `source_evidence.py` + `operation_classifier.py` + `execution_planner.py` + `agents.py` + `result_orchestrator.py` + `reliability.py` | **scoped authoritative (2026-09-10)** — `MULTISOURCE_ROUTING_ENABLED=1`, `MULTISOURCE_ROUTING_SHADOW=1` in `.env`. A `MODE_MULTI` decision drives the answer regardless of the shadow flag; every other decision (`SINGLE` / `NO_MATCH` / `CLARIFICATION_REQUIRED`) stays shadow — computes + traces, `veda_hybrid.py` legacy path answers. See §2. |
+| **Federated route** | Scope spans ≥2 sources and the question genuinely crosses them — generate + run one cross-source query | `query/federated_route.py` + `federated_executor.py` + `cross_source_composer.py` + `cross_source_guard.py` | **live** — fires when the ambient context carries ≥2 `source_ids`, or is invoked directly by an authoritative coordinator `MULTI`/`RELATIONSHIP_EDGE` decision |
 
 ### Front-door order (`veda_hybrid.run_hybrid_query` → `_l0_dispatch`)
 
 ```
 run_hybrid_query(query, scope)
   ├─ L0 runtime_context      (pure system value: "current date") ─────────► answer
-  ├─ _run_coordinator        MULTISOURCE_ROUTING_ENABLED=1 & SHADOW=1 ────► trace only, returns None
+  ├─ _run_coordinator        MULTISOURCE_ROUTING_ENABLED=1 ────────────────► see below
+  │     decision.mode == MULTI            ──────────────────────────────► ALWAYS authoritative
+  │     decision.mode != MULTI (SHADOW=1) ──────────────────────────────► trace only, returns None
   ├─ _maybe_federated        ambient ctx has ≥2 source_ids ───────────────► federated answer / refusal
   ├─ QUERY_DECOMPOSE_ENABLED=False ──────────────────────────────────────► _dispatch_single(query)   ◄── PRODUCTION PATH
   └─ _dispatch_single(query):
@@ -33,10 +35,23 @@ run_hybrid_query(query, scope)
        then head dispatch (see ARCHITECTURE.md §3.4)
 ```
 
-`_run_coordinator` (`veda_hybrid.py:602`): `On + SHADOW` → traces a decision, `return None`
-(`veda_hybrid.py:728-729`); `On + not SHADOW` → the decision drives the answer
-(`NO_MATCH` → refuse, `ROUTED/SINGLE` → source agent, `ROUTED/MULTI` → federate / merge).
-`Off` → `return None` (`:618`).
+`_run_coordinator` (`veda_hybrid.py:602`): computes `decision = plan_route(...)`, then
+`_is_multi_decision = decision.status=="ROUTED" and decision.mode=="MULTI"` and
+`_effective_shadow = MULTISOURCE_ROUTING_SHADOW and not _is_multi_decision`
+(`veda_hybrid.py:~715-730`). `_effective_shadow` → traces, `return None`; otherwise the decision
+drives the answer (`NO_MATCH`/`CLARIFICATION_REQUIRED` → refuse, `ROUTED/SINGLE` → source agent,
+`ROUTED/MULTI` → doc+data grounding / federated / independent-merge). `Off`
+(`MULTISOURCE_ROUTING_ENABLED=0`) → `return None` unconditionally (`:618`).
+
+**Why scoped this way, not fully authoritative.** Tried `MULTISOURCE_ROUTING_SHADOW=0`
+unscoped first (per `docs/MULTI_SOURCE_DEPLOYMENT.md`'s prior guidance) and it regressed plain
+single-source queries: the coordinator's own routing-evidence pass (a plain cosine lookup,
+deliberately decoupled from the answer engine's own retrieval) could return `NO_MATCH` and
+refuse a question `veda/pipeline.py::run_query` (6-signal retrieval, fast path, rerank, Tier-2
+LLM fallback) answers fine on its own — gating a strictly more capable engine with a strictly
+weaker signal. A `MODE_MULTI` decision has no such failure mode (there is no competing
+single-source legacy answer to defeat) and is exactly the case this subsystem was built for.
+Full incident + test evidence: `docs/backlog/query-engine-open-items.md`.
 
 ---
 
@@ -69,12 +84,20 @@ in a doc-bearing scope:
 
 ---
 
-## 2. Multi-source coordinator — which source(s) (shadow only)
+## 2. Multi-source coordinator — which source(s) (scoped authoritative)
 
-Runs on every query (`MULTISOURCE_ROUTING_ENABLED=1`), traces a `RoutingDecision`, then
-`return None` — **the legacy federated/single path produces the answer**. Turning
-`MULTISOURCE_ROUTING_SHADOW=0` makes it authoritative; `MULTI_SOURCE_DEPLOYMENT.md` §3 warns
-the code default (`1`) is the wrong value for a real multi-source deployment.
+Runs on every query (`MULTISOURCE_ROUTING_ENABLED=1`) and always computes + traces a
+`RoutingDecision`. What happens next depends on the decision, not just the `SHADOW` flag
+(as of 2026-09-10 — see §0's "why scoped this way"):
+
+- **`decision.mode == MODE_MULTI`** → **always authoritative**, independent of `SHADOW`. The
+  decision drives the answer: bounded doc+data grounding first
+  (`DOC_DATA_GROUNDING_ENABLED`, default on), then a genuine join edge → `_maybe_federated`
+  (strict), else an SLM-resolved multi with no edge → independent-merge
+  (`result_orchestrator.merge_results`).
+- **Every other decision** (`SINGLE`, `NO_MATCH`, `CLARIFICATION_REQUIRED`, anything else) →
+  gated by `MULTISOURCE_ROUTING_SHADOW` (currently `1` in `.env`) → `return None`, the legacy
+  federated/single path produces the answer instead.
 
 ### Internal pipeline (`source_coordinator.plan_route` / `execute_decision`)
 
@@ -237,11 +260,19 @@ see `MULTI_SOURCE_DEPLOYMENT.md` §4.
 (`_maybe_federated` + `run_federated` + aggregate-then-join executor + composer + grounding
 guard); `column_sketches` → `cross_source_graph` → `cross_source_fk`; `entity_linker`;
 semantic bridge Tier A; scope resolution chain; SourceItem layer + profilers (flag-gated).
+**As of 2026-09-10, also wired and authoritative:** the coordinator's `MODE_MULTI` decisions
+— structural edge-driven MULTI, canonical tie-break feeding a MULTI, SLM-resolved MULTI —
+drive doc+data grounding / federated / independent-merge for real, live-verified against this
+deployment's data (test: `_run_coordinator` with `SHADOW=True` + a `MODE_MULTI` decision still
+answers; see `docs/backlog/query-engine-open-items.md`).
 
-**Shadow:** the entire multi-source coordinator (`MULTISOURCE_ROUTING_SHADOW=1`) — computes and
-traces `RoutingDecision`s, does not act on them. `routing_slm.resolve_boundary`,
-`routing_policy.decide`, `operation_classifier`, `execution_planner`, `result_orchestrator` all
-run but their output is discarded.
+**Shadow:** the coordinator's `SINGLE` / `NO_MATCH` / `CLARIFICATION_REQUIRED` decisions
+(`MULTISOURCE_ROUTING_SHADOW=1`) — computed and traced, never act. This is deliberate, not an
+oversight: making them authoritative too was tried and regressed plain single-source queries
+(the coordinator's own routing-evidence pass is weaker than the real engine's retrieval — see
+§0 and the backlog). `routing_slm.resolve_boundary`, `routing_policy.decide`,
+`operation_classifier`, `execution_planner`, `result_orchestrator` all run either way; only a
+`MODE_MULTI` result's *execution* is gated by this flag.
 
 **Not the real path / fragile:**
 - `query_router` embedding fallback — never implemented; dead config.

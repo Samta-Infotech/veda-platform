@@ -108,9 +108,15 @@ def test_single_datalake_augments_sm_and_scopes_relational_does_not():
     calls = {"constrain": [], "augment": []}
     _orig_constrain = veda_hybrid._constrain_scope_to
     _orig_augment = veda_hybrid._augment_sm_for_datalake
+    _orig_iso = veda_hybrid._datalake_isolated_sm
     try:
         veda_hybrid._constrain_scope_to = lambda s: calls["constrain"].append(str(s))
         veda_hybrid._augment_sm_for_datalake = lambda sm, cols, s: (calls["augment"].append(str(s)) or ({}, []))
+        # SOURCE_ISOLATED_RETRIEVAL_ENABLED defaults ON (config.py:604): when isolation succeeds
+        # it returns the sm/cols directly and _augment_sm_for_datalake is never reached. This test
+        # targets the augment FALLBACK specifically, so force isolation to report "unavailable"
+        # (None), exactly like a real isolation failure degrading to the merge path below it.
+        veda_hybrid._datalake_isolated_sm = lambda s: None
         SC.execute_decision = lambda dec, q, **k: {"kind": "single", "result": AgentResult(
             "x", "y", "ok", data={"rows": [[1]], "answer": "a"})}
 
@@ -131,6 +137,7 @@ def test_single_datalake_augments_sm_and_scopes_relational_does_not():
     finally:
         veda_hybrid._constrain_scope_to = _orig_constrain
         veda_hybrid._augment_sm_for_datalake = _orig_augment
+        veda_hybrid._datalake_isolated_sm = _orig_iso
 
 
 def _multi_decision(reason_code):

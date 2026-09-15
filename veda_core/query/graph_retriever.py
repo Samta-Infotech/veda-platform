@@ -278,7 +278,9 @@ def run_graph_retrieval(
     seeds = retrieve_graph_seeds(qvec, top_k=seed_top_k, source_ids=source_ids)
 
     # ------------------------------------------------------------------
-    # BFS expansion
+    # Seed nodes (hop 0) — the actual expansion below is PPR, not BFS (P2-2,
+    # 2026-09-10: this header was stale since WP5 replaced hop-decay BFS with
+    # Personalized PageRank; see that section's own comment further down).
     # ------------------------------------------------------------------
     visited: Dict[str, SubgraphNode] = {}
     edges_used: list = []

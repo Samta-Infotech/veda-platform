@@ -86,12 +86,17 @@ class RRFMerger:
         sparse_ranks = self._create_rank_dict(sparse_ranking)
         value_ranks = self._create_rank_dict([(col_id, score) for col_id, score in value_signals.items()])
 
-        # Collect all candidates
+        # Collect all candidates. Signals 3/4 (subgraph/fk) are BOOST-ONLY (P1-1,
+        # 2026-09-10), matching Signal 6 (table_prior) below — they must never ADD a
+        # candidate neither dense/sparse/value nor the table prior found relevant.
+        # Before this fix they were unconditionally added here: 25 tables have
+        # structural degree >= 10 (users_user = 275), so `min(degree/10, 1)` saturates
+        # to a virtual rank-1 hit for EVERY column of those tables regardless of the
+        # query — a query-independent hub-table bias that also ballooned the candidate
+        # pool (near every column in a hub table entered it) independent of relevance.
         all_candidates = set()
         all_candidates.update(semantic_ranks.keys())
         all_candidates.update(sparse_ranks.keys())
-        all_candidates.update(fk_signals.keys())
-        all_candidates.update(subgraph_signals.keys())
         all_candidates.update(value_ranks.keys())
 
         # Compute RRF score for each candidate

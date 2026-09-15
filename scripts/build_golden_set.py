@@ -38,6 +38,16 @@ sys.path.insert(0, str(_REPO / "veda_core"))
 sys.path.insert(0, str(_REPO))
 import sqlglot
 from sqlglot import exp
+
+# P2 (2026-09-10): django.setup() must run BEFORE any `apps.*` model import — it used to
+# happen inside main(), by which point the `from apps.substrate.models import
+# VerifiedQueryCache` line below had already executed at module import time, so running
+# this script standalone always crashed with AppRegistryNotReady (never surfaced before
+# because nothing had run this script standalone until now).
+os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
+import django
+django.setup()
+
 from apps.substrate.models import VerifiedQueryCache
 
 # Temporal SQL markers → "temporal"; aggregate markers → "aggregate".
@@ -127,10 +137,6 @@ def main() -> int:
     ap.add_argument("--out", default=str(_REPO / "evaluation" / "golden_queries.jsonl"))
     ap.add_argument("--min", type=int, default=60)
     args = ap.parse_args()
-
-    os.environ.setdefault("DJANGO_SETTINGS_MODULE", "config.settings.dev")
-    import django
-    django.setup()
 
     rows: list[dict] = _seed_from_parity()
     seen_queries = {r["query"].strip().lower() for r in rows}

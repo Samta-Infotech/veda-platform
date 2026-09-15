@@ -298,8 +298,8 @@ def _run_schema_pipeline(
             _stale = ["<missing>"]          # absent/corrupt → rebuild
         if _stale:
             t0 = time.time()
-            _ug = build_unified_graph()
-            _ugp = write_unified_graph(_ug)
+            _ug = build_unified_graph(source_id, "default")
+            _ugp = write_unified_graph(_ug, source_id, "default")
             _sok(source_id,
                  f"Unified graph rebuilt (stale: {', '.join(_stale)}) — "
                  f"{len(_ug.get('nodes', []))} nodes, {len(_ug.get('edges', []))} edges",

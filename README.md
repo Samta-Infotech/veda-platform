@@ -73,6 +73,7 @@ See [`CLAUDE.md`](CLAUDE.md) for the full list of environment gotchas.
 
 | Doc | Covers |
 |-----|--------|
+| [`docs/INGESTION_AND_QUERY_PIPELINES.md`](docs/INGESTION_AND_QUERY_PIPELINES.md) | **One-read walkthrough of both pipelines end-to-end** — start here for the whole system |
 | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | The two process tiers, the request flow, every answering head, tenancy & security |
 | [`docs/QUERY_ENGINE.md`](docs/QUERY_ENGINE.md) | The deterministic SQL head in depth: the escalation ladder, the firewall, Tier-1 → Tier-2 |
 | [`docs/RETRIEVAL.md`](docs/RETRIEVAL.md) | The 6-signal retrieval spine, graph expansion, the reranker, the encoder |

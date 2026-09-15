@@ -1751,6 +1751,18 @@ AGGREGATE_OPERATORS = {
 # planning is pure latency today (measured 2026-07-11: q19/q22/q34/q37 pushed past
 # the 120s suite budget). superlative detection itself stays on (trace + intent print).
 SUPERLATIVE_JOIN_ROUTING = False
+
+# RETRIEVAL_INTENT_BOOST_SCALE (P1-2, 2026-09-10): scales retrieval/intent_boosting.py's
+# AGGREGATE/TEMPORAL/MULTI_TABLE deltas (±0.10 to ±0.40, additive) down to the actual RRF
+# score range they're added to. Measured live (source 2, k=60, real query): top-10 RRF
+# scores after fusion+cutoff sit at 0.05-0.06, so an unscaled +0.30 (let alone the -0.40 ID
+# penalty) doesn't nudge the ranking, it REPLACES it — a boost intended to break ties among
+# already-relevant candidates would instead override RRF's actual relevance signal outright.
+# 0.12 puts the largest per-intent delta (0.40) at ~0.05 — comparable to a full RRF top
+# score: a real, felt boost, not a wholesale override. Deliberately does NOT scale
+# apply_history_penalty's -0.60 (that one already fires today, at full strength, for every
+# intent — this only touches the three per-intent boosts that were previously unreachable).
+RETRIEVAL_INTENT_BOOST_SCALE = 0.12
 # TYPED_MULTITABLE_ROUTE (diagnostic experiment, default OFF → byte-identical prod
 # behavior). The adversarial audit (VEDA_ADVERSARIAL_FAILURE_MAP.md) proved the
 # deterministic multi-table planner (try_multitable/build_from_entities/plan_joins) is
@@ -2289,47 +2301,80 @@ EXECUTION_RESULT_LIMIT = 1000
 
 
 # =============================================================================
-# OUTPUT FILES (Final Architecture) — scoped per (tenant, source, version) (§3.1)
+# OUTPUT FILES (Final Architecture) (§3.1)
 # =============================================================================
-# artifact_scope resolution: every derived file artifact is keyed
-# (tenant, source_id, substrate_version). The ingesting/query worker sets
-# VEDA_ARTIFACT_SCOPE="<tenant>/<source>/<version>" (or the discrete
-# VEDA_ARTIFACT_{TENANT,SOURCE,VERSION} env). With a scope set, files resolve to
-#   <ARTIFACT_ROOT>/<tenant>/<source>/<version>/<name>
-# so N sources coexist without overwriting each other (fixes I-4). With NO scope
-# set, resolution falls back to the legacy flat "data/<name>" path, so a single
-# source still works unchanged (P3 gate). DB/pgvector artifacts already carry
-# source+tenant columns; this only scopes the file/pkl artifacts.
+# P0-7 (2026-09-11): this used to be TWO scoping mechanisms — this flat/env-based
+# one (VEDA_ARTIFACT_SCOPE="<tenant>/<source>/<version>", opt-in via
+# VEDA_ARTIFACT_SCOPING=1, and NEVER actually turned on in this deployment — only
+# the ingest subprocess could ever set the env, and it never did) and the real
+# one that replaced it, `source_artifact_path()`/`resolve_source_artifact()`
+# below (P0-1/P0-5), which resolves per-(tenant, source) unconditionally from the
+# caller's own values or the ambient request context — no version component, no
+# opt-in flag, no env plumbing to keep in sync. Removed `artifact_scope()` and
+# the `VEDA_ARTIFACT_SCOPE`/`VEDA_ARTIFACT_{TENANT,SOURCE,VERSION}` env reads
+# entirely rather than leaving a second, always-inert mechanism beside the real
+# one — see docs/backlog/query-engine-open-items.md's P0-7 entry for the fuller
+# writeup. `artifact_path()` is now just "the shared flat path" (still the
+# correct choice for an artifact that hasn't been migrated to a per-source
+# resolver yet, and still `resolve_source_artifact()`'s own fallback target).
 ARTIFACT_ROOT = __import__("os").environ.get("VEDA_ARTIFACT_ROOT", "data")
 
 
-def artifact_scope() -> tuple:
-    """(tenant, source, version) for this process, or None if unscoped (legacy flat)."""
-    _os = __import__("os")
-    raw = _os.environ.get("VEDA_ARTIFACT_SCOPE")
-    if raw:
-        parts = [p for p in raw.strip("/").split("/") if p]
-        if len(parts) == 3:
-            return tuple(parts)  # type: ignore[return-value]
-    tenant = _os.environ.get("VEDA_ARTIFACT_TENANT")
-    source = _os.environ.get("VEDA_ARTIFACT_SOURCE")
-    version = _os.environ.get("VEDA_ARTIFACT_VERSION")
-    if tenant and source and version:
-        return (tenant, source, version)
-    return None
-
-
 def artifact_path(name: str) -> str:
-    """Resolve a derived-artifact filename to its scoped path.
-
-    ``name`` is the bare filename (e.g. "veda_semantic_model.json"). Scoped →
-    ``<ARTIFACT_ROOT>/<tenant>/<source>/<version>/<name>``; unscoped → the legacy
-    ``<ARTIFACT_ROOT>/<name>`` (== "data/<name>")."""
+    """The shared flat path for a derived-artifact filename: ``<ARTIFACT_ROOT>/<name>``
+    (== ``data/<name>``). ``name`` is the bare filename (e.g.
+    "veda_semantic_model.json"). This is the LEGACY, unscoped location every
+    source used to share — still correct as `resolve_source_artifact()`'s
+    fallback for an artifact not yet migrated to its own per-source path."""
     _os = __import__("os")
-    scope = artifact_scope()
-    if scope:
-        return _os.path.join(ARTIFACT_ROOT, scope[0], scope[1], scope[2], name)
     return _os.path.join(ARTIFACT_ROOT, name)
+
+
+def source_artifact_path(name: str, source_id, tenant: str = "default") -> str:
+    """Per-(tenant, source) artifact path, ALWAYS keyed by source_id — unlike
+    ``artifact_path()`` (the shared flat path), this never depends on any env
+    var being set in this process; two sources can never collide or shadow each
+    other. ``<ARTIFACT_ROOT>/<tenant>/<source_id>/<name>``, deterministic from
+    the caller's own (tenant, source_id). This — plus its read-side counterpart
+    ``resolve_source_artifact()`` below — is the ONE per-source artifact
+    mechanism now (P0-1, landed 2026-09-10 for the relationship graph; P0-5
+    extended it to every other derived artifact; P0-7 removed the older,
+    always-inert ``VEDA_ARTIFACT_SCOPE``-based mechanism this one replaced — see
+    docs/backlog/query-engine-open-items.md). Prefer this over ``artifact_path()``
+    for any NEW per-source derived artifact."""
+    _os = __import__("os")
+    return _os.path.join(ARTIFACT_ROOT, str(tenant), str(source_id), name)
+
+
+def resolve_source_artifact(name: str, source_id=None, tenant=None, flat_default: str = None) -> str:
+    """Read-side resolver for a per-source artifact (P0-5, 2026-09-11): the
+    per-(tenant, source) path via ``source_artifact_path()`` WHEN that file already
+    exists there, else the legacy flat path — a graceful, non-breaking migration
+    that doesn't require every writer AND every reader of an artifact to move in
+    the same commit (the relationship graph's P0-1 fix used this same "prefer
+    scoped if it exists" shape inline in ``ingestion/unified_graph_builder.py``
+    before this became a shared helper).
+
+    ``source_id``/``tenant`` default to the ambient request context when not
+    given; with neither available, always returns ``flat_default`` (or
+    ``artifact_path(name)`` if that's not given either) — a ctx-less caller
+    (dev-CLI, warm-load with no request yet) behaves exactly as before this
+    function existed."""
+    _os = __import__("os")
+    if source_id is None:
+        try:
+            from veda_core import context
+            ctx = context.try_current()
+            if ctx is not None:
+                source_id = ctx.source_id
+                tenant = ctx.tenant or tenant
+        except Exception:
+            pass
+    flat = flat_default if flat_default is not None else artifact_path(name)
+    if source_id is None:
+        return flat
+    scoped = source_artifact_path(name, source_id, tenant or "default")
+    return scoped if _os.path.exists(scoped) else flat
 
 
 # Absolute-overridable (§9) so the inference container finds it regardless of cwd;

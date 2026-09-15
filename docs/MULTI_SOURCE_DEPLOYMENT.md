@@ -116,13 +116,29 @@ schema. The symptom was 15 columns across 8 homzhub tables on a scope that owns 
 
 ## 3. Set the routing flags — on **api and inference**, and recreate
 
+> **Update 2026-09-10 — unscoped `SHADOW=0` regresses this deployment; use the scoped fix
+> instead.** Tried `MULTISOURCE_ROUTING_SHADOW=0` live and it broke plain single-source
+> queries: the coordinator's own routing-evidence check (a plain cosine lookup, decoupled from
+> the answer engine's own retrieval) could return `NO_MATCH` and **refuse the query outright**,
+> before `veda/pipeline.py::run_query` — the actual, far more capable engine — ever ran.
+> `"how many properties are there"` went from answered to `no_match: "unrelated to any
+> source"`. **Fix applied**: `veda_hybrid.py::_run_coordinator` now makes only `MODE_MULTI`
+> decisions authoritative regardless of `SHADOW`; `SINGLE`/`NO_MATCH`/`CLARIFICATION_REQUIRED`
+> stay gated by `SHADOW` (left at the code default, `1`). This gets the genuine cross-source
+> win (federated + doc+data grounding, live-verified) without gating the single-source traffic
+> the engine already handles well. **Do not set `MULTISOURCE_ROUTING_SHADOW=0` in this
+> deployment** — it isn't needed any more (MULTI is already authoritative) and reintroduces the
+> regression for everything else. Incident + evidence: `docs/backlog/query-engine-open-items.md`.
+
 `docker-compose.yml` shares `env_file: [.env]` across `api`, `worker`, `beat`,
 `ingest-worker` and `inference`, so `.env` is the one place to set these. The full annotated
-list is in `.env.example`; these are the four that decide whether multi-source works at all:
+list is in `.env.example`; these are the four that decide whether multi-source works at all —
+**this deployment's actual `.env` values as of 2026-09-10** (not the originally-prescribed
+`SHADOW=0`, per the update above):
 
 ```bash
 MULTISOURCE_ROUTING_ENABLED=1
-MULTISOURCE_ROUTING_SHADOW=0          # code default is 1 — see below
+MULTISOURCE_ROUTING_SHADOW=1          # code default; LEAVE AT 1 — see the update above
 REQUIRED_SOURCE_ESCALATION_ENABLED=0  # code default is 1 — see below
 ROUTING_PERMISSION_DENY_GAP=0.12
 ```
@@ -131,11 +147,13 @@ ROUTING_PERMISSION_DENY_GAP=0.12
 $COMPOSE up -d          # NOT `restart`
 ```
 
-**Gotcha — `SHADOW` defaults to observe-only.** `MULTISOURCE_ROUTING_SHADOW=1`
-(`veda_core/config.py`, the default) makes the coordinator *log* its decision while the
-legacy path still produces the answer. Routing looks correct in the trace and is not
-actually in effect. There is no warning; the only tell is that answers come from source 1.
-It **must** be `0` for routing to be authoritative.
+**Gotcha — `SHADOW` only gates non-MULTI decisions now.** `MULTISOURCE_ROUTING_SHADOW=1`
+(`veda_core/config.py`, the default) makes the coordinator *log* a `SINGLE`/`NO_MATCH`
+decision while the legacy path still produces the answer — routing looks correct in the trace
+and is not actually in effect for those. A `MODE_MULTI` decision is **always** authoritative
+regardless of this flag (as of the 2026-09-10 fix above). The only tell for a non-MULTI
+decision silently not applying is that the answer comes from the legacy path's own routing,
+not the coordinator's.
 
 **Gotcha — required-source escalation overrides permission.** With
 `REQUIRED_SOURCE_ESCALATION_ENABLED=1` (also the default) a source named in the question is
@@ -250,7 +268,8 @@ the flag comments in `config.py` are the surviving record.
 
 - [ ] Every `Source.dialect` maps to the intended kind (§1)
 - [ ] Each source's semantic model lists only its own tables (§2)
-- [ ] `MULTISOURCE_ROUTING_SHADOW=0` **and** `REQUIRED_SOURCE_ESCALATION_ENABLED=0` in `.env`
+- [ ] `MULTISOURCE_ROUTING_SHADOW=1` (**leave at 1** — see §3's 2026-09-10 update) **and**
+      `REQUIRED_SOURCE_ESCALATION_ENABLED=0` in `.env`
 - [ ] Flags applied with `up -d`, not `restart`
 - [ ] A request carries a non-empty `X-Veda-Source-Profiles`, and routing is correct on the
       **streaming** endpoint as well as the plain one

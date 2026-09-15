@@ -128,23 +128,18 @@ def _residual_is_filler(residual, table, query_l=""):
         return False
 
 
-_GRAPH_CACHE = {"g": None}
-
-
 def _graph():
-    if _GRAPH_CACHE["g"] is None:
-        # Route through config.RELATIONSHIP_GRAPH_FILE (tenant/source/version-scoped)
-        # instead of a hardcoded repo-root path, matching veda.runtime.get_graph() /
-        # veda.graph_guard — else a non-default-scope source silently falls back to the
-        # legacy default-scope file (or an empty graph).
-        try:
-            from config import RELATIONSHIP_GRAPH_FILE
-            p = RELATIONSHIP_GRAPH_FILE if os.path.isabs(RELATIONSHIP_GRAPH_FILE) \
-                else os.path.join(_ROOT, RELATIONSHIP_GRAPH_FILE)
-        except Exception:
-            p = os.path.join(_ROOT, "data", "veda_relationship_graph.json")
-        _GRAPH_CACHE["g"] = json.load(open(p)) if os.path.exists(p) else {"edges": []}
-    return _GRAPH_CACHE["g"]
+    """The relationship graph for the current request's source.
+
+    Delegates to ``veda.runtime.get_graph()`` — the ONE graph accessor in the
+    codebase (P0-1, 2026-09-10). Previously this module cached its own copy of
+    the flat file forever, independent of ``veda.runtime``'s and
+    ``veda.graph_guard``'s own separate copies — so a source switch (or a fresh
+    graph after re-ingestion) could go unnoticed here even after the other two
+    caches picked it up. No local cache needed any more: get_graph() already
+    memoizes per source, and invalidate_graph_cache() (P0-6) clears it correctly."""
+    from veda.runtime import get_graph
+    return get_graph()
 
 
 @dataclass
@@ -914,10 +909,30 @@ def _time_clause(metric, tf, params_cols):
     return f"{_q(col)} BETWEEN '{start}' AND '{end}'"
 
 
-_SM_CACHE = {"v": None}
+_SM_CACHE = {"v": None}   # ctx-less (dev-CLI) fallback ONLY — see _sm() below.
 
 
 def _sm():
+    """The semantic model fast_path validates/plans candidate SQL against.
+
+    P0-5 (2026-09-10): when a request context is set, delegates to
+    ``veda_hybrid._load_semantic_model()`` — the SAME scoped, Redis-first sm the SQL
+    head and the retrieval engine (via ``get_engine(sm)``) already use for this exact
+    request. Before this fix, fast_path unconditionally read the flat
+    ``SEMANTIC_MODEL_FILE`` regardless of which source the request was actually
+    scoped to — not just a staleness gap: fast_path's checks could pass or fail
+    against a DIFFERENT source's schema than the one the rest of the SAME request
+    was using, a silent cross-source mismatch. Falls back to the flat-file cache
+    only for a ctx-less call (dev-CLI / tests with no request context), unchanged
+    from before."""
+    try:
+        from veda_core import context
+        if context.try_current() is not None:
+            import veda_hybrid
+            sm, _cols = veda_hybrid._load_semantic_model()
+            return sm
+    except Exception:
+        pass
     if _SM_CACHE["v"] is None:
         try:
             from config import SEMANTIC_MODEL_FILE

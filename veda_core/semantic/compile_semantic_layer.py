@@ -27,8 +27,10 @@ _HERE        = os.path.dirname(os.path.abspath(__file__))
 _ROOT        = os.path.dirname(_HERE)
 sys.path.insert(0, _ROOT)
 
-# Resolve every path through config so this compiler honours artifact scoping
-# (VEDA_ARTIFACT_SCOPE) exactly like the rest of L5. Previously these were flat
+# Resolve every path through config — these 4 constants are the flat_default
+# fallback compile_all() passes to resolve_source_artifact()/uses directly for a
+# ctx-less call (P0-5, 2026-09-11; P0-7 removed the older VEDA_ARTIFACT_SCOPE
+# env-based scoping this comment used to describe). Previously these were flat
 # _HERE/_ROOT paths that ignored scope entirely — reading a possibly-stale flat
 # semantic model and clobbering one global copy of the four registries, so a
 # second source's compile overwrote the first (the "prepared for source 1" bug).
@@ -448,8 +450,18 @@ def build_metrics(sm: dict, concepts: dict, dimensions: dict):
 # Compile
 # ---------------------------------------------------------------------------
 
-def compile_all(write: bool = True) -> dict:
-    with open(SEMANTIC_MODEL_FILE) as f:
+def compile_all(write: bool = True, source_id=None, tenant: str = "default") -> dict:
+    """`source_id`/`tenant` (P0-5, 2026-09-11): read the semantic model + domain
+    synonyms via `config.resolve_source_artifact()` (THIS source's own copy when
+    it exists, else the shared flat file) and, when `source_id` is given, write
+    the 4 compiled outputs to their per-source paths unconditionally (this
+    function fully owns those outputs, unlike the 2 inputs above) — same shape as
+    `ingestion/relationship_graph.py`'s P0-1 fix. `source_id=None` (ctx-less
+    dev-CLI) is unchanged — always the flat paths both ways."""
+    from config import resolve_source_artifact
+    sm_path = resolve_source_artifact("veda_semantic_model.json", source_id, tenant,
+                                      flat_default=SEMANTIC_MODEL_FILE)
+    with open(sm_path) as f:
         sm = json.load(f)
 
     # The authoritative domain_synonyms live in DOMAIN_SYNONYMS_FILE (retrieval reads it,
@@ -458,7 +470,9 @@ def compile_all(write: bool = True) -> dict:
     # metric label compilation sees the same enriched vocabulary retrieval does — otherwise
     # newly-added business synonyms ("financial value"→amount) never reach the fast path.
     try:
-        from config import DOMAIN_SYNONYMS_FILE as _DSF
+        from config import DOMAIN_SYNONYMS_FILE as _DSF_flat
+        _DSF = resolve_source_artifact("veda_domain_synonyms.json", source_id, tenant,
+                                       flat_default=_DSF_flat)
         if os.path.exists(_DSF):
             _ext = json.load(open(_DSF))
             _merged = dict(sm.get("domain_synonyms") or {})
@@ -480,14 +494,27 @@ def compile_all(write: bool = True) -> dict:
         return {"version": VERSION, "kind": kind, "source_hash": src_hash,
                 "count": len(payload), "items": payload}
 
+    # Output paths: unconditionally per-source when source_id is given (this
+    # function fully owns these 4 artifacts, unlike the 2 read-side inputs above,
+    # which may not have a per-source copy yet) — else the legacy flat paths.
+    if source_id is not None:
+        from config import source_artifact_path
+        concepts_file = source_artifact_path("concepts.json", source_id, tenant)
+        dimensions_file = source_artifact_path("dimensions.json", source_id, tenant)
+        metrics_file = source_artifact_path("metrics.json", source_id, tenant)
+        manifest_file = source_artifact_path("MANIFEST.json", source_id, tenant)
+    else:
+        concepts_file, dimensions_file, metrics_file, manifest_file = (
+            CONCEPTS_FILE, DIMENSIONS_FILE, METRICS_FILE, MANIFEST_FILE)
+
     artifacts = {
-        CONCEPTS_FILE:   _stamp(concepts,   "concepts"),
-        DIMENSIONS_FILE: _stamp(dimensions, "dimensions"),
-        METRICS_FILE:    _stamp(metrics,    "metrics"),
+        concepts_file:   _stamp(concepts,   "concepts"),
+        dimensions_file: _stamp(dimensions, "dimensions"),
+        metrics_file:    _stamp(metrics,    "metrics"),
     }
     manifest = {
         "version": VERSION, "source_hash": src_hash,
-        "source_model": os.path.relpath(SEMANTIC_MODEL_FILE, _ROOT),
+        "source_model": os.path.relpath(sm_path, _ROOT),
         "stats": {"concepts": len(concepts), "dimensions": len(dimensions),
                   "metrics": len(metrics),
                   "grain_suspects": len(grain_report),
@@ -520,9 +547,16 @@ def compile_all(write: bool = True) -> dict:
             os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
             with open(path, "w") as f:
                 json.dump(payload, f, indent=2)
-        os.makedirs(os.path.dirname(MANIFEST_FILE) or ".", exist_ok=True)
-        with open(MANIFEST_FILE, "w") as f:
+        os.makedirs(os.path.dirname(manifest_file) or ".", exist_ok=True)
+        with open(manifest_file, "w") as f:
             json.dump(manifest, f, indent=2)
+        # P0-6: drop this source's cached registry so the next read sees the fresh
+        # compile instead of a stale in-process copy.
+        try:
+            from semantic.registry import invalidate_cache as _inv_registry
+            _inv_registry(source_id, tenant)
+        except Exception:
+            pass
 
     return {"concepts": concepts, "dimensions": dimensions,
             "metrics": metrics, "manifest": manifest}

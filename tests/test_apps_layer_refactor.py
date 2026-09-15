@@ -35,7 +35,7 @@ from apps.query.views import QueryView
 from apps.evaluation.tasks import _report_row
 from apps.evaluation.tasks import _build_report_html
 from apps.ingestion.tasks import _StageTracker
-from apps.ingestion.tasks import STAGE_ORDER, _ENGINE_STEP_TO_STAGE, _LAYER_STAGE_TO_ROW
+from apps.ingestion.tasks import STAGE_ORDER, _LAYER_STAGE_TO_ROW
 from apps.ingestion.models import JobStatus
 from apps.ingestion.tasks import _build_engine_command
 
@@ -311,13 +311,16 @@ def _tracker(names):
     return _StageTracker(stages), stages
 
 
-def test_engine_step_map_covers_every_step_and_only_real_stages():
-    """Guards the table that replaced a per-output-line dict rebuild."""
+def test_layer_stage_map_covers_only_real_stages():
+    """Guards the table that maps layered [[STAGE]] events to IngestionStage rows.
+
+    (P2-3, 2026-09-10: this test used to also cover _ENGINE_STEP_TO_STAGE, the
+    "[N/NN] StageName" legacy-monolith marker map — removed along with the dead
+    _MARKER_RE/_apply_step_marker code it backed; the layered path never emits
+    that format.)"""
     _setup_django()
 
-    assert sorted(_ENGINE_STEP_TO_STAGE) == list(range(1, 13)), "engine steps 1..12"
     known = {name for _o, name, _q in STAGE_ORDER}
-    assert set(_ENGINE_STEP_TO_STAGE.values()) <= known
     assert set(_LAYER_STAGE_TO_ROW.values()) <= known
 
 
@@ -349,24 +352,6 @@ def test_stage_tracker_merges_checkpoint_without_dropping_keys():
     assert stages["embeddings"].batch_checkpoint == {"resume": True, "engine_step": 8}
 
 
-def test_step_markers_advance_stages_and_close_the_previous_one():
-    from apps.ingestion.tasks import _consume_engine_output
-
-    tracker, stages = _tracker(["schema_scan", "fk_adjacency", "data_graph"])
-    process = type("P", (), {"stdout": [
-        "[1/12] SchemaScan\n", "[1/12] SchemaScan again\n",   # same stage → no churn
-        "[2/12] FkAdjacency\n", "[3/12] DataGraph\n",
-    ]})()
-    tail, active_marker, active_row = _consume_engine_output(process, tracker)
-
-    assert stages["schema_scan"].status == JobStatus.SUCCESS
-    assert stages["fk_adjacency"].status == JobStatus.SUCCESS
-    assert stages["data_graph"].status == JobStatus.RUNNING, "last stage stays in flight"
-    assert active_marker == "data_graph" and active_row is None
-    assert stages["schema_scan"].batch_checkpoint["engine_step"] == 1
-    assert len(tail) == 4
-
-
 def test_layer_stage_events_roll_up_and_transition_rows():
     from apps.ingestion.tasks import _consume_engine_output
 
@@ -377,12 +362,12 @@ def test_layer_stage_events_roll_up_and_transition_rows():
         "[[STAGE]] L3 join_paths ok\n",     # same row, re-confirms
         "[[STAGE]] L4 biencoder ok\n",      # rolls up to vector_store
     ]})()
-    _tail, active_marker, active_row = _consume_engine_output(process, tracker)
+    _tail, active_row = _consume_engine_output(process, tracker)
 
     assert stages["schema_scan"].status == JobStatus.SUCCESS
     assert stages["embeddings"].status == JobStatus.SUCCESS
     assert stages["embeddings"].batch_checkpoint["layer_stage"] == "join_paths"
-    assert active_row == "vector_store" and active_marker is None
+    assert active_row == "vector_store"
 
 
 def test_fatal_layer_event_marks_failed_and_is_not_overwritten_on_transition():
@@ -405,7 +390,7 @@ def test_unmapped_layer_stage_is_ignored():
 
     tracker, stages = _tracker(["schema_scan"])
     process = type("P", (), {"stdout": ["[[STAGE]] L9 totally_unknown ok\n"]})()
-    _tail, _m, active_row = _consume_engine_output(process, tracker)
+    _tail, active_row = _consume_engine_output(process, tracker)
     assert active_row is None
     assert stages["schema_scan"].saves == 0
 
@@ -416,7 +401,7 @@ def test_output_tail_is_bounded():
 
     tracker, _stages = _tracker(["schema_scan"])
     process = type("P", (), {"stdout": [f"line {i}\n" for i in range(1000)]})()
-    tail, _m, _r = _consume_engine_output(process, tracker)
+    tail, _r = _consume_engine_output(process, tracker)
     assert len(tail) == _OUTPUT_TAIL_MAX_LINES
     assert tail[-1] == "line 999\n", "the tail must keep the MOST RECENT lines"
 

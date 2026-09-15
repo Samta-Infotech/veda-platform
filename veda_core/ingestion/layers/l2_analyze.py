@@ -59,7 +59,8 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # Additive + non-fatal: consumed by join_planner when present (P7).
     try:
         from ingestion.join_paths import build_join_paths
-        jp = build_join_paths(state["scan_result"], source_id=ctx.source_id, verbose=verbose)
+        jp = build_join_paths(state["scan_result"], source_id=ctx.source_id, tenant=ctx.tenant,
+                              verbose=verbose)
         state["join_paths"] = jp
         out.append(StageOutcome("join_paths", True, detail=f"{len(jp)} table-pairs"))
     except Exception as e:  # module optional until P7 lands its writer

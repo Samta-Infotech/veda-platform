@@ -1,6 +1,6 @@
 # =============================================================================
 # retrieval/retrieval_engine_phase3.py
-# VEDA Phase 3c - 5-Signal Hybrid Retrieval Orchestrator (NEW)
+# VEDA Phase 3c - 6-Signal Hybrid Retrieval Orchestrator (NEW)
 #
 # Purpose:
 #   Orchestrates all Phase 3 enhancements into single retrieval pipeline
@@ -74,16 +74,19 @@ class RetrievalResult:
 
 class RetrievalEnginePhase3:
     """
-    5-Signal Hybrid Retrieval Engine (Phase 3).
+    6-Signal Hybrid Retrieval Engine (Phase 3). (P2-2, 2026-09-10: was documented as
+    5-signal/BM25/unweighted RRF — all three went stale after WP3/WP4/WP6; see below.)
 
     Signals:
-      1. BGE-M3 semantic search (1024-dim embeddings)
-      2. BM25 keyword matching (enriched tokens)
-      3. FK subgraph signals (table proximity)
-      4. FK path bridges (high confidence joins)
+      1. BGE-M3 semantic search (1024-dim dense embeddings)
+      2. BGE-M3 learned-sparse matching (WP3 — replaced BM25/BM25 ensemble)
+      3. FK subgraph signals (table proximity) — boost-only (P1-1, 2026-09-10)
+      4. FK path bridges (high confidence joins) — boost-only (P1-1, 2026-09-10)
       5. Value index (literal lookups)
+      6. Table-first prior (WP4) — boost-only
 
-    Fusion: Reciprocal Rank Fusion (equal weighting)
+    Fusion: WEIGHTED Reciprocal Rank Fusion (WP6, config.FUSION_WEIGHTS per signal;
+      identity weights reproduce the original unweighted ranking bit-for-bit)
     Boost: Intent-aware score adjustments
     Cutoff: Adaptive (semantic cliff detection)
     Cache: 5-min TTL on enriched token hash
@@ -195,6 +198,11 @@ class RetrievalEnginePhase3:
         except Exception as e:
             logger.warning(f"sparse warm-load failed ({e}); falling back to fit()")
             _loaded = 0
+        # P1-4 (2026-09-10): whether Signal 2 is actually live for THIS engine scope —
+        # set False only in the "SKIPPING sparse signal" branch below (persisted store
+        # empty AND too many docs to live-fit). Surfaced per query in retrieve()'s
+        # explain-trace write, instead of only existing in this warm-load log line.
+        self.sparse_active = True
         if not _loaded:
             # fit() encodes EVERY retrieval_document with BGE-M3 sparse in-process. On a
             # real model (1900+ long passages) that is ~50 min on CPU and hangs the query
@@ -206,6 +214,7 @@ class RetrievalEnginePhase3:
             if len(rd) <= SPARSE_FIT_MAX_DOCS:
                 self.sparse_ranker.fit(self.semantic_model)
             else:
+                self.sparse_active = False
                 logger.warning(
                     "sparse index empty for scope and %d retrieval_documents exceed the "
                     "live-fit cap (%d) — SKIPPING sparse signal to avoid a multi-minute "
@@ -274,6 +283,20 @@ class RetrievalEnginePhase3:
         logger.info(f"Intent: {intent} | Caching: {use_cache}")
         logger.info("="*70)
 
+        # P1-4 (2026-09-10): surface degraded-component state in the per-query explain
+        # trace — these previously only existed as a log line/warning at warm-load or
+        # inside individual encode calls, invisible to anything reading the trace.
+        try:
+            from veda.explain import current_trace as _cur_trace
+            from ingestion.m3_encoder import get_embed_backend
+            from query.reranker import _get_reranker
+            _cur_trace().set("retrieval_health",
+                             sparse_active=getattr(self, "sparse_active", True),
+                             reranker_active=_get_reranker() is not None,
+                             embed_backend=get_embed_backend())
+        except Exception:
+            pass
+
         start_time = time.time()
 
         # STEP 1: QUERY ENRICHMENT
@@ -294,7 +317,7 @@ class RetrievalEnginePhase3:
         logger.info("[STEP 2/7] Cache miss, running full retrieval...")
 
         # STEP 3: 5-SIGNAL RETRIEVAL
-        logger.info("\n[STEP 3/7] 5-Signal Retrieval...")
+        logger.info("\n[STEP 3/7] 6-Signal Retrieval...")
 
         # Signal 1 + Signal 2: independent — run concurrently (F1).
         # RRF fusion is order-independent, so parallelizing changes wall-clock time

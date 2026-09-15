@@ -85,8 +85,17 @@ def _load(path: str) -> Optional[Any]:
 # has since been regenerated — previously a stale graph was served silently and
 # indefinitely (its siblings under DERIVED_ARTIFACTS_ENABLED promise freshness;
 # this one had no such contract).
-def _input_paths() -> Dict[str, str]:
-    return {
+def _resolve_input_paths(source_id=None, tenant: str = "default") -> Dict[str, str]:
+    """The 6 input artifact paths this builder fuses.
+
+    P0-5 (2026-09-10/11): when `source_id` is given, prefer the per-source path for
+    each input via `config.resolve_source_artifact()` — but ONLY when that
+    per-source file actually exists on disk (that helper's own contract). A
+    source with no per-source copy of a given input yet keeps reading the shared
+    flat file for THAT input, unaffected by the others — a graceful, non-breaking
+    mix as each of the 6 gets migrated on its own schedule. `source_id=None` (the
+    legacy dev-CLI / ctx-less call) is unchanged — always the flat paths."""
+    flat = {
         "semantic_model":     _SEMANTIC_MODEL,
         "relationship_graph": _REL_GRAPH,
         "concept_graph":      _CONCEPT_GRAPH,
@@ -94,13 +103,33 @@ def _input_paths() -> Dict[str, str]:
         "metrics":            _METRICS,
         "dimensions":         _DIMENSIONS,
     }
+    if source_id is None:
+        return flat
+    try:
+        from config import resolve_source_artifact
+    except Exception:
+        return flat
+    names = {
+        "semantic_model":     "veda_semantic_model.json",
+        "relationship_graph": "veda_relationship_graph.json",
+        "concept_graph":      "veda_concept_graph.json",
+        "domain_synonyms":    "veda_domain_synonyms.json",
+        "metrics":            "metrics.json",
+        "dimensions":         "dimensions.json",
+    }
+    return {key: resolve_source_artifact(names[key], source_id, tenant, flat_default=flat_path)
+            for key, flat_path in flat.items()}
 
 
-def _fingerprint() -> Dict[str, Any]:
+def _input_paths(source_id=None, tenant: str = "default") -> Dict[str, str]:
+    return _resolve_input_paths(source_id, tenant)
+
+
+def _fingerprint(source_id=None, tenant: str = "default") -> Dict[str, Any]:
     """{name: {mtime, size}} for each input artifact. Missing inputs record None so
     an input APPEARING later also registers as a change."""
     fp: Dict[str, Any] = {}
-    for name, path in _input_paths().items():
+    for name, path in _input_paths(source_id, tenant).items():
         try:
             st = os.stat(path)
             fp[name] = {"mtime": round(st.st_mtime, 3), "size": st.st_size}
@@ -109,15 +138,17 @@ def _fingerprint() -> Dict[str, Any]:
     return fp
 
 
-def stale_inputs(graph: Dict[str, Any]) -> List[str]:
+def stale_inputs(graph: Dict[str, Any], source_id=None, tenant: str = "default") -> List[str]:
     """Names of input artifacts that changed since `graph` was built.
     [] means fresh (also [] for a graph with no recorded fingerprint — an older
     artifact predating this field, which we cannot judge and must not cry wolf on).
-    """
+    `source_id`/`tenant` (P0-5, 2026-09-10) must match what built `graph`, or this
+    compares against the wrong resolved paths — query_graph.py's caller passes the
+    same source it resolved the graph itself from."""
     recorded = (graph or {}).get("inputs")
     if not isinstance(recorded, dict) or not recorded:
         return []
-    current = _fingerprint()
+    current = _fingerprint(source_id, tenant)
     return sorted(k for k in recorded if current.get(k) != recorded.get(k))
 
 
@@ -194,9 +225,25 @@ class _GraphAccumulator:
         }
 
 
-def build_unified_graph() -> Dict[str, Any]:
+def build_unified_graph(source_id=None, tenant: str = "default") -> Dict[str, Any]:
     """Build the unified graph from the on-disk artifacts. Always returns a valid graph
-    dict (possibly small) — missing artifacts are skipped, never fatal."""
+    dict (possibly small) — missing artifacts are skipped, never fatal.
+
+    `source_id`/`tenant` (P0-5, 2026-09-10): resolves each of the 6 input paths via
+    `_resolve_input_paths()` — per-source where that artifact is already migrated
+    (the relationship graph, post-P0-1), the legacy flat path otherwise. These local
+    names deliberately SHADOW the module-level `_SEMANTIC_MODEL`/`_REL_GRAPH`/etc.
+    constants for the rest of this function, so the body below (unchanged) reads
+    the resolved paths without needing every one of its ~10 `_load(...)` call sites
+    edited individually."""
+    _paths = _resolve_input_paths(source_id, tenant)
+    _SEMANTIC_MODEL = _paths["semantic_model"]
+    _REL_GRAPH = _paths["relationship_graph"]
+    _CONCEPT_GRAPH = _paths["concept_graph"]
+    _DOMAIN_SYN = _paths["domain_synonyms"]
+    _METRICS = _paths["metrics"]
+    _DIMENSIONS = _paths["dimensions"]
+
     g = _GraphAccumulator()
     warnings: List[str] = []
     prose_skipped = 0        # description-shaped labels rejected as SYNONYM terms
@@ -333,17 +380,37 @@ def build_unified_graph() -> Dict[str, Any]:
     # Stamp the inputs this build fused, so a consumer can detect staleness later.
     # Captured AFTER reading them: any input rewritten mid-build shows as changed
     # on the next check rather than being wrongly certified fresh.
-    graph["inputs"] = _fingerprint()
+    graph["inputs"] = _fingerprint(source_id, tenant)
     return graph
 
 
-def write_unified_graph(graph: Optional[Dict[str, Any]] = None) -> str:
+def write_unified_graph(graph: Optional[Dict[str, Any]] = None, source_id=None,
+                        tenant: str = "default") -> str:
+    """`source_id`/`tenant` (P0-5, 2026-09-10): write to the per-source output path
+    unconditionally via config.source_artifact_path() — unlike the INPUTS (see
+    build_unified_graph()), the output is entirely under this writer's control, so
+    there's no "does it exist yet" ambiguity. `source_id=None` keeps the legacy flat
+    `_OUT_FILE` path (dev-CLI / ctx-less callers)."""
     if graph is None:
-        graph = build_unified_graph()
-    os.makedirs(os.path.dirname(_OUT_FILE), exist_ok=True)
-    with open(_OUT_FILE, "w") as f:
+        graph = build_unified_graph(source_id, tenant)
+    if source_id is not None:
+        from config import source_artifact_path
+        out_path = source_artifact_path("veda_unified_graph.json", source_id, tenant)
+    else:
+        out_path = _OUT_FILE
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w") as f:
         json.dump(graph, f, indent=2)
-    return _OUT_FILE
+
+    # P0-6: drop this source's cached unified graph so the next read sees the fresh
+    # one (get_graph() also self-invalidates via mtime/size, so this is belt-and-braces).
+    try:
+        from graph.query_graph import invalidate_unified_graph_cache
+        invalidate_unified_graph_cache(source_id)
+    except Exception:
+        pass
+
+    return out_path
 
 
 def main() -> int:

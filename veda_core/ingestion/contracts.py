@@ -22,9 +22,12 @@ import os
 class SourceContext:
     """The one source being ingested, resolved from the injected env source.
 
-    ``artifact_scope`` is (tenant, source_id, version) or None (legacy flat
-    ``data/`` paths). It is threaded to every layer so file artifacts land under
-    ``ARTIFACT_ROOT/<tenant>/<source>/<version>/`` and N sources never collide.
+    Per-source derived-artifact paths are resolved on demand via
+    `config.source_artifact_path(name, ctx.source_id, ctx.tenant)` — there is no
+    ambient "artifact scope" carried on this context (P0-7, 2026-09-11: removed
+    the `artifact_scope` field/`VEDA_ARTIFACT_SCOPE` env plumbing it depended on;
+    it was a second, always-inert scoping mechanism beside the one that's
+    actually used everywhere now — see docs/backlog/query-engine-open-items.md).
     """
 
     source_id: str
@@ -34,7 +37,6 @@ class SourceContext:
     connection: Dict[str, Any] = field(default_factory=dict)
     exclude_tables: List[str] = field(default_factory=list)
     schema_filter: Optional[str] = None
-    artifact_scope: Optional[tuple] = None
     skip_llm: bool = False
     resume: bool = False
 
@@ -44,7 +46,7 @@ class SourceContext:
 
         This is the single place the engine learns *which* source it is running
         for — no config-file registry, no re-derivation of "primary" (§3.1)."""
-        from config import get_source, artifact_scope
+        from config import get_source
 
         src = get_source()
         conn = {
@@ -64,7 +66,6 @@ class SourceContext:
             connection=conn,
             exclude_tables=list(src.get("exclude_tables", [])),
             schema_filter=src.get("schema"),
-            artifact_scope=artifact_scope(),
             skip_llm=skip_llm or os.environ.get("VEDA_SKIP_LLM") == "1",
             resume=resume or os.environ.get("VEDA_RESUME") == "1",
         )

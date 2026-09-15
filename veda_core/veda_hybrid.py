@@ -151,8 +151,13 @@ def _load_semantic_model():
     if entry is None:
         sm = _load_sm_from_redis(scope)
         if sm is None:
-            from config import SEMANTIC_MODEL_FILE
-            with open(SEMANTIC_MODEL_FILE) as f:
+            # P0-5 (2026-09-11): prefer THIS source's own on-disk model over the
+            # flat SEMANTIC_MODEL_FILE every source used to share — falls back to
+            # the flat file automatically when no per-source copy exists yet
+            # (resolve_source_artifact's own contract).
+            from config import resolve_source_artifact
+            sm_path = resolve_source_artifact("veda_semantic_model.json", scope[0], scope[1])
+            with open(sm_path) as f:
                 sm = json.load(f)
         entry = {"sm": sm, "cols": list(sm.get("columns", {}).keys())}
         _SM[cache_key] = entry
@@ -713,19 +718,36 @@ def _run_coordinator(query, verbose=False, on_event=None):
                 pass
 
         decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
+
+        # Scoped authoritative rollout (2026-09-10, see docs/backlog/query-engine-open-items.md):
+        # live-testing MULTISOURCE_ROUTING_SHADOW=0 unscoped against this deployment's data showed
+        # the coordinator's OWN routing-evidence check (a plain cosine lookup, decoupled from the
+        # real answer engine's retrieval on purpose) hard-refusing plain single-source questions
+        # that veda/pipeline.py::run_query answers fine on its own — it was gating a strictly more
+        # capable engine with a strictly weaker signal. A genuine cross-source MULTI decision does
+        # not have that failure mode (there is no single-source legacy answer to defeat), and is
+        # exactly the case the coordinator was built for (structural join detection, doc+data
+        # grounding, federated execution). So: MULTI decisions are authoritative whenever routing
+        # is enabled at all, independent of SHADOW; every other decision (SINGLE / NO_MATCH /
+        # CLARIFICATION_REQUIRED / anything else) stays gated by SHADOW as before. SHADOW=1 in
+        # .env today — flip to 0 only once a SINGLE-vs-legacy-engine regression test exists.
+        _is_multi_decision = decision.status == "ROUTED" and decision.mode == "MULTI"
+        _effective_shadow = bool(MULTISOURCE_ROUTING_SHADOW) and not _is_multi_decision
+
         try:
             _cur_trace().set(
                 "routing", status=decision.status, mode=decision.mode,
                 source_ids=decision.source_ids, reason_code=decision.reason_code,
                 decision_method=decision.decision_method,
-                shadow=bool(MULTISOURCE_ROUTING_SHADOW))
+                shadow=_effective_shadow, shadow_flag=bool(MULTISOURCE_ROUTING_SHADOW))
         except Exception:
             pass
         if verbose:
             print(f"  [routing] {decision.status}/{decision.mode} sources={decision.source_ids} "
-                  f"({decision.reason_code}){' [shadow]' if MULTISOURCE_ROUTING_SHADOW else ''}")
+                  f"({decision.reason_code}){' [shadow]' if _effective_shadow else ''}"
+                  f"{' [multi-authoritative]' if _is_multi_decision and MULTISOURCE_ROUTING_SHADOW else ''}")
 
-        if MULTISOURCE_ROUTING_SHADOW:
+        if _effective_shadow:
             return None   # observe only
 
         # ---- authoritative: the decision drives the answer ----
@@ -749,10 +771,12 @@ def _run_coordinator(query, verbose=False, on_event=None):
                 _constrain_scope_to(_sid)
             sm, cols = _load_semantic_model()
             if _is_dl:
-                # Source isolation (flag-gated, default OFF): run over a DATALAKE-ONLY sm so retrieval/
-                # planning/validation/value-grounding see ONLY this source (no homzhub-table mixing, no
-                # shared-value collision). On OFF or any failure, fall back to the merge path below —
-                # byte-identical to prior behaviour.
+                # Source isolation (flag-gated, default ON since config.py:604 — changed from the
+                # original OFF default after it proved safe): run over a DATALAKE-ONLY sm so
+                # retrieval/planning/validation/value-grounding see ONLY this source (no
+                # homzhub-table mixing, no shared-value collision). On OFF or any failure, fall
+                # back to the merge path below (_augment_sm_for_datalake) — byte-identical to the
+                # pre-isolation behaviour.
                 _iso = None
                 try:
                     from config import SOURCE_ISOLATED_RETRIEVAL_ENABLED as _iso_on
