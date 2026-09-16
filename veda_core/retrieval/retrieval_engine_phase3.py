@@ -161,9 +161,18 @@ class RetrievalEnginePhase3:
             self.semantic_model = self._injected_sm
             logger.info("✓ Using in-memory (per-source) semantic model")
         else:
-            with open(self.semantic_model_file) as f:
-                self.semantic_model = json.load(f)
-            logger.info(f"✓ Loaded semantic model")
+            # M1 close-out (2026-09-15): no flat-file fallback. veda.runtime.get_engine()
+            # always injects the scoped model; an ad-hoc construction resolves THIS
+            # scope's artifact, and with none → an empty model (never another source's).
+            from config import resolve_source_artifact
+            _p = resolve_source_artifact("veda_semantic_model.json")
+            if _p and os.path.exists(_p):
+                with open(_p) as f:
+                    self.semantic_model = json.load(f)
+                logger.info(f"✓ Loaded scoped semantic model from {_p}")
+            else:
+                self.semantic_model = {"tables": {}, "columns": {}, "_not_materialized": True}
+                logger.warning("no scoped semantic model for this scope — empty model")
 
         # Initialize components
         logger.info("\n[2/8] Initializing query enricher...")
@@ -357,9 +366,19 @@ class RetrievalEnginePhase3:
                 logger.warning(f"Signal 2 failed: {e}")
                 return []
 
+        # Run each signal INSIDE a copy of the caller's context (M1 close-out, 2026-09-15).
+        # contextvars do not propagate into ThreadPoolExecutor workers, so inside these
+        # threads `veda_core.context.try_current()` was None: Signal 1's scoped adapter
+        # path (storage_adapters.ann_search, which reads the ambient scope) was skipped
+        # and its UNSCOPED engine-store fallback ran — a source-5 (one-table parquet)
+        # query filled its 50 dense slots with homzhub and source-4 columns. Found live via
+        # the per-source battery; one Context object cannot be entered by two threads at
+        # once, hence one copy per signal.
+        import contextvars as _cvars
+        _cv1, _cv2 = _cvars.copy_context(), _cvars.copy_context()
         with ThreadPoolExecutor(max_workers=2) as _ex:
-            _f1 = _ex.submit(_run_signal1)
-            _f2 = _ex.submit(_run_signal2)
+            _f1 = _ex.submit(_cv1.run, _run_signal1)
+            _f2 = _ex.submit(_cv2.run, _run_signal2)
             signal1_semantic = _f1.result()
             signal2_sparse   = _f2.result()
 

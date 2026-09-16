@@ -4,9 +4,13 @@ Written so a fresh chat session can pick this repo up with full context. Everyth
 §7 below is **already committed** on branch `feat/refinements-pipeline` (the user committed it
 personally between turns — commits `db18171` "md files add" and `e4fbc54` "changes"; nothing in
 that part of the session was committed by the assistant, per this repo's `CLAUDE.md` rule below).
-**§8 and §9 (2026-09-15, a follow-up session) are NOT committed** — 8 modified files + 4 new
-files total (listed at the end of §8.5 and §9.4), plus a few live DB rows (an RBAC grant, a DRF
-token) and a regenerated gitignored artifact — still sitting as uncommitted changes in the
+**§8 and §9 (2026-09-15, a follow-up session) were committed by the user** as `ec15c91` "fixes"
+and `3a2d2fa` "pipeline fix" (14:41 IST). **§10 and §11 are NOT committed** — `QUERY_UNDERSTANDING_
+GAPS_AND_ROADMAP.md`, `ARCH_REVIEW_2026-09_RECONCILED.md`, `scripts/eval_per_source_battery.py`
+(all new), plus §11's edits to `config.py` / `veda_hybrid.py` / `veda/execution.py` /
+`veda/feedback.py` / `veda/pipeline.py` and this file — plus a few live DB rows (an RBAC grant, a
+DRF token, three re-ingested sources) and one recreated container — still sitting as uncommitted
+changes in the
 working tree.
 
 ## The one rule that matters most
@@ -501,12 +505,203 @@ functions (no `__main__` block), since pytest isn't available.
 
 ---
 
+## 10. Same follow-up session, continued: why new phrasings keep needing individual fixes
+
+Direct continuation of §9's chat-API investigation — the user asked, correctly, "the
+query can be anything, we can't keep fixing each of them, there has to be a generic
+solution." Investigated whether one exists rather than proposing something new:
+
+- **Diagnosis**: `veda/pipeline.py`'s SQL planning is a fixed chain of 7 narrow, hand-
+  written regex/keyword-triggered branches (§9.3's `_bare_count` is one more instance of
+  this exact pattern), falling through to an unverified free-text LLM call for anything
+  that doesn't match. Not a real semantic-parsing layer — whack-a-mole by construction.
+- **Found the codebase already has the right architecture, unused**: `veda_core/veda/
+  understanding/` (LLM → typed concept extraction → deterministic, no-LLM schema-
+  grounding firewall, refuse-over-guess) + `veda_core/veda/analytical_spec.py`
+  (structured spec → the SAME `build_aggregate_sql` every deterministic branch uses).
+  Both flag-gated off (`QUERY_UNDERSTANDING_ENABLED`, `ANALYTICAL_SQL_V2`,
+  `config.py:1915,1923`).
+- **Two concrete, confirmed gaps in that layer**: (1) filter/dimension grounding is
+  literally unimplemented — `grounding.py::ground()` hardcodes `dimensions=[],
+  filters=[]` — so it could never have fixed the §9.2 "for sale" filter-drop bug even
+  fully enabled; (2) **live-tested it scoped-on** (monkeypatched, `.env` untouched)
+  against a battery including previously-working queries: fixed 1 case for free
+  ("how many properties are there," matching §9.3's own fix), but **regressed 2 working
+  queries** ("show all vendors," the §8.2 grouping-grammar case) — because a `Refusal`
+  from the new layer is treated as terminal in `pipeline.py`, pre-empting the old,
+  proven pipeline. Same failure shape as the multi-source coordinator's authoritative-
+  mode incident documented earlier in `query-engine-open-items.md` — a smarter
+  subsystem gating in front of a strictly more capable existing one.
+- **Not fixed this session** — this is a real, phased engineering project, not a flag
+  flip: (1) implement filter/dimension grounding, reusing L6a's existing value-grounding
+  machinery; (2) make `Refusal` degrade to the existing pipeline instead of terminal,
+  mirroring the coordinator fix's scoping pattern; (3) a labelled eval battery before any
+  `.env` default change; (4) retire the regex branches the generic path demonstrably
+  subsumes.
+
+Full write-up (flow diagrams for both the SQL-planning chain and the chatbot
+conversational layer, the regression evidence table, the phased roadmap, plus the two
+smaller open items — the "last N" vs "last month" ranking-word collision and the
+federated/multi-source filter-drop bug itself, still not root-caused to a file/line):
+**`docs/backlog/QUERY_UNDERSTANDING_GAPS_AND_ROADMAP.md`** (new this session).
+
+No code changed in this part of the session — investigation + documentation only.
+
+---
+
+## 11. Same follow-up session, continued: "every registered source works the same way" — executed
+
+The user shared an external architecture review (2026-09-10 snapshot; five properties P1–P5,
+migration order M0–M6) and said: *we need to do this, making sure all registered sources work
+the same way.* Reconciled it against the live tree first (it predated §8–§10 and the P0 pass —
+P1 and most of P5 were already fixed; P2/P3/P4 confirmed open), then executed M0 + M1's
+residuals end-to-end. Full record: **`docs/backlog/ARCH_REVIEW_2026-09_RECONCILED.md`**.
+
+**What was actually wrong** (measured with a per-source battery, not assumed): the four ready
+sources did NOT behave the same. Only homzhub (2) worked. Sources 3/4/5 were ingested
+2026-07-08, before artifact scoping, so `config.resolve_source_artifact`'s "scoped if it
+exists, else flat" contract handed them **homzhub's** semantic model, registries and rerank
+docs — source 5 planned `FROM "assets_amenity"` (a homzhub table) on a parquet source whose
+only table is `amenities_catalog`; source 4 got an empty projection (`SELECT FROM "vendors"`);
+a count-shaped question on the document source entered the SQL head and died with a raw
+`OperationalError` (hostless connection). `scripts/backfill_semantic_model.py`'s docstring had
+recorded this exact history. The engine-store tables were clean; only the file/Redis substrate
+was contaminated.
+
+**Fixed (all uncommitted):**
+- `config.resolve_source_artifact` — flat fallback is **owner-only**, ownership derived from
+  data (`_flat_artifact_owner_ok`: every table the source owns in `column_embeddings_v2` must
+  exist in the flat model; cached; permissive-with-warning on DB error).
+- `veda_hybrid._load_semantic_model` — missing model → empty, tagged model; new honest status
+  **`not_materialized`** (`veda/feedback.py` + the `if not sm.get("tables")` site) instead of
+  the misleading `access_denied`.
+- `veda_hybrid._scope_has_structured_source` — `hybrid` intent only when a structured source
+  is in scope; a document-only scope stays on RAG.
+- `veda/execution.py` — connection acquisition inside the error contract; hostless source →
+  typed `exec_error`, never an exception.
+- `veda/pipeline.py` — (a) `_bare_count` grouping guard: the §9.3 branch was hijacking grouped
+  counts ("…per vendor") into a scalar — my regression, caught by the battery the same day;
+  (b) **verified-query cache shape guard** (third demotion): a 0.88-similar cached scalar was
+  replayed for a grouped question; now grouping↔`GROUP BY` and aggregate-presence must match.
+- `scripts/eval_per_source_battery.py` (new) — the M0 seed: same-shaped questions pinned per
+  source, asserting no foreign tables in executed SQL, no crashes, no dropped grouping.
+- Re-ingested sources 4 (canary, job 20), 5 (21), 3 (22) under the scoped pipeline; recreated
+  `ingest-worker` (it was created 2026-09-10 08:48 with the stale `.43` Metal URL and paid a 60 s
+  timeout per embed call — 197 s for the canary vs ≈30 s each afterwards).
+
+**Result:** battery `--sources 2,3,4,5` → OK, 0 failures; confirmed through the live HTTP chat
+API with `source_ids` pinned. Routing suite 64/65 after every change. The two grouped questions
+on lite-model sources return an honest `clarify` (no type metadata to pick a dimension — P3/M2
+work, not isolation).
+
+**Still open, in the review's order:** M2 (IR + filter/dimension/time grounding, fix the
+authority leaks) → M3 (one compiler + IR firewall; closes the federated filter-drop) → M4
+(IR-stack memory with inherited source scope) → M5 residuals (`required_for_ready`, fusion
+weights) → M6 (retire the regex chain). M1 residuals: `semantic_layer_v2.py:660`, Django-mirror
+`GraphNode/GraphEdge` rows under 3/4/5, `required_for_ready`.
+
+Files touched in §11: `veda_core/config.py`, `veda_core/veda_hybrid.py`,
+`veda_core/veda/execution.py`, `veda_core/veda/feedback.py`, `veda_core/veda/pipeline.py`,
+`scripts/eval_per_source_battery.py` (new), `docs/backlog/ARCH_REVIEW_2026-09_RECONCILED.md`
+(new), this section. Live changes outside git: three re-ingested sources, one recreated
+container.
+
+---
+
+## 12. Close M1 for real (2026-09-16): five ordered items, each with an exit test
+
+The user's pass: *verify each claim against the live tree before changing anything; say so
+if a claim is already stale; per item report inspection vs. claim, files, exit test, open
+points; no git; no fourth cache-demotion heuristic.* Full itemized record with evidence:
+`docs/backlog/query-engine-open-items.md` ("M1 close-out pass") and
+`docs/backlog/ARCH_REVIEW_2026-09_RECONCILED.md` §6/§7.
+
+**Item 1 — resolver has no flat fallback.** Claim was *partly stale*: §11 had already
+made the flat fallback owner-only. Now removed outright: `config.resolve_source_artifact`
+returns the scoped path or `None` (`flat_default` accepted and ignored); every reader is
+None-safe and treats "missing" as an empty model / `not_materialized` (`veda/runtime`,
+`veda_hybrid`, `query/fast_path`, `query/intent`, `query/entity_resolver` (glossary keyed
+per scope), `graph/query_graph`, `query/join_planner`, `veda/validation`,
+`semantic/registry`, `inference/loaders`, `ingestion/rerank_docs`, `ingestion/biencoder`,
+`ingestion/value_referents`). Exit: grep for flat artifact reads is clean outside the
+resolver; source 2 resolves 14/15 artifacts scoped (`veda_entity_aliases.json` has never
+existed anywhere); DB down → typed `exec_error`.
+
+**Item 2 — 3/4/5 re-materialised clean.** 0 homzhub table names in any scoped artifact of
+3/4/5 (`doc_chunks` "role" hits are English prose). Discovered while checking:
+`ingestion/biencoder.py` called its loaders ctx-less, so once the flat fallback went every
+L4 embedded the structural passage only — fixed (source_id + ambient tenant), worker
+restarted; affects future ingests only.
+
+**Item 3 — lite-model sources answer the same shapes.** Root causes were generic, not
+per-source: the value mirror/`column_values` were not scoped by the graph's table ids
+(`query/value_resolver._scope_table_ids`, `query/resolution`); the parquet value probe was
+silently off without HTTP profiles (`query/datalake_values` now asks `resolve_surface`);
+retrieval Signal 1+2 ran in threads without the request context (`copy_context().run`);
+the lite model used a `METRIC` role the planner doesn't know (`MEASURE`); data-graph FK
+discovery (`fk_adjacency`) was never merged into the relationship graph
+(`_discovered_fk_edges`/`_merge_edges`); no grouped-COUNT or ranked-metric deterministic
+branch existed (`planning.grouped_count_mode`, `superlative_plan` COUNT branch,
+`pipeline` `ranked_metric_only`). Exit, live: "vendors in Kochi" → `WHERE LOWER(city)=%s`;
+"amenities in the Sports category" → `WHERE category`; "how many maintenance records per
+vendor" → `vendors JOIN maintenance … GROUP BY t0.vendor_id, t0.city` (the discovered
+join); grouped COUNT/AVG/SUM/MAX/MIN per category, `top 3 … LIMIT 3`, `above 100 → >`.
+
+**Item 4 — Django mirror is not a query-path authority.** Evidence: `storage_adapters/
+assembler.py` reads `Sm*` tables only; no query-path reader of Django `GraphNode/GraphEdge`.
+`storage_adapters/writer.py` now selects `graph_nodes/graph_edges WHERE source_id = %s`
+and writes to the scoped artifact dir; stale mirror rows cleaned; Redis `veda:sm:*` unchanged.
+
+**Item 5 — battery ≥15/source, shape-asserted.** `scripts/eval_per_source_battery.py`: 63
+questions / 4 sources, each with expected route + shape (aggregate, `GROUP BY` dimension,
+`WHERE` presence *and* comparator direction, `LIMIT N` = asked N, no foreign tables, no
+crash); typed refusals on documented gaps → WARN; **`expect="refuse"`** for "show tickets
+with high priority" (this copy has only LOW/MEDIUM — an answer *is* the bug; the shared
+planner had been answering it unfiltered); **`xfail`** carrying the verified-cache
+similarity-replay case ("which vendor has the highest rating" replays the cached "top 3
+vendors by rating", cosine 0.86 → `LIMIT 3`). Per instruction no fourth demotion was added;
+disclosed: the *existing* shape demotion was extended with `LIMIT N`; my own wrong test
+answers had been cached as "verified" and were purged (13 rows 4/5, 2 rows 2). The cache
+key must become IR-shape-aware in M2/M6 (noted in open-items). Routing suite: 64/65 — the
+1 is `test_source_coordinator.py::test_dispatch_with_adapter_flag_on_matches_flag_off_exactly`,
+`ModuleNotFoundError: query.source_adapters` (`source_coordinator._resolve_executable`
+imports a module deleted in P2-3; reachable only with the adapter flag on) — dead code,
+unchanged, not a regression.
+
+**Late finds, same pass (generic, all sources):** (a) the Tier-2 **envelope** (frozen
+contract v1: no ranking intent, `eq|ne` filters) answered out-of-contract questions with
+the *nearest* shape — "top 5 by monthly rent" as a monthly trend, "more than 3 floors" as
+`= 3`; now `veda_hybrid._envelope_inexpressible` skips it (ranking / threshold / negation,
+reusing `ranking_parser` + `operation_classifier`'s phrase sets); (b) `_tier2_validate`
+gained a dropped-constraint check (threshold ⇒ comparison/HAVING; negation ⇒ `<>`/`NOT`);
+(c) the **shared-planner** Tier-2 branch ran only the AST firewall, never `_tier2_validate`
+— "more than 3 floors" executed as "assets with more than 3 listing reviews"; gated now;
+(d) env drift: the inference container holds `OLLAMA_URL=host.docker.internal:11434`
+(serves `/api/chat` but 404s `/api/generate`, so the NL explainer falls back) while `.env`
+says `192.168.1.35:11500` — the new `env_drift` check reports it on every boot; needs
+`docker compose up -d inference` (not done: it would have killed the battery mid-run).
+
+**Result:** battery `--sources 2,3,4,5` → see the final line recorded in
+`ARCH_REVIEW_2026-09_RECONCILED.md` §6 (0 failures; typed-gap WARNs and 1 documented
+xfail); routing suite 64/65; all changes uncommitted.
+
+**Next:** M2 first checkpoint (grounding of filters/dimensions/time with type + value
+checks, `analytical_spec` GROUP BY/numeric enforcement + grounded WHERE, the two authority
+leaks in `pipeline.py`), flags staying off; report before M3.
+
+---
+
 ## Where to look for more detail
 
+- **`docs/backlog/ARCH_REVIEW_2026-09_RECONCILED.md`** — §11's full record: the review's five
+  properties reconciled claim-by-claim, the per-source battery before/after, the amended M0–M6.
 - **`docs/backlog/query-engine-open-items.md`** — the complete, itemized record of every fix
   across both sessions (P0-1 through P2-3, then the 2026-09-15 follow-up's grammar/intent-boost/
   MySQL work), each with exact evidence, the fix applied, and live verification transcripts. This
   is the single most detailed source if you need to verify or extend any specific item above.
+- **`docs/backlog/QUERY_UNDERSTANDING_GAPS_AND_ROADMAP.md`** — §10's full diagnosis: both
+  query-processing flows, why phrasing-specific fixes don't scale, the half-built generic
+  understanding layer, live regression evidence, and the phased plan to actually close it.
 - **`docs/INGESTION_AND_QUERY_PIPELINES.md`** — the one-read architecture walkthrough.
 - **`docs/MULTI_SOURCE.md`** §0/§2/§7 — the coordinator's scoped-authoritative design and why.
 - **`docs/RETRIEVAL.md`** §2 — the P1-1 boost-only fix and the eval-harness gap, in place.

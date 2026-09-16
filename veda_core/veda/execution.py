@@ -100,12 +100,28 @@ def execute_sql(sql, params=None):
         # (mixed relational+tabular = federated execution — handled by the composer path.)
 
     from config import EXECUTION_RESULT_LIMIT
-    cfg = get_db_config()
+    # Connection acquisition INSIDE the error contract (2026-09-15). This used to sit
+    # outside the try below, so a connection failure escaped as a raw exception through
+    # run_query/run_hybrid_query instead of the typed `exec_error` every other L7 failure
+    # returns. Found live: a SQL-shaped question pinned to a document source (source 3,
+    # `docs_contracts`, host="") reached here, psycopg2 defaulted to the unix socket, and
+    # the whole request died with OperationalError. A source with no SQL endpoint is a
+    # refusal, never a crash.
+    try:
+        cfg = get_db_config()
+    except Exception as e:
+        return None, None, f"no SQL connection for this source: {e}"
+    if not (cfg.get("host") or "").strip():
+        return None, None, ("this source has no SQL endpoint (no host configured) — "
+                            "it cannot answer a SQL-shaped question")
     kw = {"host": cfg["host"], "port": cfg["port"], "dbname": cfg["database"],
           "user": cfg["user"], "password": cfg["password"]}
     if cfg.get("sslmode"):
         kw["sslmode"] = cfg["sslmode"]
-    conn = psycopg2.connect(**kw)
+    try:
+        conn = psycopg2.connect(**kw)
+    except Exception as e:
+        return None, None, f"could not connect to the source database: {e}"
     try:
         conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:

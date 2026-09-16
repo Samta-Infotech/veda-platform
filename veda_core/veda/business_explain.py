@@ -209,7 +209,11 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
 
     where = tree.find(exp.Where)
     if where is not None:
-        ops = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Like, exp.In, exp.Is)
+        # exp.Between added 2026-09-15: the deterministic temporal branch emits
+        # `"created_at" BETWEEN '…' AND '…'`, which was invisible here — so the filter-
+        # presence guard saw "no filters" and refused a correct "users created last month".
+        ops = (exp.EQ, exp.NEQ, exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Like, exp.In, exp.Is,
+               exp.Between)
         for pred in where.find_all(ops):
             if _in_subquery(pred):
                 continue

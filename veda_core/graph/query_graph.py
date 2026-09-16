@@ -2,7 +2,7 @@
 """
 graph/query_graph.py — Phase 3: in-memory query engine over the unified graph.
 
-Loads data/veda_unified_graph.json ONCE into adjacency dicts (module-level cache) and
+Loads the per-source unified-graph artifact ONCE into adjacency dicts (module-level cache) and
 answers traversal queries in well under 20ms. Pure stdlib — no networkx — so it adds no
 dependency and is trivially fast at this scale (~4k nodes / ~7.7k edges).
 
@@ -34,11 +34,10 @@ from ingestion.unified_graph_builder import (
 )
 
 _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-try:
-    import config as _cfg
-    _GRAPH_FILE = os.path.join(_ROOT, getattr(_cfg, "UNIFIED_GRAPH_FILE", "data/veda_unified_graph.json"))
-except Exception:
-    _GRAPH_FILE = os.path.join(_ROOT, "data", "veda_unified_graph.json")
+# M1 close-out (2026-09-15): the legacy flat unified-graph path is retired. A caller with
+# no source scope gets no graph (None), never another source's — see
+# _resolve_unified_graph_path().
+_GRAPH_FILE = None
 from retrieval.query_enrichment import _singularize
 import re as _re
 
@@ -330,6 +329,8 @@ def get_graph(path: str = None, force_reload: bool = False) -> Optional[UnifiedG
     _sid, _tenant = _resolve_source()
     if path is None:
         path = _resolve_unified_graph_path(_sid, _tenant)
+    if not path:                    # no scope → no graph (M1 close-out, 2026-09-15)
+        return None
     sig = _file_sig(path)
     if path in _GRAPH and not force_reload and sig == _GRAPH_SIG.get(path):
         return _GRAPH[path]

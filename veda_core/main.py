@@ -59,9 +59,9 @@ def check_ingestion_status() -> dict:
     """Readiness for the HYBRID query engine (what `--query` and the demo actually run).
 
     The hybrid engine reads exactly three artifacts; ONLY these gate readiness:
-      • data/veda_semantic_model.json       — semantic model (routing, display, grounding)
-      • column_embeddings_v2 (primary DB)    — BGE retrieval, the live vector store
-      • data/veda_relationship_graph.json    — join planner / fast path / graph guard
+      • veda_semantic_model.json (per-source artifact) — semantic model (routing, display, grounding)
+      • column_embeddings_v2 (engine store, source-scoped) — BGE retrieval, the live vector store
+      • veda_relationship_graph.json (per-source artifact) — join planner / fast path / graph guard
 
     Legacy ensemble artifacts (relgt_weights, tfidf/svd, column_embeddings_lt/hybrid) and the
     table_metadata table are NOT read by the hybrid path — display columns come from the
@@ -70,7 +70,7 @@ def check_ingestion_status() -> dict:
     counts are reported for the demo's status display but only matter for RAG on that source, so
     they don't gate SQL/hybrid readiness either. Return shape unchanged: {ready, checks}.
     """
-    from config import SEMANTIC_MODEL_FILE, BIENCODER_COL_TABLE, DOC_CHUNKS_TABLE_NAME
+    from config import SEMANTIC_MODEL_FILE, BIENCODER_COL_TABLE, DOC_CHUNKS_TABLE_NAME, artifact_path
 
     base = os.path.dirname(os.path.abspath(__file__))
 
@@ -99,7 +99,7 @@ def check_ingestion_status() -> dict:
     # ── Core gate: the artifacts the hybrid engine cannot answer without ──
     core = {
         "semantic_model":     os.path.exists(_abs(SEMANTIC_MODEL_FILE)),
-        "relationship_graph": os.path.exists(_abs("data/veda_relationship_graph.json")),
+        "relationship_graph": os.path.exists(_abs(artifact_path("veda_relationship_graph.json"))),
     }
     info: dict = {}   # reported for visibility, never gates readiness
 

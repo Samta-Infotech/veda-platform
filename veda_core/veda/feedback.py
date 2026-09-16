@@ -102,6 +102,13 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
         # the leak this whole path exists to avoid.
         why = ACCESS_DENIED_WHY
         what = ACCESS_DENIED_WHAT
+    elif status == "not_materialized":
+        # 2026-09-15: a registered source whose semantic model has not been built
+        # under the per-source pipeline yet (or whose Redis copy is gone). Used to be
+        # reported as access_denied — misleading, and it hid the real remediation.
+        why = ("This data source hasn't been fully prepared for querying yet — its "
+               "schema model isn't available.")
+        what = "Re-run ingestion for this source, then ask again."
     elif status == "qualifier_dropped":
         if _restricted_match(missing, sm):
             # A real column/table the user's role doesn't grant, not a typo or

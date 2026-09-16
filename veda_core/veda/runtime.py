@@ -240,6 +240,10 @@ def _load_one_sm(source_id, tenant):
             pass
     from config import resolve_source_artifact
     sm_path = resolve_source_artifact("veda_semantic_model.json", source_id, tenant)
+    if not sm_path or not os.path.exists(sm_path):
+        # M1 close-out (2026-09-15): no scoped model and no flat fallback → an EMPTY,
+        # tagged model. The SQL head reports `not_materialized`; never another source's.
+        return {"tables": {}, "columns": {}, "_not_materialized": True}
     with open(sm_path) as f:
         return json.load(f)
 
@@ -289,9 +293,9 @@ def _load_scoped_sm():
     path); a multi-source scope returns the merged namespace (`_merge_scoped_sms`)."""
     ctx = context.try_current()
     if ctx is None:
-        from config import SEMANTIC_MODEL_FILE
-        with open(SEMANTIC_MODEL_FILE) as f:
-            return json.load(f)
+        # No scope → EMPTY model (M1 close-out, 2026-09-15). The flat file is retired;
+        # a ctx-less caller never builds an engine over another source's schema.
+        return {"tables": {}, "columns": {}, "_not_materialized": True}
     ids = list(ctx.source_ids)
     if len(ids) == 1:
         return _load_one_sm(ids[0], ctx.tenant)

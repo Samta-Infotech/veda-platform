@@ -17,6 +17,7 @@ from veda.execution_state import ExecutionState
 from slm._call_slm import collect_usage, usage_totals
 from query.temporal_parser import run_temporal_parser
 from veda.planning import aggregate_mode as _agg_mode, grouped_mode as _grp_mode, ratio_mode as _rat_mode, superlative_mode as _sup_mode
+from veda.planning import grouped_count_mode as _grpc_mode   # grouped COUNT per dimension (2026-09-15)
 from query.fast_path import try_fast_path, log_route
 import sqlglot as _sg
 from sqlglot import exp as _exp
@@ -430,7 +431,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # Deterministic grouped-breakdown planner (same QSR machinery, non-ranked
     # sibling): "how much does each <dim> contribute" → GROUP BY dim, SUM(measure).
     # Same clarify/fall-through contract as the superlative planner above.
-    if fp is None and not is_existence and _grp:
+    if fp is None and not is_existence and (_grp or _grpc_mode(query)):
         try:
             from config import GROUPED_PLAN_ENABLED
         except Exception:
@@ -518,6 +519,26 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         except Exception:
                             pass
                     if not _grounded_ok:
+                        # Column-name evidence (M1 close-out, 2026-09-15): typed_anchor_
+                        # evidence counts VALUE and ENTITY(table-name) evidence only — a
+                        # question that names the plan's own COLUMNS verbatim ("average
+                        # MONTHLY FEE per CATEGORY" → amenities_catalog.monthly_fee /
+                        # .category) scored 0 and a correct deterministic grouped plan was
+                        # demoted into a row list (then refused). Schema-driven: the plan's
+                        # own columns' name tokens, no vocabulary. One fully-named column
+                        # on the picked table is anchoring evidence.
+                        try:
+                            _qtoks = set(re.findall(r"[a-z0-9]+", query.lower()))
+                            for _pc in (getattr(fp, "columns", None) or []):
+                                _ctoks = [t for t in str(_pc).lower().split(".")[-1].split("_") if len(t) > 2]
+                                if _ctoks and all(t in _qtoks for t in _ctoks):
+                                    _grounded_ok = True
+                                    tr.note("schema_linking",
+                                            f"fast-path pick kept: column '{_pc}' named in the query")
+                                    break
+                        except Exception:
+                            pass
+                    if not _grounded_ok:
                         print(f"  [FastPath] demoted: no typed evidence for "
                               f"{sorted(fp.tables)[:3]} — full pipeline")
                         tr.note("schema_linking",
@@ -563,6 +584,50 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                       f"for THIS query — recompute")
                 tr.note("schema_linking",
                         f"verified-cache hit demoted (dropped qualifier {missing_cache_q!r})")
+                cached_sql = None
+        except Exception:
+            pass
+    if cached_sql:
+        # SHAPE re-check (2026-09-15) — the third demotion, distinct from both above: the
+        # evidence guard asks "right table?", the qualifier guard asks "every named
+        # qualifier present?"; neither asks "same ANSWER SHAPE?". Found live on source 4
+        # right after its re-ingest: "how many maintenance records PER VENDOR" hit the
+        # cached "how many maintenance records are there" (sim=0.88) and replayed its
+        # scalar COUNT(*) — one number for a question that asked for a breakdown, and
+        # the qualifier gate let it through because 'vendor' loosely matches the
+        # vendors table. A grouping phrase in the question with no GROUP BY in the cached
+        # SQL (or a GROUP BY the question never asked for), or scalar-aggregate wording
+        # with an aggregate-less cached SQL, is a different question → recompute. Same
+        # grammar list every other grouping check uses; same aggregate gate the fresh
+        # path runs (intent_sql_alignment.aggregate_presence_ok).
+        try:
+            from config import QUERY_GRAMMAR as _QG_cache
+            from veda.intent_sql_alignment import aggregate_presence_ok as _agg_ok_cache
+            _qlc = f" {query.lower()} "
+            _q_grouped = any((" " in w and w in _qlc) or re.search(rf"\b{re.escape(w)}\b", _qlc)
+                             for w in _QG_cache.get("grouping", []))
+            _sql_grouped = bool(re.search(r"\bGROUP\s+BY\b", cached_sql, re.I))
+            _shape_why = None
+            if _q_grouped != _sql_grouped:
+                _shape_why = ("question asks for a breakdown, cached SQL has no GROUP BY"
+                              if _q_grouped else
+                              "cached SQL groups, question asks for no breakdown")
+            else:
+                _ok_agg_c, _ = _agg_ok_cache(query, cached_sql, sm)
+                if not _ok_agg_c:
+                    _shape_why = "question asks for a figure, cached SQL has no aggregate"
+            if not _shape_why:
+                # LIMIT N is part of the answer SHAPE too: "top 3 vendors by rating" hit the
+                # cached "which vendor has the highest rating" (sim=0.86) and replayed its
+                # LIMIT 1 — a silently wrong N. Same guard, one more shape attribute.
+                _mtop = re.search(r"\b(?:top|latest|last|bottom|first)\s+(\d+)\b", _qlc)
+                _mlim = re.search(r"\bLIMIT\s+(\d+)\b", cached_sql, re.I)
+                if _mtop and (not _mlim or _mlim.group(1) != _mtop.group(1)):
+                    _shape_why = (f"question asks for top {_mtop.group(1)}, cached SQL has "
+                                  f"LIMIT {_mlim.group(1) if _mlim else 'none'}")
+            if _shape_why:
+                print(f"  [cache] demoted: {_shape_why} — recompute")
+                tr.note("schema_linking", f"verified-cache hit demoted (shape: {_shape_why})")
                 cached_sql = None
         except Exception:
             pass
@@ -660,6 +725,24 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # allowed_resources (RBAC off, staff, or a pre-Gate-1 caller).
         _before_rbac = len(results) if results else 0
         results = filter_retrieval_results(results, sm, _ambient_ctx())
+        # Fail-closed SCOPE filter (M1 close-out, 2026-09-15), independent of RBAC: a
+        # candidate whose table is not in THIS scope's semantic model cannot be planned
+        # against, whichever retrieval signal produced it. Found live: a source-5
+        # (parquet, one table) query retrieved `maintenance` (source 4) and homzhub
+        # tables, and routing anchored on a table the source doesn't have. Whatever
+        # signal leaks is a bug to fix on its own; this guard makes the leak harmless
+        # in the meantime — the same "never plan against another source's schema"
+        # contract the artifact resolver now enforces. Multi-source scopes carry
+        # `src{ID}.<table>` keys for collisions; both spellings are admitted.
+        if results and _ambient_ctx() is not None:
+            _scope_tables = set((sm.get("tables") or {}).keys())
+            _scope_tables |= {k.split(".", 1)[1] for k in _scope_tables if k.startswith("src") and "." in k}
+            _before = len(results)
+            results = [r for r in results if getattr(r, "table_name", "") in _scope_tables]
+            if len(results) != _before:
+                print(f"  [L2s] Scope filter  dropped {_before - len(results)} candidate(s) "
+                      f"from tables outside this source's model")
+                tr.note("retrieval", f"scope filter dropped {_before - len(results)} foreign candidates")
         if results is not None and len(results) != _before_rbac:
             tr.set("rbac_filter", before=_before_rbac, after=len(results))
 
@@ -1052,7 +1135,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             _ents = [_er.anchor] + [t for t in _er.secondaries if t != _er.anchor]
             mt = {"action": "fallback"}
             _tried = None
-            for _a in _ents:
+            # Grain-first (M1 close-out, 2026-09-15): "how many maintenance records PER
+            # VENDOR" — the loop below anchors on ER's first entity (maintenance) and
+            # grouped by its own CATEGORY column, a silently wrong dimension. try_multitable()
+            # already resolves the grain from the "per/by X" phrase (whole-entity match →
+            # anchor vendors, COUNT maintenance per vendor); when the question carries a
+            # grouping phrase, let it go first and keep its SQL. Everything else falls
+            # through to the entity-first loop unchanged.
+            if _grp or _grpc_mode(query) or (_agg and re.search(r"\b(?:per|by)\s+[a-z]", query.lower())):
+                try:
+                    _mt0 = try_multitable(query, results, sm, all_cols, tf, primary=primary)
+                    if isinstance(_mt0, dict) and _mt0.get("action") == "sql" and _mt0.get("sql"):
+                        mt, _tried = _mt0, ((_mt0.get("plan") or {}).get("anchor") or "grain-first")
+                        tr.note("join_planning", "grain-first: try_multitable resolved the grouping "
+                                                  f"anchor {_tried!r} ahead of the entity-first loop")
+                except Exception:
+                    pass
+            for _a in ([] if mt.get("action") == "sql" else _ents):
                 _tg = [t for t in _ents if t != _a]
                 _cand = build_from_entities(query, sm, all_cols, tf, _a, _tg, results=results)
                 if isinstance(_cand, dict) and _cand.get("action") == "sql" and _cand.get("sql"):
@@ -1250,8 +1349,20 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             # (aggregate_mode(query)) — deliberately excludes threshold/op/top_n/ranked so this
             # never intercepts a per-anchor child-count ("X with more than one Y") or a ranked
             # count ("top 5 X by count"), which have their own existing handling elsewhere.
+            # Also excludes any GROUPING phrase ("per vendor", "by city", "for each X") —
+            # grouped_mode() deliberately returns None for COUNT-shaped queries (its own
+            # contract: "COUNT-per-dimension ... has its own counting machinery"), so `_grp`
+            # can't be used as the guard here; check the grammar's grouping words directly.
+            # Found live the same day this branch landed: "how many maintenance records
+            # per vendor" (source 4) was hijacked into a scalar COUNT(*) and then correctly
+            # refused by the qualifier gate ('vendor' dropped) — a regression this guard closes.
+            from config import QUERY_GRAMMAR as _QG_bc
+            _ql_bc = f" {query.lower()} "
+            _has_grouping_bc = any(
+                (" " in w and w in _ql_bc) or re.search(rf"\b{re.escape(w)}\b", _ql_bc)
+                for w in _QG_bc.get("grouping", []))
             _bare_count = bool(_agg) and _agg.get("op") is None and _agg.get("threshold") is None \
-                and not _agg.get("top_n") and not _agg.get("ranked")
+                and not _agg.get("top_n") and not _agg.get("ranked") and not _has_grouping_bc
             _tcol = (_resolve_temporal_column(primary, sm)
                     if (tf and (tf.start or tf.end)) or _want_rank_order else None)
             # "latest 10 X" ALSO makes L1 match the vague-recency word and derive a
@@ -1499,6 +1610,25 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 print(f"  [L4e] Ranked       {primary} ORDER BY {_tcol} "
                       f"{_rank.direction.upper()} LIMIT {_rank.top_n or 100}"
                       "  — deterministic, no LLM")
+            elif _rank.top_n is not None and _rank.basis == "metric" and _rank_sort_col \
+                    and _rank_tail:
+                # "top 3 vendors by rating" / "top 5 amenities by monthly fee" — a ranking on a
+                # MEASURE column of the anchor (2026-09-15, M1 close-out battery). Only the
+                # temporal-basis ranking had a branch; a metric-basis one fell to the generic
+                # path and was refused on lite-model sources. _rank_sort_col already resolved
+                # the column against the anchor (deterministic, schema-driven) and _rank_tail
+                # is the ORDER BY … LIMIT N it built — nothing new is inferred here.
+                _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
+                                                    must_include=[_rank_sort_col])
+                _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
+                sql = f'SELECT {_proj} FROM "{primary}"' + (f' WHERE {_tpred}' if _tpred else '') + _rank_tail
+                allowed_columns = allowed_columns + [_rank_sort_col] + ([_tcol] if _tcol else [])
+                _llm_sql = False                 # deterministic — skip IR-equivalence
+                tr.set("sql_planning", action="ranked_metric_only", table=primary,
+                       sort_col=_rank_sort_col, top_n=_rank.top_n, direction=_rank.direction)
+                _tick("sql_planning", "Sorting and picking the top results")
+                print(f"  [L4e] Ranked       {primary} ORDER BY {_rank_sort_col} "
+                      f"{_rank.direction.upper()} LIMIT {_rank.top_n}  — deterministic, no LLM")
             else:
                 # ENFORCEMENT: a temporal question on an anchor with NO date column cannot
                 # be answered — refuse, rather than hand the LLM an impossible "date-filter

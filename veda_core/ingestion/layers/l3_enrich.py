@@ -28,6 +28,12 @@ def _artifact_paths(ctx: SourceContext):
         "domain_synonyms": source_artifact_path("veda_domain_synonyms.json", sid, tenant),
         "concept_graph": source_artifact_path("veda_concept_graph.json", sid, tenant),
         "glossary": source_artifact_path("veda_glossary.json", sid, tenant),
+        # M1 close-out (2026-09-15): the semantic layer's two READ-side dependencies were
+        # still flat — the LLM-stage checkpoint (source B could resume from A's) and the
+        # relationship graph it reads for schema-aware prompts (homzhub's, for every
+        # source — live during the 2026-09-15 re-ingests of 3/4/5).
+        "checkpoint": source_artifact_path("veda_semantic_checkpoint.json", sid, tenant),
+        "relationship_graph": source_artifact_path("veda_relationship_graph.json", sid, tenant),
     }
 
 
@@ -65,7 +71,9 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
             schema_dict=schema_dict, profiling=None, glossary=None, force_glossary=True,
             domain_synonyms_file=paths["domain_synonyms"],
             concept_graph_file=paths["concept_graph"],
-            glossary_file=paths["glossary"])
+            glossary_file=paths["glossary"],
+            checkpoint_file=paths["checkpoint"],
+            relationship_graph_file=paths["relationship_graph"])
         save_semantic_model(semantic_model, paths["semantic_model"])
         state["semantic_model"] = semantic_model
         out.append(StageOutcome("semantic_layer", True, detail=(

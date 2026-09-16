@@ -51,18 +51,19 @@ Q: "escalation rate" -> {"intent":"ratio","entity":"t1","ratio":{"col":"c2","val
 _TYPE_TAG = {"CATEGORY": "category", "TEMPORAL": "time", "IDENTIFIER": "id",
              "METRIC": "numeric", "MONETARY": "numeric", "FREE_TEXT": "text"}
 
-_SM_CACHE = {"v": None}
-
-
 def _sample_values(col_id):
-    if _SM_CACHE["v"] is None:
-        try:
-            path = SEMANTIC_MODEL_FILE if os.path.isabs(SEMANTIC_MODEL_FILE) else \
-                os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), SEMANTIC_MODEL_FILE)
-            _SM_CACHE["v"] = json.load(open(path)).get("columns", {})
-        except Exception:
-            _SM_CACHE["v"] = {}
-    return (_SM_CACHE["v"].get(col_id, {}) or {}).get("sample_values") or []
+    """Sample values for one column from THIS request's scoped semantic model (M1
+    close-out, 2026-09-15). Used to read the flat SEMANTIC_MODEL_FILE into a
+    process-global cache — every source's Tier-2 envelope then saw homzhub's sample
+    values. veda_hybrid._load_semantic_model() is already cached per scope, so this
+    costs one dict lookup; ctx-less → no values."""
+    try:
+        import veda_hybrid
+        sm, _cols = veda_hybrid._load_semantic_model()
+        cols = (sm or {}).get("columns", {}) or {}
+    except Exception:
+        cols = {}
+    return (cols.get(col_id, {}) or {}).get("sample_values") or []
 
 
 def _entity_candidates(query, sel_columns):

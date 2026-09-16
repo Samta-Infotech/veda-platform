@@ -1569,7 +1569,7 @@ TEMPORAL_PARSER_ENABLED = True
 SEMANTIC_LAYER_V2_ENABLED = True
 
 # Post-ingestion derived artifacts (LLM-free transforms of veda_semantic_model.json):
-#   - data/veda_relationship_graph.json        (join planner / fast path / graph guard)
+#   - veda_relationship_graph.json (per-source artifact — join planner / fast path / graph guard)
 #   - semantic/{concepts,dimensions,metrics,MANIFEST}.json  (fast-path Phase-1 registry)
 # Regenerated on every ingestion so the fast path never reads a stale graph/model.
 DERIVED_ARTIFACTS_ENABLED = True
@@ -1581,7 +1581,8 @@ DERIVED_ARTIFACTS_ENABLED = True
 # successful full build.
 SEMANTIC_CHECKPOINT_ENABLED = True
 SEMANTIC_CHECKPOINT_EVERY   = 5                                  # flush every N tables
-SEMANTIC_CHECKPOINT_FILE    = "data/veda_semantic_checkpoint.json"
+# SEMANTIC_CHECKPOINT_FILE is defined with the other artifact constants below (it needs
+# artifact_path(), defined later in this module) — M1 close-out, 2026-09-15.
 
 # Parallel Qwen execution for the semantic layer (Stage 3 table + Stage 4 column
 # understanding). OFF by default → the exact sequential behaviour is preserved. When
@@ -2382,11 +2383,20 @@ def resolve_source_artifact(name: str, source_id=None, tenant=None, flat_default
                 tenant = ctx.tenant or tenant
         except Exception:
             pass
-    flat = flat_default if flat_default is not None else artifact_path(name)
+    # 2026-09-15 (M1 close-out): NO flat fallback, ever. The flat `data/<name>` files were
+    # produced by ONE source's ingestion (homzhub, id 2 — since migrated to its own scoped
+    # path); the old "scoped if it exists, else flat" contract handed them to every
+    # source that had no scoped copy yet (sources 3/4/5 planned SQL against homzhub's
+    # schema — see docs/backlog/ARCH_REVIEW_2026-09_RECONCILED.md §1). A short-lived
+    # data-derived "owner may fall back" rule replaced that, but it was permissive on a
+    # DB error — fail-open, which an isolation guard must never be. So: a known scope
+    # ALWAYS resolves to its own scoped path (existing or not — every reader treats a
+    # missing file as an empty artifact, and the SQL head reports `not_materialized`);
+    # no scope at all → None (nothing to resolve against; readers treat None like a
+    # missing file). `flat_default` is accepted for call-site compatibility and IGNORED.
     if source_id is None:
-        return flat
-    scoped = source_artifact_path(name, source_id, tenant or "default")
-    return scoped if _os.path.exists(scoped) else flat
+        return None
+    return source_artifact_path(name, source_id, tenant or "default")
 
 
 # Absolute-overridable (§9) so the inference container finds it regardless of cwd;
@@ -2398,6 +2408,7 @@ GLOSSARY_FILE = artifact_path("veda_glossary.json")
 DOMAIN_SYNONYMS_FILE = artifact_path("veda_domain_synonyms.json")
 CONCEPT_GRAPH_FILE = artifact_path("veda_concept_graph.json")
 RELATIONSHIP_GRAPH_FILE = artifact_path("veda_relationship_graph.json")
+SEMANTIC_CHECKPOINT_FILE = artifact_path("veda_semantic_checkpoint.json")   # ctx-less default only
 PROFILING_FILE = artifact_path("veda_profiling.json")
 
 # ── Compiled deterministic fast-path registries (semantic/compile_semantic_layer) ──

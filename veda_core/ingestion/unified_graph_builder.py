@@ -2,17 +2,18 @@
 """
 ingestion/unified_graph_builder.py — Phase 1 of the Unified Knowledge Graph.
 
-Fuses VEDA's separate graph-like artifacts into ONE node/edge graph:
-    data/veda_semantic_model.json      → TABLE, COLUMN nodes + HAS_COLUMN
-    data/veda_relationship_graph.json  → FK_TO (table↔table) + REFERENCES (col↔col)
-    data/veda_concept_graph.json       → CONCEPT nodes + IS_CONCEPT
-    data/veda_domain_synonyms.json     → SYNONYM nodes + SYNONYM_OF
-    semantic/metrics.json              → METRIC nodes + IS_METRIC
-    semantic/dimensions.json           → DIMENSION nodes + IS_DIMENSION
+Fuses VEDA's separate graph-like artifacts (each resolved PER SOURCE via
+config.resolve_source_artifact) into ONE node/edge graph:
+    veda_semantic_model.json      → TABLE, COLUMN nodes + HAS_COLUMN
+    veda_relationship_graph.json  → FK_TO (table↔table) + REFERENCES (col↔col)
+    veda_concept_graph.json       → CONCEPT nodes + IS_CONCEPT
+    veda_domain_synonyms.json     → SYNONYM nodes + SYNONYM_OF
+    metrics.json                  → METRIC nodes + IS_METRIC
+    dimensions.json               → DIMENSION nodes + IS_DIMENSION
     (column aliases in semantic model)  → ALIAS_OF
 
 This does NOT replace any existing artifact — it is a derived, additive view that the
-existing builders keep feeding. Output: data/veda_unified_graph.json.
+existing builders keep feeding. Output: the per-source veda_unified_graph.json artifact.
 
 Design constraints honoured:
   • Zero new dependencies (pure stdlib) — meets <5min build / reasonable memory trivially.
@@ -45,32 +46,27 @@ def _p(rel: str) -> str:
     return os.path.join(_ROOT, rel)
 
 
-# Resolve artifact paths from config when available, else fall back to defaults.
-try:
-    import config as _cfg
-    _SEMANTIC_MODEL = _p(getattr(_cfg, "SEMANTIC_MODEL_FILE", "data/veda_semantic_model.json"))
-    _REL_GRAPH      = _p(getattr(_cfg, "RELATIONSHIP_GRAPH_FILE", "data/veda_relationship_graph.json"))
-    _CONCEPT_GRAPH  = _p(getattr(_cfg, "CONCEPT_GRAPH_FILE", "data/veda_concept_graph.json"))
-    _DOMAIN_SYN     = _p(getattr(_cfg, "DOMAIN_SYNONYMS_FILE", "data/veda_domain_synonyms.json"))
-    _OUT_FILE       = _p(getattr(_cfg, "UNIFIED_GRAPH_FILE", "data/veda_unified_graph.json"))
-    # Compiled registries moved under artifact_path() (data/…, scope-aware) — was
-    # hardcoded to the flat semantic/ dir, which never isolated per source.
-    _METRICS        = _p(getattr(_cfg, "METRICS_FILE", "data/metrics.json"))
-    _DIMENSIONS     = _p(getattr(_cfg, "DIMENSIONS_FILE", "data/dimensions.json"))
-except Exception:
-    _SEMANTIC_MODEL = _p("data/veda_semantic_model.json")
-    _REL_GRAPH      = _p("data/veda_relationship_graph.json")
-    _CONCEPT_GRAPH  = _p("data/veda_concept_graph.json")
-    _DOMAIN_SYN     = _p("data/veda_domain_synonyms.json")
-    _OUT_FILE       = _p("data/veda_unified_graph.json")
-    _METRICS        = _p("data/metrics.json")
-    _DIMENSIONS     = _p("data/dimensions.json")
+# Legacy FLAT input/output paths — used ONLY by the ctx-less dev-CLI path
+# (`source_id=None`). Every real build resolves per source via
+# config.resolve_source_artifact() (see _resolve_input_paths). M1 close-out
+# (2026-09-15): no literal paths here; config.artifact_path() is the single
+# definition of the flat location.
+import config as _cfg
+_SEMANTIC_MODEL = _p(_cfg.SEMANTIC_MODEL_FILE)
+_REL_GRAPH      = _p(_cfg.RELATIONSHIP_GRAPH_FILE)
+_CONCEPT_GRAPH  = _p(_cfg.CONCEPT_GRAPH_FILE)
+_DOMAIN_SYN     = _p(_cfg.DOMAIN_SYNONYMS_FILE)
+_OUT_FILE       = _p(_cfg.UNIFIED_GRAPH_FILE)
+_METRICS        = _p(_cfg.METRICS_FILE)
+_DIMENSIONS     = _p(_cfg.DIMENSIONS_FILE)
 
 GRAPH_VERSION = "1.0"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-def _load(path: str) -> Optional[Any]:
+def _load(path: Optional[str]) -> Optional[Any]:
+    if not path:                      # resolver returned None (no scope) → absent input
+        return None
     try:
         with open(path) as f:
             return json.load(f)
@@ -133,7 +129,7 @@ def _fingerprint(source_id=None, tenant: str = "default") -> Dict[str, Any]:
         try:
             st = os.stat(path)
             fp[name] = {"mtime": round(st.st_mtime, 3), "size": st.st_size}
-        except OSError:
+        except (OSError, TypeError):      # missing file, or None (no scope)
             fp[name] = None
     return fp
 

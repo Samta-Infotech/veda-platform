@@ -2,13 +2,15 @@
 import os, re, sys, time, json, logging, threading
 import numpy as np
 from veda.runtime import _encode_query, _get_bge
+from config import artifact_path as _artifact_path
 
 
 # Absolute (repo-root) path, not CWD-relative — else the verified-query store silently
 # reads/writes the wrong file (or none) when VEDA runs from a different working directory.
 VERIFIED_FILE = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-    "data", "veda_verified_queries.json")
+    _artifact_path("veda_verified_queries.json"))   # ctx-less (dev-CLI) store only — served
+                                                    # requests use Django VerifiedQueryCache
 # Guards the read-modify-write of the verified-query JSON store (concurrent writes
 # under a threaded server would otherwise interleave and corrupt the file).
 

@@ -396,7 +396,7 @@ def _domain_synonyms() -> dict:
         from config import DOMAIN_SYNONYMS_FILE, resolve_source_artifact
         _p = resolve_source_artifact("veda_domain_synonyms.json", sid, tenant,
                                      flat_default=DOMAIN_SYNONYMS_FILE)
-        data = _json.load(open(_p)) if _os.path.exists(_p) else {}
+        data = _json.load(open(_p)) if (_p and _os.path.exists(_p)) else {}
     except Exception:
         data = {}
     _DS_SYN_CACHE[key] = data

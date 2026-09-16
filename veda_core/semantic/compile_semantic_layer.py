@@ -3,7 +3,7 @@
 # semantic/compile_semantic_layer.py
 # VEDA — offline compiler for the deterministic semantic layer (Phase 1 slice).
 #
-# Pure function of data/veda_semantic_model.json. Emits three static, versioned
+# Pure function of the (per-source) semantic-model artifact. Emits three static, versioned
 # registries the runtime fast path resolves against — NO LLM, NO retrieval:
 #
 #   semantic/concepts.json    business nouns  → entity table   (e.g. "case" → incident)

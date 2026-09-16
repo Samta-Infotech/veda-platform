@@ -190,6 +190,35 @@ def grouped_mode(query):
     return {"grouped": True, "op": op}
 
 
+def grouped_count_mode(query):
+    """Grammar-level grouped-COUNT breakdown detection, or None (M1 close-out, 2026-09-15).
+
+    "how many maintenance records per vendor" / "how many amenities per category" — a
+    COUNT(*) GROUP BY dim over ONE anchor. grouped_mode() deliberately returns None for
+    COUNT (its contract: COUNT-per-dimension "has its own counting machinery"); that
+    machinery is the per-anchor CHILD count ("X with their Y count"), which never fired for
+    a same-table dimension, so these questions fell to a row list and were refused by the
+    shape guard. Kept SEPARATE from grouped_mode so its tested contract is unchanged.
+    Requires: a grouping phrase (QUERY_GRAMMAR["grouping"]) AND counting wording, and NO
+    measure operator (that is grouped_mode's job). Yields to the superlative planner."""
+    from config import QUERY_GRAMMAR
+    ql = f" {query.lower()} "
+
+    def has(group):
+        for w in QUERY_GRAMMAR.get(group, []):
+            if (" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql):
+                return True
+        return False
+
+    if superlative_mode(query):
+        return None
+    if not has("grouping") or not has("counting"):
+        return None
+    if aggregate_operator(query) not in (None, "COUNT"):
+        return None                     # a measure aggregate → grouped_mode owns it
+    return {"grouped": True, "op": "COUNT"}
+
+
 def ratio_mode(query):
     """Grammar-level ratio detection, or None.
 

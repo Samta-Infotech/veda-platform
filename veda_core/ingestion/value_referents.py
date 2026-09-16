@@ -227,7 +227,10 @@ def load_value_referents() -> dict:
             paths = [_artifact(ctx.tenant, sid) for sid in ctx.source_ids]
     except Exception:
         pass
-    paths = [p for p in paths if os.path.exists(p)] or [_artifact()]
+    # M1 close-out (2026-09-15): no flat fallback — a scope with no scoped artifact gets an
+    # empty referent map (consumers fall back to the live value store), never another
+    # source's referents.
+    paths = [p for p in paths if os.path.exists(p)]
     key = tuple(paths)
     if _CACHE["path"] == key and _CACHE["art"] is not None:
         return _CACHE["art"]

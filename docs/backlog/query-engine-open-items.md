@@ -937,6 +937,21 @@ also tracked in `requirements/inference.txt`/`host-ingest.txt` for the next imag
 rebuild — not yet baked into a rebuilt image, since these containers weren't rebuilt
 this pass).
 
+## Query understanding: why new phrasings keep needing individual fixes — see its own doc
+
+A live chat-API investigation the same day (2026-09-15, prompted by a user asking why a
+chat follow-up silently dropped a filter) surfaced a bigger, structural finding: SQL
+planning (`veda/pipeline.py`) is a fixed chain of narrow regex/keyword-triggered
+branches, each covering one surface phrasing — not a real semantic-parsing layer. Every
+fix in this doc's P1-2/grammar-gap sections above is an instance of that pattern (one
+more trigger added). The codebase already has the right architecture for a real fix
+(`veda_core/veda/understanding/` + `veda_core/veda/analytical_spec.py` — LLM concept
+extraction → deterministic schema-grounding firewall → the same SQL builder), flag-gated
+off and incomplete (no filter/dimension grounding yet), plus a live-tested regression
+(enabling it as-is broke 2 working queries while fixing 1). Full write-up, flow diagrams,
+the regression evidence table, and a phased roadmap:
+**`docs/backlog/QUERY_UNDERSTANDING_GAPS_AND_ROADMAP.md`**.
+
 ## Compose note (unrelated, found while verifying the above)
 
 The local `pg_data` volume (494 MB, created 2026-07-05) is PG16-formatted; `docker-compose.yml`
@@ -946,3 +961,70 @@ data directory. Pinned `docker-compose.yml`'s `postgres` image back to `pg16` on
 survives. Re-bump to pg17 via a proper `pg_dumpall`-and-restore (or `pg_upgrade`) when
 convenient; `docker-compose.demo.yml:30` still says `pg17` and has the same latent issue if
 that override is ever used against this volume.
+
+## M1 close-out pass (2026-09-16): verified-query cache key must become IR-shape-aware
+
+Found while widening the per-source battery (`scripts/eval_per_source_battery.py`, 63
+questions / 4 sources with expected SQL shapes): the `VerifiedQueryCache` key is the
+normalised question text only. Two consequences observed live, not hypothesised:
+
+1. **Scalar-vs-grouped replay.** A cached scalar answer for "how many maintenance records"
+   replayed for "how many maintenance records per vendor"; a cached `LIMIT 1` superlative
+   ("which vendor has the highest rating") replayed for "top 3 vendors by rating". The
+   three existing demotions (evidence, qualifier, shape) catch some of this; this pass
+   **extended the existing shape demotion** to compare grouping ↔ `GROUP BY`, aggregate
+   presence, and `LIMIT N` (no fourth heuristic was added — the user's instruction — but
+   the extension is a stop-gap and is disclosed here as such).
+2. **Poisoning by test traffic.** Wrong-shaped answers produced while the code was in
+   flux were cached as "verified" and replayed on every later run. Purged by hand:
+   13 rows for sources 4/5 and 2 rows for source 2 created 2026-09-15/16; the 26
+   pre-existing source-2 rows (July) were left alone.
+
+**Required in M2/M6:** the cache key must include the grounded IR shape (anchor table,
+aggregate, group dimensions, filter columns+ops, ranking N / direction, time bucket), not
+the question text — then a scalar and a grouped variant of the same words can never
+collide, and demotion heuristics on the SQL text become unnecessary. Until then the
+battery carries the scalar-vs-grouped replay case as a regression check (source 4:
+"how many maintenance records are there" followed by "… per vendor"; "which vendor has
+the highest rating" followed by "top 3 vendors by rating").
+
+### Same pass — Tier-2 envelope contract gate (`veda_hybrid.py::_envelope_inexpressible`)
+
+The frozen intent envelope (`INTENT_ENVELOPE_CONTRACT.md` v1) has no ranking intent and
+`eq|ne` filters only. Two battery questions on source 2 were answered with the *nearest
+expressible* shape instead of falling through: "list top 5 properties by monthly rent" →
+a monthly `DATE_TRUNC` count trend (LIMIT 100), "properties with more than 3 floors" →
+`WHERE total_floors = 3`. The envelope path now skips when the question carries a ranking
+(`query/ranking_parser`), a numeric threshold, or a negation (the phrase sets
+`query/operation_classifier` already uses for the same reason on the cross-source path)
+and lets the IR path rank/compare or refuse typed. Comparators and rankings inside the
+envelope itself are M2 grounding work (typed filter ops), not a contract v1 patch.
+
+### Same pass — `ingestion/biencoder.py` L4 embed read no semantic model at all
+
+`_load_retrieval_docs()` / `_load_table_purposes()` were called ctx-less; once the flat
+`SEMANTIC_MODEL_FILE` fallback was removed (M1), that resolved to no artifact, so every
+L4 embedded the structural passage only. Now passed `source_id` + ambient tenant. Takes
+effect on the next ingest after `docker compose restart ingest-worker` (prefork child
+caches modules); existing embeddings for full-model sources (2) were built before the
+fallback removal and are unaffected, lite-model sources (3/4/5) have no
+`retrieval_documents` either way.
+
+### Same pass — the shared-planner Tier-2 branch ran without `_tier2_validate`
+
+`veda_hybrid._tier2_sql`'s multi-entity branch (`answered via SHARED planner`) applied only
+the AST firewall; the single-table branch below it ran `_tier2_validate` (value grounding,
+strict qualifier completeness, IR equivalence). Live consequence: "properties with more
+than 3 floors" executed as `… HAVING COUNT(listing reviews) > 3` — a graph-verified join
+answering a different question — and "show tickets with high priority" executed with
+`high` dropped (an unfiltered ticket list; this copy's `worklists_ticket.priority` holds
+only LOW 223 / MEDIUM 8, so the only honest outcome is a typed refusal). Both branches now
+run the same gates; the reason feeds the existing repair hint before refusing.
+
+### Same pass — battery semantics added: `expect="refuse"` and `xfail`
+
+`expect="refuse"` makes an *answer* the failure for a question whose value does not exist
+in the data; `xfail` carries the verified-cache similarity-replay case ("which vendor has
+the highest rating" → cached "top 3 vendors by rating", cosine 0.86 → `LIMIT 3`) as a
+documented failing case reported separately — XPASS fires when the IR-shape-aware key
+(above) lands, so the marker gets removed rather than forgotten.

@@ -87,6 +87,7 @@ def _run_schema_pipeline(
     run_data_graph:  bool = True,
     run_value_sampler: bool = True,
     verbose:         bool = False,
+    tabular_connector = None,   # the datalake chain's own connector (M1 close-out) — see below
 ) -> dict:
     """
     Runs schema_scanner → FK adjacency → (data_graph) → semantic inference →
@@ -127,7 +128,14 @@ def _run_schema_pipeline(
         t0 = time.time()
         try:
             from ingestion.data_graph import run_data_graph, to_fk_adjacency_rows
-            dg_result = run_data_graph(scan_result, source_id=source_id, verbose=verbose)
+            # `tabular_connector` (M1 close-out, 2026-09-15): the datalake chain's own DuckDB-
+            # backed connector, so value-overlap discovery samples the files. Without it,
+            # data_graph fell back to a Postgres client connection that doesn't exist for a
+            # csv/parquet source and reported 0 edges in 0.01 s — source 4's
+            # maintenance.ticket_id ↔ vendors.ticket_id (100% overlap) was never found
+            # through this chain, though layers/l1_extract.py had been fixed on 2026-09-10.
+            dg_result = run_data_graph(scan_result, source_id=source_id, verbose=verbose,
+                                       tabular_connector=tabular_connector)
             ctx["dg_result"] = dg_result
             if dg_result.discovered_edges:
                 discovered_rows = to_fk_adjacency_rows(dg_result, include_soft=False)
@@ -289,12 +297,15 @@ def _run_schema_pipeline(
         from ingestion.unified_graph_builder import (
             build_unified_graph, write_unified_graph, stale_inputs,
         )
-        from config import UNIFIED_GRAPH_FILE
+        from config import resolve_source_artifact
         import json as _ugjson
+        # THIS source's unified graph (M1 close-out, 2026-09-15) — used to stat the flat
+        # legacy file, i.e. another source's freshness.
+        _ug_path = resolve_source_artifact("veda_unified_graph.json", source_id)
         try:
-            with open(UNIFIED_GRAPH_FILE) as _ugf:
-                _stale = stale_inputs(_ugjson.load(_ugf))
-        except (OSError, ValueError):
+            with open(_ug_path) as _ugf:
+                _stale = stale_inputs(_ugjson.load(_ugf), source_id)
+        except (OSError, ValueError, TypeError):
             _stale = ["<missing>"]          # absent/corrupt → rebuild
         if _stale:
             t0 = time.time()
@@ -457,6 +468,7 @@ def _dispatch_datalake(source_config: dict, verbose: bool) -> DispatchResult:
             run_data_graph    = engine in _TABULAR,   # value-overlap FK discovery within the files
             run_value_sampler = False,                 # files sampled via the connector below
             verbose           = verbose,
+            tabular_connector = connector if engine in _TABULAR else None,   # M1 close-out
         )
 
         steps = ["schema", "fk", "semantic", "metadata", "reg", "encoder", "vector_store"]

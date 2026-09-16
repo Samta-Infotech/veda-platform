@@ -40,10 +40,13 @@ def build_rerank_docs(source_id: str = "", tenant: str = "default", verbose: boo
     if semantic_model is not None:
         sm = semantic_model
     else:
-        from config import SEMANTIC_MODEL_FILE
-        if not os.path.exists(SEMANTIC_MODEL_FILE):
-            raise FileNotFoundError(f"semantic model not found: {SEMANTIC_MODEL_FILE}")
-        with open(SEMANTIC_MODEL_FILE) as f:
+        # M1 close-out (2026-09-15): THIS source's scoped model, never the flat file.
+        from config import resolve_source_artifact
+        _p = resolve_source_artifact("veda_semantic_model.json", source_id or None, tenant)
+        if not _p or not os.path.exists(_p):
+            raise FileNotFoundError(
+                f"semantic model not materialized for source {source_id!r}: {_p}")
+        with open(_p) as f:
             sm = json.load(f)
 
     col_docs = dict(sm.get("retrieval_documents", {}))   # col_id -> enriched text

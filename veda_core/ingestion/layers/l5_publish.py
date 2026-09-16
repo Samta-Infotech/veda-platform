@@ -92,12 +92,12 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     # activate step to store on SubstrateVersion.hnsw_ef_search — non-fatal.
     try:
         import json as _json
-        from config import artifact_path
+        from config import source_artifact_path
         scan = state.get("scan_result")
         n_tables = int(getattr(scan, "stats", {}).get("total_tables", 0)) if scan else 0
         # larger schema → wider search; clamp to [40, 200]. 40 == shipped default.
         ef = min(200, max(40, 40 + (n_tables // 20) * 20))
-        _p = artifact_path("veda_hnsw.json")
+        _p = source_artifact_path("veda_hnsw.json", ctx.source_id, ctx.tenant)   # per source (M1)
         import os as _os
         _os.makedirs(_os.path.dirname(_p) or ".", exist_ok=True)
         with open(_p, "w") as _f:

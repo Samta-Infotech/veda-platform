@@ -934,11 +934,14 @@ def _sm():
     except Exception:
         pass
     if _SM_CACHE["v"] is None:
+        # Ctx-less call (dev-CLI / tests): resolve through the one resolver — with no
+        # scope it returns None → empty model. No flat-file read (M1 close-out, 2026-09-15).
         try:
-            from config import SEMANTIC_MODEL_FILE
-            path = SEMANTIC_MODEL_FILE if os.path.isabs(SEMANTIC_MODEL_FILE) \
-                else os.path.join(_ROOT, SEMANTIC_MODEL_FILE)
-            _SM_CACHE["v"] = json.load(open(path))
+            from config import resolve_source_artifact
+            path = resolve_source_artifact("veda_semantic_model.json")
+            if path and not os.path.isabs(path):
+                path = os.path.join(_ROOT, path)
+            _SM_CACHE["v"] = json.load(open(path)) if path and os.path.exists(path) else {}
         except Exception:
             _SM_CACHE["v"] = {}
     return _SM_CACHE["v"]

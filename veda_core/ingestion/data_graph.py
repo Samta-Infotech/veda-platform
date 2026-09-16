@@ -171,6 +171,15 @@ def _is_eligible_as_target(col: ScannedColumn) -> bool:
     # uuid columns
     if col.data_type.lower() == "uuid":
         return True
+    # String NATURAL keys named like an identifier ("ticket_id" VARCHAR) — common in
+    # file-backed (csv/parquet) sources, which have no declared PKs at all. M1 close-out
+    # (2026-09-15): source 4's `maintenance`/`vendors` join on exactly such a key and
+    # got 0 edges because this pre-filter rejected the target before the value-overlap
+    # correlation (≥ _MATCH_FLOOR, the actual evidence gate) ever ran. Eligibility only
+    # admits the candidate; the data correlation still decides whether an edge exists.
+    if name.endswith("_id") and any(t in col.data_type.lower()
+                                    for t in ("char", "text", "string", "varchar")):
+        return True
     return False
 
 

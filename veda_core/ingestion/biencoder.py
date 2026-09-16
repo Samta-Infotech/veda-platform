@@ -84,34 +84,57 @@ class BiEncoderResult:
     error:           Optional[str] = None
 
 
-def _load_retrieval_docs() -> dict:
-    """Rich per-column semantic text from the semantic model (DEFINITION / TERMS /
-    SEARCH questions / …), keyed 'table.col'. Built FOR BGE embedding. Empty dict
-    when the strategy is structural or the model is absent → caller falls back."""
+def _scoped_sm(source_id, tenant: str = "default") -> dict:
+    """THIS source's semantic model (M1 close-out, 2026-09-15). These helpers used to
+    read the flat SEMANTIC_MODEL_FILE — during a tabular source's L4 that was homzhub's
+    model, i.e. another source's retrieval documents feeding this source's embeddings.
+    Resolved per source; absent → {} (structural fallback), never another source's."""
     try:
-        from config import EMBED_TEXT_STRATEGY, SEMANTIC_MODEL_FILE
-        if EMBED_TEXT_STRATEGY == "structural":
-            return {}
         import os
         import json as _json
-        if os.path.exists(SEMANTIC_MODEL_FILE):
-            return _json.load(open(SEMANTIC_MODEL_FILE)).get("retrieval_documents", {}) or {}
+        from config import resolve_source_artifact
+        p = resolve_source_artifact("veda_semantic_model.json", source_id, tenant)
+        if p and os.path.exists(p):
+            return _json.load(open(p)) or {}
     except Exception:
         pass
     return {}
 
 
-def _load_table_purposes() -> dict:
+def _ctx_tenant() -> str:
+    """Tenant of the ambient ingestion context (source_dispatcher sets it), else 'default'."""
+    for modname in ("veda_core.context", "context"):
+        try:
+            mod = __import__(modname, fromlist=["try_current"])
+            ctx = mod.try_current()
+            if ctx is not None:
+                return str(getattr(ctx, "tenant", "default") or "default")
+        except Exception:
+            continue
+    return "default"
+
+
+def _load_retrieval_docs(source_id=None, tenant: str = "default") -> dict:
+    """Rich per-column semantic text from the semantic model (DEFINITION / TERMS /
+    SEARCH questions / …), keyed 'table.col'. Built FOR BGE embedding. Empty dict
+    when the strategy is structural or the model is absent → caller falls back."""
+    try:
+        from config import EMBED_TEXT_STRATEGY
+        if EMBED_TEXT_STRATEGY == "structural":
+            return {}
+        return _scoped_sm(source_id, tenant).get("retrieval_documents", {}) or {}
+    except Exception:
+        pass
+    return {}
+
+
+def _load_table_purposes(source_id=None, tenant: str = "default") -> dict:
     """table_name -> business_purpose from the semantic model (semantic_layer_v2's
     LLM-authored one-sentence table summary). Empty dict when the model is absent —
     caller falls back to the bare column-list passage, same as before this existed."""
     try:
-        from config import SEMANTIC_MODEL_FILE
-        import os
-        import json as _json
-        if os.path.exists(SEMANTIC_MODEL_FILE):
-            tables = _json.load(open(SEMANTIC_MODEL_FILE)).get("tables", {}) or {}
-            return {n: (m.get("business_purpose") or "") for n, m in tables.items()}
+        tables = _scoped_sm(source_id, tenant).get("tables", {}) or {}
+        return {n: (m.get("business_purpose") or "") for n, m in tables.items()}
     except Exception:
         pass
     return {}
@@ -163,7 +186,11 @@ def run_biencoder_ingestion(
         col_metas  = []
         table_map: dict = {}  # table_id → {table_name, col_names, source_id}
 
-        _rdocs = _load_retrieval_docs()
+        # THIS source's model, THIS tenant (2026-09-16): the ctx-less call resolved to no
+        # artifact at all once the flat fallback went away — every L4 silently embedded
+        # the structural passage only.
+        _tenant = _ctx_tenant()
+        _rdocs = _load_retrieval_docs(source_id, _tenant)
         for col in inference_result.typed_columns:
             text = BIENCODER_PASSAGE_PREFIX + _passage_text(col, _rdocs)
             col_texts.append(text)
@@ -211,7 +238,7 @@ def run_biencoder_ingestion(
         # --- Table embeddings ---
         tbl_texts = []
         tbl_metas = []
-        _tbl_purposes = _load_table_purposes()
+        _tbl_purposes = _load_table_purposes(source_id, _tenant)
         for tid, info in table_map.items():
             col_list = ", ".join(info["col_names"][:20])
             purpose = _tbl_purposes.get(info["table_name"])

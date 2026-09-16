@@ -25,7 +25,7 @@ import re
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from config import get_primary_relational_source, source_artifact_path
+from config import get_primary_relational_source, source_artifact_path, artifact_path
 from utils.logger import get_logger
 import psycopg2
 from schema.real_schema import get_real_schema
@@ -37,7 +37,7 @@ logger = get_logger(__name__)
 # config.source_artifact_path() (P0-1, 2026-09-10): before this fix, EVERY source
 # wrote here, so source B's publish silently overwrote source A's graph and both
 # read whichever ran last — see docs/backlog/query-engine-open-items.md.
-RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
+RELATIONSHIP_GRAPH_FILE = artifact_path("veda_relationship_graph.json")
 
 # Mirrors ingestion/dispatcher.py's _TABULAR_ENGINES / ingestion/layers/l1_extract.py:
 # file-backed sources run the full L1-L5 pipeline over a DuckDB-backed connector, not
@@ -269,6 +269,84 @@ def _declared_fk_edges(schema_tables):
     return edges
 
 
+def _discovered_fk_edges(tables, ctx=None):
+    """Undeclared FK edges the data graph DISCOVERED (value-overlap correlation,
+    ingestion/data_graph.py) for THIS source's tables, read back from the engine store's
+    `fk_adjacency` (M1 close-out, 2026-09-15). Until now discovered edges only ever fed
+    that store (retrieval Signals 3/4) — never this graph, so the join planner, the
+    firewall's join check and the fast path saw declared FKs only. A file-backed
+    (csv/parquet) source has NO declared FKs at all, so its graph was always empty even
+    when the data proved a join (source 4: maintenance.ticket_id ↔ vendors.ticket_id,
+    100% overlap, found and then dropped on the floor).
+
+    `fk_adjacency` carries no source_id column; rows are matched on BOTH the table name
+    (must be one of this source's tables) AND the table id, taken from the engine store's
+    own `graph_nodes` rows for THIS source (always source-scoped) — so a same-named table
+    in another source can't leak in. No graph_nodes for the source → no discovered edges."""
+    tset = set(tables)
+    if not tset or ctx is None:
+        return []
+    sid = str(ctx.source_id)
+    try:
+        from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+        conn = get_internal_connection()
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT table_id FROM graph_nodes WHERE source_id = %s "
+                            "AND node_type = 'table' AND table_id IS NOT NULL", [sid])
+                expected_ids = {str(r[0]) for r in cur.fetchall()}
+                if not expected_ids:
+                    return []
+                ph = ",".join(["%s"] * len(tset))
+                cur.execute(
+                    "SELECT from_table_name, from_col_name, to_table_name, to_col_name, "
+                    "from_table_id, to_table_id FROM fk_adjacency "
+                    f"WHERE from_table_name IN ({ph}) AND to_table_name IN ({ph})",
+                    list(tset) + list(tset))
+                rows = cur.fetchall()
+        finally:
+            release_internal_connection(conn)
+    except Exception as e:
+        logger.warning("relationship_graph: could not read discovered FK edges (%s: %s) — "
+                       "declared edges only", type(e).__name__, str(e)[:120])
+        return []
+    edges = []
+    seen_pairs = set()
+    for ft, fc, tt, tc, fid, tid in rows:
+        if str(fid) not in expected_ids or str(tid) not in expected_ids:
+            continue                                   # a same-named table from another source
+        # The data graph records a 100%-overlap pair in BOTH directions; the join planner
+        # then sees "two keys" and refuses as ambiguous ("which key: ticket_id, ticket_id?").
+        # Keep one direction per unordered column pair (first seen, i.e. store order).
+        pair = frozenset(((ft, fc), (tt, tc)))
+        if pair in seen_pairs:
+            continue
+        seen_pairs.add(pair)
+        edges.append({
+            "source_table": ft, "source_column": fc,
+            "target_table": tt, "target_column": tc,
+            "relationship_type": "audit" if (_AUDIT_TABLE_RE.search(ft) or _AUDIT_COL_RE.search(fc))
+                                 else "data_inferred",
+            "discovery": "data_inferred", "polymorphic": False,
+            "requires_predicate": None, "confidence": 0.9,
+        })
+    return edges
+
+
+def _merge_edges(declared, discovered):
+    """Declared edges win; a discovered edge is added only for a (source col → target col)
+    pair no declared edge already covers."""
+    seen = {(e["source_table"], e["source_column"], e["target_table"], e["target_column"])
+            for e in declared}
+    out = list(declared)
+    for e in discovered:
+        k = (e["source_table"], e["source_column"], e["target_table"], e["target_column"])
+        if k not in seen:
+            seen.add(k)
+            out.append(e)
+    return out
+
+
 def _polymorphic_edges(cur, tables, meta, engine="postgresql"):
     """Detect *_id + (*_type|model_name) pairs and resolve each discriminator value
     to a target table.column by DATA CORRELATION (not string matching)."""
@@ -416,6 +494,7 @@ def build_relationship_graph(tables=None, verbose=False, ctx=None):
 
             edges = _declared_fk_edges([by_name[t] for t in tables])
             edges = [e for e in edges if e["target_table"] in tables]
+            edges = _merge_edges(edges, _discovered_fk_edges(tables, ctx))   # M1 close-out
             edges += _polymorphic_edges(cur, tables, meta, engine=engine)
 
             for e in edges:
@@ -433,6 +512,7 @@ def build_relationship_graph(tables=None, verbose=False, ctx=None):
         # to get NO graph at all (ValueError → non-fatal stage failure) now gets one.
         edges = _declared_fk_edges([by_name[t] for t in tables])
         edges = [e for e in edges if e["target_table"] in tables]
+        edges = _merge_edges(edges, _discovered_fk_edges(tables, ctx))   # M1 close-out
         for e in edges:
             e["cardinality"] = "unknown"
             e["weight"] = _WEIGHT.get(e["relationship_type"], 3)

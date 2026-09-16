@@ -82,7 +82,12 @@ def _wants_time_bucket(query, sm=None):
     ql = " " + (query or "").lower().strip() + " "
     if " over time " in ql or " trend " in ql or " time series " in ql:
         return True
-    if any((p + u) in ql for p in _TIME_GROUP_PREPS for u in _TIME_UNITS):
+    # Word-boundary on the UNIT (2026-09-15): the plain substring test matched " by month"
+    # inside "top 3 amenities BY MONTHLY fee" and refused a correct ranking as a missing
+    # time breakdown — before the adverb-modifies-measure check below could ever run.
+    _preps = "|".join(re.escape(p.strip()) for p in _TIME_GROUP_PREPS)
+    _units = "|".join(_TIME_UNITS)
+    if re.search(rf"\b(?:{_preps})\s+(?:{_units})s?\b", ql):
         return True                                          # "per month", "by year" — unambiguous
     for a in _TIME_ADVERBS:
         if (" " + a + " ") in ql and not _adverb_modifies_measure(query, a, sm):
@@ -232,13 +237,40 @@ def _filter_presence_enabled() -> bool:
         return True
 
 
-def _boolean_flag_named(query, sm):
+def _value_named_in_query(query, sm, sql_tables=None):
+    """A query span that value-grounds to a column of one of the SQL's OWN tables (the
+    same value-resolution the anchor scorer uses — query/resolution.resolve), e.g. "Kochi"
+    → vendors.city. Returns "table.column" or None. 2026-09-15: "vendors in Kochi" and
+    "amenities in the Sports category" were answered as UNFILTERED row lists; the value
+    grounded (L6a passed) and the column was projected (qualifier gate passed), so nothing
+    noticed the predicate had vanished. Same evidence-based shape as the boolean-flag case
+    above — no vocabulary list."""
+    try:
+        from query.resolution import resolve
+        for tr in resolve(query, sm):
+            if getattr(tr, "grammar", False):
+                continue
+            for r in (tr.values or {}).get("direct", []):
+                if sql_tables and r.get("table") not in sql_tables:
+                    continue
+                return f"{r.get('table')}.{r.get('column')}"
+    except Exception:
+        return None
+    return None
+
+
+def _boolean_flag_named(query, sm, sql_tables=None):
     """A BOOLEAN/FLAG column whose own distinctive name-word the query uses, e.g. "gated" for
-    `is_gated`. Schema-driven (the column's words), no vocabulary list."""
+    `is_gated`. Schema-driven (the column's words), no vocabulary list. `sql_tables` (2026-09-15):
+    only flags on tables the SQL actually reads count — a flag on some unrelated table cannot
+    be "the filter this SQL forgot" ("users created LAST month" used to match
+    users_userpreference.is_LAST_name_obfuscated and refuse a correct temporal query)."""
     ql = " " + re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()) + " "
     for k, c in (sm or {}).get("columns", {}).items():
         st = (c.get("semantic_type") or "").upper()
         if st not in ("BOOLEAN", "FLAG", "BOOL"):
+            continue
+        if sql_tables and k.split(".", 1)[0] not in sql_tables:
             continue
         for w in k.split(".", 1)[1].lower().split("_"):
             if len(w) > 3 and w not in ("flag", "is", "has") and (" " + w + " ") in ql:
@@ -265,14 +297,18 @@ def filter_presence_ok(query, sql, sm):
     if not _filter_presence_enabled() or not sql:
         return True, ""
     ql = " " + re.sub(r"[^a-z0-9.]", " ", (query or "").lower()) + " "
+    facts = _facts(sql)
+    sql_tables = set(facts.get("entities") or [])
     wants = False
     if any(w in ql for w in _CMP_WORDS) and re.search(r"\d", ql):
         wants = True                                     # "above 4.0" / "over 250"
-    elif _boolean_flag_named(query, sm):
+    elif _boolean_flag_named(query, sm, sql_tables):
         wants = True                                     # "gated" -> is_gated
+    elif _value_named_in_query(query, sm, sql_tables):
+        wants = True                                     # "vendors in KOCHI" -> city='Kochi'
     if not wants:
         return True, ""
-    if _facts(sql).get("filters"):
+    if facts.get("filters"):
         return True, ""                                  # SQL filters something -> not omitted
     return False, ("I couldn't apply the condition you asked for, so I'd rather not show numbers "
                    "that ignore it")

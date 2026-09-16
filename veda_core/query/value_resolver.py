@@ -183,6 +183,49 @@ def _mirror_lookup(token):
         return None
 
 
+_SCOPE_TABLE_IDS: dict = {}   # (tenant, source_ids) -> [table_id, ...] from graph_nodes
+
+
+def _scope_table_ids(conn_fn):
+    """Table ids (engine `graph_nodes`, always source-scoped) of every source in the
+    ambient request scope — the predicate that scopes `column_values`, which carries
+    NO source_id column (M1 close-out, 2026-09-15). Found live: under a source-4
+    (csv) scope, "Kochi" value-grounded to homzhub's generics_city.name and
+    generics_location.city_name — foreign VALUE evidence that can pull a foreign
+    anchor, and that hid a dropped filter from the filter-presence guard.
+    Returns None when there is no request context (dev-CLI: unscoped, as before);
+    [] when the scope owns no tables (fail closed: nothing grounds)."""
+    try:
+        from veda_core.context import try_current
+        ctx = try_current()
+    except Exception:
+        ctx = None
+    if ctx is None:
+        return None
+    key = (str(getattr(ctx, "tenant", "default")), tuple(str(s) for s in (ctx.source_ids or ())))
+    if key in _SCOPE_TABLE_IDS:
+        return _SCOPE_TABLE_IDS[key]
+    ids: list = []
+    conn = None
+    try:
+        conn = conn_fn()
+        with conn.cursor() as cur:
+            ph = ",".join(["%s"] * len(key[1])) or "NULL"
+            cur.execute("SELECT DISTINCT table_id::text FROM graph_nodes WHERE node_type='table' "
+                        f"AND table_id IS NOT NULL AND source_id IN ({ph})", list(key[1]))
+            ids = [r[0] for r in cur.fetchall()]
+    except Exception:
+        ids = []                                   # fail closed, never unscoped
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    _SCOPE_TABLE_IDS[key] = ids
+    return ids
+
+
 def column_values_lookup(conn_fn):
     """Build a lookup backed by the `column_values` store (data-driven; the sampler
     already chose which columns to index, so there's no name/role heuristic here).
@@ -201,9 +244,18 @@ def column_values_lookup(conn_fn):
                 # (original casing). Match on value_norm (EXACT — no LIKE/fuzzy); return
                 # value_raw as the real filter literal. (Prior code referenced a
                 # non-existent `value` column and silently returned [] on every call.)
-                cur.execute(
-                    "SELECT table_name, col_name, value_raw FROM column_values "
-                    "WHERE value_norm = %s LIMIT 8", (token.lower(),))
+                scope_ids = _scope_table_ids(conn_fn)
+                if scope_ids is not None and not scope_ids:
+                    return []               # scoped request over sources with no tables
+                if scope_ids is None:
+                    cur.execute(
+                        "SELECT table_name, col_name, value_raw FROM column_values "
+                        "WHERE value_norm = %s LIMIT 8", (token.lower(),))
+                else:
+                    cur.execute(
+                        "SELECT table_name, col_name, value_raw FROM column_values "
+                        "WHERE value_norm = %s AND table_id::text = ANY(%s) LIMIT 8",
+                        (token.lower(), scope_ids))
                 return [(r[0], r[1], r[2]) for r in cur.fetchall()]
         except Exception:
             return []
@@ -233,13 +285,21 @@ def column_values_lookup(conn_fn):
         if not remaining:
             return out
         toks = remaining
+        scope_ids = _scope_table_ids(conn_fn)
+        if scope_ids is not None and not scope_ids:
+            return out                          # fail closed (see _scope_table_ids)
         conn = None
         try:
             conn = conn_fn()
             with conn.cursor() as cur:
-                cur.execute(
-                    "SELECT value_norm, table_name, col_name, value_raw FROM column_values "
-                    "WHERE value_norm = ANY(%s)", (toks,))
+                if scope_ids is None:
+                    cur.execute(
+                        "SELECT value_norm, table_name, col_name, value_raw FROM column_values "
+                        "WHERE value_norm = ANY(%s)", (toks,))
+                else:
+                    cur.execute(
+                        "SELECT value_norm, table_name, col_name, value_raw FROM column_values "
+                        "WHERE value_norm = ANY(%s) AND table_id::text = ANY(%s)", (toks, scope_ids))
                 for vnorm, table_name, col_name, value_raw in cur.fetchall():
                     out.setdefault(vnorm, []).append((table_name, col_name, value_raw))
                 return out

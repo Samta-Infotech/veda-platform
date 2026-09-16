@@ -157,8 +157,22 @@ def _load_semantic_model():
             # (resolve_source_artifact's own contract).
             from config import resolve_source_artifact
             sm_path = resolve_source_artifact("veda_semantic_model.json", scope[0], scope[1])
-            with open(sm_path) as f:
-                sm = json.load(f)
+            if not sm_path or not os.path.exists(sm_path):
+                # 2026-09-15: a source that is not the flat files' owner and has no scoped
+                # semantic model yet (never ingested under the scoped pipeline, Redis copy
+                # gone) now resolves to a MISSING path instead of another source's model
+                # (config.resolve_source_artifact's owner rule). An empty model makes the
+                # SQL head refuse with "no table" rather than plan SQL against a foreign
+                # schema — the honest answer until the source is (re-)ingested.
+                print(f"  [sm] no semantic model materialized for scope {scope} "
+                      f"(expected {sm_path}) — empty model, SQL head will refuse")
+                # `_not_materialized` lets the SQL head's empty-model refusal say the
+                # TRUE reason ("not ingested yet") instead of misreporting it as an
+                # RBAC access_denied — see the `if not sm.get("tables")` site below.
+                sm = {"tables": {}, "columns": {}, "_not_materialized": True}
+            else:
+                with open(sm_path) as f:
+                    sm = json.load(f)
         entry = {"sm": sm, "cols": list(sm.get("columns", {}).keys())}
         _SM[cache_key] = entry
     # NOTE (Gate 1, Task 16): this `sm` is the SAME object handed to
@@ -183,6 +197,35 @@ _DOC_REF_RE = _re_mod.compile(
 _DB_AGG_RE = _re_mod.compile(
     r"\b(how many|count|total|sum|average|avg|per |group by|number of|top \d|highest|"
     r"lowest|most|least|ranked?)\b", _re_mod.I)
+
+
+def _scope_has_structured_source() -> bool:
+    """True when the request scope includes a source with structured columns (relational or
+    tabular) — the mirror of ``_scope_has_doc_source`` (2026-09-15). The HYBRID lane (RAG ⊕
+    deterministic SQL head) only makes sense when there is a structured source to run the
+    SQL half against; a document-ONLY scope asked a count/total-shaped question used to be
+    routed to HYBRID anyway, and the SQL head then retrieved columns from whatever semantic
+    model the flat fallback served (another source's) and tried to execute against a source
+    with no SQL endpoint at all. Found live on source 3 (`docs_contracts`)."""
+    ctx = _current_ctx()
+    sids = [str(s) for s in (getattr(ctx, "source_ids", ()) or ())] if ctx is not None else []
+    if not sids:
+        return False
+    try:
+        from config import BIENCODER_COL_TABLE
+        from ingestion.db_abstraction import (
+            get_internal_connection, release_internal_connection)
+        conn = get_internal_connection()
+        try:
+            with conn.cursor() as cur:
+                ph = ",".join(["%s"] * len(sids))
+                cur.execute(f"SELECT 1 FROM {BIENCODER_COL_TABLE} WHERE source_id IN ({ph}) LIMIT 1",
+                            sids)
+                return cur.fetchone() is not None
+        finally:
+            release_internal_connection(conn)
+    except Exception:
+        return False
 
 
 def _scope_has_doc_source() -> bool:
@@ -262,7 +305,11 @@ def classify(query, verbose=False):
         # Prefer the fast RAG lane (retrieve chunks + one synthesis call, ~6-8s). Only take
         # the heavier HYBRID lane (RAG ⊕ deterministic SQL head) when the utterance clearly
         # needs a DB aggregation (count/total/per-group) the documents can't supply.
-        intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
+        # HYBRID needs a structured source to run its SQL half against (2026-09-15) — a
+        # document-only scope stays on the RAG lane even for count/total wording; see
+        # _scope_has_structured_source().
+        intent = ("hybrid" if (_DB_AGG_RE.search(q) and _scope_has_structured_source())
+                  else "rag")
         if verbose:
             print(f"  [router] doc-intent override → {intent}")
         return intent, None
@@ -270,7 +317,11 @@ def classify(query, verbose=False):
     # Evidence-based doc-intent (flag-gated): catches document questions the fixed word list misses,
     # by consulting the coordinator's cosine evidence. OFF ⇒ this is False ⇒ byte-identical.
     if _doc_intent_by_evidence(q):
-        intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
+        # HYBRID needs a structured source to run its SQL half against (2026-09-15) — a
+        # document-only scope stays on the RAG lane even for count/total wording; see
+        # _scope_has_structured_source().
+        intent = ("hybrid" if (_DB_AGG_RE.search(q) and _scope_has_structured_source())
+                  else "rag")
         if verbose:
             print(f"  [router] doc-intent (evidence) → {intent}")
         return intent, None
@@ -1417,6 +1468,14 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
                     return "rag", rag
 
             from veda.feedback import explain_failure
+            if sm.get("_not_materialized"):
+                # Empty because the source was never materialized under the scoped
+                # pipeline (2026-09-15, see _load_semantic_model) — NOT because RBAC
+                # narrowed it to nothing. Say so; "access denied" sent people to the
+                # wrong fix (roles) when the real one is "ingest this source".
+                fb = explain_failure("not_materialized", sm)
+                _emit(on_event, "answer", "This source has no schema model yet")
+                return "deterministic", {"ok": False, "status": "not_materialized", "feedback": fb}
             fb = explain_failure("access_denied", sm)
             _emit(on_event, "answer", "No permitted database in scope")
             return "deterministic", {"ok": False, "status": "access_denied", "feedback": fb}
@@ -1722,6 +1781,15 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     ok_q, missing = qualifier_completeness(query, raw_sql, sm, strict=True)
     if not ok_q:
         return False, f"dropped qualifier {missing!r}"
+    # Constraint-class check (2026-09-16, M1 close-out battery): "properties with more
+    # than 3 floors" came back as SELECT total_floors … LIMIT 1000 — the threshold was
+    # dropped, and qualifier_completeness can't see it because "3" is not a categorical
+    # value with a referent. A numeric threshold needs a comparison (or HAVING); a
+    # negation needs <> / NOT. Reason wording "dropped" feeds _repair_hint_for's existing
+    # "represent every condition" hint, so the IR loop gets a retry before refusing.
+    _ck = _constraint_kind(query)
+    if _ck and not _sql_keeps_constraint(raw_sql, _ck):
+        return False, f"dropped {_ck} constraint (no {'comparison' if _ck == 'threshold' else 'negation'} predicate in SQL)"
     _tcols = ({k.split(".", 1)[1] for k, m in cols_meta.items()
                if k.split(".", 1)[0] in allowed_tables
                and (m or {}).get("semantic_type") == "TEMPORAL"}
@@ -1987,6 +2055,64 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     return result
 
 
+class _EnvelopeSkip(Exception):
+    """Control-flow only: the envelope contract can't express this question's shape."""
+
+
+def _constraint_kind(query):
+    """"threshold" | "negation" | "" — the constraint CLASS the question carries that a
+    planner can silently drop or invert. Phrase sets are the ones query/operation_classifier
+    already refuses on for the cross-source path (same rule, same words), plus the
+    number-anchored "above/below/under/over N" form those sets miss."""
+    try:
+        from query.operation_classifier import _COUNT_THRESHOLD, _NEGATION
+    except Exception:
+        return ""
+    q = " " + (query or "").lower().strip() + " "
+    if any(s in q for s in _COUNT_THRESHOLD) or _re_mod.search(r"\b(above|below|under|over)\s+\d", q):
+        return "threshold"
+    if any(s in q for s in _NEGATION):
+        return "negation"
+    return ""
+
+
+def _sql_keeps_constraint(sql, kind):
+    """True when the SQL carries a predicate of that class: a comparison / BETWEEN / HAVING
+    for a threshold, a <> / NOT for a negation. Unparseable SQL → True (never refuse on a
+    parser hiccup; the AST firewall has already run)."""
+    try:
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return True
+    if kind == "threshold":
+        kinds = (exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between, exp.Having)
+    else:
+        kinds = (exp.NEQ, exp.Not)
+    return any(tree.find(k) is not None for k in kinds)
+
+
+def _envelope_inexpressible(query):
+    """Reason string when the frozen intent envelope (INTENT_ENVELOPE_CONTRACT v1:
+    count/measure/ratio/trend/compare/group/dimension_list, filters eq|ne) cannot
+    represent the question, else "". Deterministic; reuses query/ranking_parser and
+    _constraint_kind — the same "never drop or invert a constraint silently" rule the
+    cross-source path already enforces. Temporal rankings ("last"/"first") are NOT
+    gated: the envelope's count + time filter handles those."""
+    try:
+        from query.ranking_parser import parse_ranking
+        rk = parse_ranking(query or "")
+        if rk.top_n is not None or rk.basis == "metric":
+            return f"ranking (top_n={rk.top_n}, basis={rk.basis})"
+    except Exception:
+        pass
+    kind = _constraint_kind(query)
+    if kind == "threshold":
+        return "numeric threshold (envelope filters are eq|ne only)"
+    if kind == "negation":
+        return "negation (no anti-join / ne-only filters)"
+    return ""
+
+
 def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_state=None, on_event=None):
     """Tier-2 SQL fallback (only when the deterministic head can't answer).
 
@@ -2056,6 +2182,17 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             from query.envelope_slm import emit_envelope
             from query.intent_envelope import map_envelope_to_intent
             from query.intent import validate_intent, build_sql
+            # Contract gate (2026-09-16, M1 close-out battery): the frozen envelope has NO
+            # ranking intent and filters are eq|ne only. A question that carries a shape the
+            # contract can't express ("top 5 X by Y", "more than 3 floors", "X without Y")
+            # was still being answered — with the NEAREST expressible shape (a monthly
+            # trend, a `= 3` filter). Refuse-over-guess: skip the envelope and let the IR
+            # path (which can rank/compare or refuse typed) handle it. Reuses the
+            # ranking parser and the cross-source expressiveness phrases — no new grammar.
+            _inexp = _envelope_inexpressible(query)
+            if _inexp:
+                print(f"  [Tier2] envelope skipped (shape outside contract: {_inexp}) — fallback to IR")
+                raise _EnvelopeSkip()
             _env, _hmap = emit_envelope(query, sel.columns, verbose=verbose)
             _qi = map_envelope_to_intent(_env, _hmap, tf) if _env else None
             if _qi is not None and validate_intent(_qi)[0] == "ok":
@@ -2083,6 +2220,8 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                             print(f"  [Tier2] answered via ENVELOPE ({_qi.query_type}) — {len(erows)} rows")
                             _print_rows(ecols, erows, sql=psql)
                             return _tier2_finish(query, sm, ecols, erows, psql, "envelope")
+        except _EnvelopeSkip:
+            pass                                          # already reported above
         except Exception as _ee:
             print(f"  [Tier2] envelope path skipped: {type(_ee).__name__}: {str(_ee)[:120]}")
 
@@ -2228,6 +2367,18 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                             _repair_hint = _repair_hint_for(err); continue
                         print(f"  [Tier2] shared-planner firewall rejected (kept safe): {err}")
                         return {"status": "tier2_rejected", "ok": False, "error": err}
+                    # The SAME correctness gates the single-table IR path runs below
+                    # (2026-09-16): this branch only had the AST firewall, so "properties
+                    # with more than 3 floors" executed as "assets with more than 3
+                    # listing reviews" — a graph-verified join answering a different
+                    # question. Reason feeds the repair hint first, refusal last.
+                    _ok_sp, _why_sp = _tier2_validate(query, psql, sm, a_tables, a_cols,
+                                                      llm_written=True, tf=tf)
+                    if not _ok_sp:
+                        if _attempt < _max_repairs:
+                            _repair_hint = _repair_hint_for(_why_sp); continue
+                        print(f"  [Tier2] shared-planner gated (kept safe): {_why_sp}")
+                        return {"status": "tier2_rejected", "ok": False, "error": _why_sp}
                     cols, rows, eerr = execute_sql(psql, list(params))
                     if eerr:
                         if _is_param_mismatch(eerr):

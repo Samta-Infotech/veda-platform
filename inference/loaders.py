@@ -33,11 +33,17 @@ async def hydrate() -> dict:
     import veda_core  # noqa: F401 — activates the path shim
     from veda_core import config
 
-    # 1) Semantic model — present only after an ingestion run has completed.
-    sm_path = config.SEMANTIC_MODEL_FILE
-    _STATE["semantic_model"] = os.path.exists(sm_path)
+    # 1) Semantic model — present only after an ingestion run has completed. Per-source
+    #    since the M1 close-out (2026-09-15): "warm" means at least one source has its own
+    #    scoped model under <ARTIFACT_ROOT>/<tenant>/<source>/ (the flat file is retired).
+    import glob as _glob
+    _root = config.ARTIFACT_ROOT
+    if not os.path.isabs(_root):
+        _root = os.path.join(os.path.dirname(os.path.abspath(config.__file__)), _root)
+    _scoped = _glob.glob(os.path.join(_root, "*", "*", "veda_semantic_model.json"))
+    _STATE["semantic_model"] = bool(_scoped)
     if not _STATE["semantic_model"]:
-        logger.warning("semantic model not found at %s — run ingestion first", sm_path)
+        logger.warning("no per-source semantic model under %s — run ingestion first", _root)
         _STATE["degraded"].append("semantic_model_missing")
 
     # 2) Warm the retrieval engine / encoders so the first query isn't cold.

@@ -68,30 +68,37 @@ def _table_type(sm, t):
 _TYPE_ORDINAL = {"MASTER": 1.0, "TRANSACTION": 0.8, "EVENT": 0.6, "REFERENCE": 0.4, "BRIDGE": 0.2}
 
 
-_GLOSSARY = {"m": None}
+_GLOSSARY: dict = {}   # (tenant, source_id) -> glossary map; ("", "") = ctx-less
 
 
 def _entity_glossary():
-    """Curated business-noun → canonical entity TABLE map (data/veda_entity_aliases.json).
-    Resolves UNNAMED entities the query text doesn't lexically name (owner→users_user,
-    property→assets_asset) — the completeness gap the probe proved metadata can't fill
-    deterministically. Empty on any load failure (rule then no-ops)."""
-    if _GLOSSARY["m"] is None:
+    """Curated business-noun → canonical entity TABLE map (the `veda_entity_aliases.json`
+    artifact, resolved PER SOURCE via config.resolve_source_artifact — M1 close-out,
+    2026-09-15; it used to be one flat file read into a process-global cache, so every
+    source resolved "property"/"owner" to homzhub's tables). Resolves UNNAMED entities
+    the query text doesn't lexically name (owner→users_user, property→assets_asset) — the
+    completeness gap the probe proved metadata can't fill deterministically. Empty when
+    the source has no such artifact or on any load failure (rule then no-ops)."""
+    try:
+        from veda_core import context as _ctx
+        _c = _ctx.try_current()
+        key = (str(_c.tenant), str(_c.source_id)) if _c is not None else ("", "")
+    except Exception:
+        key = ("", "")
+    if key not in _GLOSSARY:
         g = {}
-        # cwd/data (engine runs with cwd=veda_core) OR module-relative veda_core/data
-        # (pytest / other cwds) — robust regardless of where the process started.
-        _here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))  # veda_core/
-        for _p in (os.path.join(os.getcwd(), "data", "veda_entity_aliases.json"),
-                   os.path.join(_here, "data", "veda_entity_aliases.json")):
-            try:
-                if os.path.exists(_p):
-                    raw = json.load(open(_p))
-                    g = {k.lower(): v for k, v in raw.items() if not str(k).startswith("_")}
-                    break
-            except Exception:
-                g = {}
-        _GLOSSARY["m"] = g
-    return _GLOSSARY["m"]
+        try:
+            from config import resolve_source_artifact
+            _p = resolve_source_artifact("veda_entity_aliases.json")
+            if _p and not os.path.isabs(_p):
+                _p = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), _p)
+            if _p and os.path.exists(_p):
+                raw = json.load(open(_p))
+                g = {k.lower(): v for k, v in raw.items() if not str(k).startswith("_")}
+        except Exception:
+            g = {}
+        _GLOSSARY[key] = g
+    return _GLOSSARY[key]
 
 
 def _score(count, coverage, table_type, retrieval):

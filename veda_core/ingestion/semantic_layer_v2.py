@@ -283,12 +283,18 @@ def _schema_fingerprint(schema_dict: Dict[str, Any]) -> str:
     return hashlib.md5("|".join(parts).encode("utf-8")).hexdigest()
 
 
+# Per-run overrides set by run_full_semantic_layer() from the caller's per-source paths
+# (M1 close-out, 2026-09-15). Both used to be process-global flat files: the LLM-stage
+# checkpoint could let source B resume from source A's partial run, and the relationship
+# graph read for schema-aware prompts was homzhub's for every source.
+_RUN_PATHS: Dict[str, Optional[str]] = {"checkpoint": None, "relationship_graph": None}
+
+
 def _checkpoint_file() -> str:
-    try:
-        from config import SEMANTIC_CHECKPOINT_FILE
-        return SEMANTIC_CHECKPOINT_FILE
-    except Exception:
-        return "data/veda_semantic_checkpoint.json"
+    if _RUN_PATHS.get("checkpoint"):
+        return _RUN_PATHS["checkpoint"]
+    from config import SEMANTIC_CHECKPOINT_FILE     # ctx-less dev-CLI default
+    return SEMANTIC_CHECKPOINT_FILE
 
 
 def _load_checkpoint(fp: str):
@@ -654,10 +660,11 @@ def _load_relationship_graph() -> Dict[str, Any]:
     if "graph" in _REL_GRAPH_CACHE:
         return _REL_GRAPH_CACHE["graph"]
     graph: Dict[str, Any] = {"tables": [], "edges": []}
-    try:
+    # THIS run's per-source graph when the caller supplied one (l3_enrich does); the
+    # flat legacy constant only for a ctx-less dev-CLI run.
+    _rel_file = _RUN_PATHS.get("relationship_graph")
+    if not _rel_file:
         from config import RELATIONSHIP_GRAPH_FILE as _rel_file
-    except Exception:
-        _rel_file = "data/veda_relationship_graph.json"
     path = _rel_file if os.path.isabs(_rel_file) else os.path.join(_REPO_ROOT, _rel_file)
     try:
         with open(path) as f:
@@ -1225,6 +1232,8 @@ def run_full_semantic_layer(
     domain_synonyms_file: Optional[str] = None,
     concept_graph_file: Optional[str] = None,
     glossary_file: Optional[str] = None,
+    checkpoint_file: Optional[str] = None,
+    relationship_graph_file: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Run full L2 semantic layer (Stages 1-5 + Post-processing).
@@ -1246,6 +1255,12 @@ def run_full_semantic_layer(
     """
     domain_synonyms_file = domain_synonyms_file or DOMAIN_SYNONYMS_FILE
     concept_graph_file = concept_graph_file or CONCEPT_GRAPH_FILE
+    # Per-source READ-side paths for this run (M1 close-out, 2026-09-15): the LLM-stage
+    # checkpoint and the relationship graph the prompts consult. Reset the graph cache
+    # so a long-lived process never serves a previous run's (other source's) graph.
+    _RUN_PATHS["checkpoint"] = checkpoint_file
+    _RUN_PATHS["relationship_graph"] = relationship_graph_file
+    _REL_GRAPH_CACHE.clear()
     logger.info(f"Starting L2 semantic layer (stages 1-5 + post-processing) on {len(schema_dict)} tables...")
     start_time = time.time()
 

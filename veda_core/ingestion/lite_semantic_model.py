@@ -63,7 +63,13 @@ def build_lite_sm(columns: List[dict]) -> dict:
         for c in tcols:
             key = f"{tname}.{c['col_name']}"
             role = "IDENTIFIER" if (c.get("is_pk") or c.get("is_fk") or c.get("semantic_type") == "IDENTIFIER") else \
-                   ("METRIC" if c["col_name"] in measures else "DIMENSION")
+                   ("MEASURE" if c["col_name"] in measures else "DIMENSION")   # MEASURE, not
+                   # METRIC: the full model's analytics_role vocabulary is {IDENTIFIER,
+                   # TIME_DIMENSION, DIMENSION, MEASURE, ATTRIBUTE}, and every reader
+                   # (intent_boosting, intent_sql_alignment._adverb_modifies_measure,
+                   # the grouped planner) tests for "MEASURE". With "METRIC" a lite source's
+                   # "average MONTHLY fee per category" was refused as a bogus time
+                   # breakdown (M1 close-out, 2026-09-15).
             aliases = _tokens(c["col_name"])
             cols[key] = {
                 "col_name": c["col_name"], "table_name": tname,

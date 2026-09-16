@@ -71,13 +71,26 @@ def _current_scope() -> Tuple[List[str], str, dict]:
     return [], "default", {}
 
 
-def _datalake_source_ids(source_ids: List[str], profiles: dict) -> List[str]:
-    """The in-scope source ids whose profile kind is a tabular datalake."""
+def _datalake_source_ids(source_ids: List[str], profiles: dict, tenant: str = "default") -> List[str]:
+    """The in-scope source ids that are tabular datalakes: by request profile when the
+    caller supplied one, else by the surface resolver (M1 close-out, 2026-09-15). Profiles
+    are set only by the HTTP API path; every other caller (engine tests, the per-source
+    battery, direct run_hybrid_query) had NO profiles, so this returned [] and tabular
+    value grounding was silently off — "vendors in Kochi" on a csv source answered as an
+    unfiltered row list. resolve_surface() is the same authority execution.py uses."""
     out = []
     for sid in source_ids:
         st = str((profiles or {}).get(str(sid), {}).get("source_type", "")).lower()
         if st == "datalake":
             out.append(str(sid))
+            continue
+        if not st:                                   # no profile → ask the surface resolver
+            try:
+                surf = resolve_surface(str(sid), tenant)
+                if surf is not None and getattr(surf, "kind", "") == "parquet":
+                    out.append(str(sid))
+            except Exception:
+                pass
     return out
 
 
@@ -144,7 +157,7 @@ def _sample_source(source_id: str, tenant: str, limit: int) -> _ValueIndex:
 
 def datalake_value_index(source_ids: List[str], tenant: str, profiles: dict) -> _ValueIndex:
     """Merged value index for all in-scope datalake sources, cached per (source-set, tenant)."""
-    dl = _datalake_source_ids(source_ids, profiles)
+    dl = _datalake_source_ids(source_ids, profiles, tenant)
     if not dl:
         return {}
     key = (tuple(sorted(dl)), tenant)
@@ -168,7 +181,7 @@ def augment_lookup(base_lookup: Callable[[str], list]) -> Callable[[str], list]:
     if not is_enabled():
         return base_lookup
     source_ids, tenant, profiles = _current_scope()
-    if not _datalake_source_ids(source_ids, profiles):
+    if not _datalake_source_ids(source_ids, profiles, tenant):
         return base_lookup
     idx = datalake_value_index(source_ids, tenant, profiles)
     if not idx:

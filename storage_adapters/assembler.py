@@ -3,7 +3,7 @@
 The deterministic engine consumes ONE nested `sm` dict (pipeline.py:17, 346,
 553, 563, 613, 631, 660, ...), not the normalized substrate rows. Today
 `veda_hybrid._load_semantic_model()` loads that dict whole from
-`data/veda_semantic_model.json`; in the platform the same information lives in
+the per-source `veda_semantic_model.json` artifact; in the platform the same information lives in
 the Django-owned `Sm*` substrate models, so this Builder reconstructs the
 byte-identical dict from those rows — and `persist()` is the inverse the writer
 uses to store what ingestion produced.

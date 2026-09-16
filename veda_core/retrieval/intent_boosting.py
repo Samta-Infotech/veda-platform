@@ -55,7 +55,7 @@ class IntentBooster:
         P1-2 follow-up (2026-09-15): this used to ONLY walk
         `tables[table_name]["columns"][col_name]` — but no entry in `sm["tables"]`
         actually has a "columns" sub-dict (confirmed live against
-        veda_core/data/veda_semantic_model.json: a real table entry's keys are
+        the semantic-model artifact: a real table entry's keys are
         `table_name/business_purpose/primary_entity/table_type/
         candidate_temporal_columns/candidate_measure_columns` — no "columns" key at
         all). Column metadata (including `analytics_role`, the field every boost_*

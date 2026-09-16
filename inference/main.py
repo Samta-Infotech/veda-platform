@@ -130,6 +130,14 @@ def _start_rehydrate_subscriber():
 async def lifespan(app):
     from inference import loaders
 
+    # Startup env-drift check (2026-09-15): log effective METAL_EMBED_URL / SLM_MODEL_NAME /
+    # SLM_TEMPERATURE / OLLAMA_URL and warn if they differ from .env — a container created
+    # before a .env edit keeps the old value silently (see storage_adapters/env_drift.py).
+    try:
+        from storage_adapters.env_drift import check_env_drift
+        check_env_drift("inference")
+    except Exception:
+        pass
     app.state.versions = await loaders.hydrate()  # Phase 5: warm-load §8.1
     _start_rehydrate_subscriber()                  # §8.4 fan-out subscriber
     yield

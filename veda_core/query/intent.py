@@ -28,22 +28,30 @@ _ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 # ---------------------------------------------------------------------------
 # Schema knowledge — real column set per table (for the existence firewall)
 # ---------------------------------------------------------------------------
-_COLS_CACHE = {"v": None}
+_COLS_CACHE: dict = {}   # id(sm) -> {table: {col,...}}; the scoped sm is cached upstream
 
 
 def _table_columns():
-    if _COLS_CACHE["v"] is None:
-        path = os.path.join(_ROOT, "data", "veda_semantic_model.json")
+    """Real column set per table for THIS request's scoped semantic model (M1 close-out,
+    2026-09-15). Used to read the flat semantic-model file into one process-global map,
+    so the existence firewall validated every source's SQL against homzhub's columns.
+    veda_hybrid._load_semantic_model() is cached per scope; the map is memoized by the
+    identity of that cached object. Ctx-less → empty (fail closed)."""
+    try:
+        import veda_hybrid
+        sm, _cols = veda_hybrid._load_semantic_model()
+    except Exception:
+        sm = {}
+    key = id(sm)
+    if key not in _COLS_CACHE:
         m = {}
-        try:
-            sm = json.load(open(path))
-            for col_id in sm.get("columns", {}):
-                t, c = col_id.split(".", 1)
+        for col_id in (sm or {}).get("columns", {}) or {}:
+            t, _, c = col_id.partition(".")
+            if c:
                 m.setdefault(t, set()).add(c)
-        except Exception:
-            pass
-        _COLS_CACHE["v"] = m
-    return _COLS_CACHE["v"]
+        _COLS_CACHE.clear()          # one scope at a time is enough; never grows unbounded
+        _COLS_CACHE[key] = m
+    return _COLS_CACHE[key]
 
 
 def _q(ident: str) -> str:

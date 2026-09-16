@@ -2,7 +2,7 @@
 # query/join_planner.py
 # VEDA V2 — deterministic join planner (runtime).
 #
-# Reads data/veda_relationship_graph.json (built offline). The LLM NEVER touches
+# Reads the per-source relationship-graph artifact (built offline). The LLM NEVER touches
 # any of this — join keys, paths, polymorphic predicates are all computed here.
 #
 #   select_anchor()  → the query's subject/grain table
@@ -23,7 +23,8 @@ from retrieval.query_enrichment import _singularize
 import re as _re
 from veda.routing import _name_toks
 
-RELATIONSHIP_GRAPH_FILE = "data/veda_relationship_graph.json"
+# (The legacy flat RELATIONSHIP_GRAPH_FILE constant was retired in the M1 close-out,
+#  2026-09-15 — load_graph() resolves per source, or returns an empty graph.)
 
 # confidence penalties (multiplicative)
 _HOP_PENALTY = 0.92
@@ -74,8 +75,10 @@ def load_graph(path=None, source_id=None, tenant=None):
             from config import source_artifact_path
             path = source_artifact_path("veda_relationship_graph.json", source_id, tenant or "default")
         else:
-            path = RELATIONSHIP_GRAPH_FILE
-    if not os.path.exists(path):
+            # M1 close-out (2026-09-15): no scope → EMPTY graph. The legacy flat file is
+            # retired; a ctx-less caller never gets another source's joins.
+            return {"tables": [], "edges": []}
+    if not path or not os.path.exists(path):
         return {"tables": [], "edges": []}
     return json.load(open(path))
 

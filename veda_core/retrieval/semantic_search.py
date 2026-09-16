@@ -165,21 +165,38 @@ class SemanticSearcher:
             _iso_pred = ""
             if allowed_cols:
                 _iso_pred = "AND (table_name || '.' || col_name) = ANY(%s)\n"
+            # SOURCE SCOPE, fail-closed (M1 close-out, 2026-09-15): whenever a request
+            # context exists, this fallback is restricted to the request's source-id SET —
+            # the same predicate the adapter path applies. It used to scan EVERY source's
+            # columns (documented above as "dev/CLI only"), but it is reached whenever the
+            # adapter path raises, and it did: a source-5 (parquet) query filled its dense
+            # slots with homzhub and source-4 columns and routing anchored on a table the
+            # source doesn't own. `source_id` is TEXT in this store (see the 2026-09-10
+            # ann_search fix) — stringify.
+            _src_pred, _src_ids = "", None
+            if _c is not None and getattr(_c, "source_ids", None):
+                _src_ids = [str(s) for s in _c.source_ids]
+                _src_pred = "AND source_id = ANY(%s)\n"
             query = f"""
                 SELECT
                     col_id,
                     1 - (embedding <=> %s::vector) as similarity
                 FROM {schema}.{BIENCODER_COL_TABLE}
                 WHERE embedding IS NOT NULL
-                {_iso_pred}
+                {_src_pred}{_iso_pred}
                 ORDER BY embedding <=> %s::vector
                 LIMIT %s
             """
 
             cur.execute("BEGIN")
             cur.execute(f"SET LOCAL hnsw.ef_search = {int(_ef)}")
-            _params = ((embedding_str, list(allowed_cols), embedding_str, k) if allowed_cols
-                       else (embedding_str, embedding_str, k))
+            _params = [embedding_str]
+            if _src_ids is not None:
+                _params.append(_src_ids)
+            if allowed_cols:
+                _params.append(list(allowed_cols))
+            _params += [embedding_str, k]
+            _params = tuple(_params)
             cur.execute(query, _params)
             results = cur.fetchall()
             cur.execute("COMMIT")

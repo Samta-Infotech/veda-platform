@@ -126,6 +126,11 @@ def try_grouped_plan(query: str, sm=None):
     try:
         _gm = grouped_mode(query)
         if not _gm:
+            # grouped COUNT ("how many X per Y") — planning.grouped_count_mode, 2026-09-15;
+            # kept out of grouped_mode() so that function's tested contract is unchanged.
+            from veda.planning import grouped_count_mode
+            _gm = grouped_count_mode(query)
+        if not _gm:
             return None
         return _try(query, sm, {"kind": "grouped", "op": _gm.get("op", "SUM")})
     except Exception:
@@ -473,6 +478,19 @@ def _build_result(mode, anchor, dim_col, measure, measures, where, why,
                               columns=list(dict.fromkeys(fcols)), primary=anchor,
                               route=f"superlative.frequency.{order.lower()}", why=why)
 
+    if mode["kind"] == "grouped" and agg == "COUNT":
+        # Grouped COUNT per dimension (planning.grouped_count_mode, 2026-09-15): no measure
+        # column at all — COUNT(*) is the measure. Without this branch the composer below
+        # emitted an empty measure list and `ORDER BY COUNT(a."None")` (rejected by the
+        # AST firewall as an unknown column 'none').
+        sql = (f"SELECT a.{_q(dim_col)} AS {_q(dim_col)}, COUNT(*) AS \"count\" "
+               f"FROM {_q(anchor)} a"
+               + (f" WHERE {' AND '.join(where)}" if where else "")
+               + f" GROUP BY a.{_q(dim_col)} ORDER BY COUNT(*) DESC LIMIT 100")
+        why = [f"grouped breakdown → COUNT(*) per {dim_col}"] + why
+        return FastPathResult(sql=sql, tables=ftables,
+                              columns=list(dict.fromkeys(list(fcols) + [dim_col])), primary=anchor,
+                              route="grouped.breakdown.count", why=why)
     if mode["kind"] == "grouped":
         # Full breakdown: every group, sorted by its own measure, bounded like other lanes.
         tail, route = (f" GROUP BY a.{_q(dim_col)} ORDER BY {agg}(a.{_q(measure)}) "
@@ -563,7 +581,9 @@ def _try(query: str, sm=None, mode=None):
 
     # ── measure (frequency superlatives rank by COUNT(*) and need no measure)
     measures, measure = [], None
-    if not count_rank:
+    # A grouped COUNT (planning.grouped_count_mode, 2026-09-15) needs no measure column
+    # either — COUNT(*) per dimension, the same shape frequency superlatives use.
+    if not count_rank and agg != "COUNT":
         _r, _v = _resolve_measure(spans, anchor, anchor_cols, neg_span, mode, agg, sm)
         if _r == "clarify":
             return ("clarify", _v)

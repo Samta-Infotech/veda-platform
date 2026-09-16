@@ -209,11 +209,24 @@ def value_referents(token: str) -> Dict[str, list]:
     out = {"direct": [], "closed": []}
     try:
         from config import COLUMN_VALUES_TABLE_NAME as TBL
+        # Source scope, fail-closed (M1 close-out, 2026-09-15): `column_values` has no
+        # source_id column; restrict to the request scope's own table ids (engine
+        # graph_nodes) — the twin of the guard in query/value_resolver.py. Without it a
+        # source-4 (csv) query value-grounded "Kochi" to homzhub's generics_city.name.
+        from query.value_resolver import _scope_table_ids
+        _ids = _scope_table_ids(_internal_conn)
+        if _ids is not None and not _ids:
+            return out                                  # scoped, owns no tables → nothing
         conn = _internal_conn()
         try:
             cur = conn.cursor()
-            cur.execute(f"SELECT table_name, col_name, semantic_type, value_raw "
-                        f"FROM {TBL} WHERE value_norm = %s LIMIT 16", (token,))
+            if _ids is None:
+                cur.execute(f"SELECT table_name, col_name, semantic_type, value_raw "
+                            f"FROM {TBL} WHERE value_norm = %s LIMIT 16", (token,))
+            else:
+                cur.execute(f"SELECT table_name, col_name, semantic_type, value_raw "
+                            f"FROM {TBL} WHERE value_norm = %s AND table_id::text = ANY(%s) "
+                            f"LIMIT 16", (token, _ids))
             out["direct"] = [{"kind": "direct", "table": r[0], "column": r[1],
                               "type": r[2], "value_raw": r[3]} for r in cur.fetchall()]
         finally:

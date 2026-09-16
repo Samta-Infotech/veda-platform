@@ -114,7 +114,7 @@ def _load_file(name, scope=None):
             path = resolve_source_artifact(name, scope[0], scope[1], flat_default=flat)
         except Exception:
             path = flat
-    if not os.path.exists(path):
+    if not path or not os.path.exists(path):
         return {}, None
     blob = json.load(open(path))
     return blob.get("items", {}), blob.get("source_hash")

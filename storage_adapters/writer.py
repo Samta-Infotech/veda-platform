@@ -253,8 +253,12 @@ def _sync_graph_from_engine(cur, ctx):
     GraphEdge.objects.all_tenants().filter(**scope).delete()
     GraphNode.objects.all_tenants().filter(**scope).delete()
 
-    # nodes: node_id → GraphNode(node_key=node_id, payload=descriptor)
-    cur.execute("SELECT node_id, node_type, name, table_name, semantic_type, attrs FROM graph_nodes")
+    # nodes: node_id → GraphNode(node_key=node_id, payload=descriptor) — THIS source's
+    # nodes only. M1 close-out (2026-09-15): this selected EVERY source's graph_nodes
+    # and stored them all under the ingesting source's scope, so the Django mirror for
+    # sources 3/4/5 held homzhub's ~2100 nodes each (ARCH_REVIEW_2026-09_RECONCILED.md §1).
+    cur.execute("SELECT node_id, node_type, name, table_name, semantic_type, attrs "
+                "FROM graph_nodes WHERE source_id = %s", [str(ctx.source_id)])
     node_rows = cur.fetchall()
     nodes = [
         GraphNode(node_key=nid, node_type=ntype or "",
@@ -266,7 +270,8 @@ def _sync_graph_from_engine(cur, ctx):
     key_to_pk = {n.node_key: n.pk for n in GraphNode.objects.all_tenants().filter(**scope)}
 
     # edges: (src,dst) node_id → GraphEdge(from_node, to_node)
-    cur.execute("SELECT src_node_id, dst_node_id, edge_type, weight FROM graph_edges")
+    cur.execute("SELECT src_node_id, dst_node_id, edge_type, weight FROM graph_edges "
+                "WHERE source_id = %s", [str(ctx.source_id)])
     edges = []
     for src, dst, etype, weight in cur.fetchall():
         fp, tp = key_to_pk.get(src), key_to_pk.get(dst)
@@ -278,11 +283,20 @@ def _sync_graph_from_engine(cur, ctx):
     # Register the relationship-graph artifact (path the query path's join_planner reads).
     rel_path = os.environ.get(
         "VEDA_RELATIONSHIP_GRAPH_FILE",
-        os.path.join(os.environ.get("VEDA_APP_DIR", "/app"), "veda_core", "data",
-                     "veda_relationship_graph.json"))
+        os.path.join(_scoped_artifact_dir(ctx), "veda_relationship_graph.json"))   # per source (M1)
     GraphArtifact.objects.all_tenants().update_or_create(
         kind="relationship_graph", defaults={"path": rel_path, "version": "1", **scope}, **scope)
     return len(nodes), len(edges)
+
+
+def _scoped_artifact_dir(ctx) -> str:
+    """`<VEDA_APP_DIR>/veda_core/<ARTIFACT_ROOT>/<tenant>/<source_id>` — the same layout
+    veda_core.config.source_artifact_path() uses, computed here without importing
+    veda_core (this module runs in the Django tier). VEDA_ARTIFACT_ROOT may be absolute."""
+    root = os.environ.get("VEDA_ARTIFACT_ROOT", "data")
+    if not os.path.isabs(root):
+        root = os.path.join(os.environ.get("VEDA_APP_DIR", "/app"), "veda_core", root)
+    return os.path.join(root, str(ctx.tenant), str(ctx.source_id))
 
 
 def _is_relational_source(source_id) -> bool:
@@ -330,11 +344,15 @@ def warm() -> dict:
     so every inference replica reloads. Returns row counts."""
 
     ctx = context.current()
-    # Persist the semantic model produced by the ingestion subprocess into Django (§8a).
+    # Persist the semantic model produced by the ingestion subprocess into Django (§8a) —
+    # from THIS source's scoped artifact dir (M1 close-out, 2026-09-15). This used to be
+    # the FLAT veda_core/data/ dir: a relational source's warm() persisted + published
+    # whatever veda_semantic_model.json / registries happened to be there — the July
+    # mechanism that put homzhub's model under sources 3/4/5, still live for any NEW
+    # relational source until now. L3/L5 write per source; warm() must read there too.
     sm_file = os.environ.get(
         "VEDA_SEMANTIC_MODEL_FILE",
-        os.path.join(os.environ.get("VEDA_APP_DIR", "/app"), "veda_core", "data",
-                     "veda_semantic_model.json"),
+        os.path.join(_scoped_artifact_dir(ctx), "veda_semantic_model.json"),
     )
     sm_cols = 0
     if not _is_relational_source(ctx.source_id):
