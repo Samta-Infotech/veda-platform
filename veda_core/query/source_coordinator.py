@@ -300,9 +300,9 @@ def build_candidates(evidence_by_source: dict, profiles: dict) -> List[Candidate
         summary = ev.summary() if hasattr(ev, "summary") else dict(ev or {})
         if prof.get("description"):
             summary = {**summary, "description": prof["description"]}
-        top_score = max(getattr(ev, "top_item_score", 0.0),
-                        getattr(ev, "top_column_score", 0.0),
-                        getattr(ev, "top_chunk_score", 0.0))
+        # the SAME kind-normalised number _dominance_retier tiered on (2026-09-18), so the
+        # policy's co-leader / doc-boundary comparisons see a fair cross-kind score
+        top_score = kind_normalised_signal(ev, True, False)
         out.append(CandidateSource(
             source_id=sid,
             source_type=prof.get("source_type", ""),
@@ -364,7 +364,8 @@ def best_matching_scored(query: str, source_ids, profiles=None):
             _saved = _cur
             # same tenant/source_id, but NO allowed_resources and ALL sources in scope, for scoring only
             set_context(RequestContext(source_id=_cur.source_id, tenant=_cur.tenant,
-                                       source_ids=tuple(source_ids), allowed_resources=None))
+                                       source_ids=tuple(source_ids), allowed_resources=None,
+                                       cache_back=getattr(_cur, "cache_back", True)))
     except Exception:
         _saved = None
     try:
@@ -413,18 +414,39 @@ def _default_evidence_provider(query: str, source_ids) -> Tuple[list, list]:
     qv = _query_embedding(query)   # embed-once (P3): reused with the item-prior provider
     if qv is None:
         return columns, chunks
-    # columns — clean cosine over the bi-encoder store, per source
+    # PER-SOURCE evidence (2026-09-18). One global top-10 over column_embeddings_v2 let the
+    # largest source crowd out every other: this deployment holds 1902 columns for source 2
+    # vs 9 for 4 and 4 for 5, so "top 3 vendors by rating" surfaced nine homzhub columns
+    # and ONE column from the vendors source (`city`, not `rating`), and "total monthly
+    # fee" surfaced nothing from source 5 at all — the coordinator then routed both to the
+    # document source (probe, docs/backlog/query-engine-open-items.md). Each source is now
+    # judged on ITS OWN best columns AND its own best TABLE embedding (table_embeddings_v2 —
+    # a one-table datalake's strongest signal is the table itself). Same stores, same
+    # cosine; scoped so the field is comparable.
     try:
         from ingestion.db_abstraction import get_internal_connection, release_internal_connection
         from query.retrieval_v2 import _cosine_search_v2
-        from config import BIENCODER_COL_TABLE
+        from config import BIENCODER_COL_TABLE, BIENCODER_TABLE_TABLE
         conn = get_internal_connection()
         try:
-            columns = list(_cosine_search_v2(conn, BIENCODER_COL_TABLE, qv, max(_K, 10), sids) or [])
+            for sid in sids:
+                try:
+                    columns.extend(list(_cosine_search_v2(conn, BIENCODER_COL_TABLE, qv, max(_K, 5), [sid]) or []))
+                except Exception:
+                    pass
+                try:
+                    for t in (_cosine_search_v2(conn, BIENCODER_TABLE_TABLE, qv, 3, [sid]) or []):
+                        try:
+                            t.retrieval_method = "table"   # group_evidence_by_source reads this
+                        except Exception:
+                            pass
+                        columns.append(t)
+                except Exception:
+                    pass
         finally:
             release_internal_connection(conn)
     except Exception:
-        columns = []
+        pass
     # chunks — clean cosine over the doc store
     try:
         from ingestion.chunk_embedder import retrieve_top_k_chunks
@@ -448,21 +470,45 @@ def _default_edge_provider(source_ids) -> Set[frozenset]:
             ph = ",".join(["%s"] * len(sids))
             with conn.cursor() as cur:
                 cur.execute(
-                    f"SELECT DISTINCT ns.source_id, nd.source_id FROM {GRAPH_EDGES_TABLE} e "
+                    f"SELECT ns.source_id, nd.source_id, e.evidence FROM {GRAPH_EDGES_TABLE} e "
                     f"JOIN {GRAPH_NODES_TABLE} ns ON ns.node_id = e.src_node_id "
                     f"JOIN {GRAPH_NODES_TABLE} nd ON nd.node_id = e.dst_node_id "
                     f"WHERE e.edge_type = 'cross_source_fk' "
                     f"AND ns.source_id IN ({ph}) AND nd.source_id IN ({ph})",
                     sids + sids)
                 pairs = set()
-                for a, b in cur.fetchall():
-                    if a and b and str(a) != str(b):
+                for a, b, evd in cur.fetchall():
+                    if a and b and str(a) != str(b) and _edge_quality_ok(evd):
                         pairs.add(frozenset({str(a), str(b)}))
                 return pairs
         finally:
             release_internal_connection(conn)
     except Exception:
         return set()
+
+
+def _edge_quality_ok(evidence) -> bool:
+    """Is a cross_source_fk edge a plausible JOIN, not a value-overlap artefact? The
+    discovery step (ingestion/data_graph.py) rates by containment, so two small integer
+    id ranges contained in a big one come out HIGH at Jaccard 0.001 — `4:asset_id ↔ 2:id`,
+    `2:asset_country_id ↔ 4:asset_id` (a country id "joining" an asset id). Those edges
+    made every single-source vendor/amenity question a structural MULTI (2026-09-18 probe).
+    Gate: Jaccard ≥ ROUTING_EDGE_MIN_JACCARD (default 0.05) — a real key relationship shares
+    a meaningful fraction of its values in BOTH directions. Unknown evidence → keep (never
+    drop a declared edge on a parse miss)."""
+    try:
+        import re as _re
+        from config import ROUTING_EDGE_MIN_JACCARD as _mj
+    except Exception:
+        import re as _re
+        _mj = 0.05
+    try:
+        m = _re.search(r"jac=([0-9.]+)", str(evidence or ""))
+        if not m:
+            return True
+        return float(m.group(1)) >= float(_mj)
+    except Exception:
+        return True
 
 
 def _default_profile_provider(source_ids) -> Dict[str, dict]:
@@ -631,6 +677,33 @@ def _doc_boundary_winner(candidates):
     return top
 
 
+def kind_normalised_signal(e, max_signal: bool = True, have_item: bool = False) -> float:
+    """One comparable relevance number per source: its best signal, each KIND shifted onto a
+    common scale by its own STRONG floor (source_evidence._floors) so a document chunk and a
+    table/column compete fairly. Returned on the tabular scale (a tabular hit is unchanged;
+    a chunk hit is shifted by tabular_floor − document_floor). Used by _dominance_retier and
+    build_candidates so tiering and the boundary tie-break see the SAME number."""
+    # Chunk cosine runs HOTTER than column/table cosine for equal relevance on this
+    # deployment (measured 2026-09-18, three questions: +0.034, −0.008, +0.023 for a doc
+    # that merely mentions the topic vs the table that holds it; the config floors
+    # tabular 0.55 / document 0.50 encode the OPPOSITE assumption and, applied as a shift,
+    # crowned the document source on every tabular question — 7/12 → 6/12). The offset is
+    # therefore an explicit, measured penalty on the chunk kind, not derived from the floors.
+    try:
+        from config import ROUTING_CHUNK_KIND_OFFSET as _off
+    except Exception:
+        _off = 0.07
+    col = float(getattr(e, "top_column_score", 0.0) or 0.0)
+    chunk = float(getattr(e, "top_chunk_score", 0.0) or 0.0)
+    chunk_n = (chunk - float(_off)) if chunk > 0 else 0.0     # onto the tabular scale
+    item = float(getattr(e, "top_item_score", 0.0) or 0.0)
+    if max_signal:
+        return max(item, col, chunk_n)
+    if have_item:
+        return item or max(col, chunk_n)
+    return max(col, chunk_n)
+
+
 def _dominance_retier(evidence_by_source, gap=None, floor=None):
     """Re-tier sources RELATIVE to the field (benchmark finding). Absolute per-source floors fail on
     a large multi-column DB, which always has *some* column matching any query at ~0.6 — a spurious
@@ -661,17 +734,16 @@ def _dominance_retier(evidence_by_source, gap=None, floor=None):
     except Exception:
         _max_signal = False
     have_item = any(getattr(e, "top_item_score", 0.0) > 0 for e in evidence_by_source.values())
-    if _max_signal:
-        tops = {sid: max(getattr(e, "top_item_score", 0.0),
-                         e.top_column_score, e.top_chunk_score)
-                for sid, e in evidence_by_source.items()}
-    elif have_item:
-        tops = {sid: (getattr(e, "top_item_score", 0.0)
-                      or max(e.top_column_score, e.top_chunk_score))
-                for sid, e in evidence_by_source.items()}
-    else:
-        tops = {sid: max(e.top_column_score, e.top_chunk_score)
-                for sid, e in evidence_by_source.items()}
+    # KIND-FAIR comparison (2026-09-18). Chunk cosine runs ~0.05–0.10 hotter than column/table
+    # cosine for the same relevance (measured on this deployment: maintenance_policy.docx
+    # 0.696 vs amenities_catalog 0.662 on "average monthly fee per category" — the doc merely
+    # MENTIONS monthly fees; 0.584 vs the maintenance table's 0.592 on "…per vendor"), so a
+    # raw cross-kind max with a 0.03 gap crowned the document source on tabular questions.
+    # Each source's signal is taken RELATIVE to its own kind's STRONG floor (the floors
+    # already encode that offset: tabular 0.55, document 0.50); the gap/floor semantics are
+    # unchanged, applied on the normalised scale. Item priors are on the tabular scale.
+    tops = {sid: kind_normalised_signal(e, _max_signal, have_item)
+            for sid, e in evidence_by_source.items()}
     if not tops:
         return
     mx = max(tops.values())
@@ -721,21 +793,6 @@ def _build_execution_context(decision, query):
         query_embedding=cached_v if cached_q == query else None)
 
 
-def _dispatch_flags():
-    """(use_adapter, use_execution_request) from config — two SEPARATE flags, one per architectural
-    change (Phase A3 / Phase B2). use_execution_request implies adapter resolution even if
-    SOURCE_ADAPTER_DISPATCH_ENABLED itself is off, because execute_request() only exists on
-    SourceAdapter (see _resolve_executable's docstring)."""
-    try:
-        import config as _cfg
-        use_adapter = bool(getattr(_cfg, "SOURCE_ADAPTER_DISPATCH_ENABLED", False))
-        use_execution_request = bool(getattr(_cfg, "EXECUTION_REQUEST_DISPATCH_ENABLED", False))
-    except Exception:
-        use_adapter = False
-        use_execution_request = False
-    return use_adapter, use_execution_request
-
-
 def _resolve_executable(source_kind: str):
     """Phase A3 (Source Adapter Foundation) / Phase B2 (Execution Request): return the object whose
     ``.execute(...)`` (or, Phase B2, ``.execute_request(...)``) runs this source kind — either
@@ -745,10 +802,8 @@ def _resolve_executable(source_kind: str):
     is called exactly as before either phase existed — byte-identical. See
     docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md and
     docs/architecture/VEDA_CANONICAL_EXECUTION_REQUEST_AUDIT.md."""
-    use_adapter, use_execution_request = _dispatch_flags()
-    if use_adapter or use_execution_request:
-        from query.source_adapters import resolve_adapter
-        return resolve_adapter(source_kind)
+    # 2026-09-16: the Phase A3/B2 adapter branch imported query/source_adapters, a module
+    # deleted in the P2-3 cleanup (the flags were never on) — removed with its flags.
     from query.agents import resolve_agent
     return resolve_agent(source_kind)
 
@@ -772,12 +827,6 @@ def dispatch(decision: RoutingDecision, query: str, *, sm=None, cols=None,
     if executable is None:
         return None
     exec_ctx = _build_execution_context(decision, query)
-    _, use_execution_request = _dispatch_flags()
-    if use_execution_request:
-        from query.execution_request import ExecutionRequest
-        request = ExecutionRequest(query=query, source_id=sid, source_ids=[sid], sm=sm, cols=cols,
-                                   execution_context=exec_ctx, on_event=on_event)
-        return execute_reliably(lambda: executable.execute_request(request, evidence=evidence))
     return execute_reliably(lambda: executable.execute(
         query, source_id=sid, source_ids=[sid], sm=sm, cols=cols,
         evidence=evidence, execution_context=exec_ctx, on_event=on_event))

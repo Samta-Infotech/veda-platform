@@ -61,8 +61,12 @@ class GroundedMeasure:
 class GroundedFilter:
     table: str                # real table
     column: str               # real column (existence-validated)
-    value: Any = None         # value is still value-grounded downstream (L6a)
+    value: Any = None         # grounded value: a sampled categorical value (normalised) or a number
     concept: str = ""
+    # M2 (2026-09-16): a filter is a TYPED predicate, not a bare (column, value) pair.
+    op: str = "="             # "=" | "!=" | ">" | ">=" | "<" | "<="
+    numeric: bool = False     # True → value is a number compared on a numeric column
+    semantic_type: Optional[str] = None   # the column's L2 semantic_type at grounding time
 
 
 @dataclass
@@ -76,6 +80,30 @@ class GroundedIntent:
     confidence: float = 0.0
     schema_version: int = SCHEMA_VERSION
     evidence: Dict[str, Any] = field(default_factory=dict)   # grounding provenance/trace
+    # M2 (2026-09-16): grounded time window on the anchor's TEMPORAL column, or None.
+    time: Optional[Dict[str, Any]] = None          # {"column", "start", "end"}
+    # "how many amenity categories" → COUNT(DISTINCT category): the dimension column
+    # the count is OVER (validated on the anchor), or None for a plain row count.
+    distinct_column: Optional[str] = None
+    # HOW the anchor was grounded (grounding.GROUND_*): exact_name | glossary |
+    # table_vocabulary | name_tokens | retrieval. Pre-M3 item 1 (2026-09-16).
+    anchor_method: str = "retrieval"
+
+    @property
+    def reentry_eligible(self) -> bool:
+        """May this intent take FIRST position on re-entry? Only when the anchor was
+        grounded by the user's own naming (exact / glossary / vocabulary / name tokens).
+        A retrieval-top-table grounding is a ranked guess: candidate-only, always."""
+        from veda.understanding.grounding import REENTRY_METHODS
+        return self.anchor is not None and self.anchor_method in REENTRY_METHODS
+
+    @property
+    def fully_grounded(self) -> bool:
+        """Every REQUIRED slot resolved to a real artifact: the anchor, and every dimension /
+        filter / time window the question carried (those refuse in ground() when they
+        can't). The LLM's free-form `entities` list is informational — a phantom entry it
+        echoes (e.g. 'assets_property') must not demote a correctly grounded intent."""
+        return self.anchor is not None
 
     @property
     def tables(self) -> List[str]:

@@ -691,6 +691,287 @@ leaks in `pipeline.py`), flags staying off; report before M3.
 
 ---
 
+## 13. Pre-M2 items (2026-09-16, on the committed baseline `b0bc2eb`) and the M2 first checkpoint
+
+**Item 1 — golden-set retrieval eval: byte-identical to 09-15**, but only after fixing
+what the first run exposed. `scripts/eval_p1_2_intent_boost.py --source-id 2` crashed,
+then ran blind, for two M1-era reasons: (a) `config.ARTIFACT_ROOT` was CWD-relative — the
+battery `chdir`s to `veda_core` and worked, the eval runs from `/app` and every scoped
+artifact resolved to `data/default/2/…` relative to the wrong directory (the enricher
+loaded no synonyms/glossary/model; the first numbers were recall@5 0.3454 / table_recall@3
+0.5238 — meaningless); now anchored at the package dir (`_artifact_root_abs`); (b) the eval
+sets scope through the bare `context` module while the resolver reads `veda_core.context`
+— both `/app` and `/app/veda_core` are on `sys.path`, so those were two module objects
+with two ContextVars (20 vs 25 import sites); `context.py` now makes the second import
+adopt the first's ContextVars. One missed reader fixed on the way (`retrieval/
+query_enrichment.py` opened a `None` path). Result, both conditions, 21 graded of 24 (3
+rows carry no gold columns, as before): baseline recall@5 0.1936 / recall@15 0.3734 / mrr
+0.4139 / table_recall@3 0.7619; grammar-intent 0.2571 / 0.3907 / 0.479 / 0.7143 — the
+09-15 numbers exactly. Nothing dropped.
+
+**Item 2 — verified-query cache.** (a) `RequestContext.cache_back` (default True):
+False = no replay AND no write. Set from `X-Veda-No-Cache: 1`, which the api tier sends
+when the request carries `no_cache` (`/api/v1/query` and the chat front door:
+`apps/query/views.py`, `apps/chat/views.py` → `ConversationQueryService` →
+`chatbot/run.py` → `call_engine_node` → `InferenceClient`); the battery and every eval
+script (`eval_per_source_battery`, `eval_p1_2_intent_boost`, `retrieval_eval`,
+`tune_fusion_weights`, `parity_suite`, `apps/evaluation/tasks.py`) set it. (b)
+`VerifiedQueryCache.substrate_version` (migration `substrate/0009`): written from the
+source's current `SubstrateVersion.version`, part of the unique key, and both lookups
+(`verified_cache_exact`, cosine `verified_cache_lookup`) match only rows at the source's
+CURRENT version — a re-ingest invalidates every replay without a purge. Purged once after
+(a): 37 rows (all pre-version; unservable under the new predicate anyway). No new
+demotion heuristic. Consequence for the battery's xfail replay case: with `cache_back`
+off it can no longer be replayed, so the marker came off (XPASS) — the production replay
+hazard is closed by the version key + the M2/M6 IR-shape key, not by the battery.
+
+**Item 3 — RAG content assertions found a real retrieval miss.** `expect_text` (any-of
+substrings from the actual chunk texts) + `expect_doc` on all 15 source-3 questions. First
+run: 14/15; "what does the site notes document say" answered from the readme with 2
+citations — `site_notes.md` ranked **95/177** dense, and the independent sparse scan never
+surfaced it either. Root cause (generic, every document source): BGE-M3's lexical vocab is
+case-sensitive SentencePiece — `'site notes'` → ids 73048/1764, `'Site Notes'` →
+18622/20897, zero overlap — so a lowercase question can never lexically meet a title-cased
+heading. Fix: case-normalise chunk text before sparse encoding at ingest
+(`ingestion/chunk_embedder.py`) and the query at retrieval (`query/rag_layer.py`); doc
+path only, column/table sparse vectors untouched. Re-encoded source 3's 177 sparse rows
+in place (dense embeddings unchanged); site_notes is now sparse rank 1. Weak spots the
+assertions still tolerate, on record: "list the documents available" names only the
+handbook; "notice period for termination" answers the probation clause. M6 retirement
+list with battery coverage for the three new deterministic branches: in
+`query-engine-open-items.md`.
+
+**Item 4 — adapter branch deleted.** `source_coordinator._resolve_executable` /
+`dispatch` no longer import the removed `query/source_adapters`; `_dispatch_flags` and
+both config flags gone; the failing test deleted, the two flag-dependent tests rewritten
+without the flag. Routing suite **64/64**.
+
+**Also this pass:** the inference container had NOT been recreated (`Created`
+2026-09-10); `docker compose up -d inference` is a no-op because compose sets
+`OLLAMA_URL: http://host.docker.internal:11434` explicitly for `inference` and
+`ingest-worker` — `.env` is not that key's authority, so the env-drift check now excludes
+it. The NL explainer's `/api/generate` 404 against that host is a real, separate issue
+(the host ollama serves `/api/chat` only for that model) — open.
+
+**M2 first checkpoint — DONE; exit test passed** (flags still OFF by default; env-settable
+for the one-process test: `QUERY_UNDERSTANDING_ENABLED=1 ANALYTICAL_SQL_V2=1`).
+
+What landed. `understanding/grounding.py`: dimensions grounded to groupable anchor
+columns (L2 semantic_type / lite role / data_type via `column_kind`), filters grounded on
+DATA (the value arbiter's typed lookup → `=`/`!=`; numeric literals → comparator read
+from the question or the LLM's value text, on a numeric column only; "have a X" →
+`IS NOT NULL`), time → the anchor's TEMPORAL column, COUNT-DISTINCT over a named
+dimension; anything named that grounds to nothing → typed clarify. Real tables = graph ∪
+scoped model (lite sources have no graph edges → 0 graph tables → every concept refused
+before). `analytical_spec.py`: grounded dimensions first, unresolvable GROUP BY → None
+(never a scalar), `numeric` enforced, grounded WHERE into `build_aggregate_sql`, `list`
+specs (predicate only) composed with the pipeline's projection. `pipeline.py`: Refusal
+ADVISORY (existing path decides); grounded intent a CANDIDATE — never pins the anchor on
+the first pass; the ONE authority moment is re-entry: when a deterministic answer is
+REFUSED by a shape guard / planner, run once more with the fast path off and the grounded
+candidate first (that is the operational meaning of "no deterministic branch matched").
+Two guards fixed on the way: `_named_measure_columns` no longer treats a one-word column
+("amount") as named by that word alone; `_boolean_flag_named` no longer reads "paid" as
+`is_paid` when `paid_amount` exists on the same tables.
+
+Exit, one process each, flags ON: battery `{"summary": "OK", "questions": 63,
+"failures": 0, "known_gap_warns": 3}` — nine of the twelve typed refusals now ANSWER:
+"how many properties are in Pune" → `COUNT(*) … WHERE LOWER(city_name) = %s`;
+"total paid amount per currency" → `SUM(paid_amount) … GROUP BY currency_id`;
+"properties with more than 3 floors" → `WHERE total_floors > 3`; "how many users have a
+last login" → `WHERE last_login IS NOT NULL`; "total maintenance amount" →
+`SUM(amount)`; "maintenance records with amount above 500" → `WHERE amount > 500`;
+"total monthly fee" / "average monthly fee" → `SUM`/`AVG(monthly_fee)`; "how many amenity
+categories are there" → `COUNT(DISTINCT category)`. Golden set flags ON: byte-identical
+(0.1936/0.3734/0.4139/0.7619 and 0.2571/0.3907/0.479/0.7143). §5 table: 0 regressions —
+"how many properties are there" and "show all vendors" answer as before, "average payment
+amount broken down by currency" is the same typed clarify as flags OFF (the grounded
+GROUP BY is `currency_id`; the guard wants the display column on `generics_currency`,
+a join = M3). Flags OFF: `{"summary": "OK", "failures": 0, "known_gap_warns": 12}` —
+unchanged. Routing suite 64/64. Still typed with flags on (3): "list properties in
+Mumbai" (a list with a value filter: the arbiter's own state-column pick — the fast path
+answers before the candidate is consulted and is not refused), "how many properties per
+city" (fast path, same), "which project has the highest carpet area" (cross-table
+superlative, M3).
+
+---
+
+## 14. Pre-M3 items + M3 checkpoint 1 (one firewall) + multi-source routing made real (2026-09-16 → 18)
+
+**Baseline note:** the pass said "baseline committed as `<sha>`" — it was not; `git log`
+still tops at `b0bc2eb` and the M2 pass sat uncommitted (34 files). Everything below is
+on top of that, uncommitted.
+
+### Pre-M3 (4 items) — what inspection found vs. the claims
+1. **Re-entry eligibility — done.** `ground_entity` now records HOW the anchor grounded
+   (`GROUND_EXACT|GLOSSARY|VOCAB|NAME_TOKENS|RETRIEVAL`, `GroundedIntent.anchor_method`);
+   `reentry_eligible` is True only for the four name-evidence methods, and `pipeline.py`'s
+   re-entry override checks it — a retrieval-top-table grounding stays candidate-only.
+   Battery: "how many gizmos/widgets/gadgets are there" per source with `expect="refuse"`.
+   **Found on the first flags-on battery: the rule was not enough** — the deterministic
+   `_bare_count` branch counts whatever table retrieval ranked first with no name
+   evidence at all (`COUNT(*) FROM worklists_ticketuser` for "gizmos"). The layer's
+   eligibility gate only governs the candidate; the existing head still guesses. Open.
+2. **Business names on source 2 — claim inspected, not stale, but not what it seemed.**
+   L3 (`semantic_layer_v2`) emits `business_purpose` / `primary_entity` / `table_type`
+   per table; there is NO `business_name` field in the stage or the model, and its
+   "glossary" is a generic compliance vocabulary, not schema terms. So `0/178` is by
+   design, not a stale model — an ingestion item. Grounding now also reads
+   `primary_entity` as table vocabulary (`GROUND_VOCAB`).
+3. **Loosened guards bounded by tests.** `total reminder amount` (`expect_table=
+   reminders_reminder`) and `how many properties are gated` (filter expected) added.
+4. **Explainer — claim stale.** It already went through `call_slm`; the 404 was
+   `endpoint="generate"` (the host Metal ollama serves `/api/chat` only) plus
+   `NL_SUMMARY_MODEL=qwen2.5:7b-instruct` which that host does not serve. Fixed: chat
+   endpoint + `_nl_model()` picks the summary model only when `/api/tags` lists it
+   (`OllamaBackend.served_models`). Live: "There are 6 vendors." / "Kochi has two vendors
+   with ratings of 4.5 and 3.9 respectively." — LLM-composed, numeric guard intact.
+
+### M3 checkpoint 1 — one firewall over (IR, SQL)
+`veda/ir.py` (`QueryIR`, `IRFilter`, `IRMeasure`; adapters `from_grounded_intent`,
+`from_query_intent`, `from_branch_state`, `partial`) and `veda/firewall.py`
+(`check()` → `FirewallVerdict` ok|ungrounded|qualifier_dropped|shape_mismatch|ir_mismatch|
+rbac|invalid; `check_federated()`; `qualifier_only()`). Every head goes through it: the
+pipeline (staged — value/qualifier, alignment, IR-equivalence, RBAC+AST — because it
+reacts differently per stage: salvage, re-entry), fast path, cache replay, Tier-2
+envelope / shared-planner / IR, and the federated head (`_fed_compose` /
+`_fed_compose_plan` in `federated_route.py`; `_generate_federated_sql` and the flat-SELECT
+fallback DELETED — no free-form SQL reaches the executor). IR-vs-SQL structural checks
+run when the IR is complete; text heuristics only for partial slots; `ir_partial` and
+`checks_run` are traced (`explain._SECTIONS` gained `firewall` etc.). Exit greps: no
+`federated_sql` / `_generate_federated_sql`; the gates are called only from
+`veda/firewall.py` (docstring mentions aside; the cache-demotion site reads the message
+via the same gate). Routing suite 64/64 after the refactor.
+
+**Batteries (flags OFF / ON, 69 q):** 5 / 4 failures, `ir_partial` 33/56 answered
+(`branch.full:SIMPLE` 13/13, `llm_sql`, `cache` — the partial heads checkpoint 2 must
+complete). The failures: the three "gizmos" guesses (item 1 above), one adapter bug
+("list all users" — `dimension_list` marked DISTINCT but the fast path's `SELECT
+DISTINCT` shape wasn't matched by the IR-vs-SQL check), one battery-spec error (source 3
+"gizmos" listed as a SQL question). **Golden set: byte-identical.** Host: 22 GB swap
+used throughout; each battery ran 4–5 h instead of ~40 min.
+
+### Cross-source battery → the multi-source finding, and the fix
+`scripts/eval_cross_source_battery.py`: 32 pairs (source-4/5 questions pinned vs.
+unpinned scope 2,3,4,5) + the §9.2 chat sequence. First run: **17/32 DIVERGENT** — every
+single-source question ("top 3 vendors by rating", "total monthly fee") ran through the
+federated structured planner unpinned and came back as a different shape (7 rows for a
+LIMIT 3; a grouped SUM for a scalar). Root cause was upstream of the planner: the routing
+coordinator runs in SHADOW, and its decisions were **wrong 9/12** (probe
+`route_probe.py`): source 3 (the document source) won on tabular questions and a
+`RELATIONSHIP_EDGE` MULTI fired on vendor questions. Three measured causes, three fixes
+(`query/source_coordinator.py`, `source_evidence.py`, `routing_slm.py`, `config.py`):
+- **Global top-10 evidence** over 1902 (src 2) / 9 (src 4) / 4 (src 5) column embeddings
+  → the small sources were invisible. Now per-source top-k over columns AND the table
+  embeddings (`table_embeddings_v2`). 3/12 → 7/12.
+- **Kind-unfair tiering**: chunk cosine runs ~0.07 hotter than column/table cosine for
+  equal relevance here (measured on three questions); the config floors assumed the
+  opposite and, applied as a shift, made it worse (7 → 6). `kind_normalised_signal`
+  subtracts `ROUTING_CHUNK_KIND_OFFSET` (0.07, measured — re-measure on a new corpus).
+  7 → 10/12.
+- **Value-overlap `cross_source_fk` edges** at Jaccard 0.001 (`4:asset_id ↔ 2:id`,
+  `2:asset_country_id ↔ 4:asset_id`) rated HIGH by containment → `_edge_quality_ok`,
+  `ROUTING_EDGE_MIN_JACCARD` 0.05.
+- **SLM "NONE" at an evidence boundary** with a tabular leader above the absolute STRONG
+  floor → route to the leader (`resolve_boundary`); a nonsense concept stays NO_MATCH.
+  10 → **11/12**. The last miss ("how many properties are in Mumbai" → NO_MATCH: best hit
+  `assets_asset` at 0.427, the vocabulary gap of item 2) falls to the legacy path under
+  SHADOW and is answered/refused exactly as pinned.
+
+**Then the three behaviours the user asked for:**
+- (a) **decide the source, run the pinned path there** — `veda_hybrid`: a ROUTED/SINGLE
+  decision is now authoritative (the condition the 09-10 note set — a SINGLE-vs-legacy
+  regression test — is the cross-source battery); NO_MATCH/CLARIFY stay advisory.
+  Live, unpinned: "how many amenities are there" → `ROUTED/SINGLE ['5']`, "There are 7
+  amenities." — identical to pinned.
+- (a′) **drill-down keeps the source** — `QueryFrame.source_id` (written from
+  `engine_result["source_id"]`, which `pipeline._done` and `_agent_to_subresult` now
+  stamp); `call_engine_node` narrows a drill/refine/compare follow-up to the frame's
+  source. Live: chat 11 turn 2 ran `ROUTED/SINGLE ['5'] (SINGLE_CANDIDATE)` on the
+  inherited scope (its filtered-count *answer* needs the M2 flags, off by instruction).
+- (c) **several sources each answer → one summary** — `MultiResult.summary`
+  (`_summarise_multi_answers`: small NL model over the per-source answers only, numeric
+  guard, labelled-join fallback); one item per source is preserved (the routing test pins
+  that); the chatbot lifts the summary into the reply and keeps `source_answers`.
+  Not yet exercised live (needs Ollama free of the batteries).
+
+**Behaviour (c), continued once Metal was back (same day) — five measured runs on
+"how many maintenance records and how many amenities are there", scope 2,3,4,5
+(table in `query-engine-open-items.md`):** the wrong federated answer was closed by a
+question-IR gate on EVERY federated compose (`_question_gate`: plan-vs-question for
+structured plans, SQL-vs-question for semi-join / free-form / per-metric SQL —
+aggregation must match the intent, every named entity must be read, two entities + a
+plain count is not a join). Then, one leak at a time: the legacy federate-first call in
+`run_hybrid_query` ran before the decomposer (`_COMPOUND_HANDOFF` contextvar skips it);
+the decomposer is globally off (`QUERY_DECOMPOSE_ENABLED=False`, it mis-splits join
+questions) — the coordinator's compound handoff proceeds regardless, because a MULTI
+decision with no join relation cannot be that mistake; each part ran on the primary
+source ("32 amenities" from homzhub instead of 7) → `_run_sub` routes every part through
+the coordinator; part 2 then inherited part 1's narrowed scope → snapshot/restore of the
+ambient context around every part. `_fan_out` attaches `MultiResult.summary`
+(`_with_summary`). **Run 5 (all of the above), unpinned scope 2,3,4,5:** part 1 →
+source 4 *"There are 8 maintenance records."*, part 2 → source 5 *"There are 7
+amenities."*, `summary` = *"There are 8 maintenance records and 7 amenities."* — each
+figure from the source that owns it, equal to the pinned batteries; the two shared-noun
+probes ("records with status open", "average rating") stay honest federated refusals.
+Routing suite 64/64 on this code. Golden set on this code: byte-identical (fifth time —
+0.1936/0.3734/0.4139/0.7619 and 0.2571/0.3907/0.479/0.7143). Final cross-source, flags-OFF
+and flags-ON batteries on this exact code (2026-09-19/20, host swapping — each took 5–20 h):
+- cross-source: `{"summary": "OK", "pairs": 32, "divergent": 0, "verdicts": {"same": 24,
+  "typed_refusal": 5, "both_typed": 3}, "seq_9_2": "typed_refusal"}`
+- flags OFF: `{"summary": "OK", "questions": 69, "failures": 0, "known_gap_warns": 14,
+  "ir_partial": 31}`
+- flags ON: line below when it lands.
+
+**Cross-source battery after the fixes: `{"summary": "OK", "pairs": 32, "divergent": 0,
+"verdicts": {"same": 24, "typed_refusal": 5, "both_typed": 3}, "seq_9_2": "typed_refusal"}`**
+— from 17 divergent. 24 unpinned answers are byte-identical in shape and row count to
+pinned; the 5 unpinned typed refusals are the flags-off M2 gaps (scalar SUM/AVG, filtered
+count) refusing exactly as pinned; §9.2's follow-up refuses honestly (never the unfiltered
+`for_sale_count`). Routing suite 64/64 on the final code.
+
+**Bare-count anchor gate (item 1's real fix) + alias stopgap (item 2):** `_bare_count` now
+requires the question to NAME the table (name tokens, curated glossary, or L3
+`primary_entity`) — "how many gizmos/gadgets are there" → typed clarify; vendors / users /
+properties still count. "properties" needed `veda_core/data/default/2/veda_entity_aliases.json`
+(the per-source glossary the resolver always looked for and never found — L3 emits no
+business names; `assets_asset`'s only vocabulary is "Asset"). Live probe 5/5 as intended.
+**That file is NOT in git** (`veda_core/data/` is ignored, like every artifact) — its
+content, to recreate on another machine: `{"property": "assets_asset", "properties":
+"assets_asset", "payment": "accounts_paymenttransaction", "payments":
+"accounts_paymenttransaction", "payment transaction": "accounts_paymenttransaction",
+"payment transactions": "accounts_paymenttransaction"}` (keys starting with `_` are
+ignored). A tracked seed + an ingestion stage that emits it is the proper fix (open-items).
+**Flags-OFF battery on the final code: 2 failures / 69, `ir_partial` 31.** (a) source-3
+"gizmos" — my spec listed it as a RAG question; pinned to a document source a count enters
+the SQL head and refuses (correct) → spec fixed to `route="sql", expect="refuse"`. (b)
+"which vendor has the highest rating" → `LIMIT 3` from head **`cache`** (13 answers via
+cache in that run) — the verified-query cache served and WROTE rows (17 since 09-17)
+despite `cache_back=False`: the authoritative SINGLE route rebuilt the `RequestContext`
+from `source_id`/`tenant` only (`veda_hybrid._constrain_scope_to`; the coordinator's
+scoring context likewise), silently dropping `cache_back` — and it would drop an RBAC
+data scope the same way. Fixed: `RequestContext.narrowed(source_id)` carries every field;
+both sites use it; the 17 rows purged. **Golden set: byte-identical** (fourth time).
+
+**Flags-ON battery on the final code: `{"summary": "OK", "questions": 69, "failures": 0,
+"known_gap_warns": 4, "ir_partial": 30}`** — the last exit test. Both batteries OK, cross-
+source OK, golden set unchanged, routing suite 64/64.
+
+**Behaviour (c) — measured, and it found the M3 item-4 flaw for real.** Three multi-source
+probes unpinned: "how many records have status open" and "what is the average rating" →
+`refused` (federated, honest — no per-source plan). "how many maintenance records and how
+many amenities are there" → federated head **answered**: *"There are 4 maintenance records
+and an average of 10.88 amenities…"* — pinned truth is 5 and 7; the structured planner
+chose an AVG for a "how many" and the wrong grain, and the firewall passed it because the
+federated IR is built FROM THE PLAN (`_fed_ir_from_structured`), so it validates the
+planner against itself. The spec said derive the IR from `understanding.extract` +
+grounding across the scope's sources; that is the checkpoint-2 prerequisite, not done
+here. The INDEPENDENT/APPEND path (one answer per source → `MultiResult.summary`) was not
+reached by any probe: the coordinator routes shared-noun questions to `federated`, not
+`independent`. `MultiResult.summary` and the chat lift are in place but unexercised live.
+
+---
+
 ## Where to look for more detail
 
 - **`docs/backlog/ARCH_REVIEW_2026-09_RECONCILED.md`** — §11's full record: the review's five
@@ -706,3 +987,27 @@ leaks in `pipeline.py`), flags staying off; report before M3.
 - **`docs/MULTI_SOURCE.md`** §0/§2/§7 — the coordinator's scoped-authoritative design and why.
 - **`docs/RETRIEVAL.md`** §2 — the P1-1 boost-only fix and the eval-harness gap, in place.
 - **`CLAUDE.md`** (repo root) — environment facts, the git-safety rule, the two-clones gotcha.
+
+### 2026-09-20 — Metal offline: switched to this machine's own services
+
+`.env` now: `OLLAMA_URL=http://host.docker.internal:11434` (the host's ollama, `qwen2.5-coder:7b`;
+the compose `ollama` service holds the same model on CPU as a fallback) and
+`METAL_EMBED_URL=` (blank → `ingestion/m3_encoder` and the reranker load BGE-M3 /
+bge-reranker-v2-m3 from `/models/hf_cache` on CPU). Previous remote values are kept as
+comments in `.env`; a timestamped copy of the old file is in the session scratchpad.
+Containers `inference`, `ingest-worker`, `api`, `worker` were recreated (`up -d`, not
+`restart`) — the api/worker pair had been carrying a stale `.43` Metal IP since 09-10.
+Verified in the recreated `inference` container: BGE-M3 dense 1024-d in 5.9 s cold / sparse 0.2 s,
+bge-reranker-v2-m3 loads in 1.6 s, all `backend=cpu`; `call_slm` → host ollama answers in 6.6 s;
+no ENV DRIFT line. `.env` had a DUPLICATE `METAL_EMBED_URL` line (the later one overrode the
+blank) — removed. The flags-ON battery + chat compound check killed by the recreate were
+relaunched on this path. Expect slower embeds/reranks; results are otherwise unchanged (same
+models, same weights).
+To go back: restore the two lines and `docker compose up -d` the four services.
+
+**Gotcha found right after the recreate (2026-09-20):** `localhost:8080` returned 502. nginx's
+`upstream veda_api { server api:8000; }` resolves the `api` hostname ONCE at startup and
+caches the IP; recreating the `api` container changed its IP (172.18.0.10 → .12) and nginx
+kept proxying to the dead one. `docker compose restart nginx` fixes it. Rule: after ANY
+`docker compose up -d` that recreates `api`, restart `nginx` too (or make the upstream
+resolve dynamically — see the nginx note in open-items).

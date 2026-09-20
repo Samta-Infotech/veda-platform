@@ -1028,3 +1028,166 @@ in the data; `xfail` carries the verified-cache similarity-replay case ("which v
 the highest rating" → cached "top 3 vendors by rating", cosine 0.86 → `LIMIT 3`) as a
 documented failing case reported separately — XPASS fires when the IR-shape-aware key
 (above) lands, so the marker gets removed rather than forgotten.
+
+## M6 retirement list — deterministic branches added in the M1 close-out (2026-09-16)
+
+Each of these is a narrow, phrasing-triggered branch of the kind M6 retires once the IR
+path (M2/M3) subsumes it. The battery questions listed are the coverage that must keep
+passing when the branch is deleted — remove the branch only when the flags-on run answers
+them through the IR.
+
+| Branch | Where | Trigger | Battery coverage (source: question) |
+|---|---|---|---|
+| `grouped_count_mode` | `veda/planning.py`; consumed by `query/superlative_plan.try_grouped_plan` / `_build_result` COUNT branch and the `pipeline` grouped gate | grouping word + counting word, no measure operation, no superlative | 4: "how many maintenance records per category", "how many maintenance records per status"; 5: "how many amenities per category" |
+| `ranked_metric_only` | `veda/pipeline.py` SQL-planning chain (after the ranked-temporal branch) | `parse_ranking().top_n` set, basis `metric`, `_rank_sort_column` resolves on the anchor | 4: "top 3 vendors by rating"; 5: "top 3 amenities by monthly fee" |
+| grain-first multi-table | `veda/pipeline.py` entity-first block: `try_multitable` runs first when a grouping phrase / `grouped_count_mode` / "per|by <word>" with an aggregate is present; the entity loop is skipped when it returns SQL | grouping phrase whose grain is a whole entity joined to a child | 4: "how many maintenance records per vendor" (vendors ⨝ maintenance via the discovered FK) |
+
+Also new in the same pass and on the same list: `veda_hybrid._envelope_inexpressible`
+(contract gate) and the `_tier2_validate` dropped-constraint check — both become
+redundant once filters carry typed operators in the IR (M2) and the compiler is the
+only SQL path (M3).
+
+## Pre-M2 pass (2026-09-16): three generic root causes surfaced by the item-1/3 evals
+
+1. **CWD-relative artifact root.** `config.ARTIFACT_ROOT = "data"` was joined as-is, so
+   every scoped artifact path depended on the process's working directory. The battery
+   `os.chdir`s to `veda_core`; the golden-set eval runs from `/app`; uvicorn happens to
+   start in `veda_core`. Fixed: `_artifact_root_abs()` anchors a relative root at the
+   package directory; an absolute `VEDA_ARTIFACT_ROOT` is used as-is.
+2. **Twin `context` modules.** `/app` and `/app/veda_core` are both on `sys.path`, so
+   `veda_core/context.py` loads twice (as `context` and `veda_core.context`) with two
+   ContextVars — a scope set through one name is invisible through the other. The resolver
+   reads `veda_core.context`; the eval scripts set `context`. `context.py` now aliases: the
+   second import adopts the first's ContextVars. The pipeline's `_ambient_ctx()` and
+   `veda_hybrid._current_ctx()` had been working around this by probing both names.
+3. **Case-sensitive sparse vocabulary.** BGE-M3 lexical ids differ per case form; the doc
+   chunk sparse index was built from raw text and queried with the raw question, so
+   title-cased headings never lexically matched lowercase questions (site_notes.md ranked
+   95/177). Both sides now lowercase (doc path only); source 3 re-encoded in place. Any
+   OTHER document source ingested before 2026-09-16 needs `chunk_sparse_v1` re-encoded
+   (script pattern: scratch `reencode_sparse.py`, 177 rows in seconds on Metal) — none
+   exist locally today (only source 3 has doc_chunks).
+
+Verified-query cache after this pass: `substrate_version` in the row + unique key +
+both lookup predicates (`storage_adapters/reader._CURRENT_VERSION_PRED`); `RequestContext.
+cache_back=False` for all eval traffic. The IR-shape-aware key (above) remains the M2/M6
+item for production traffic.
+
+## M3 checkpoint 1 (2026-09-16 → 18): one firewall, and the multi-source routing that the cross-source battery exposed
+
+Full narrative: SESSION_HANDOFF_2026-09.md §14. Itemised here:
+
+- `veda/ir.py`, `veda/firewall.py` — the ONE firewall over (IR, SQL); every head calls it
+  (`pipeline.py` staged; `fast_path.py` `qualifier_only`; `veda_hybrid.py` Tier-2 envelope /
+  shared planner / IR; `federated_route.py` `_fed_compose*`). `_generate_federated_sql` and the
+  flat-SELECT fallback deleted. `explain._SECTIONS` gained `firewall`, `understanding`,
+  `analytical_sql_v2`, `dimension_alignment`, `entity_resolution`, `value_arbitration`, `federated`.
+- `ir_partial` 33/56 answered (OFF and ON): `branch.full:SIMPLE` 13/13, `llm_sql`, `cache` —
+  checkpoint 2's target.
+- Routing evidence fixed (`source_coordinator.py`): per-source top-k over columns + table
+  embeddings; `kind_normalised_signal` (`ROUTING_CHUNK_KIND_OFFSET` 0.07, measured);
+  `_edge_quality_ok` (`ROUTING_EDGE_MIN_JACCARD` 0.05); `routing_slm.resolve_boundary` routes to
+  a tabular leader above the absolute STRONG floor when the SLM says NONE. Probe 3/12 → 11/12.
+- ROUTED/SINGLE authoritative (`veda_hybrid`), frame `source_id` (P4 closed for the frame
+  slot), `MultiResult.summary` for independent multi-source answers.
+
+**Open after this pass**
+1. `_bare_count` (and the other deterministic branches) count/plan on retrieval's top table
+   with NO name evidence — "how many gizmos are there" → `COUNT(*) FROM worklists_ticketuser`.
+   The re-entry eligibility rule only governs the understanding candidate; the head itself
+   must require anchor evidence (a name-token / vocabulary / value hit on the primary) or
+   return a typed clarify. This is the same gap M6 retires by construction; until then it needs
+   the branch-level gate.
+2. `from_query_intent`: `dimension_list` maps to `distinct=True` and the IR-vs-SQL check then
+   mis-reads the fast path's `SELECT DISTINCT … ORDER BY` — "list all users" refused with
+   `shape_mismatch` (flags OFF, 1 battery FAIL). Fix in the adapter, not the check.
+3. Item 2 of the pre-M3 list is an INGESTION item: L3 emits no per-table business name /
+   alias set (only `business_purpose`, `primary_entity`, `table_type`); the glossary stage
+   produces a generic domain vocabulary. Grounding reads `primary_entity` now; a real
+   business-name stage would close the "properties → assets_asset" class (the last routing
+   miss and the §5 "how many properties are in Mumbai" NO_MATCH).
+4. `ROUTING_CHUNK_KIND_OFFSET` is a measured constant for THIS corpus (165-chunk handbook +
+   4 small docs vs 1902/9/4 columns). It must be re-measured per deployment or replaced by a
+   per-kind calibration at ingest (e.g. the median top-1 cosine of held-out questions).
+5. Host: 22 GB swap in use throughout; batteries take 4–5 h each. Not a code item, but every
+   exit test in this doc was paid at that rate.
+
+### Follow-up the same day: bare-count anchor gate + the alias stopgap for item 3
+
+- `veda/understanding/grounding.anchor_named_in_query(query, table, sm)` → the method
+  (`name_tokens` | `glossary` | `table_vocabulary`) or None. `pipeline.py`'s `_bare_count`
+  branch requires it: no name evidence for the router's primary → typed clarify naming the
+  closest table ("how many gizmos are there" → clarify; vendors / users still count).
+- Measured cost of item 3's vocabulary gap: with the gate on, "how many properties are
+  there" clarified too — `assets_asset`'s only L3 vocabulary is `primary_entity: "Asset"`.
+  Stopgap: `veda_core/data/default/2/veda_entity_aliases.json` (the per-source glossary the
+  resolver has always looked for and never found), seeded with property/properties →
+  assets_asset and payment(s) → accounts_paymenttransaction. User-supplied evidence, read by
+  `ground_entity` (glossary first) and the new gate. The ingestion item (an L3 stage that
+  emits business names / aliases per table) still stands — this file is what it would
+  produce, hand-written for two nouns.
+
+### Same day — context re-scoping dropped fields (found by the cross-source battery)
+
+Two sites rebuilt the ambient `RequestContext` from `source_id` + `tenant` when narrowing
+scope (`veda_hybrid._constrain_scope_to` on the authoritative SINGLE route; the coordinator's
+scoring context in `source_coordinator`). `cache_back=False` was lost → the battery wrote 17
+verified-cache rows and replayed one (`LIMIT 3` for "which vendor has the highest rating").
+The same construction would have dropped `allowed_resources` had the second site not copied
+it by hand. `RequestContext.narrowed(source_id, source_ids=None)` now carries every field;
+rule: never construct a RequestContext from a subset of another's fields on a served path.
+
+### Federated plan checked against the QUESTION's IR (checkpoint-2 prerequisite, 2026-09-18)
+
+`federated_route._fed_ir_from_question(query, focused, scope)`: `understanding.extract` →
+each named entity grounded to (source, table) over the planner's own per-source schema map
+(`focused`), the measure to a column of its table → a `QueryIR` built from the question.
+`_plan_vs_question(struct, qir, info)` refuses a structured plan that (1) aggregates
+differently from the intent (AVG for a "how many"), (2) omits a table the question names, or
+(3) is two entities + a plain count + no shared grain (two independent counts, not a join).
+Wired into `_fed_compose_plan` on both structured-plan sites (`run_federated` and
+`_dispatch_classified_operation`, `focused` threaded through). Measured need: "how many
+maintenance records and how many amenities are there" → "4 … and an average of 10.88"
+(truth 5 and 7) with the plan-derived IR validating the planner against itself.
+
+Still open: the same question should not merely REFUSE — the question-IR says "two sources,
+independent counts"; `execution_planner.plan_execution` picks FEDERATED whenever an edge
+connects the scope, so the INDEPENDENT/APPEND path (one answer per source →
+`MultiResult.summary`) is never chosen for it. Use the question-IR shape (≥2 sources, count,
+no grain) to prefer INDEPENDENT — the behaviour-(c) path the user asked for.
+
+### Behaviour (c) closed at the routing layer (2026-09-18, Metal back)
+
+- `veda_hybrid._run_coordinator`: a ROUTED/MULTI decision on a COMPOUND question
+  (`run_decomposer(...).should_split`, ≥2 parts) hands off to the decomposer (returns None)
+  instead of federating — each part routes SINGLE on its own; `_fan_out` returns
+  `MultiResult.summary` (`_with_summary` → `_summarise_multi_answers`, small NL model over the
+  per-source answers, numeric guard, labelled-join fallback). Federation is kept for
+  questions that genuinely relate the sources.
+- `FEDERATE_SLM_MULTI_ENABLED`'s comment said "Default OFF"; it has been ON since it shipped —
+  corrected. It still pre-empts the INDEPENDENT plan for non-compound MULTI decisions; with
+  the question-IR check in `_fed_compose_plan` a wrong federated plan now refuses instead of
+  answering, and the fallback to independent-merge stands.
+
+### Behaviour (c), measured step by step (2026-09-18, probe `multi_probe.py`, compound question
+"how many maintenance records and how many amenities are there", scope 2,3,4,5)
+
+| run | code | result |
+|---|---|---|
+| 1 | question-IR check on structured plans only | wrong federated answer gone; semi-join/free-form paths unchecked |
+| 2 | + decomposer handoff in `_run_coordinator` | federated head answered `COUNT … GROUP BY city_name`, 142 rows — the legacy `_maybe_federated` call at `run_hybrid_query` ran BEFORE the decomposer |
+| 3 | + `_COMPOUND_HANDOFF` skips the federate-first call; decomposer gate honours the handoff despite `QUERY_DECOMPOSE_ENABLED=False` | split into 2 parts — but both ran on source 2: "32 amenities" from homzhub's `assets_amenity` (truth 7 on source 5) |
+| 4 | + each part routed through `_run_coordinator` (`_run_sub`) | part 1 → source 4 ("8 maintenance records", = pinned); part 2 ALSO on source 4 (refused): the SINGLE route narrows the ambient scope (`_constrain_scope_to`) and it leaked into the next part |
+| 5 | + scope snapshot/restore around every part | part 1 → source 4 "8 maintenance records", part 2 → source 5 "7 amenities", `summary` "There are 8 maintenance records and 7 amenities." — each figure from its own source, = pinned |
+
+Also: the question-IR gate now runs on EVERY federated compose (`_question_gate`: plan-vs-
+question for structured plans, SQL-vs-question for semi-join / free-form / per-metric SQL).
+
+## Ops (2026-09-20): nginx caches the `api` upstream IP → 502 after every api recreate
+
+`docker/nginx.conf` used a static `upstream veda_api { server api:8000; }`; nginx resolves the
+name once at startup, so recreating `api` (any `docker compose up -d` that changes its env)
+left nginx proxying to the old container IP. Changed to per-request resolution via Docker's
+embedded DNS (`resolver 127.0.0.11 valid=10s;` + `set $veda_api http://api:8000;` +
+`proxy_pass $veda_api…`). Until nginx is recreated with the new file, `docker compose
+restart nginx` after an api recreate is the workaround.

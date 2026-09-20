@@ -569,6 +569,20 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
     # `cols` when absent — never clobbers a pipeline that already set it.
     if "cols" not in res0 and res0.get("columns"):
         res0["cols"] = res0["columns"]
+    # Multi-source APPEND answer (2026-09-18): the MultiResult carries ONE `summary` over
+    # its per-source items and one item PER source. The chat reply leads with the summary;
+    # each source's own answer is kept under `source_answers` for provenance / drill-down.
+    # Item0 alone would have shown only the first source's answer.
+    _mr_summary = result.get("summary")
+    if _mr_summary and len(items) >= 2:
+        res0 = dict(res0)
+        res0["source_answers"] = [
+            {"source_id": (it.get("result") or {}).get("source_id"),
+             "status": it.get("status"),
+             "answer": (it.get("result") or {}).get("answer")}
+            for it in items if isinstance(it, dict)]
+        res0["answer"] = str(_mr_summary)
+        res0["is_multi_source"] = True
     # A DEFINITE refusal from the router (no access to the source that can answer,
     # NO_MATCH, ...) is minted by veda_core/veda_hybrid.py::_run_coordinator via
     # MultiResult.single(..., refuse_reason=...): it never runs the SQL pipeline, so
@@ -620,15 +634,33 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
     res0: dict = {}
     status = "error"
 
+    # Drill-down keeps the SOURCE (P4, 2026-09-18): a follow-up that refines / drills the
+    # previous frame runs on the source that frame's answer came from, not the whole scope
+    # re-deciding (which can land a "how many of those…" on a different source). Only
+    # narrows within the turn's authorised scope; a new topic keeps the full scope.
+    _turn_source_id = state.get("source_id")
+    _turn_source_ids = state.get("source_ids")
+    try:
+        _frame_sid = (state.get("frame") or {}).get("source_id")
+        _delta = state.get("delta_type")
+        if (_frame_sid and _delta in ("drill_down", "drill_up", "refine", "compare")
+                and (not _turn_source_ids or int(_frame_sid) in {int(s) for s in _turn_source_ids})):
+            _turn_source_id, _turn_source_ids = int(_frame_sid), [int(_frame_sid)]
+            _emit(config, "route", f"Continuing on the same source ({_frame_sid})…",
+                  {"source_ids": _turn_source_ids, "mode": "single", "inherited": True})
+    except Exception:
+        pass
+
     try:
         for kind, data in client.stream_hybrid_query(
             query,
-            source_id=state.get("source_id"),
-            source_ids=state.get("source_ids"),
+            source_id=_turn_source_id,
+            source_ids=_turn_source_ids,
             tenant=state.get("tenant"),
             request_id=state.get("request_id"),
             data_scope=state.get("data_scope"),
             source_profiles=state.get("source_profiles"),
+            no_cache=bool(state.get("no_cache")),   # request's `no_cache` → X-Veda-No-Cache
         ):
             if kind == "progress":
                 _extra = {k: v for k, v in data.items() if k not in ("phase", "message")}

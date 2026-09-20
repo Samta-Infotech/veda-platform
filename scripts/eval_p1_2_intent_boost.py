@@ -87,7 +87,7 @@ def main() -> int:
         import config as _cfg
         _cfg.RERANKER_ENABLED = False
 
-    set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant))
+    set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant, cache_back=False))
     eng = rt.get_engine()
 
     rows = []

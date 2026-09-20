@@ -315,14 +315,20 @@ class VerifiedQueryCache(TenantScopedModel):
     query_text = models.TextField()
     verified_sql = models.TextField()
     columns_json = models.JSONField(default=list, blank=True)
+    # The source's SubstrateVersion.version at write time (2026-09-16). Lookups match
+    # only rows written under the source's CURRENT version, so a re-ingest invalidates
+    # every replay for that source without a purge; the unique key includes it so the
+    # same question can be re-verified under the new version. "" = pre-existing rows.
+    substrate_version = models.CharField(max_length=64, default="", blank=True)
 
     class Meta:
         constraints = [
             models.UniqueConstraint(
-                fields=["source", "tenant", "query_hash"], name="uq_verifiedcache_hash"
+                fields=["source", "tenant", "query_hash", "substrate_version"],
+                name="uq_verifiedcache_hash",
             )
         ]
-        indexes = [models.Index(fields=["source", "tenant", "query_hash"])]
+        indexes = [models.Index(fields=["source", "tenant", "query_hash", "substrate_version"])]
 
 
 # ─────────────────────────────────────────────────────────────────────────────

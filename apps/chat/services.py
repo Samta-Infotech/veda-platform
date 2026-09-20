@@ -116,9 +116,12 @@ class ConversationQueryService:
     def __init__(self, user, source_id: int | None = None, tenant: str = "default",
                  source_ids: list[int] | None = None, data_scope: dict | None = None,
                  source_profiles: dict | None = None,
-                 access_denied: bool = False):
+                 access_denied: bool = False, no_cache: bool = False):
         self.user = user
         self.source_id = source_id
+        # `no_cache` request field (2026-09-16): forwarded to the engine as X-Veda-No-Cache —
+        # this turn neither replays nor writes the verified-query cache (eval traffic).
+        self.no_cache = bool(no_cache)
         # Validated query SCOPE (P5) — ready source ids, primary first, resolved
         # server-side by the view (apps.query.scope.resolve_query_scope). Forwarded to
         # inference so multi-source scopes retrieve/federate exactly like /api/v1/query.
@@ -219,7 +222,8 @@ class ConversationQueryService:
         kwargs = dict(tenant=self.tenant, source_id=self.source_id,
                       source_ids=self.source_ids, request_id=request_id,
                       data_scope=self.data_scope,
-                      source_profiles=self.source_profiles)
+                      source_profiles=self.source_profiles,
+                      no_cache=self.no_cache)
         # End-to-end wall clock for THIS turn — so latency_ms is ALWAYS reportable,
         # even when the engine result carries none (a refusal/clarify that never
         # reached _done(), or a path that returned no latency). Used as the fallback

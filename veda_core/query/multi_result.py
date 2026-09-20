@@ -42,6 +42,10 @@ class SubResult:
 @dataclass
 class MultiResult:
     items: List[SubResult] = field(default_factory=list)  # order preserved (query order)
+    # One summary over several per-source answers (independent multi-source APPEND merge,
+    # 2026-09-18): composed from the items' own answers, never new facts. None when the
+    # result is single-source or the merge was not APPEND. Items stay one-per-source.
+    summary: Optional[str] = None
     trace_id: Optional[str] = None       # the ONE query-trace correlation id (observability);
                                          # set by run_hybrid_query, surfaced to the API caller
                                          # so a client can grep the full trace by this id

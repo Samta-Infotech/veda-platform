@@ -153,7 +153,8 @@ def _temporal_predicate(table, sm, tf):
     return f"{q} <= '{tf.end}'"
 
 
-def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None):
+def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None,
+              _reentry=False):
     """Run one NL→SQL→result. Reuses the shared engine; never closes it.
 
     Returns an int status code (0 ok / 1 error) by default — backward-compatible.
@@ -170,6 +171,36 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     join_constraints = None
     fanout_guard = None
     _llm_sql = False          # True only when the SQL's SELECT/WHERE was LLM-written
+    # M3 checkpoint 1: branch state the firewall's IR is built from (bound later by the
+    # branches that have it; these defaults mean "unknown" → partial IR slots).
+    _u = None; _arb_filters = []; _rank = None; _tpred = None; _tcol = None; _rank_sort_col = None
+    # the understanding candidate's state — bound in the planning block, read by the firewall
+    # IR on EVERY path (the fast path returns before the planning block runs)
+    _analytical_sql = None; _analytical_primary = None; _analytical_spec = None
+    _analytical_used = False; _analytical_reentry_ok = False
+
+    def _guard_refusal(status, msg, fb, tail, always_done=False, **done_kw):
+        """M2 (2026-09-16): a deterministic answer (fast path, planner, branch) that a shape
+        guard / planner REFUSED is not terminal while the understanding layer is on — the
+        grounded candidate never got its turn ("no deterministic branch matched" must
+        include "the one that matched was refused"). Re-enter ONCE: fast path skipped,
+        the candidate first in the planning chain. Flags off, already re-entered, or a
+        cache replay → the refusal stands exactly as before."""
+        try:
+            from config import QUERY_UNDERSTANDING_ENABLED as _qu
+        except Exception:
+            _qu = False
+        if _qu and not _reentry and not from_cache:
+            print(f"  [QU] {tail}: deterministic answer refused → re-entering once with the "
+                  f"grounded candidate (fast path off)")
+            log_route(f"{tail}.reentry", query, (time.time() - start) * 1000)
+            return run_query(query, sm, all_cols, return_result=return_result,
+                             anchor_hint=anchor_hint, on_event=on_event, _reentry=True)
+        log_route(tail, query, (time.time() - start) * 1000)
+        _kw = dict(done_kw)
+        if msg is not None:
+            _kw["msg"] = msg
+        return _done(0, status, feedback=fb, **_kw) if (return_result or always_done) else 0
     tr = new_trace(query)
     es = ExecutionState()
     _usage = collect_usage()
@@ -305,6 +336,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 kw.setdefault("business_intent",
                               (explain.get("understanding") or {}).get("summary"))
             return {"status": status, "ok": (status == "answered"),
+                    # the source this answer ran against (P4, 2026-09-18): the chat frame
+                    # records it so a drill-down stays on the same source
+                    "source_id": getattr(_ambient_ctx(), "source_id", None),
                     "trace": tr.to_dict(), "explain": explain,
                     "usage": {"prompt_tokens": tr.total_prompt_tokens,
                               "completion_tokens": tr.total_completion_tokens,
@@ -399,7 +433,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # already has its own deterministic path. Conservative match → falls through on miss.
     from config import FAST_PATH_ENABLED
     fp = None
-    if FAST_PATH_ENABLED and not is_existence:
+    if FAST_PATH_ENABLED and not is_existence and not _reentry:   # re-entry: fast path off (M2)
         try:
             fp = try_fast_path(query, tf)
         except Exception as _fpe:
@@ -547,7 +581,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         except Exception:
             pass
 
-    cached_sql, sim = (None, 0.0) if (is_existence or fp) else verified_cache_lookup(query)
+    # cache_back=False (RequestContext, 2026-09-16): the request opted out of the
+    # verified-query cache — no replay here, no write at the end (eval/battery traffic).
+    _cache_back = getattr(_ambient_ctx(), "cache_back", True)
+    cached_sql, sim = (None, 0.0) if (is_existence or fp or not _cache_back) else verified_cache_lookup(query)
     # Same evidence guard for the CACHED lane — the fourth answer-producing lane,
     # which replays SQL verified under OLDER code: a cached answer whose tables get
     # zero typed evidence from the query is a stale wrong pick → recompute.
@@ -578,7 +615,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # fresh answer would, not a lesser one just because it was pre-verified
         # once under possibly-older code.
         try:
-            ok_cache_q, missing_cache_q = qualifier_completeness(query, cached_sql, sm)
+            from veda.firewall import qualifier_only as _fw_qual
+            from veda.ir import partial as _ir_partial_c
+            ok_cache_q = _fw_qual(_ir_partial_c("cache"), cached_sql, sm, query=query)
+            missing_cache_q = None if ok_cache_q else qualifier_completeness(query, cached_sql, sm)[1]
             if not ok_cache_q:
                 print(f"  [cache] demoted: cached SQL drops qualifier {missing_cache_q!r} "
                       f"for THIS query — recompute")
@@ -859,6 +899,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         _er = None
         _analytical_sql = None          # Phase 1 ANALYTICAL_SQL_V2 (set in understanding block)
         _analytical_primary = None
+        _analytical_spec = None         # M2: the spec itself (list specs carry only where_sql)
+        _analytical_used = False        # M2: True once the grounded candidate IS the SQL being validated
+        _analytical_reentry_ok = False  # pre-M3: anchor grounded by NAME (not retrieval) → may lead on re-entry
         # ── Query-Understanding layer (flag-gated, default OFF) — enterprise ─────
         # LLM extracts typed intent → deterministic grounding validates to REAL tables
         # → adapted into a ResolvedEntities so the EXISTING ER plumbing (primary-pin,
@@ -876,26 +919,42 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 for _r in results:
                     _t = _r.col_id.split(".")[0]
                     _rscore[_t] = max(_rscore.get(_t, 0.0), getattr(_r, "final_score", 0.0))
-                _u = understand_query(query, sm, retrieval_scores=_rscore)
+                _u = understand_query(query, sm, retrieval_scores=_rscore, tf=tf)
+                try:
+                    from config import QUERY_UNDERSTANDING_MIN_CONFIDENCE as _qu_minc
+                except Exception:
+                    _qu_minc = 0.5
                 if isinstance(_u, _RF):
+                    # M2 (2026-09-16): a Refusal is ADVISORY, never terminal. The
+                    # understanding layer is a strictly weaker signal than the deterministic
+                    # branches below (§5 regressions: "show all vendors" refused by a layer
+                    # that couldn't ground a table the router had). Record it, keep going;
+                    # the existing path decides. (Rule: a new decision layer never gates a
+                    # strictly more capable path on a strictly weaker signal.)
                     _st = "clarify" if _u.reason == "ambiguous" else "refuse"
-                    fb = _feedback(_st, msg=_u.message)
                     tr.set("understanding", decision=_st, reason=_u.reason,
-                           unresolved=_u.unresolved)
-                    log_route(_st, query, (time.time() - start) * 1000)
-                    return _done(0, _st, msg=_u.message, feedback=fb)
+                           unresolved=_u.unresolved, advisory=True)
+                    print(f"  [QU] advisory {_st}: {_u.message[:100]} — existing path decides")
+                    _u = None
+                if isinstance(_u, _GI) and _u.anchor and not (
+                        _u.fully_grounded and (_u.confidence or 0.0) >= _qu_minc):
+                    # M2: a PARTIALLY grounded intent (an entity that didn't ground, or
+                    # low confidence) is a candidate for the trace only — it must not
+                    # override the router's anchor / the ER pin.
+                    tr.set("understanding", decision="advisory", anchor=_u.anchor,
+                           unresolved=(_u.evidence or {}).get("unresolved_nonfatal"),
+                           confidence=_u.confidence)
+                    print(f"  [QU] advisory: anchor={_u.anchor} not fully grounded — not pinned")
+                    _u = None
                 if isinstance(_u, _GI) and _u.anchor:
-                    from query.entity_resolver import ResolvedEntities
-                    _er = ResolvedEntities(
-                        anchor=_u.anchor, secondaries=list(_u.secondaries),
-                        confidence=max(_u.confidence or 0.0, 0.7), status="RESOLVED",
-                        evidence={"pin_eligible": True, "source": "understanding",
-                                  "intent": _u.intent})
-                    es.resolved_anchor = _u.anchor
-                    es.resolved_secondaries = list(_u.secondaries)
-                    es.entity_resolution_status = "RESOLVED"
-                    es.entity_resolution_confidence = _u.confidence
-                    tr.set("entity_resolution", source="understanding", anchor=_u.anchor,
+                    # M2 (2026-09-16): a grounded intent is a CANDIDATE, never a pin. It
+                    # used to become a RESOLVED ResolvedEntities that bypassed vet_primary
+                    # and the ER path — "show all vendors" then planned on whatever table
+                    # the LLM's grain grounded to (§5 regression). Now it only contributes
+                    # deterministic analytical SQL, and that SQL is used only when its
+                    # anchor IS the router's primary and no deterministic branch matched
+                    # (checked where the candidate is consumed below).
+                    tr.set("understanding", decision="candidate", anchor=_u.anchor,
                            secondaries=_u.secondaries, intent=_u.intent,
                            confidence=_u.confidence)
                     # ── Phase 1: ANALYTICAL_SQL_V2 (flag-gated) ─────────────────
@@ -910,7 +969,17 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         try:
                             from veda.analytical_spec import derive_spec, emit_sql
                             _aspec = derive_spec(_u, query, sm)
+                            _analytical_spec = _aspec
+                            _analytical_reentry_ok = bool(getattr(_u, "reentry_eligible", False))
+                            tr.set("understanding", anchor_method=getattr(_u, "anchor_method", None),
+                                   reentry_eligible=_analytical_reentry_ok)
                             _cand = emit_sql(_aspec, sm) if _aspec else None
+                            if _aspec is not None and _aspec.aggregation == "list":
+                                _analytical_primary = _u.anchor
+                                tr.set("analytical_sql_v2", used=True, anchor=_u.anchor,
+                                       aggregation="list", where=_aspec.where_sql)
+                                print(f"  [AnalyticalV2] list on {_u.anchor} WHERE {_aspec.where_sql}"
+                                      f" — grounded predicate, projection from the pipeline")
                             if _cand:
                                 _analytical_sql = _cand
                                 _analytical_primary = _u.anchor
@@ -1112,11 +1181,38 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # Phase 1 ANALYTICAL_SQL_V2: a single-anchor analytical query has a deterministic
         # SQL already built — force the single-table path (no join planner) so it flows
         # straight to validation + execution with our structured SQL.
-        if _analytical_sql:
-            needs_join = False
-            _er_multi = False
-            if _analytical_primary:
+        if _analytical_sql or _analytical_spec is not None:
+            if _analytical_primary and _analytical_primary != primary and _reentry \
+                    and not _analytical_reentry_ok:
+                # pre-M3 item 1: a RETRIEVAL-grounded anchor never overrides the router,
+                # even on re-entry — candidate-only (discarded below like a first pass).
+                tr.set("analytical_sql_v2", used=False, discarded="retrieval-grounded anchor is not re-entry-eligible",
+                       anchor=_analytical_primary, router_primary=primary)
+                print(f"  [AnalyticalV2] re-entry: anchor {_analytical_primary} grounded by retrieval "
+                      f"— not eligible to override router primary {primary}")
+                _analytical_sql, _analytical_spec, _analytical_primary = None, None, None
+            elif _analytical_primary and _analytical_primary != primary and _reentry:
+                # M2: the ONE case a grounded intent takes authority — fully grounded (it
+                # would not exist otherwise) AND no deterministic branch matched (the one
+                # that did was refused, which is why we are re-entering). The router chose
+                # the DIMENSION table as primary ("average payment amount by currency" →
+                # generics_currency): the grain-inversion class this layer exists to fix.
+                tr.set("analytical_sql_v2", reentry_override=True,
+                       anchor=_analytical_primary, router_primary=primary)
+                print(f"  [AnalyticalV2] re-entry: grounded anchor {_analytical_primary} "
+                      f"overrides router primary {primary} (no deterministic branch matched)")
                 primary = _analytical_primary
+            elif _analytical_primary and _analytical_primary != primary:
+                # first pass: candidate only — the router's primary stands; a spec built on a
+                # different anchor is discarded (trace), never overrides.
+                tr.set("analytical_sql_v2", used=False, discarded="anchor != router primary",
+                       anchor=_analytical_primary, router_primary=primary)
+                print(f"  [AnalyticalV2] candidate discarded: anchor {_analytical_primary} "
+                      f"≠ router primary {primary}")
+                _analytical_sql, _analytical_spec, _analytical_primary = None, None, None
+            elif _analytical_sql or (_reentry and _analytical_spec is not None):
+                needs_join = False               # single-table candidate (a list spec too, on re-entry)
+                _er_multi = False
         # Observability: record whether the deterministic multi-table planner is even
         # REACHED — needs_join gates try_multitable (planner-reachability signal).
         tr.set("join_planning", needs_join=needs_join, intent_for_join=intent,
@@ -1167,12 +1263,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
 
         if mt["action"] == "clarify":
             fb = _feedback("clarify", msg=mt.get("msg"))
-            log_route("clarify", query, (time.time() - start) * 1000)
-            return _done(0, "clarify", msg=mt.get("msg"), feedback=fb)
+            return _guard_refusal("clarify", mt.get("msg"), fb, "clarify", always_done=True)
         if mt["action"] == "refuse":
             fb = _feedback("refuse", msg=mt.get("msg"))
-            log_route("refuse", query, (time.time() - start) * 1000)
-            return _done(0, "refuse", msg=mt.get("msg"), feedback=fb)
+            return _guard_refusal("refuse", mt.get("msg"), fb, "refuse", always_done=True)
         if mt["action"] == "existence":
             # Deterministic EXISTS / NOT EXISTS — no LLM, no fan-out, no join skeleton.
             p = mt["plan"]
@@ -1419,7 +1513,28 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 except Exception:
                     _ans = None
 
-            if _ans and not _tpred:
+            if _reentry and _analytical_reentry_ok and (
+                    _analytical_sql or (_analytical_spec is not None
+                                        and getattr(_analytical_spec, "aggregation", None) == "list"
+                                        and _analytical_spec.anchor == primary
+                                        and _analytical_spec.where_sql)):
+                # M2 re-entry: the deterministic answer was refused, the grounded candidate
+                # (anchor == router primary, enforced above) takes the first turn.
+                _anchor_cols_re = [c.split(".", 1)[1] for c in all_cols
+                                   if c.split(".", 1)[0] == primary]
+                if not _analytical_sql:
+                    _lp_cols = recommended_projection(primary, _anchor_cols_re, results, sm, query)
+                    _lp = ", ".join(f't0."{c}"' for c in (_lp_cols or [])) or "t0.*"
+                    _analytical_sql = (f'SELECT {_lp} FROM "{primary}" t0 '
+                                       f'WHERE {_analytical_spec.where_sql} LIMIT 100')
+                sql = _analytical_sql
+                _analytical_used = True
+                allowed_columns = list(dict.fromkeys(list(allowed_columns) + _anchor_cols_re))
+                _llm_sql = False
+                tr.set("sql_planning", action="analytical_v2_reentry", table=primary)
+                _tick("sql_planning", "Using the grounded analytical plan")
+                print(f"  [AnalyticalV2] re-entry: grounded candidate takes the first turn — {sql[:120]}")
+            elif _ans and not _tpred:
                 # Project the person over the FK (display name, not the raw id). Defer to the
                 # normal path when a temporal window is present so the date filter isn't dropped.
                 from query.value_arbiter import where_clause as _arb_where
@@ -1558,6 +1673,24 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 # already matched `_arb_filters`/`_mh`/`_fk` above, which own their own SQL
                 # shape) — this is deliberately the plain "just count everything (optionally
                 # in a window)" case only.
+                #
+                # ANCHOR EVIDENCE (2026-09-18): nothing else anchors this branch — no filter,
+                # no join, no measure column — so the table must be NAMED by the question
+                # (a name token or its L3 primary_entity). Otherwise this counted whatever
+                # table retrieval ranked first: "how many gizmos are there" → COUNT(*) FROM
+                # worklists_ticketuser (battery, flags ON and OFF). Typed clarify instead.
+                from veda.understanding.grounding import anchor_named_in_query as _anchor_named
+                _bc_method = _anchor_named(query, primary, sm)
+                if _bc_method is None:
+                    _bc_disp = (sm.get("tables", {}).get(primary) or {}).get("primary_entity") or primary
+                    _msg = (f"I couldn't tell which data you mean to count — the closest match is "
+                            f"'{_bc_disp}', but the question doesn't name it. Could you say which "
+                            f"records you'd like counted?")
+                    tr.set("sql_planning", action="bare_count_ungrounded", table=primary)
+                    fb = _feedback("clarify", msg=_msg)
+                    log_route("clarify.bare_count_ungrounded", query, (time.time() - start) * 1000)
+                    return _done(0, "clarify", msg=_msg, feedback=fb)
+                tr.set("sql_planning", anchor_evidence=_bc_method)
                 sql = f'SELECT COUNT(*) AS count FROM "{primary}"' + (f' WHERE {_tpred}' if _tpred else '')
                 allowed_columns = allowed_columns + ([_tcol] if _tcol else [])
                 _llm_sql = False                 # deterministic — skip IR-equivalence
@@ -1672,9 +1805,28 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 # Phase 1 ANALYTICAL_SQL_V2: use the deterministic structured analytical
                 # SQL (built from the grounded spec) instead of the LLM — it flows through
                 # the SAME validation + execution below. Falls back to the LLM otherwise.
+                # M2: a grounded LIST spec (typed predicate on the anchor, no aggregate) —
+                # the pipeline's own recommended projection + the grounded WHERE. Only when
+                # the spec's anchor IS this branch's primary (no anchor override here).
+                if (_analytical_sql is None and _analytical_spec is not None
+                        and getattr(_analytical_spec, "aggregation", None) == "list"
+                        and _analytical_spec.anchor == primary and _analytical_spec.where_sql):
+                    _lp = ", ".join(f't0."{c}"' for c in (_proj_cols or [])) or "t0.*"
+                    _analytical_sql = (f'SELECT {_lp} FROM "{primary}" t0 '
+                                       f'WHERE {_analytical_spec.where_sql} LIMIT 100')
+                    _wcols = [c for c in allowed_columns] + [f.column for f in []]
                 sql = _analytical_sql or generate_sql(query, primary, allowed_columns, tf,
                                    col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
                                    recommended_projection=_proj_cols)
+                if _analytical_sql:
+                    # deterministic build from a grounded spec — skip IR-equivalence like every
+                    # other deterministic branch (it rejected the spec's own grounded filter
+                    # as "not requested by the query", 2026-09-16) and allow the anchor's
+                    # grounded columns through the firewall.
+                    _analytical_used = True
+                    _llm_sql = False
+                    allowed_columns = list(dict.fromkeys(list(allowed_columns) + [
+                        c.split(".", 1)[1] for c in all_cols if c.split(".", 1)[0] == primary]))
                 print(f"  [L5] SQL gen       {time.time()-t_sql:.1f}s"
                       + ("  [AnalyticalV2 deterministic]" if _analytical_sql else "")
                       + (f"  (+{len(_gloss)} col defs)" if _gloss else "")
@@ -1732,13 +1884,49 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
               "existence" if is_existence else f"full:{intent}")
 
     tr.set("schema_linking", selected_table=primary)
-    ok_val, bad = value_grounding(sql, _resolve, sm.get("columns", {}), skip_values)
-    tr.check("value_grounding", ok_val, "" if ok_val else str(bad))
-    if not ok_val:
-        colname, val = bad
+
+    # ── M3 checkpoint 1: ONE firewall over (IR, SQL) ──────────────────────────────
+    # The IR is built from whatever structured state THIS head has (a complete IR from
+    # the understanding candidate / fast path, else the branch's own filters/time/rank
+    # with the aggregate & grouping slots partial → the text heuristics keep them). Gates
+    # run in the same order they always did; the head reacts to the verdict exactly as
+    # before (typed refusal, salvage, re-entry). `ir_partial` is traced so the count can
+    # fall through checkpoint 2.
+    from veda import firewall as _fw
+    from veda.ir import from_grounded_intent as _ir_from_gi, from_query_intent as _ir_from_qi, \
+        from_branch_state as _ir_from_branch, partial as _ir_partial
+    if _analytical_used and _analytical_spec is not None and getattr(_u, 'anchor', None):
+        _ir = _ir_from_gi(_u, _analytical_spec, head=("understanding.reentry" if _reentry else "understanding"))
+    elif fp is not None:
+        # the fast path stashes its QueryIntent on a request-scoped ContextVar
+        # (query.fast_path._capture_intent / get_preserved_intent) — the IR reads it there
+        from query.fast_path import get_preserved_intent as _gpi
+        _pi = (_gpi() or {}).get("intent") if callable(_gpi) else None
+        _ir = (_ir_from_qi(_pi, head=f"fast_path.{fp.route}") if _pi is not None
+               else _ir_partial(f"fast_path.{fp.route}", primary))
+    elif from_cache:
+        _ir = _ir_partial("cache", primary)
+    elif _llm_sql:
+        _ir = _ir_partial("llm_sql", primary, known={"filters": [
+            __import__("veda.ir", fromlist=["IRFilter"]).IRFilter(table=primary, column=f["column"], op=f.get("op", "="),
+                                                                  value=f.get("value_norm", f.get("value")), grounding="value_arbiter")
+            for f in (_arb_filters or [])]})
+    else:
+        _ir = _ir_from_branch(f"branch.{_route}", primary, arb_filters=_arb_filters,
+                              tpred_col=(_tcol if _tpred else None), tf=tf,
+                              rank=_rank, rank_col=_rank_sort_col, complete=False)
+    _fv = _fw.check(_ir, sql, sm, query=query, allowed_tables=allowed_tables, allowed_columns=allowed_columns,
+                    ctx=_ambient_ctx(), resolve_table=_resolve, skip_values=skip_values,
+                    llm_generated=_llm_sql, tf=tf, join_constraints=join_constraints, fanout_guard=fanout_guard,
+                    skip_predicate_cols=(join_constraints or {}).get("predicate_cols", set()),
+                    run_alignment=False, run_ir_equivalence=False, run_rbac=False,
+                    head=_ir.head, trace=tr, _semantic_only=True)
+    tr.check("value_grounding", _fv.verdict != _fw.UNGROUNDED, "" if _fv.verdict != _fw.UNGROUNDED else str(_fv.detail))
+    if _fv.verdict == _fw.UNGROUNDED:
+        colname, val = _fv.detail
         fb = _feedback("ungrounded", column=colname, value=val)
         log_route(_route + ".ungrounded", query, (time.time() - start) * 1000)
-        return _done(0, "ungrounded", detail=bad,
+        return _done(0, "ungrounded", detail=_fv.detail,
                      msg=f"value '{val}' not present in {colname}", feedback=fb)
     print("  [L6a] Value check  ✓  filter literals exist in the data")
 
@@ -1749,7 +1937,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
 
     # Unified qualifier-completeness gate (all paths): refuse if the user named a
     # qualifier the SQL doesn't account for (a dropped filter → broader answer).
-    ok_q, missing = qualifier_completeness(query, sql, sm)
+    ok_q = _fv.verdict != _fw.QUALIFIER_DROPPED
+    missing = (_fv.detail if isinstance(_fv.detail, list) else [_fv.detail]) if not ok_q else []
+    if not ok_q and _fv.slot and _fv.slot.startswith("filter:"):
+        missing = [_fv.slot.split(":", 1)[1]]            # IR-vs-SQL: the dropped IR slot
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
         _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
@@ -1869,8 +2060,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             log_route(_route + ".access_denied", query, (time.time() - start) * 1000)
             return _done(0, "access_denied", missing=missing, feedback=fb)
         fb = _feedback("qualifier_dropped", missing=missing)
-        log_route(_route + ".qualifier_dropped", query, (time.time() - start) * 1000)
-        return _done(0, "qualifier_dropped", missing=missing, feedback=fb)
+        # M2: a dropped qualifier on a deterministic answer ("how many amenity CATEGORIES"
+        # → bare COUNT(*)) is a refused branch — the grounded candidate (COUNT DISTINCT)
+        # gets its turn via re-entry when the layer is on; refusal stands otherwise.
+        return _guard_refusal("qualifier_dropped", None, fb, _route + ".qualifier_dropped",
+                              always_done=True, missing=missing)   # this site always returned _done()
     print("  [L6b] Qualifier    ✓  every named qualifier is represented in the SQL")
 
     # Grouped-intent shape guard (flag-gated): an LLM-written PURE PROJECTION for a "how many X by Y" /
@@ -1902,61 +2096,39 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # each can misalign: #14 (cache replay), #13 ("leads per month" grouped by lead_stage) is produced by
     # the deterministic join planner, disproving "deterministic is aligned by construction". The check is a
     # no-op when the flag is off or the referents align, so running it universally is byte-identical-safe.
+    # Alignment guards (temporal / entity-anchor / aggregate presence / filter presence /
+    # dimension) — the firewall's alignment stage. Reactions preserved verbatim: each kind
+    # keeps its own message, `what` hint and route tail; a refused deterministic answer
+    # still goes through _guard_refusal (M2 re-entry).
     if sql:
-        from veda.intent_sql_alignment import alignment_ok as _align_ok
-        _ok_align, _align_why = _align_ok(query, sql, sm)
-        if not _ok_align:
-            _amsg = (f"{_align_why}. Please rephrase or confirm the exact column to use.")
-            fb = _feedback("clarify", msg=_amsg)
-            log_route(_route + ".intent_sql_misalignment", query, (time.time() - start) * 1000)
-            return _done(0, "clarify", msg=_amsg, feedback=fb) if return_result else 0
-
-    # Aggregate-OMISSION guard (flag-gated, Increment 3A): a scalar-aggregate intent ("how many"/"total"/
-    # "average") answered by SQL with NO aggregate call returns a row list reported as the figure (the
-    # "how many projects → 100" silent-wrong). Refuse. Runs on every produced SQL; no-op when off/aligned.
-    if sql:
-        from veda.intent_sql_alignment import aggregate_presence_ok as _agg_ok
-        _ok_agg, _agg_why = _agg_ok(query, sql, sm)
-        if not _ok_agg:
-            # Own next step: the generic "which one you mean?" tail treats a stated-but-unbuilt
-            # aggregate as an ambiguity the user has to resolve, which it isn't.
-            fb = _feedback("clarify", msg=_agg_why,
-                           what="Try asking for one figure at a time — a count, or a total.")
-            log_route(_route + ".aggregate_omission", query, (time.time() - start) * 1000)
-            return _done(0, "clarify", msg=_agg_why, feedback=fb) if return_result else 0
-
-    # Filter-OMISSION guard (flag-gated): the other half of the same silent-wrong class — the question
-    # states a CONDITION ("rated above 4.0", "the ones that are gated") and the SQL applies NO filter at
-    # all, so the answer layer narrates the unfiltered rows as if they were the filtered ones. Measured:
-    # `SELECT "rating","vendor_id","city" FROM "vendors" LIMIT 100` answered "5 vendors have ratings above
-    # 4.0" (truth 4). Placed AFTER the aggregate guard so a query that omits both is reported by the
-    # aggregate one first (the coarser defect). No-op when off / no filter intent / SQL filters anything.
-    if sql:
-        from veda.intent_sql_alignment import filter_presence_ok as _filt_ok
-        _ok_filt, _filt_why = _filt_ok(query, sql, sm)
-        if not _ok_filt:
-            # No worked example here: a fixed one ("vendors where rating > 4") was shown
-            # verbatim on a maintenance question, which reads as the wrong suggestion.
-            fb = _feedback("clarify", msg=_filt_why,
-                           what="Try naming the field and the value to compare it against.")
-            log_route(_route + ".filter_omission", query, (time.time() - start) * 1000)
-            return _done(0, "clarify", msg=_filt_why, feedback=fb) if return_result else 0
-
-    # DIMENSION referent alignment (flag-gated, increment 2): the SQL GROUP BY column must belong to the
-    # CATEGORY/DIMENSION candidates of the SQL's tables whose name matches the requested dimension phrase.
-    # REFUSE (grouped outside the family, "by city" → country) or CLARIFY (≥2 acceptable candidates, e.g.
-    # "leads by status" → furnishing_status | loe_status — never pick arbitrarily). ALIGNED / NOT_APPLICABLE
-    # proceed. Runs on every produced SQL path; no-op when off / not applicable → byte-identical-safe.
-    if sql:
-        from veda.intent_sql_alignment import (
-            dimension_alignment as _dim_align, DIM_REFUSE, DIM_CLARIFY)
-        _dim_out, _dim_why = _dim_align(query, sql, sm)
-        if _dim_out in (DIM_REFUSE, DIM_CLARIFY):
-            fb = _feedback("clarify", msg=_dim_why)
-            log_route(_route + (".dimension_misalignment" if _dim_out == DIM_REFUSE
-                                else ".dimension_ambiguous"),
-                      query, (time.time() - start) * 1000)
-            return _done(0, "clarify", msg=_dim_why, feedback=fb) if return_result else 0
+        _fa = _fw.check(_ir, sql, sm, query=query, allowed_tables=allowed_tables, allowed_columns=allowed_columns,
+                        ctx=_ambient_ctx(), resolve_table=_resolve, skip_values=skip_values, llm_generated=_llm_sql,
+                        tf=tf, run_alignment=True, run_ir_equivalence=False, run_rbac=False,
+                        head=_ir.head, trace=tr, _semantic_only=True, _skip_value_and_qualifier=True)
+        if _fa.verdict == _fw.SHAPE_MISMATCH:
+            _k = _fa.shape_kind
+            if _k == "alignment":
+                _amsg = f"{_fa.reason}. Please rephrase or confirm the exact column to use."
+                fb = _feedback("clarify", msg=_amsg)
+                return _guard_refusal("clarify", _amsg, fb, _route + ".intent_sql_misalignment")
+            if _k == "aggregate_omission":
+                fb = _feedback("clarify", msg=_fa.reason,
+                               what="Try asking for one figure at a time — a count, or a total.")
+                return _guard_refusal("clarify", _fa.reason, fb, _route + ".aggregate_omission")
+            if _k == "filter_omission":
+                fb = _feedback("clarify", msg=_fa.reason,
+                               what="Try naming the field and the value to compare it against.")
+                return _guard_refusal("clarify", _fa.reason, fb, _route + ".filter_omission")
+            if _k == "dimension":
+                from veda.intent_sql_alignment import DIM_REFUSE
+                fb = _feedback("clarify", msg=_fa.reason)
+                return _guard_refusal("clarify", _fa.reason, fb,
+                                      _route + (".dimension_misalignment" if _fa.dim_out == DIM_REFUSE
+                                                else ".dimension_ambiguous"))
+            # IR-vs-SQL structural mismatch on a complete IR (group key / aggregate / limit /
+            # distinct absent from the SQL): same clarify contract, its own route tail.
+            fb = _feedback("clarify", msg=_fa.reason)
+            return _guard_refusal("clarify", _fa.reason, fb, _route + f".ir_shape_{_k or 'mismatch'}")
 
     # Canonical-QueryIntent SHADOW measurement (flag-gated, OBSERVE-ONLY, Phase 1). When the fast-path
     # DECLINED (fp is None) but preserved a QueryIntent, compare it to the final SQL's referents and LOG
@@ -1968,21 +2140,18 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         except Exception:
             pass
 
-    # IR equivalence — refuse LLM SQL that introduced semantics the query never asked
-    # for (extra filters/grouping/ordering/joins/DISTINCT). Deterministic builds skip it.
-    _skip_pred = (join_constraints or {}).get("predicate_cols", set())
-    _tcols = ({k.split(".", 1)[1] for k, m in sm.get("columns", {}).items()
-               if k.split(".", 1)[0] in allowed_tables
-               and (m or {}).get("semantic_type") == "TEMPORAL"}
-              if (tf and (tf.start or tf.end)) else set())
-    ok_ir, ir_viol = validate_ir_equivalence(
-        query, sql, sm, allowed_tables=allowed_tables,
-        skip_predicate_cols=_skip_pred, temporal_cols=_tcols, llm_generated=_llm_sql)
-    tr.check("ir_equivalence", ok_ir, "; ".join(ir_viol))
-    if not ok_ir:
-        fb = _feedback("ir_mismatch", msg="; ".join(ir_viol))
+    # IR equivalence — the firewall's stage 4 (LLM SQL must not add semantics the
+    # question never asked for; deterministic builds skip it inside the gate).
+    _fe = _fw.check(_ir, sql, sm, query=query, allowed_tables=allowed_tables, allowed_columns=allowed_columns,
+                    ctx=_ambient_ctx(), resolve_table=_resolve, skip_values=skip_values, llm_generated=_llm_sql,
+                    tf=tf, skip_predicate_cols=(join_constraints or {}).get("predicate_cols", set()),
+                    run_alignment=False, run_ir_equivalence=True, run_rbac=False,
+                    head=_ir.head, trace=tr, _semantic_only=True, _skip_value_and_qualifier=True)
+    tr.check("ir_equivalence", _fe.verdict != _fw.IR_MISMATCH, _fe.reason if _fe.verdict == _fw.IR_MISMATCH else "")
+    if _fe.verdict == _fw.IR_MISMATCH:
+        fb = _feedback("ir_mismatch", msg=_fe.reason)
         log_route(_route + ".ir_mismatch", query, (time.time() - start) * 1000)
-        return _done(0, "ir_mismatch", msg="; ".join(ir_viol), feedback=fb)
+        return _done(0, "ir_mismatch", msg=_fe.reason, feedback=fb)
     if _llm_sql:
         print("  [L6b+] IR check    ✓  no unrequested filters / joins / grouping / ordering")
 
@@ -2026,8 +2195,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # the narrowed sets, not what it took out.
     _restricted_for_sql = restricted_names(sm, _ambient_ctx())
     _tables_before = set(allowed_tables or ())
-    allowed_tables, allowed_columns = narrow_allowed(
-        allowed_tables, allowed_columns, sm, _ambient_ctx())
+    _fp_v = _fw.check(_ir, sql, sm, query=query, allowed_tables=allowed_tables, allowed_columns=allowed_columns,
+                      ctx=_ambient_ctx(), resolve_table=_resolve, skip_values=skip_values, llm_generated=_llm_sql,
+                      tf=tf, join_constraints=join_constraints, fanout_guard=fanout_guard,
+                      run_alignment=False, run_ir_equivalence=False, run_rbac=True,
+                      head=_ir.head, trace=tr, _skip_value_and_qualifier=True)
+    allowed_tables, allowed_columns = _fp_v.allowed_tables, _fp_v.allowed_columns
     # Say so when the gate actually took something away. Without this, an RBAC
     # narrowing and an ordinary planning miss are indistinguishable in the engine
     # log: the only visible trace was validate_and_parameterize's downstream
@@ -2041,9 +2214,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
               f"(source_ids={list(getattr(_ctx_dbg, 'source_ids', ()) or ())}, "
               f"restricted={_restricted_for_sql['tables']})")
 
-    param_sql, params, err = validate_and_parameterize(sql, allowed_tables, allowed_columns,
-                                                        join_constraints=join_constraints,
-                                                        fanout_guard=fanout_guard)
+    param_sql, params, err = ((_fp_v.sql, _fp_v.params, None) if _fp_v.ok
+                              else (None, [], _fp_v.reason))
     tr.check("ast_readonly_parameterized_fanout", not err, err or "")
     if not err and getattr(tr, "enabled", False):
         _jc = tr.sections.get("join_planning", {}).get("confidence")
@@ -2258,7 +2430,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     is_temporal = bool(tf and (tf.start or tf.end))
     # Don't cache fast-path results — they're already instant and the fast path always
     # wins ahead of the cache, so a cached copy would never be served.
-    if not from_cache and fp is None and rows and not is_temporal and not is_existence:
+    if not from_cache and fp is None and rows and not is_temporal and not is_existence \
+            and _cache_back:
         save_verified_query(query, sql)
 
     log_route(_route, query, (time.time() - start) * 1000, table=str(primary), rows=len(rows))

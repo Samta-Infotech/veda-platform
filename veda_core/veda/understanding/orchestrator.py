@@ -42,7 +42,7 @@ def _trace(section: str, **kw) -> None:
 
 
 def understand_query(query: str, sm, graph=None, junctions=None,
-                     retrieval_scores: Optional[Dict[str, float]] = None
+                     retrieval_scores: Optional[Dict[str, float]] = None, tf=None,
                      ) -> Optional[Union[GroundedIntent, Refusal]]:
     """Flag-gated entry point: EXTRACT → GROUND → trace. Returns None (degrade to the
     existing pipeline), a Refusal (firewall blocked a guess), or a GroundedIntent."""
@@ -66,8 +66,11 @@ def understand_query(query: str, sm, graph=None, junctions=None,
         _trace("understanding", enabled=True, status="extracted",
                intent=raw.intent, grain=raw.grain, measure=raw.measure,
                entities=raw.entities, confidence=raw.confidence)
+        print(f"  [QU] extracted  intent={raw.intent} grain={raw.grain!r} measure={raw.measure!r} "
+              f"dims={raw.dimensions} filters={raw.filters} entities={raw.entities} conf={raw.confidence}")
 
-        result = ground(raw, sm, graph, junctions, retrieval_scores, min_confidence=_minc)
+        result = ground(raw, sm, graph, junctions, retrieval_scores, min_confidence=_minc,
+                        query=query, tf=tf)
         if result is None:
             _trace("understanding", status="degrade", reason="grounding_degrade")
             return None
@@ -78,7 +81,13 @@ def understand_query(query: str, sm, graph=None, junctions=None,
         _trace("understanding", status="grounded", anchor=result.anchor,
                secondaries=result.secondaries,
                measure=(result.measure.kind if result.measure else None),
-               confidence=result.confidence)
+               dimensions=[d.column for d in result.dimensions],
+               filters=[(f.column, f.op, f.value) for f in result.filters],
+               time=result.time, distinct_column=result.distinct_column,
+               fully_grounded=result.fully_grounded, confidence=result.confidence)
+        print(f"  [QU] grounded   anchor={result.anchor} measure={(result.measure.kind, result.measure.column) if result.measure else None} "
+              f"dims={[d.column for d in result.dimensions]} filters={[(f.column, f.op, f.value) for f in result.filters]} "
+              f"time={result.time} distinct={result.distinct_column} full={result.fully_grounded}")
         return result
     except Exception as e:
         # understanding must never break the query path — degrade on any error

@@ -95,7 +95,9 @@ def _run_one_case(client, query_text: str, source_id, tenant) -> tuple[str, str,
     started = time.time()
     status, sql = _ERROR_STATUS, ""
     try:
-        payload = client.run_hybrid_query(query_text, source_id=source_id, tenant=tenant)
+        # Evaluation traffic never replays or writes the verified-query cache (2026-09-16).
+        payload = client.run_hybrid_query(query_text, source_id=source_id, tenant=tenant,
+                                          no_cache=True)
         status = payload.get("status", _UNKNOWN_STATUS)
         items = (payload.get("result") or {}).get("items", [])
         if items:

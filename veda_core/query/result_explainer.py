@@ -415,6 +415,26 @@ def _analytical_context_block(ctx: Optional[dict]) -> str:
     return ("\n\nResolved analytical context: " + "; ".join(bits)) if bits else ""
 
 
+def _nl_model() -> Optional[str]:
+    """The small summarisation model when the backend serves it, else the backend's own
+    model (pre-M3 item 4, 2026-09-16). NL_SUMMARY_MODEL defaults to qwen2.5:7b-instruct,
+    which the host ollama the inference tier points at does not host (it serves
+    qwen2.5-coder:7b only) — asking for it was the second half of the silent fallback.
+    Checked once per process via the backend's /api/tags."""
+    try:
+        from slm import get_backend
+        backend = get_backend()
+        served = getattr(backend, "served_models", None)
+        if callable(served):
+            names = set(served() or [])
+            if NL_SUMMARY_MODEL in names:
+                return NL_SUMMARY_MODEL
+            return getattr(backend, "model", None) or NL_SUMMARY_MODEL
+    except Exception:
+        pass
+    return NL_SUMMARY_MODEL
+
+
 def run_nl_answer(
     query:          str,
     columns:        List[str],
@@ -548,9 +568,12 @@ def run_nl_answer(
             # Still bounded — this prevents essays, it does not license unbounded output.
             num_predict=(NL_SUMMARY_ANALYTICAL_MAX_TOKENS if _mode == "analytical"
                          else NL_SUMMARY_MAX_TOKENS + 50),
-            endpoint="generate",
+            # /api/chat, like every other call in the tree (pre-M3 item 4, 2026-09-16):
+            # the host Metal ollama serves chat only — "generate" 404'd on every answer
+            # and the explainer silently fell back to the templated blend.
+            endpoint="chat",
             timeout=_slm_timeout,
-            model=NL_SUMMARY_MODEL,
+            model=_nl_model(),
         ).strip()
         if not answer:
             raise ValueError("Empty response from SLM")

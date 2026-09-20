@@ -52,6 +52,8 @@ class ChatState(TypedDict, total=False):
                                        # JSON-safe dict, see apps.access_management.services.
                                        # serialize_data_scope), forwarded to call_engine_node
                                        # as the X-Veda-Data-Scope header. None = no narrowing.
+    no_cache: Optional[bool]               # request opted out of the verified-query cache
+                                       # (forwarded by call_engine_node as X-Veda-No-Cache)
     source_profiles: Optional[Dict[str, Any]]  # per-source routing metadata
                                        # (source_type/is_canonical/domain_tags/description, from
                                        # apps.query.scope.source_profiles_for), forwarded to

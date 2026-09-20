@@ -153,7 +153,7 @@ def main():
 
         # MIGRATED: Django-assembled sm via redis, FK via storage_adapters (context set).
         os.environ["VEDA_SM_REDIS"] = "1"
-        set_context(RequestContext(source_id=1, tenant="default"))
+        set_context(RequestContext(source_id=1, tenant="default", cache_back=False))
         _reset_engine_sm()
         migrated = _run(q)
         print(f"  migrated: status={migrated[0]['status']} route={migrated[0]['route']} rows={migrated[0]['row_count']}")

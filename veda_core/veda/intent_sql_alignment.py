@@ -139,8 +139,19 @@ def _named_measure_columns(query, sm):
             continue
         tbl, _, col = k.partition(".")
         words = [w for w in col.lower().split("_") if len(w) > 2]
-        if words and (" " + " ".join(words) + " ") in ql:
-            out.add((tbl, col))
+        if not words or (" " + " ".join(words) + " ") not in ql:
+            continue
+        if len(words) == 1:
+            # A ONE-word column ("amount") is not "named" by that word alone — it fired on
+            # every question containing "amount" and vetoed a correct AVG(paid_amount)
+            # because reminders_reminder.amount / accounts_generalledger.amount weren't the
+            # anchor (2026-09-16, "average payment amount broken down by currency"). It
+            # counts only when the question also names the column's table ("reminder amount").
+            _ttoks = [t for t in re.split(r"[_\s]+", tbl.lower()) if len(t) > 2]
+            _ttoks = [t[:-1] if t.endswith("s") and len(t) > 3 else t for t in _ttoks]
+            if not any((" " + t) in ql for t in _ttoks):
+                continue
+        out.add((tbl, col))
     return out
 
 
@@ -266,14 +277,27 @@ def _boolean_flag_named(query, sm, sql_tables=None):
     be "the filter this SQL forgot" ("users created LAST month" used to match
     users_userpreference.is_LAST_name_obfuscated and refuse a correct temporal query)."""
     ql = " " + re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()) + " "
-    for k, c in (sm or {}).get("columns", {}).items():
+    cols = (sm or {}).get("columns", {})
+    # A word that is ALSO a name-part of a NON-flag column on the same tables is explained by
+    # that column, not by the flag: "total PAID amount" names paid_amount (a measure), not
+    # is_paid — the guard used to refuse a correct grouped SUM as a "forgotten condition"
+    # (2026-09-16, "total paid amount per currency").
+    _non_flag_words = set()
+    for k, c in cols.items():
+        if (c.get("semantic_type") or "").upper() in ("BOOLEAN", "FLAG", "BOOL"):
+            continue
+        if sql_tables and k.split(".", 1)[0] not in sql_tables:
+            continue
+        _non_flag_words.update(w for w in k.split(".", 1)[1].lower().split("_") if len(w) > 3)
+    for k, c in cols.items():
         st = (c.get("semantic_type") or "").upper()
         if st not in ("BOOLEAN", "FLAG", "BOOL"):
             continue
         if sql_tables and k.split(".", 1)[0] not in sql_tables:
             continue
         for w in k.split(".", 1)[1].lower().split("_"):
-            if len(w) > 3 and w not in ("flag", "is", "has") and (" " + w + " ") in ql:
+            if (len(w) > 3 and w not in ("flag", "is", "has") and w not in _non_flag_words
+                    and (" " + w + " ") in ql):
                 return k
     return None
 

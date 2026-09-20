@@ -24,6 +24,7 @@ def run_chat_turn(
     on_event: Optional[Callable[[str, str, dict], None]] = None,
     data_scope: Optional[dict] = None,
     source_profiles: Optional[dict] = None,
+    no_cache: bool = False,
 ) -> dict:
     """The ONE function a caller (apps/chat) invokes per user turn.
 
@@ -75,6 +76,7 @@ def run_chat_turn(
                 "request_id": request_id,
                 "data_scope": data_scope,
                 "source_profiles": source_profiles,
+                "no_cache": bool(no_cache),   # → call_engine_node → X-Veda-No-Cache
             },
             config={"configurable": {"thread_id": session_id, "on_event": on_event}},
         )

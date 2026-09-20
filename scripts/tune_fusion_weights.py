@@ -76,7 +76,7 @@ def main() -> int:
     except Exception as e:
         print(f"[warn] django.setup() failed ({e})", file=sys.stderr)
 
-    set_context(RequestContext(source_id=args.source_id, tenant=args.tenant))
+    set_context(RequestContext(source_id=args.source_id, tenant=args.tenant, cache_back=False))
 
     import config as _config
 

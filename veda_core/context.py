@@ -44,6 +44,25 @@ class RequestContext:
     tenant: str
     source_ids: tuple = ()
     allowed_resources: tuple | None = None
+    # ``cache_back`` (2026-09-16): False disables the verified-query cache for this
+    # request — no replay AND no write. Set by the api tier from the request's
+    # ``no_cache`` field (forwarded as X-Veda-No-Cache) and by every eval script /
+    # the battery, so test traffic can neither be answered from a cached SQL nor
+    # poison the cache with its own answers. Default True = production behaviour.
+    cache_back: bool = True
+
+    def narrowed(self, source_id, source_ids=None) -> "RequestContext":
+        """A copy of this context re-scoped to `source_id` (and optionally a subset
+        `source_ids`) with EVERY other field carried over — allowed_resources (RBAC),
+        cache_back, tenant. Use this, never a fresh RequestContext(source_id=…, tenant=…),
+        when the routing coordinator / agent dispatch narrows scope: rebuilding from two
+        fields silently dropped `cache_back=False` (2026-09-18 — the cross-source battery
+        wrote 17 verified-cache rows through the authoritative SINGLE route) and would drop
+        an RBAC data scope the same way."""
+        return RequestContext(source_id=int(source_id), tenant=self.tenant,
+                              source_ids=tuple(source_ids) if source_ids else (int(source_id),),
+                              allowed_resources=self.allowed_resources,
+                              cache_back=self.cache_back)
 
     def __post_init__(self):
         # Normalize the set: default to the primary, dedupe preserving order, and
@@ -82,6 +101,20 @@ def try_current() -> "RequestContext | None":
 # back to evidence-only routing (canonical/domain tie-break doesn't fire) — byte-identical when
 # unset, so every existing caller is unaffected.
 _source_profiles: ContextVar[dict] = ContextVar("veda_source_profiles", default={})
+
+# Import-name twins (2026-09-16). `/app` AND `/app/veda_core` are both on sys.path, so
+# this file is imported as `context` (20 sites: engine internals, eval scripts) and as
+# `veda_core.context` (25 sites: inference tier, resolver, battery) — two module objects,
+# each with its own ContextVars. A scope set through one name was invisible through the
+# other: the golden-set eval set `context` and `config.resolve_source_artifact` (reading
+# `veda_core.context`) saw no scope. Whichever copy imports second adopts the first
+# copy's ContextVars, so there is exactly ONE ambient scope per process.
+import sys as _sys
+_twin = _sys.modules.get("context" if __name__ == "veda_core.context" else "veda_core.context")
+if _twin is not None and _twin is not _sys.modules.get(__name__) and hasattr(_twin, "_ctx"):
+    _ctx = _twin._ctx
+    _source_profiles = _twin._source_profiles
+del _sys, _twin
 
 
 def set_source_profiles(profiles: dict):

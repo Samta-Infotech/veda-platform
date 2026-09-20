@@ -689,6 +689,14 @@ ROUTING_TIER_DOCUMENT_WEAK   = float(_os.environ.get("ROUTING_TIER_DOCUMENT_WEAK
 # cosine is within GAP of the best source overall AND above FLOOR. Env-tunable; provisional.
 ROUTING_DOMINANCE_GAP   = float(_os.environ.get("ROUTING_DOMINANCE_GAP", "0.03"))
 ROUTING_DOMINANCE_FLOOR = float(_os.environ.get("ROUTING_DOMINANCE_FLOOR", "0.35"))
+# Minimum Jaccard for a discovered cross_source_fk edge to count as a routing relationship
+# (2026-09-18): containment-rated edges at jac 0.001 (`4:asset_id ↔ 2:id`) were making every
+# single-source vendor/amenity question a structural MULTI. See source_coordinator._edge_quality_ok.
+ROUTING_EDGE_MIN_JACCARD = float(_os.environ.get("ROUTING_EDGE_MIN_JACCARD", "0.05"))
+# Kind-fair routing signal (2026-09-18): doc-chunk cosine is subtracted by this before it is
+# compared with column/table cosine (chunks run ~0.07 hotter for equal relevance here). See
+# source_coordinator.kind_normalised_signal. Re-measure on a new corpus; tune, don't guess.
+ROUTING_CHUNK_KIND_OFFSET = float(_os.environ.get("ROUTING_CHUNK_KIND_OFFSET", "0.07"))
 # NOTE: an absolute NO-MATCH threshold on the item-prior cosine was tried and REJECTED — measured
 # distributions overlap. Out-of-scope rejection and cross-source intent are handled instead by the
 # bounded SEMANTIC decision boundary (source_coordinator._decision_boundary → routing_slm.resolve_boundary),
@@ -731,7 +739,9 @@ ROUTING_SLM_MULTI_FEWSHOT_ENABLED = _os.environ.get("ROUTING_SLM_MULTI_FEWSHOT_E
 # 'independent' (run each source separately + merge) — which cannot JOIN, so a genuine cross-source
 # query fails. But run_federated self-discovers join hints independently of the routing edge and works
 # when invoked directly. This flag makes SLM-MULTI try federated first (non-strict); on None it falls
-# back to independent-merge unchanged. Default OFF → byte-identical.
+# back to independent-merge unchanged. Default ON since the flag shipped (the comment used to
+# say OFF — corrected 2026-09-18). A COMPOUND question over several sources never reaches
+# this: veda_hybrid._run_coordinator hands it to the decomposer first (behaviour (c)).
 FEDERATE_SLM_MULTI_ENABLED = _os.environ.get("FEDERATE_SLM_MULTI_ENABLED", "1") == "1"
 
 # Bounded SEMI_JOIN / FILTER_BY_OTHER_SOURCE cross-source strategy (query/semi_join_planner.py). Inside
@@ -1913,15 +1923,17 @@ FASTPATH_ENTITY_GLOSSARY = True
 # language-words-as-filters) that no downstream join/grain patch can. Default OFF
 # → pipeline byte-identical; graceful-degrades to the existing path on any SLM /
 # parse / grounding failure. See docs + veda/understanding/schema.py.
-QUERY_UNDERSTANDING_ENABLED = False
-QUERY_UNDERSTANDING_MIN_CONFIDENCE = 0.5   # below this, degrade to existing path (don't refuse)
+# Env-settable (2026-09-16, M2 first checkpoint) so the flags-on exit test runs in ONE
+# process without editing source; the default stays OFF.
+QUERY_UNDERSTANDING_ENABLED = _os.environ.get("QUERY_UNDERSTANDING_ENABLED", "0") == "1"
+QUERY_UNDERSTANDING_MIN_CONFIDENCE = float(_os.environ.get("QUERY_UNDERSTANDING_MIN_CONFIDENCE", "0.5"))   # below this, degrade to existing path (don't refuse)
 # ── ANALYTICAL_SQL_V2 (Phase 1: structured analytical SQL, flag-gated, OFF) ────
 # Benchmark showed SQL-gen DROPS aggregate intent (scalar/grouped queries came back as
 # raw-row lists). Phase 1 fix: a structured AnalyticalSpec (veda/analytical_spec.py)
 # that SQL-gen CONSUMES instead of re-inferring from language. Scope: SINGLE-ANCHOR
 # analytics (scalar COUNT/SUM/AVG/MIN/MAX, grouped GROUP BY). Multi-table analytical =
 # Phase 2. Deterministic; returns None → existing path (zero regression by construction).
-ANALYTICAL_SQL_V2 = False
+ANALYTICAL_SQL_V2 = _os.environ.get("ANALYTICAL_SQL_V2", "0") == "1"   # env-settable, default OFF
 # NOTE (RC2 routing mis-pick, 2026-07-23): TWO small routing-layer fixes were tried and
 # both reverted (VEDA_ADVERSARIAL_FAILURE_MAP.md Part 4). v1 (broad FK-child penalty in
 # select_primary_table) regressed 20→18. v2 (structural name-prefix penalty + parent
@@ -2284,6 +2296,9 @@ LANGGRAPH_SHARED_PLANNER = True
 # non-deterministic head or a deterministic refusal triggers it. Needs Ollama; if
 # unreachable run_decomposer degrades to "single" and behaviour is exactly as today.
 QUERY_DECOMPOSE_ENABLED = False   # TEMP off: splits join queries ("X and their Y") wrongly — fix later
+# Exception (2026-09-18): a MULTI routing decision on a compound question is decomposed
+# regardless — the coordinator already established there is no join relation between the
+# sources, so the split cannot be the "X and their Y" mistake. See veda_hybrid._COMPOUND_HANDOFF.
 # Independent sub-queries of a compound query are I/O-bound (DB / Ollama / RAG) and
 # share NO state — execute_sql opens a fresh connection per call — so fan them out
 # concurrently. Output is captured per sub-query and emitted IN ORDER; results keep
@@ -2339,8 +2354,20 @@ def artifact_path(name: str) -> str:
     "veda_semantic_model.json"). This is the LEGACY, unscoped location every
     source used to share — still correct as `resolve_source_artifact()`'s
     fallback for an artifact not yet migrated to its own per-source path."""
+    return __import__("os").path.join(_artifact_root_abs(), name)
+
+
+def _artifact_root_abs() -> str:
+    """ARTIFACT_ROOT anchored at this package's directory when it is relative
+    (2026-09-16). It was CWD-relative: the battery `chdir`s to veda_core and worked,
+    the golden-set eval ran from /app and every scoped artifact resolved to
+    `data/default/2/…` relative to the wrong directory — the enricher then loaded
+    no synonyms/glossary/model and the retrieval numbers were silently wrong.
+    An absolute VEDA_ARTIFACT_ROOT is used as-is."""
     _os = __import__("os")
-    return _os.path.join(ARTIFACT_ROOT, name)
+    if _os.path.isabs(ARTIFACT_ROOT):
+        return ARTIFACT_ROOT
+    return _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), ARTIFACT_ROOT)
 
 
 def source_artifact_path(name: str, source_id, tenant: str = "default") -> str:
@@ -2355,8 +2382,7 @@ def source_artifact_path(name: str, source_id, tenant: str = "default") -> str:
     always-inert ``VEDA_ARTIFACT_SCOPE``-based mechanism this one replaced — see
     docs/backlog/query-engine-open-items.md). Prefer this over ``artifact_path()``
     for any NEW per-source derived artifact."""
-    _os = __import__("os")
-    return _os.path.join(ARTIFACT_ROOT, str(tenant), str(source_id), name)
+    return __import__("os").path.join(_artifact_root_abs(), str(tenant), str(source_id), name)
 
 
 def resolve_source_artifact(name: str, source_id=None, tenant=None, flat_default: str = None) -> str:

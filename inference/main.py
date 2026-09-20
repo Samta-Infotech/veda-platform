@@ -174,9 +174,14 @@ def create_app():
                     logger.exception(
                         "malformed X-Veda-Data-Scope header; failing closed to no access")
                     allowed_resources = ()
+            # X-Veda-No-Cache: 1 → this request neither replays nor writes the verified-
+            # query cache (api tier forwards the request's `no_cache` field; every eval
+            # script sets the same flag in-process). See RequestContext.cache_back.
+            _no_cache = str(request.headers.get("x-veda-no-cache", "")).strip().lower() in ("1", "true", "yes")
             set_context(RequestContext(source_id=int(source_id), tenant=tenant,
                                        source_ids=source_ids,
-                                       allowed_resources=allowed_resources))
+                                       allowed_resources=allowed_resources,
+                                       cache_back=not _no_cache))
             # Multi-source routing profiles (source_type/is_canonical/domain_tags/description),
             # server-resolved by the api tier from the Source registry (apps/query/scope.py::
             # source_profiles_for) and sent as X-Veda-Source-Profiles. This was the one forwarded

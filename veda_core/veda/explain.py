@@ -50,6 +50,11 @@ _SECTIONS = [
     "tier1", "tier2", "sql_planning", "sql_generation", "validation",
     "execution", "result_analysis", "summary", "visualization",
     "explainability", "slm", "llm_usage", "output", "totals",
+    # M2/M3 (2026-09-16): the understanding layer's decision, the firewall's verdict on
+    # the SQL that executed ({verdict, ir_partial, checks_run, head, slot, reason}), the
+    # analytical-spec candidate, and the dimension guard's grounded-GROUP-BY note.
+    "understanding", "analytical_sql_v2", "firewall", "dimension_alignment",
+    "entity_resolution", "value_arbitration", "federated",
 ]
 
 

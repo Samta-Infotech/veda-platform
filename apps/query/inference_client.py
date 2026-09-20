@@ -38,6 +38,9 @@ _HEADER_REQUEST_ID = "X-Request-Id"
 # empty object — absence is the "no restriction" signal on the inference side too.
 _HEADER_DATA_SCOPE = "X-Veda-Data-Scope"
 _HEADER_SOURCE_PROFILES = "X-Veda-Source-Profiles"
+# Verified-query cache opt-out (2026-09-16): the request's `no_cache` field, forwarded so
+# the engine neither replays nor writes the cache for this request (eval/battery traffic).
+_HEADER_NO_CACHE = "X-Veda-No-Cache"
 
 _SSE_EVENT_PREFIX = "event:"
 _SSE_DATA_PREFIX = "data:"
@@ -67,7 +70,7 @@ class InferenceClient:
 
     def _request(self, path: str, body: dict, source_id, tenant, request_id=None,
                  accept: str | None = None, source_ids=None, data_scope=None,
-                 source_profiles=None) -> urllib.request.Request:
+                 source_profiles=None, no_cache: bool = False) -> urllib.request.Request:
         url = f"{self.config.base_url.rstrip('/')}{path}"
         data = json.dumps(body).encode("utf-8")
         headers = {"Content-Type": "application/json"}
@@ -90,6 +93,8 @@ class InferenceClient:
             # Multi-source routing profiles, server-resolved from the Source registry (never client
             # supplied). Optional — the engine routes on evidence alone when absent.
             headers[_HEADER_SOURCE_PROFILES] = json.dumps(source_profiles)
+        if no_cache:
+            headers[_HEADER_NO_CACHE] = "1"
         return urllib.request.Request(url, data=data, headers=headers, method="POST")
 
     @staticmethod
@@ -113,27 +118,28 @@ class InferenceClient:
                 f"inference unreachable at {request.full_url}: {exc}") from exc
 
     def _post(self, path: str, body: dict, source_id, tenant, request_id=None,
-              source_ids=None, data_scope=None, source_profiles=None) -> dict:
+              source_ids=None, data_scope=None, source_profiles=None,
+              no_cache: bool = False) -> dict:
         request = self._request(path, body, source_id, tenant, request_id=request_id,
                                 source_ids=source_ids, data_scope=data_scope,
-                                source_profiles=source_profiles)
+                                source_profiles=source_profiles, no_cache=no_cache)
         with self._open(request, self.config.timeout_s) as response:
             return json.loads(response.read().decode("utf-8"))
 
     def run_hybrid_query(self, query: str, source_id=None, tenant=None, flags=None,
                          request_id=None, source_ids=None, data_scope=None,
-                         source_profiles=None) -> dict:
+                         source_profiles=None, no_cache: bool = False) -> dict:
         return self._post(
             _PATH_RUN_HYBRID_QUERY,
             {"query": query, "source_id": source_id, "tenant": tenant,
              "source_ids": source_ids, "flags": flags},
             source_id, tenant, request_id=request_id, source_ids=source_ids,
-            data_scope=data_scope, source_profiles=source_profiles,
+            data_scope=data_scope, source_profiles=source_profiles, no_cache=no_cache,
         )
 
     def stream_hybrid_query(
         self, query: str, source_id=None, tenant=None, flags=None, request_id=None,
-        source_ids=None, data_scope=None, source_profiles=None,
+        source_ids=None, data_scope=None, source_profiles=None, no_cache: bool = False,
     ) -> Iterator[tuple[str, dict]]:
         """Yields (event, data) as the inference tier's SSE stream delivers them
         (progress events as the pipeline advances, then one final "result" event).
@@ -150,7 +156,7 @@ class InferenceClient:
             # then cannot tell a datalake/document source from a relational one, skips the
             # datalake-isolated semantic model, and plans SQL against the primary source's
             # schema — which does not contain the datalake tables at all.
-            source_profiles=source_profiles,
+            source_profiles=source_profiles, no_cache=no_cache,
         )
         response = self._open(request, self.config.timeout_s)
         try:

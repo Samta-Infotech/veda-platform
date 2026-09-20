@@ -133,7 +133,11 @@ class QueryView(APIView):
         try:
             payload = client.run_hybrid_query(query, source_id=source_id, tenant=tenant,
                                               source_ids=source_ids, request_id=request_id,
-                                              data_scope=data_scope, source_profiles=source_profiles)
+                                              data_scope=data_scope, source_profiles=source_profiles,
+                                              # `no_cache` request field → X-Veda-No-Cache: the
+                                              # engine neither replays nor writes the verified-
+                                              # query cache for this request (eval traffic).
+                                              no_cache=str(getattr(request, "data", {}).get("no_cache", "")).lower() in ("1", "true", "yes"))
         except InferenceUnavailable as exc:
             latency = int((time.time() - started) * 1000)
             logger.warning("inference unavailable request_id=%s tenant=%s source_id=%s: %s",

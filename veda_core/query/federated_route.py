@@ -30,7 +30,6 @@ from collections import Counter as _Counter
 
 logger = get_logger(__name__)
 
-_SQL_FENCE = re.compile(r"```(?:sql)?\s*(.+?)```", re.DOTALL | re.IGNORECASE)
 _IDENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")   # safe bare SQL identifier
 # Peripheral/attachment-style tables excluded from the join-path graph — they link to many
 # entities and produce coincidental shortest paths instead of the semantic junction.
@@ -298,39 +297,7 @@ def _join_text(hints: List[dict], kinds: Dict[str, str]) -> str:
     return "\n".join(out)
 
 
-def _extract_sql(text: str) -> str:
-    m = _SQL_FENCE.search(text or "")
-    sql = (m.group(1) if m else text or "").strip()
-    # keep a single statement, drop a trailing semicolon
-    sql = sql.split(";")[0].strip()
-    return sql
 
-
-def _generate_federated_sql(query: str, schema_text: str, join_text: str,
-                            prior_sql: str = "", prior_error: str = "") -> str:
-    system = (
-        "You write ONE read-only DuckDB SQL SELECT statement. Rules: use ONLY the fully-"
-        "qualified table names given VERBATIM (including the src_<id>. prefix and quotes); "
-        "join sources ONLY on the provided join keys; use INNER JOINs ONLY; do NOT join to a "
-        "subquery and do NOT use correlated subqueries or EXISTS — compute every total/count/"
-        "average with plain aggregates + GROUP BY over the joined tables (use COUNT(DISTINCT x) "
-        "for distinct counts); join ONLY the tables the question needs; "
-        "no DDL/DML; no comments; no explanation. Return only the SQL, optionally in a ```sql block.")
-    user = (
-        f"Question: {query}\n\n"
-        f"Available tables:\n{schema_text}\n\n"
-        f"Cross-source join keys (JOIN across src_ catalogs ONLY on these):\n{join_text}\n\n"
-        f"Write the single DuckDB SELECT that answers the question. Always alias tables, "
-        f"GROUP BY the grouping column(s), LIMIT 100.")
-    if prior_error:
-        # One-shot self-repair: the previous SQL failed to execute — show it + the engine
-        # error so the model fixes exactly that (usually: replace a subquery/outer join with
-        # a flat inner join + GROUP BY).
-        user += (f"\n\nYour previous SQL FAILED with this DuckDB error — rewrite it to avoid "
-                 f"the error (flat INNER JOINs + GROUP BY, no subquery joins):\n"
-                 f"-- previous SQL --\n{prior_sql}\n-- error --\n{prior_error}")
-    raw = call_slm(user, system=system, purpose="federated_sql", temperature=0.0)
-    return _extract_sql(raw)
 
 
 def _column_bearing_sources(source_ids) -> set:
@@ -588,7 +555,8 @@ def _classifier_enabled() -> bool:
 
 
 def _dispatch_classified_operation(operation, *, query, by_source, hints, kinds, rel_sid,
-                                   schema_text, join_text, cols, chunks, tenant) -> dict:
+                                   schema_text, join_text, cols, chunks, tenant,
+                                   focused=None) -> dict:
     """Run the EXISTING deterministic planner for a CLASSIFIED cross-source operation. Returns a
     compose payload (ok) or a labelled controlled refusal — it NEVER falls through to the free-form
     SLM-SQL chain. UNSUPPORTED / not-yet-implemented (LOOKUP_ENRICH) / any planner-failure → refuse.
@@ -612,7 +580,9 @@ def _dispatch_classified_operation(operation, *, query, by_source, hints, kinds,
             if sj is None:
                 continue                      # variance: re-pick the key-pair
             sj_sql, _cand = sj
-            payload = compose_federated(query, sj_sql, cols, chunks, tenant=tenant)
+            payload = _fed_compose(query, sj_sql, cols, chunks, tenant, head="federated.semi_join", focused=focused,
+                                   ir=_fed_ir_partial("federated.semi_join", selected_source_ids(cols),
+                                                      anchor=(_cand.get("output_table") if isinstance(_cand, dict) else None)))
             if isinstance(payload, dict) and payload.get("status") == "ok":
                 payload["answer"] = _nl_answer(query, payload.get("result") or {})
                 payload["operation"] = operation
@@ -639,7 +609,9 @@ def _dispatch_classified_operation(operation, *, query, by_source, hints, kinds,
             if not (metric_sqls and len(metric_sqls) == len(struct["metrics"])):
                 continue                      # some metric had no join path → re-pick
             plan = {"group_by": struct["group_alias"], "metrics": metric_sqls}
-            payload = compose_federated_plan(query, plan, cols, chunks, tenant=tenant)
+            payload = _fed_compose_plan(query, plan, cols, chunks, tenant, head="federated.structured",
+                                        ir=_fed_ir_from_structured(struct, metric_sqls, selected_source_ids(cols)),
+                                        struct=struct, focused=focused)
             if isinstance(payload, dict) and payload.get("status") == "ok":
                 payload["answer"] = _nl_answer(query, payload.get("result") or {})
                 payload["operation"] = operation
@@ -649,6 +621,277 @@ def _dispatch_classified_operation(operation, *, query, by_source, hints, kinds,
     # UNSUPPORTED → controlled refusal, never free-form.
     return _refuse("this cross-source shape is not supported by a deterministic operation yet; "
                    "please rephrase or narrow the question")
+
+
+# ── M3 checkpoint 1: ONE firewall in front of the federated executor ───────────────────
+def _fed_value_exists(source_id: str, column: str, literal: str) -> bool:
+    """Does `literal` exist as a sampled value of `column` in source `source_id`? Engine
+    store column_values, scoped to the source's own graph table ids (the same scoping the
+    single-source arbiter uses, query/value_resolver._scope_table_ids); case-insensitive.
+    Unknown column / store miss → False (fail closed: a literal we cannot ground is
+    ungrounded, never assumed)."""
+    try:
+        from veda.runtime import get_internal_connection, release_internal_connection
+    except Exception:
+        try:
+            from storage_adapters.reader import _internal_connection as _ic
+            get_internal_connection, release_internal_connection = (lambda: _ic()), (lambda c: None)
+        except Exception:
+            return False
+    conn = None
+    try:
+        conn = get_internal_connection()
+        with conn.cursor() as cur:
+            cur.execute("SELECT id FROM graph_nodes WHERE source_id = %s AND node_type = %s",
+                        (str(source_id), "table"))
+            ids = [str(r[0]) for r in cur.fetchall()]
+            if not ids:
+                return False
+            cur.execute("SELECT 1 FROM column_values WHERE table_id::text = ANY(%s) AND col_name = %s "
+                        "AND (value_norm = %s OR lower(value_raw) = %s) LIMIT 1",
+                        (ids, column, literal.lower(), literal.lower()))
+            return cur.fetchone() is not None
+    except Exception:
+        return False
+    finally:
+        try:
+            if conn is not None:
+                release_internal_connection(conn)
+        except Exception:
+            pass
+
+
+def _fed_ir_from_structured(struct: dict, metric_sqls: list, scope: list):
+    """Structured plan → COMPLETE IR (the planner names every slot: group col, per-metric
+    agg/table/col; the assembled SQL has no filters by construction)."""
+    from veda.ir import QueryIR, IRMeasure
+    m0 = (struct.get("metrics") or [{}])[0]
+    agg = str(m0.get("agg") or "count").lower().replace("count_distinct", "count")
+    return QueryIR(anchor=str(struct.get("group_table") or ""), measure=IRMeasure(
+        aggregation=agg, column=m0.get("col"), table=m0.get("table"),
+        distinct=str(m0.get("agg") or "").upper() == "COUNT_DISTINCT"),
+        filters=[], group_keys=[str(struct.get("group_col"))], source_scope=list(scope),
+        grounding_method={"anchor": "planner", f"group:{struct.get('group_col')}": "planner"},
+        head="federated.structured")
+
+
+def _fed_ir_from_question(query: str, focused: dict, scope: list):
+    """The IR the firewall checks the federated PLAN against — from the QUESTION (M3
+    checkpoint 2 prerequisite, 2026-09-18), not from the plan. `understanding.extract`
+    names the intent / grain / measure / entities; each entity is grounded to a source
+    and table over `focused` ({source_id: {table: [cols]}} — the same per-source schema
+    the planner sees), the measure to a numeric-looking column of its table. Returns
+    (QueryIR | None, info). None = extraction failed → the caller keeps the plan-derived
+    partial IR (text heuristics only). Never calls the planner.
+
+    Measured need: "how many maintenance records and how many amenities are there" was
+    answered "4 … and an average of 10.88 amenities" (truth 5 and 7) — the structured
+    planner chose AVG for a 'how many' and the wrong grain, and `_fed_ir_from_structured`
+    validated the planner against itself."""
+    try:
+        from veda.understanding.extractor import extract
+        from veda.understanding.grounding import _name_toks, _singularize, _STOP
+        from veda.ir import QueryIR, IRMeasure
+    except Exception:
+        return None, {"reason": "understanding unavailable"}
+    catalog = sorted({t for tabs in (focused or {}).values() for t in tabs})
+    try:
+        raw = extract(query, catalog)
+    except Exception as e:
+        return None, {"reason": f"extract failed: {type(e).__name__}"}
+    if raw is None:
+        return None, {"reason": "extract returned None"}
+
+    def _ground(concept):
+        toks = {_singularize(w) for w in re.findall(r"[a-z]+", str(concept or "").lower())
+                if len(w) > 2 and w not in _STOP}
+        if not toks:
+            return None, None
+        hits = []
+        for sid, tabs in (focused or {}).items():
+            for t in tabs:
+                if t.lower() == str(concept).strip().lower().replace(" ", "_"):
+                    return sid, t
+                if toks & _name_toks(t, None):
+                    hits.append((sid, t))
+        return hits[0] if len(hits) == 1 else (None, None)
+
+    entities = []
+    unresolved = []
+    for e in (raw.entities or []) + ([raw.grain] if raw.grain else []):
+        sid, t = _ground(e)
+        if t and (sid, t) not in entities:
+            entities.append((sid, t))
+        elif e and not t:
+            unresolved.append(str(e))
+    measure = None
+    agg = raw.intent if raw.intent in ("count", "sum", "avg", "min", "max") else None
+    if agg and agg != "count" and raw.measure:
+        mtoks = {_singularize(w) for w in re.findall(r"[a-z]+", raw.measure.lower())
+                 if len(w) > 2 and w not in _STOP}
+        for sid, t in entities:
+            for c in (focused.get(sid, {}) or {}).get(t, []):
+                if mtoks & {_singularize(p) for p in c.lower().split("_")}:
+                    measure = IRMeasure(aggregation=agg, column=c, table=t)
+                    break
+            if measure:
+                break
+    elif agg == "count":
+        measure = IRMeasure(aggregation="count", column=None,
+                            table=entities[0][1] if entities else None)
+    ir = QueryIR(anchor=(entities[0][1] if entities else None),
+                 secondaries=[t for _, t in entities[1:]], measure=measure,
+                 filters=[], group_keys=([raw.grain] if raw.grain and raw.dimensions is not None
+                                         and raw.grain not in [t for _, t in entities] else []),
+                 source_scope=list(scope),
+                 grounding_method={f"entity:{t}": "name_tokens" for _, t in entities},
+                 head="federated.question")
+    info = {"intent": raw.intent, "grain": raw.grain, "measure": raw.measure,
+            "entities": [(s, t) for s, t in entities], "unresolved": unresolved,
+            "n_sources": len({s for s, _ in entities})}
+    return ir, info
+
+
+def _plan_vs_question(struct: dict, qir, info: dict):
+    """Refusal reason when the structured PLAN contradicts the QUESTION's IR, else None.
+    (1) aggregation: a 'how many' must be a COUNT, a 'total' a SUM, …; (2) every question
+    entity must be a table the plan reads; (3) two entities with no shared measure, no
+    grain and no dimension is not a JOIN question — it is two independent counts."""
+    if qir is None or qir.measure is None:
+        return None
+    m0 = (struct.get("metrics") or [{}])[0]
+    plan_agg = str(m0.get("agg") or "").lower().replace("count_distinct", "count")
+    want = qir.measure.aggregation
+    if want and plan_agg and plan_agg != want:
+        return f"plan aggregates {plan_agg.upper()} but the question asks for {want.upper()} (slot: measure)"
+    plan_tables = {str(struct.get("group_table") or "")} | {str(m.get("table") or "") for m in (struct.get("metrics") or [])}
+    plan_names = {re.sub(r'.*\.', "", t).strip('"').lower() for t in plan_tables}
+    for t in [qir.anchor] + list(qir.secondaries):
+        if t and t.lower() not in plan_names:
+            return f"plan does not read '{t}', which the question names (slot: entity)"
+    if len(qir.secondaries) >= 1 and want == "count" and not qir.group_keys and not info.get("grain"):
+        return ("two entities, a plain count and no shared dimension: this is two independent "
+                "counts, not a cross-source join (slot: shape)")
+    return None
+
+
+def _fed_ir_partial(head: str, scope: list, anchor=None, filters=None):
+    from veda.ir import partial, IRFilter
+    known = {}
+    if filters is not None:
+        known["filters"] = [IRFilter(table=f.get("table"), column=f["column"], op=f.get("op", "="),
+                                     value=f.get("value"), grounding=f.get("grounding", "planner"))
+                            for f in filters]
+    return partial(head, anchor, known=known, source_scope=scope)
+
+
+def _sql_vs_question(sql: str, qir, info: dict):
+    """The single-SQL counterpart of _plan_vs_question (semi-join / flat paths): the SQL's
+    aggregate must match the question's intent, every question entity must be a table the
+    SQL reads, and a two-entity plain count is not a join. None = consistent."""
+    if qir is None or qir.measure is None or not sql:
+        return None
+    s = sql.upper()
+    aggs = {a for a in ("COUNT", "SUM", "AVG", "MIN", "MAX") if re.search(rf"\b{a}\s*\(", s)}
+    want = (qir.measure.aggregation or "").upper()
+    if want and aggs and want not in aggs:
+        return f"SQL aggregates {'/'.join(sorted(aggs))} but the question asks for {want} (slot: measure)"
+    names = {m.group(1).lower() for m in re.finditer(r'src_\d+\.(?:[A-Za-z_]+\.)?"?([A-Za-z_][A-Za-z0-9_]*)"?', sql)}
+    for t in [qir.anchor] + list(qir.secondaries):
+        if t and t.lower() not in names:
+            return f"SQL does not read '{t}', which the question names (slot: entity)"
+    if len(qir.secondaries) >= 1 and want == "COUNT" and not qir.group_keys and not info.get("grain"):
+        return ("two entities, a plain count and no shared dimension: this is two independent "
+                "counts, not a cross-source join (slot: shape)")
+    return None
+
+
+def _question_gate(query, focused, scope, head, sql=None, struct=None):
+    """Run the question-IR check for any federated compose. Returns a refusal payload or
+    None. `focused` is required (the per-source schema the entities ground against)."""
+    if not focused:
+        return None
+    qir, qinfo = _fed_ir_from_question(query, focused, scope)
+    try:
+        from veda.explain import current_trace as _ct
+        _ct().set("federated", question_ir=(qir.to_dict() if qir is not None else None),
+                  **{k: v for k, v in (qinfo or {}).items() if k != "entities"})
+    except Exception:
+        pass
+    if qir is None:
+        return None
+    why = _plan_vs_question(struct, qir, qinfo or {}) if struct is not None else _sql_vs_question(sql, qir, qinfo or {})
+    if not why:
+        return None
+    fw = {"verdict": "shape_mismatch", "ir_partial": False, "head": head,
+          "checks_run": ["question_ir"], "slot": why.split("(slot: ")[-1].rstrip(")"), "reason": why}
+    try:
+        from veda.explain import current_trace as _ct
+        _ct().set("firewall", **fw)
+    except Exception:
+        pass
+    return {"status": "refused_federated", "reason": f"firewall shape_mismatch: {why}",
+            "firewall": fw, "sql": sql, "sources": scope}
+
+
+def _fed_compose(query, sql, cols, chunks, tenant, *, ir, head, focused=None):
+    """compose_federated receives ONLY firewalled SQL: the question-IR gate, then
+    firewall.check_federated; a refusal becomes a labelled federated refusal carrying the
+    firewall status."""
+    from veda.firewall import check_federated
+    try:
+        from veda.explain import current_trace as _ct
+        _tr = _ct()
+    except Exception:
+        _tr = None
+    scope = selected_source_ids(cols)
+    _ref = _question_gate(query, focused, scope, head, sql=sql)
+    if _ref is not None:
+        return _ref
+    v = check_federated(ir, sql, query=query, scope_sources=scope,
+                        value_exists=_fed_value_exists, head=head, trace=_tr)
+    if not v.ok:
+        return {"status": "refused_federated", "reason": f"firewall {v.verdict}: {v.reason}",
+                "firewall": v.trace_dict(), "sql": sql, "sources": scope}
+    payload = compose_federated(query, v.sql, cols, chunks, tenant=tenant, params=v.params)
+    if isinstance(payload, dict):
+        payload["firewall"] = v.trace_dict()
+    return payload
+
+
+def _fed_compose_plan(query, plan, cols, chunks, tenant, *, ir, head, struct=None, focused=None):
+    """Per-metric plan: every metric's SQL is firewalled independently (each is what the
+    executor materialises); the plan's group key must equal the IR's. With `struct` +
+    `focused` (the structured planner's path) the plan is FIRST checked against the IR
+    derived from the QUESTION (`_fed_ir_from_question`) — aggregation, entities, shape —
+    so a plan can no longer be validated against itself."""
+    from veda.firewall import check_federated
+    try:
+        from veda.explain import current_trace as _ct
+        _tr = _ct()
+    except Exception:
+        _tr = None
+    scope = selected_source_ids(cols)
+    # question-IR gate: a structured plan is compared as a plan; a free-form per-metric
+    # plan (SLM-written metric SQL, no struct) is compared through its first metric's SQL
+    _first_sql = ((plan.get("metrics") or [{}])[0] or {}).get("sql") or ""
+    _ref = _question_gate(query, focused, scope, head, sql=_first_sql, struct=struct)
+    if _ref is not None:
+        _ref["plan"] = plan
+        return _ref
+    verdicts = []
+    for m in (plan.get("metrics") or []):
+        v = check_federated(ir, m.get("sql") or "", query=query, scope_sources=scope,
+                            value_exists=_fed_value_exists, head=head, trace=_tr)
+        verdicts.append(v)
+        if not v.ok:
+            return {"status": "refused_federated", "reason": f"firewall {v.verdict}: {v.reason}",
+                    "firewall": v.trace_dict(), "plan": plan, "sources": scope}
+    payload = compose_federated_plan(query, plan, cols, chunks, tenant=tenant)
+    if isinstance(payload, dict) and verdicts:
+        payload["firewall"] = verdicts[0].trace_dict()
+    return payload
+
 
 
 def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) -> Optional[dict]:
@@ -739,7 +982,7 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
         return _dispatch_classified_operation(
             op_dec.operation, query=query, by_source=by_source, hints=hints, kinds=kinds,
             rel_sid=rel_sid, schema_text=schema_text, join_text=join_text,
-            cols=cols, chunks=chunks, tenant=tenant)
+            cols=cols, chunks=chunks, tenant=tenant, focused=focused)
 
     # BOUNDED SEMI_JOIN / FILTER strategy (flag-gated, default OFF → skipped entirely). A bounded SLM
     # picks among pre-built, grounded (output,filter) candidate key-pairs — it invents nothing; CODE
@@ -752,7 +995,9 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
             sj = plan_semi_join(query, by_source, hints, kinds)
             if sj is not None:
                 sj_sql, _cand = sj
-                payload = compose_federated(query, sj_sql, cols, chunks, tenant=tenant)
+                payload = _fed_compose(query, sj_sql, cols, chunks, tenant, head="federated.semi_join", focused=focused,
+                                   ir=_fed_ir_partial("federated.semi_join", selected_source_ids(cols),
+                                                      anchor=(_cand.get("output_table") if isinstance(_cand, dict) else None)))
                 if isinstance(payload, dict) and payload.get("status") == "ok":
                     payload["answer"] = _nl_answer(query, payload.get("result") or {})
                     payload["operation"] = "SEMI_JOIN_FILTER"
@@ -780,7 +1025,9 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
         # dropped/NULL metric). Otherwise fall through to the free-form / refuse path.
         if metric_sqls and len(metric_sqls) == len(struct["metrics"]):
             plan = {"group_by": struct["group_alias"], "metrics": metric_sqls}
-            payload = compose_federated_plan(query, plan, cols, chunks, tenant=tenant)
+            payload = _fed_compose_plan(query, plan, cols, chunks, tenant, head="federated.structured",
+                                        ir=_fed_ir_from_structured(struct, metric_sqls, selected_source_ids(cols)),
+                                        struct=struct, focused=focused)
             if isinstance(payload, dict) and payload.get("status") == "ok":
                 payload["answer"] = _nl_answer(query, payload.get("result") or {})
                 return payload
@@ -792,7 +1039,8 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
     plan = _generate_federated_plan(query, schema_text, join_text)
     if plan is not None:
         multi_metric = len(plan.get("metrics") or []) > 1
-        payload = compose_federated_plan(query, plan, cols, chunks, tenant=tenant)
+        payload = _fed_compose_plan(query, plan, cols, chunks, tenant, head="federated.freeform_plan", focused=focused,
+                                    ir=_fed_ir_partial("federated.freeform_plan", selected_source_ids(cols)))
         # Bounded self-repair: feed the engine error back to the SLM for a rewrite, up to the
         # configured depth (default 1 = the historical one-shot). Stops on ok / non-error / no plan.
         _rp = 0
@@ -805,7 +1053,8 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
                                              prior_error=str(payload.get("reason")))
             if plan2 is None:
                 break
-            payload = compose_federated_plan(query, plan2, cols, chunks, tenant=tenant)
+            payload = _fed_compose_plan(query, plan2, cols, chunks, tenant, head="federated.freeform_plan", focused=focused,
+                                        ir=_fed_ir_partial("federated.freeform_plan", selected_source_ids(cols)))
         if isinstance(payload, dict) and payload.get("status") == "ok":
             payload["answer"] = _nl_answer(query, payload.get("result") or {})
             return payload
@@ -820,29 +1069,17 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
                     "sources": selected_source_ids(cols)}, cols)
         # single-metric plan failed → fall through to the single-SQL attempt below.
 
-    # FALLBACK: single flat SELECT (works for simple joins / when plan JSON couldn't be formed).
-    sql = _generate_federated_sql(query, schema_text, join_text)
-    if not sql or not sql.lower().lstrip().startswith("select"):
-        return _labelled_failure({"status": "refused_federated", "reason": "no SELECT generated",
-                                  "sql": sql, "sources": selected_source_ids(cols)}, cols)
-    payload = compose_federated(query, sql, cols, chunks, tenant=tenant)
-    # Bounded self-repair: rewrite from the engine error, up to the configured depth (default 1 =
-    # the historical one-shot). Stops on ok / non-error / a non-SELECT rewrite.
-    _rp = 0
-    while (isinstance(payload, dict) and payload.get("status") == "exec_error_federated"
-           and _rp < _repair_max_attempts()):
-        _rp += 1
-        sql = _generate_federated_sql(query, schema_text, join_text,
-                                      prior_sql=sql, prior_error=str(payload.get("reason")))
-        if not (sql and sql.lower().lstrip().startswith("select")):
-            break
-        payload = compose_federated(query, sql, cols, chunks, tenant=tenant)
-    if isinstance(payload, dict):
-        if _rp:
-            payload.setdefault("repair_attempts", _rp)          # diagnostic: self-repair rounds used
-        if payload.get("status") == "ok":
-            payload["answer"] = _nl_answer(query, payload.get("result") or {})
-    return _labelled_failure(payload, cols)
+    # No free-form SQL fallback (M3 checkpoint 1, 2026-09-16): `_generate_federated_sql`
+    # — an SLM writing raw DuckDB text that only the executor ever saw — is deleted. A
+    # cross-source question that neither the semi-join planner nor the structured /
+    # per-metric planners can express is a typed refusal, never unfirewalled SQL.
+    return _labelled_failure({"status": "refused_federated",
+                              "reason": ("no validated cross-source plan for this question "
+                                         "(the planners could not express it; free-form SQL is "
+                                         "not an option)"),
+                              "firewall": {"verdict": "invalid", "head": "federated",
+                                           "reason": "no plan"},
+                              "sources": selected_source_ids(cols)}, cols)
 
 
 def _labelled_failure(payload, cols):

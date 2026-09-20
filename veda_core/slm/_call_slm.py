@@ -238,6 +238,21 @@ class OllamaBackend:
         self.base_url = base_url.rstrip("/")
         self.model = model
         self.default_timeout = default_timeout
+        self._served: Optional[list] = None
+
+    def served_models(self) -> list:
+        """Model names this Ollama serves (/api/tags), cached per process; [] when
+        unreachable. Lets a caller pick a secondary model only when it exists
+        (query/result_explainer._nl_model, 2026-09-16)."""
+        if self._served is None:
+            try:
+                req = urllib.request.Request(f"{self.base_url}/api/tags", method="GET")
+                with urllib.request.urlopen(req, timeout=5) as r:
+                    body = json.loads(r.read().decode("utf-8") or "{}")
+                self._served = [m.get("name") for m in (body.get("models") or []) if m.get("name")]
+            except Exception:
+                self._served = []
+        return list(self._served)
 
     def call(self, user_message, *, system=None, timeout=None, temperature=0.0,
              num_predict=None, num_ctx=None, seed=None, json_format=False,

@@ -138,11 +138,14 @@ def group_evidence_by_source(columns, chunks) -> Dict[str, SourceEvidence]:
             continue
         ev = buckets.setdefault(sid, SourceEvidence(source_id=sid))
         sim = float(_get(c, "similarity", 0.0) or 0.0)
+        _kind = "table" if str(_get(c, "retrieval_method", "") or "") == "table" else "column"
         ev.items.append(EvidenceItem(
-            kind="column", ref=_col_id(c), name=str(_get(c, "col_name", "") or ""),
+            kind=_kind, ref=_col_id(c), name=str(_get(c, "col_name", "") or _get(c, "table_name", "") or ""),
             table_name=str(_get(c, "table_name", "") or ""), score=sim,
             retrieval_method=str(_get(c, "retrieval_method", "") or ""),
         ))
+        # a TABLE-embedding hit (2026-09-18, per-source evidence) counts as tabular evidence
+        # alongside columns — a one-table datalake source's best signal is the table itself
         ev.column_count += 1
         ev.top_column_score = max(ev.top_column_score, sim)
 

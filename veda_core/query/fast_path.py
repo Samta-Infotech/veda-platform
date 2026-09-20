@@ -993,10 +993,14 @@ def _finalize(query, intent, ground_fn=None) -> Optional[FastPathResult]:
     # ("role names AND role codes") drops a column → fall through to the single-table
     # path, which projects all named columns. (Single-attribute lists pass unchanged.)
     if intent.query_type in ("count", "measure", "dimension_list"):
+        # M3 checkpoint 1: the fast path's ONE gate is the shared firewall's qualifier
+        # check (IR-vs-SQL for the intent's own filters, then the text heuristic) —
+        # same decision as before, one implementation. The full firewall (RBAC, AST,
+        # parameterisation) runs in the pipeline on the returned SQL like every head.
         try:
-            from veda.validation import qualifier_completeness
-            ok_q, _missing = qualifier_completeness(query, sql, _sm())
-            if not ok_q:
+            from veda.firewall import qualifier_only
+            from veda.ir import from_query_intent
+            if not qualifier_only(from_query_intent(intent, head="fast_path"), sql, _sm(), query=query):
                 _capture_intent(intent, "QUALIFIER_GROUNDING_DECLINE")  # intent+sql built, value ungrounded
                 return None
         except Exception:

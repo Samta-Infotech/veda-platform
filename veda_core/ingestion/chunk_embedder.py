@@ -292,7 +292,14 @@ def run_chunk_embedder(
     # it must never fail the ingestion the way a dense-embedding failure does above.
     try:
         from ingestion import m3_encoder
-        sparse_weights = m3_encoder.encode_sparse(texts)
+        # Case-normalised (2026-09-16): BGE-M3's lexical vocabulary is a case-sensitive
+        # SentencePiece — "Site Inspection Notes" (a title) and "site notes" (a question)
+        # share NO token ids, so the independent sparse scan could never surface a
+        # title-cased heading for a lowercase question (found by the battery's content
+        # assertion: site_notes.md ranked 95/177 and the readme answered instead).
+        # query/rag_layer._encode_rag_query_sparse lowercases the query the same way.
+        # Doc-chunk path only; column/table sparse vectors (sparse_index.py) are untouched.
+        sparse_weights = m3_encoder.encode_sparse([str(t).lower() for t in texts])
     except Exception as e:
         if verbose:
             print(f"  ⚠ sparse encoding failed ({e}) — chunks stored dense-only")

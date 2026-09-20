@@ -313,7 +313,7 @@ def eval_federated_e2e(tenant: str) -> dict:
 
 def run_cross_source(args) -> int:
     _setup_django()
-    set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant))
+    set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant, cache_back=False))
 
     golden_path = Path(args.golden)
     if not golden_path.exists():
@@ -390,7 +390,7 @@ def main() -> int:
         return run_cross_source(args)
 
     _setup_django()
-    set_context(RequestContext(source_id=args.source_id, tenant=args.tenant))
+    set_context(RequestContext(source_id=args.source_id, tenant=args.tenant, cache_back=False))
 
     golden_path = Path(args.golden)
     if not golden_path.exists():

@@ -337,16 +337,28 @@ def verified_cache_lookup(qvec: List[float], threshold: float = 0.85) -> Optiona
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     with _connection().cursor() as cur:
         cur.execute(
-            "SELECT verified_sql, columns_json, 1 - (query_embedding <=> %s::vector) "
-            "FROM substrate_verifiedquerycache "
-            "WHERE source_id = ANY(%s) AND tenant = %s AND query_embedding IS NOT NULL "
-            "ORDER BY query_embedding <=> %s::vector LIMIT 1",
+            "SELECT c.verified_sql, c.columns_json, 1 - (c.query_embedding <=> %s::vector) "
+            "FROM substrate_verifiedquerycache c "
+            "WHERE c.source_id = ANY(%s) AND c.tenant = %s AND c.query_embedding IS NOT NULL "
+            f"  AND {_CURRENT_VERSION_PRED} "
+            "ORDER BY c.query_embedding <=> %s::vector LIMIT 1",
             [vec, source_ids, tenant, vec],
         )
         row = cur.fetchone()
     if row and row[2] is not None and row[2] >= threshold:
         return {"sql": row[0], "columns": row[1], "similarity": float(row[2])}
     return None
+
+
+# A cache row is live only while its source is still at the SubstrateVersion it was
+# written under (2026-09-16): a re-ingest bumps the version and every replay for that
+# source lapses without a purge. Pre-existing rows carry "" and match only a source
+# with no version row (i.e. never) — they age out naturally.
+_CURRENT_VERSION_PRED = (
+    "c.substrate_version = COALESCE((SELECT sv.version FROM substrate_substrateversion sv "
+    "  WHERE sv.source_id = c.source_id AND sv.tenant = c.tenant "
+    "  ORDER BY sv.id DESC LIMIT 1), '')"
+)
 
 
 def _query_hash(query: str) -> str:
@@ -362,8 +374,9 @@ def verified_cache_exact(query: str) -> Optional[dict]:
     qhash = _query_hash(query)
     with _connection().cursor() as cur:
         cur.execute(
-            "SELECT verified_sql, columns_json FROM substrate_verifiedquerycache "
-            "WHERE source_id = ANY(%s) AND tenant = %s AND query_hash = %s LIMIT 1",
+            "SELECT c.verified_sql, c.columns_json FROM substrate_verifiedquerycache c "
+            "WHERE c.source_id = ANY(%s) AND c.tenant = %s AND c.query_hash = %s "
+            f"  AND {_CURRENT_VERSION_PRED} LIMIT 1",
             [source_ids, tenant, qhash],
         )
         row = cur.fetchone()
@@ -391,10 +404,14 @@ def save_verified_query(query: str, qvec: List[float], sql: str, columns=None) -
         cur.execute(
             "INSERT INTO substrate_verifiedquerycache "
             "(id, source_id, tenant, query_hash, query_text, verified_sql, columns_json, "
-            " query_embedding, created_at, updated_at) "
-            "VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s::jsonb, %s::vector, now(), now()) "
-            "ON CONFLICT (source_id, tenant, query_hash) DO NOTHING",
-            [source_id, tenant, qhash, query, sql, _json.dumps(columns or []), vec],
+            " query_embedding, substrate_version, created_at, updated_at) "
+            "VALUES (gen_random_uuid(), %s, %s, %s, %s, %s, %s::jsonb, %s::vector, "
+            "        COALESCE((SELECT sv.version FROM substrate_substrateversion sv "
+            "                  WHERE sv.source_id = %s AND sv.tenant = %s "
+            "                  ORDER BY sv.id DESC LIMIT 1), ''), now(), now()) "
+            "ON CONFLICT (source_id, tenant, query_hash, substrate_version) DO NOTHING",
+            [source_id, tenant, qhash, query, sql, _json.dumps(columns or []), vec,
+             source_id, tenant],
         )
         inserted = cur.rowcount > 0
     if inserted:

@@ -170,7 +170,9 @@ def _encode_rag_query_sparse(query: str, verbose: bool = False) -> Optional[dict
     before this signal existed."""
     try:
         from ingestion import m3_encoder
-        return m3_encoder.encode_sparse([query])[0]
+        # lowercase: must match ingestion/chunk_embedder's case-normalised chunk weights
+        # (BGE-M3 sparse ids are case-sensitive — see the comment there, 2026-09-16).
+        return m3_encoder.encode_sparse([str(query).lower()])[0]
     except Exception as e:
         if verbose:
             print(f"  [RAG] sparse encoding failed: {e}")

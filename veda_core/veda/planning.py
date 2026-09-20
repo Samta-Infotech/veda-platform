@@ -241,7 +241,8 @@ def ratio_mode(query):
 
 def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
                         top_n=None, group_col=None, ranked=False, direction="desc",
-                        measure_agg=None, measure_column=None, distinct=False):
+                        measure_agg=None, measure_column=None, distinct=False,
+                        where_sql=None):
     """Deterministic pre-aggregation: one CTE per child relation, each grouped by
     its FK to the anchor, then joined to the anchor grain. No LLM, and structurally
     fan-out-free — two child CTEs can never cross-multiply (the 'organizations with
@@ -271,12 +272,16 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
                 return None, set()
             expr = f'{_a}("{measure_column}")'
         alias = f"{measure_agg.lower()}_result"
+        # M2 (2026-09-16): grounded predicates (analytical_spec._where_sql — typed value /
+        # numeric-comparator / time filters on the anchor, alias t0) — only this branch;
+        # the child-CTE path below is unchanged.
+        _w = f" WHERE {where_sql}" if where_sql else ""
         if group_col:
             _dir = "ASC" if direction == "asc" else "DESC"
             _lim = f" LIMIT {int(top_n)}" if top_n else " LIMIT 100"
-            return (f'SELECT t0."{group_col}", {expr} AS {alias} FROM "{anchor}" t0 '
+            return (f'SELECT t0."{group_col}", {expr} AS {alias} FROM "{anchor}" t0{_w} '
                     f'GROUP BY t0."{group_col}" ORDER BY {alias} {_dir}{_lim}', {anchor})
-        return f'SELECT {expr} AS {alias} FROM "{anchor}" t0', {anchor}
+        return f'SELECT {expr} AS {alias} FROM "{anchor}" t0{_w}', {anchor}
 
     ctes, joins, selects, tables = [], [], [], {anchor}
     metrics = []

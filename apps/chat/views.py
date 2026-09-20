@@ -162,7 +162,10 @@ class ConversationQueryView(APIView):
         source_profiles = source_profiles_for(source_ids)
         service = ConversationQueryService(
             user=user, source_id=source_ids[0], source_ids=source_ids,
-            data_scope=data_scope, source_profiles=source_profiles)
+            data_scope=data_scope, source_profiles=source_profiles,
+            # optional `no_cache` field → the engine skips the verified-query cache for this
+            # turn (no replay, no write). Same flag /api/v1/query accepts.
+            no_cache=str(request.data.get("no_cache", "")).lower() in ("1", "true", "yes"))
         try:
             chat = service.resolve_chat(data["chat_id"], name_hint=data["message"])
         except ChatNotFound:

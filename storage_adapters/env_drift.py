@@ -17,7 +17,11 @@ import logging
 import os
 from typing import Dict, Optional
 
-KEYS = ("METAL_EMBED_URL", "SLM_MODEL_NAME", "SLM_TEMPERATURE", "OLLAMA_URL")
+# OLLAMA_URL is deliberately NOT here: docker-compose.yml sets it explicitly for
+# `inference` and `ingest-worker` (host Metal-GPU ollama), so `.env` is not its authority
+# for those services and comparing against it produced a standing false "drift"
+# (2026-09-16). Compose-level overrides can't be read from inside the container.
+KEYS = ("METAL_EMBED_URL", "SLM_MODEL_NAME", "SLM_TEMPERATURE")
 
 
 def _read_dotenv(path: str) -> Dict[str, str]:

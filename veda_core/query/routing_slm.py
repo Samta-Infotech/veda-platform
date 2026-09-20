@@ -224,6 +224,34 @@ def resolve_boundary(query: str, candidates: List[CandidateSource], *,
 
     decision = _decision_field(parsed)
     if decision == MODE_NONE:
+        # 2026-09-18: the SLM says "no source" at a boundary the EVIDENCE put it at — i.e.
+        # at least one candidate is STRONG. A NONE against a tabular source with a real
+        # table/column hit ("maintenance records per vendor" → maintenance 0.59) is the
+        # weaker signal (measured: 2 of the 12 probe questions were lost exactly here).
+        # Fall back to the deterministic leader when it is TABULAR and leads every other
+        # candidate by the compete window; otherwise honour the NONE (document-led ties,
+        # or no clear leader, still refuse — never a silent fallback source).
+        try:
+            from config import ROUTING_COMPETE_WINDOW as _win, ROUTING_TIER_TABULAR_STRONG as _abs
+        except Exception:
+            _win, _abs = 0.08, 0.55
+        _tab = [c for c in candidates if (c.source_type or "").lower() not in ("document", "doc", "filesystem")]
+        _lead = max(candidates, key=lambda c: getattr(c, "top_score", 0.0)) if candidates else None
+        # the leader must be strong on its OWN evidence (absolute floor), not merely the
+        # least-weak of a weak field: a 1900-column source always has SOME 0.5 hit, and a
+        # nonsense concept ("gizmos") must stay NO_MATCH (probe, 2026-09-18)
+        if (_lead is not None and _lead in _tab and getattr(_lead, "presence_tier", "") == "STRONG"
+                and getattr(_lead, "top_score", 0.0) >= float(_abs)):
+            _others = [getattr(c, "top_score", 0.0) for c in candidates if c is not _lead]
+            if not _others or getattr(_lead, "top_score", 0.0) >= max(_others) + float(_win) / 2:
+                return RoutingDecision(
+                    status=STATUS_ROUTED, mode=MODE_SINGLE, source_ids=[_lead.source_id],
+                    candidate_sources=list(candidates),
+                    evidence_summary=[_lead.evidence_summary] if _lead.evidence_summary else [],
+                    decision_method=METHOD_SLM, reason_code=RC_SLM_RESOLVED,
+                    reason=("SLM answered NONE at an evidence boundary; the tabular leader "
+                            f"(source {_lead.source_id}) holds the strongest signal — routed to it."),
+                    validation_status="passed", query_id=query_id, trace_id=trace_id)
         return RoutingDecision(
             status=STATUS_NO_MATCH, mode=MODE_NONE, candidate_sources=list(candidates),
             decision_method=METHOD_SLM, reason_code=RC_NO_EVIDENCE,

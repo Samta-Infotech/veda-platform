@@ -44,6 +44,8 @@ class QueryFrame(TypedDict, total=False):
     tenant: str
     session_id: str
     entity: Optional[str]           # raw table name (engine_result["table"])
+    source_id: Optional[int]        # the source this turn's answer came from (P4, 2026-09-18);
+                                    # a drill-down runs on THIS source, not the whole scope
     entity_display: Optional[str]   # humanized dataset name (explain.data_used.datasets[0])
     understanding: Optional[str]    # engine's own deterministic summary sentence
                                      # (business_explain.build_explain, NOT LLM prose)
@@ -114,6 +116,10 @@ def harvest_frame(engine_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
     return {
         "entity": engine_result.get("table"),
+        # the source this turn's answer came from (P4 / 2026-09-18): a drill-down keeps
+        # working on THIS source instead of the whole scope re-deciding. None when the
+        # engine result carries no source (a federated or independent multi-source answer).
+        "source_id": engine_result.get("source_id"),
         "entity_display": datasets[0] if datasets else None,
         "understanding": understanding,
         "filters": [

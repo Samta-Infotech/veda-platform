@@ -56,7 +56,7 @@ from concurrent.futures import ThreadPoolExecutor
 from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
 from veda.explain import (current_trace as _cur_trace, bind_trace as _bind_trace,
                           record_result_stages, render_trace)
-from veda.validation import value_grounding, qualifier_completeness
+# (value_grounding / qualifier_completeness now run inside veda.firewall — M3 checkpoint 1)
 from veda.ir_equivalence import validate_ir_equivalence
 import sqlglot
 from sqlglot import exp
@@ -370,6 +370,10 @@ def _agent_to_subresult(query, ar):
     status = getattr(ar, "status", "")
     if status == "ok":
         payload = {"ok": True, **(getattr(ar, "data", {}) or {})}
+        # the answering source travels with the answer (P4, 2026-09-18) so the chat frame
+        # can keep a drill-down on it
+        if getattr(ar, "source_id", None) not in (None, "") and "source_id" not in payload:
+            payload["source_id"] = ar.source_id
         return _to_subresult(query, engine, payload)
     if status == "refused":
         # Pass the agent's diagnostic payload through instead of None. It carries the pipeline's
@@ -423,7 +427,67 @@ def _multi_to_multiresult(query, out, on_event=None):
                                    f"source {f.get('source_id')}: {f.get('error')}"))
     if not items:
         return None
-    return MultiResult(items=items)
+    # APPEND (independent facts from ≥2 sources): lead with ONE summary that states each
+    # source's answer, so the reply reads as a single answer over several sources rather
+    # than a list of disconnected blocks (2026-09-18). Composed by the small NL model from
+    # the per-source answers ONLY (no new facts); deterministic fallback = the answers
+    # joined, each labelled with its source. Per-source items stay for provenance/drill.
+    _summary = None
+    if len([it for it in items if it.status == STATUS_OK]) >= 2:
+        try:
+            _summary = _summarise_multi_answers(query, items)
+        except Exception:
+            _summary = None
+    return MultiResult(items=items, summary=_summary)
+
+
+def _with_summary(mr):
+    """Attach MultiResult.summary when ≥2 items answered (compound fan-out / independent
+    multi-source merge) — behaviour (c), 2026-09-18. The per-source items are untouched."""
+    try:
+        oks = [it for it in (getattr(mr, "items", None) or []) if it.status == STATUS_OK]
+        if len(oks) >= 2 and not getattr(mr, "summary", None):
+            q = " ; ".join(it.sub_query for it in oks)
+            mr.summary = _summarise_multi_answers(q, oks)
+    except Exception:
+        pass
+    return mr
+
+
+def _summarise_multi_answers(query, items):
+    """One sentence-or-three over the per-source answers (APPEND merge). The SLM sees only
+    the answers already produced (with their source ids) and must not add figures; the
+    numeric guard the explainer uses applies. Falls back to a labelled join."""
+    parts = []
+    for it in items:
+        if it.status != STATUS_OK or not isinstance(it.result, dict):
+            continue
+        sid = it.result.get("source_id") or (it.result.get("sources") or [""])[0]
+        ans = str(it.result.get("answer") or "").strip()
+        if ans:
+            parts.append((str(sid), ans))
+    if len(parts) < 2:
+        return None
+    fallback = " ".join(f"From source {sid}: {ans}" for sid, ans in parts)
+    try:
+        from slm import call_slm
+        from config import NL_SUMMARY_MAX_TOKENS
+        from query.result_explainer import _nl_model
+        prompt = ("Combine the following answers, each from a different data source, into ONE short "
+                  "summary that answers the question. State each source's figure; do not invent or "
+                  "compute new numbers; if they disagree, say so.\n\n"
+                  f"Question: {query}\n" + "\n".join(f"- source {sid}: {ans}" for sid, ans in parts)
+                  + "\n\nSummary:")
+        out = call_slm(prompt, purpose="multi_summary", temperature=0.1,
+                       num_predict=NL_SUMMARY_MAX_TOKENS + 50, endpoint="chat", model=_nl_model()).strip()
+        import re as _re
+        nums_in = set(_re.findall(r"\d[\d,]*\.?\d*", " ".join(a for _, a in parts)))
+        nums_out = set(_re.findall(r"\d[\d,]*\.?\d*", out))
+        if out and nums_out <= nums_in:      # no invented figures
+            return out
+    except Exception:
+        pass
+    return fallback
 
 
 def _constrain_scope_to(source_id):
@@ -438,10 +502,10 @@ def _constrain_scope_to(source_id):
         if ctx is None:
             return
         sid = int(source_id)
-        from veda_core.context import RequestContext
-        _set_ctx(RequestContext(source_id=sid, tenant=str(getattr(ctx, "tenant", "default")),
-                                source_ids=(sid,),
-                                allowed_resources=getattr(ctx, "allowed_resources", None)))
+        # narrowed(): EVERY other field travels (allowed_resources, cache_back) — a fresh
+        # RequestContext here dropped cache_back=False and the cross-source battery wrote
+        # 17 verified-cache rows through the authoritative SINGLE route (2026-09-18)
+        _set_ctx(ctx.narrowed(sid))
     except Exception:
         pass
 
@@ -655,6 +719,12 @@ def _datalake_isolated_sm(source_id):
         return None
 
 
+from contextvars import ContextVar as _CtxVar
+# set by _run_coordinator when a MULTI decision on a compound question is handed to the
+# decomposer; read by run_hybrid_query to skip the legacy federate-first call (behaviour c)
+_COMPOUND_HANDOFF: "_CtxVar[bool]" = _CtxVar("veda_compound_handoff", default=False)
+
+
 def _run_coordinator(query, verbose=False, on_event=None):
     """Multi-source routing coordinator entry (Phase 3.6 + authoritative wiring).
 
@@ -783,7 +853,17 @@ def _run_coordinator(query, verbose=False, on_event=None):
         # CLARIFICATION_REQUIRED / anything else) stays gated by SHADOW as before. SHADOW=1 in
         # .env today — flip to 0 only once a SINGLE-vs-legacy-engine regression test exists.
         _is_multi_decision = decision.status == "ROUTED" and decision.mode == "MULTI"
-        _effective_shadow = bool(MULTISOURCE_ROUTING_SHADOW) and not _is_multi_decision
+        # 2026-09-18: a ROUTED/SINGLE decision is authoritative too. The condition the 09-10
+        # note set for this ("a SINGLE-vs-legacy-engine regression test") exists now —
+        # scripts/eval_cross_source_battery.py — and the routing evidence it was gated on has
+        # been fixed to be per-source and kind-fair (source_coordinator, 3/12 → 10/12 on the
+        # probe). A SINGLE route runs the SAME pinned path the source's own battery runs, so
+        # an unpinned single-source question can no longer land in the federated planner.
+        # NO_MATCH / CLARIFICATION_REQUIRED stay advisory under SHADOW: the legacy engine is
+        # strictly more capable than "no source", so they fall through instead of refusing.
+        _is_single_decision = decision.status == "ROUTED" and decision.mode == "SINGLE"
+        _effective_shadow = (bool(MULTISOURCE_ROUTING_SHADOW)
+                             and not _is_multi_decision and not _is_single_decision)
 
         try:
             _cur_trace().set(
@@ -853,6 +933,30 @@ def _run_coordinator(query, verbose=False, on_event=None):
             return MultiResult(items=[_agent_to_subresult(query, ar)])
 
         if decision.status == "ROUTED" and decision.mode == "MULTI":
+            # Behaviour (c), 2026-09-18: a COMPOUND question over several sources ("how many
+            # maintenance records and how many amenities are there") is not a join — it is
+            # one sub-question per source. Let the decomposer split it (the normal path
+            # below _run_coordinator) so each part routes SINGLE on its own and the fan-out
+            # returns one answer per source plus a summary. Federation stays for questions
+            # that genuinely relate the sources. Measured: this question went to the
+            # federated planner and came back "4 … and an average of 10.88" (truth 5 and 7).
+            try:
+                _dc = run_decomposer(query, verbose=False)
+                if getattr(_dc, "should_split", False) and len(getattr(_dc, "sub_queries", []) or []) >= 2:
+                    if verbose:
+                        print(f"  [routing] MULTI but compound ({len(_dc.sub_queries)} parts) → "
+                              f"decompose; each part routes on its own")
+                    try:
+                        _cur_trace().set("routing", compound=True, parts=list(_dc.sub_queries),
+                                         handoff="decomposer")
+                    except Exception:
+                        pass
+                    # tell run_hybrid_query to skip the legacy federate-first call and go
+                    # straight to the decomposer (contextvar: request-scoped, thread-safe)
+                    _COMPOUND_HANDOFF.set(True)
+                    return None
+            except Exception:
+                pass
             _emit(on_event, "route",
                   f"Combining data across {len(decision.source_ids)} sources…",
                   source_ids=decision.source_ids, mode="multi")
@@ -1043,14 +1147,40 @@ def _maybe_federated(query, verbose=False, strict=False):
                       "retryable": payload.get("retryable"),
                       "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
             return MultiResult(items=[_to_subresult(query, "federated", result)])
+        # M3 checkpoint 1: a plan the FIREWALL refused (ungrounded literal, dropped IR
+        # slot, out-of-scope table) is a real, explained refusal — never a silent
+        # single-source fallback that would answer a different question.
+        if isinstance(payload.get("firewall"), dict) and payload["firewall"].get("verdict") not in (None, "ok"):
+            if verbose:
+                print(f"  [federated] firewall {payload['firewall'].get('verdict')} — surfacing refusal")
+            result = {"ok": False, "status": "federated_refused",
+                      "error": payload.get("reason") or "federation refused", "sql": payload.get("sql"),
+                      "firewall": payload.get("firewall"),
+                      "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
+            try:
+                _cur_trace().set("firewall", **payload["firewall"])
+            except Exception:
+                pass
+            return MultiResult(items=[_to_subresult(query, "federated", result)])
         if verbose:
             print(f"  [federated] plan failed ({_reason[:80]}) — falling back to single-source")
+        try:
+            _cur_trace().set("federated", status=payload.get("status"), reason=str(_reason)[:200],
+                             fallback="single_source")
+        except Exception:
+            pass
         return None
     # refused/blocked federation is a real, explained outcome — surface it, don't silently
     # fall back to a single-source answer that would drop a source.
     result = {"ok": False, "status": "federated_refused",
               "error": payload.get("reason") or "federation refused", "sql": payload.get("sql"),
+              "firewall": payload.get("firewall"),
               "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
+    try:
+        if isinstance(payload.get("firewall"), dict):
+            _cur_trace().set("firewall", **payload["firewall"])
+    except Exception:
+        pass
     return MultiResult(items=[_to_subresult(query, "federated", result)])
 
 
@@ -1224,6 +1354,7 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # it only traces (answer path byte-identical), and when authoritative it can drive the answer —
     # NO_MATCH/clarify refuse WITHOUT generating an answer, SINGLE routes via its source agent. Returns
     # None to defer to the legacy path (off / shadow / MULTI / any failure).
+    _COMPOUND_HANDOFF.set(False)
     _routed = _run_coordinator(query, verbose=verbose, on_event=on_event)
     if _routed is not None:
         return _merge_extra_usage(_routed, _l0_usage_totals)
@@ -1231,7 +1362,9 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
     # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.
-    fed = _maybe_federated(query, verbose=verbose)
+    # Behaviour (c), 2026-09-18: NOT when the coordinator just handed a COMPOUND question
+    # to the decomposer — federating first re-created the wrong "4 … average 10.88" answer.
+    fed = None if _COMPOUND_HANDOFF.get() else _maybe_federated(query, verbose=verbose)
     if fed is not None:
         return _merge_extra_usage(fed, _l0_usage_totals)
 
@@ -1240,7 +1373,11 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     except Exception:
         QUERY_DECOMPOSE_ENABLED = False
 
-    if not QUERY_DECOMPOSE_ENABLED:
+    # Behaviour (c), 2026-09-18: the global decomposer flag is OFF (it mis-splits join
+    # questions), but when the ROUTING COORDINATOR handed a MULTI decision off as compound
+    # the split is safe by construction — it found ≥2 sources and no join relation, and the
+    # decomposer produced ≥2 parts — so the handoff proceeds to the split regardless.
+    if not QUERY_DECOMPOSE_ENABLED and not _COMPOUND_HANDOFF.get():
         route, res = _dispatch_single(query, verbose=verbose, on_event=on_event)
         return _merge_extra_usage(
             MultiResult(items=[_to_subresult(query, route, res)]), _l0_usage_totals)
@@ -1349,11 +1486,39 @@ def _run_sub(sq, verbose=False, on_event=None, index=None, total=None):
     if index is not None and total is not None:
         _emit(on_event, "sub_query", f"Running sub-query {index}/{total}: {sq}",
               index=index, total=total, sub_query=sq)
+    # Each part starts from the FULL request scope: the coordinator's SINGLE route narrows
+    # the ambient context to the chosen source (_constrain_scope_to), and without a reset
+    # part 2 inherited part 1's source (run 4, 2026-09-18: "how many amenities" ran on the
+    # maintenance source and refused). Snapshot → route → restore, every part.
+    _saved_ctx = None
     try:
+        from veda_core.context import try_current as _tc, set_context as _sc
+        _saved_ctx = _tc()
+    except Exception:
+        _saved_ctx = None
+    try:
+        # Behaviour (c), 2026-09-18: each part of a compound question DECIDES ITS OWN
+        # SOURCE — route it through the coordinator first (a SINGLE decision answers on
+        # that source, the same pinned path its battery runs); None → the legacy
+        # single dispatch on the ambient scope, exactly as before.
+        _routed = None
+        try:
+            _routed = _run_coordinator(sq, verbose=verbose, on_event=on_event)
+        except Exception:
+            _routed = None
+        if _routed is not None and getattr(_routed, "items", None):
+            _it = _routed.items[0]
+            return SubResult(sq, _it.status, _it.route, _it.result, _it.refuse_reason)
         route, res = _dispatch_single(sq, verbose=verbose, on_event=on_event)
     except Exception as e:
         print(f"  [Hybrid] sub-query crashed: {type(e).__name__}: {e}")
         route, res = "none", None
+    finally:
+        if _saved_ctx is not None:
+            try:
+                _sc(_saved_ctx)
+            except Exception:
+                pass
     return _to_subresult(sq, route, res)
 
 
@@ -1383,7 +1548,7 @@ def _fan_out(sub_queries, verbose=False, on_event=None):
         for i, sq in enumerate(sub_queries, start=1):
             print(f"\n  [Hybrid] ── sub-query: {sq!r}")
             items.append(_run_sub(sq, verbose=verbose, on_event=on_event, index=i, total=total))
-        return MultiResult(items=items)
+        return _with_summary(MultiResult(items=items))
 
     import io, sys, threading
     real_stdout = sys.stdout
@@ -1427,7 +1592,7 @@ def _fan_out(sub_queries, verbose=False, on_event=None):
         if out.strip():
             print(out.rstrip("\n"))
         items.append(item)
-    return MultiResult(items=items)
+    return _with_summary(MultiResult(items=items))
 
 
 def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
@@ -1772,15 +1937,20 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
         owners = [t for t in allowed_tables if f"{t}.{colexp.name}" in cols_meta]
         return owners[0] if len(owners) == 1 else _default_tbl
 
-    ok_val, bad = value_grounding(raw_sql, _resolve, cols_meta)
-    if not ok_val:
-        return False, f"ungrounded value {bad}"
-    # STRICT: LLM-lane answers face the QSR-aware gate — an unaccounted token with a
-    # referent anywhere in the schema is a dropped qualifier, closing the wrong-table
-    # blind spot (SELECT * FROM assets_asset for "most expensive financial records").
-    ok_q, missing = qualifier_completeness(query, raw_sql, sm, strict=True)
-    if not ok_q:
-        return False, f"dropped qualifier {missing!r}"
+    # M3 checkpoint 1: value grounding + STRICT qualifier completeness through the ONE
+    # firewall (veda.firewall) — same gates, same order, one implementation. RBAC and
+    # parameterisation already ran on this SQL before _tier2_validate is called, so
+    # only the semantic gates are requested here (run_rbac/ast are the caller's).
+    from veda.firewall import check as _fw_check, UNGROUNDED as _FW_UNGROUNDED
+    from veda.ir import partial as _ir_partial
+    _v = _fw_check(_ir_partial("tier2"), raw_sql, sm, query=query, allowed_tables=allowed_tables,
+                   allowed_columns=allowed_cols, resolve_table=_resolve, strict_qualifier=True,
+                   llm_generated=llm_written, tf=tf, run_alignment=False,
+                   run_ir_equivalence=False, run_rbac=False, head="tier2",
+                   trace=_cur_trace(), _semantic_only=True)
+    if not _v.ok:
+        return False, (f"ungrounded value {_v.detail}" if _v.verdict == _FW_UNGROUNDED
+                       else f"dropped qualifier {_v.detail!r}")
     # Constraint-class check (2026-09-16, M1 close-out battery): "properties with more
     # than 3 floors" came back as SELECT total_floors … LIMIT 1000 — the threshold was
     # dropped, and qualifier_completeness can't see it because "3" is not a categorical
@@ -2133,9 +2303,7 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
         from query.retrieval_select import select_retrieval
         from query.slm_layer import run_slm_layer
         from query.sql_builder import run_sql_builder
-        from veda.validation import validate_and_parameterize, value_grounding
         from veda.execution import execute_sql
-        from veda.rbac_filter import narrow_allowed
         from query.temporal_parser import run_temporal_parser
 
         if execution_state is not None and execution_state.temporal_result is not None:
@@ -2197,22 +2365,19 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             _qi = map_envelope_to_intent(_env, _hmap, tf) if _env else None
             if _qi is not None and validate_intent(_qi)[0] == "ok":
                 _sql, _tbls, _cols, _route, _why = build_sql(_qi)
-                ok_val, bad = value_grounding(_sql, lambda _c: _qi.subject_table,
-                                              sm.get("columns", {}))
-                if not ok_val:
-                    print(f"  [Tier2] envelope value ungrounded {bad} — fallback to IR")
+                # M3 checkpoint 1: the envelope's QueryIntent → IR → ONE firewall call
+                # (value grounding, qualifier, alignment, IR-equivalence, RBAC, AST+params).
+                from veda.firewall import check as _fw_check
+                from veda.ir import from_query_intent as _ir_from_qi
+                _fv = _fw_check(_ir_from_qi(_qi, head="tier2.envelope"), _sql, sm, query=query,
+                                allowed_tables=_tbls, allowed_columns=_cols, ctx=_current_ctx(),
+                                resolve_table=lambda _c: _qi.subject_table, strict_qualifier=True,
+                                llm_generated=True, tf=tf, head="tier2.envelope", trace=_cur_trace())
+                if not _fv.ok:
+                    print(f"  [Tier2] envelope firewall {_fv.verdict} ({_fv.reason[:100]}) — fallback to IR")
                 else:
-                    # Gate 1 (User Story 3): centralized final RBAC gate — see
-                    # veda.rbac_filter.narrow_allowed's docstring. No-op without a
-                    # forwarded data scope.
-                    _tbls, _cols = narrow_allowed(_tbls, _cols, sm, _current_ctx())
-                    psql, params, err = validate_and_parameterize(_sql, _tbls, _cols)
-                    if err:
-                        print(f"  [Tier2] envelope firewall rejected ({err}) — fallback to IR")
-                    elif not (_ev := _tier2_validate(query, psql, sm, set(_tbls), _cols,
-                                                     llm_written=True, tf=tf))[0]:
-                        print(f"  [Tier2] envelope gated ({_ev[1]}) — fallback to IR")
-                    else:
+                    psql, params = _fv.sql, _fv.params
+                    if True:
                         ecols, erows, eerr = execute_sql(psql, list(params))
                         if eerr:
                             print(f"  [Tier2] envelope exec error ({eerr}) — fallback to IR")
@@ -2359,26 +2524,22 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
                     a_tables = set(act.get("tables", []))
                     a_cols = act.get("columns") or [k.split(".", 1)[1] for k in all_cols
                                                     if k.split(".", 1)[0] in a_tables]
-                    # Gate 1 (User Story 3): centralized final RBAC gate.
-                    a_tables, a_cols = narrow_allowed(a_tables, a_cols, sm, _current_ctx())
-                    psql, params, err = validate_and_parameterize(act["sql"], a_tables, a_cols)
-                    if err:
+                    # M3 checkpoint 1: ONE firewall call (RBAC + AST/params + the semantic
+                    # gates, in the pipeline's order). A refusal feeds the repair hint
+                    # first, the typed refusal last — the head reacts, the firewall decides.
+                    from veda.firewall import check as _fw_check
+                    from veda.ir import partial as _ir_partial
+                    _fv = _fw_check(_ir_partial("tier2.shared_planner", ent_names[0]), act["sql"], sm,
+                                    query=query, allowed_tables=a_tables, allowed_columns=a_cols,
+                                    ctx=_current_ctx(), strict_qualifier=True, llm_generated=True,
+                                    tf=tf, head="tier2.shared_planner", trace=_cur_trace())
+                    if not _fv.ok:
                         if _attempt < _max_repairs:
-                            _repair_hint = _repair_hint_for(err); continue
-                        print(f"  [Tier2] shared-planner firewall rejected (kept safe): {err}")
-                        return {"status": "tier2_rejected", "ok": False, "error": err}
-                    # The SAME correctness gates the single-table IR path runs below
-                    # (2026-09-16): this branch only had the AST firewall, so "properties
-                    # with more than 3 floors" executed as "assets with more than 3
-                    # listing reviews" — a graph-verified join answering a different
-                    # question. Reason feeds the repair hint first, refusal last.
-                    _ok_sp, _why_sp = _tier2_validate(query, psql, sm, a_tables, a_cols,
-                                                      llm_written=True, tf=tf)
-                    if not _ok_sp:
-                        if _attempt < _max_repairs:
-                            _repair_hint = _repair_hint_for(_why_sp); continue
-                        print(f"  [Tier2] shared-planner gated (kept safe): {_why_sp}")
-                        return {"status": "tier2_rejected", "ok": False, "error": _why_sp}
+                            _repair_hint = _repair_hint_for(_fv.reason); continue
+                        print(f"  [Tier2] shared-planner firewall {_fv.verdict} (kept safe): {_fv.reason[:120]}")
+                        return {"status": "tier2_rejected", "ok": False, "error": _fv.reason,
+                                "firewall": _fv.trace_dict()}
+                    psql, params = _fv.sql, _fv.params
                     cols, rows, eerr = execute_sql(psql, list(params))
                     if eerr:
                         if _is_param_mismatch(eerr):
@@ -2408,33 +2569,31 @@ def _tier2_sql(query, sm, all_cols, verbose=False, deadline=None, execution_stat
             allowed_tables = set(getattr(l4, "tables_used", []) or [])
             allowed_cols = [k.split(".", 1)[1] for k in all_cols
                             if k.split(".", 1)[0] in allowed_tables]
-            # Gate 1 (User Story 3): centralized final RBAC gate.
-            allowed_tables, allowed_cols = narrow_allowed(
-                allowed_tables, allowed_cols, sm, _current_ctx())
-            # firewall — graph_guard (live) verifies LLM-proposed joins against the FK graph
-            psql, params, err = validate_and_parameterize(l4.sql, allowed_tables, allowed_cols)
-            if err:
-                try:
-                    _cur_trace().check("tier2_firewall", False, str(err)[:200])
+            # M3 checkpoint 1: ONE firewall call. Same reaction contract as before: an
+            # AST/allow-list failure ('invalid'/'rbac') is repairable → retry with a hint;
+            # a semantic gate failure (ungrounded / dropped qualifier / mismatch) is NOT
+            # (the schema doesn't change between attempts) → refuse at once. The SLM's
+            # IR names entities, not grounded slots → partial IR (text heuristics apply).
+            from veda.firewall import check as _fw_check, INVALID as _FW_INVALID, RBAC as _FW_RBAC
+            from veda.ir import partial as _ir_partial
+            _fv = _fw_check(_ir_partial("tier2.ir", next(iter(allowed_tables), None)), l4.sql, sm,
+                            query=query, allowed_tables=allowed_tables, allowed_columns=allowed_cols,
+                            ctx=_current_ctx(), strict_qualifier=True, llm_generated=True, tf=tf,
+                            head="tier2.ir", trace=_cur_trace())
+            if not _fv.ok:
+                if _fv.verdict in (_FW_INVALID, _FW_RBAC):
+                    try:
+                        _cur_trace().check("tier2_firewall", False, _fv.reason[:200])
+                        if _attempt < _max_repairs:
+                            _cur_trace().repair("firewall", f"attempt {_attempt}", "retry")
+                    except Exception:
+                        pass
                     if _attempt < _max_repairs:
-                        _cur_trace().repair("firewall", f"attempt {_attempt}", "retry")
-                except Exception:
-                    pass
-                if _attempt < _max_repairs:
-                    _repair_hint = _repair_hint_for(err); continue
-                print(f"  [Tier2] firewall rejected (kept safe): {err}")
-                return {"status": "tier2_rejected", "ok": False, "error": err}
-            # Correctness gates (value grounding + STRICT qualifier + IR equivalence) —
-            # previously defined but never called on this path, which is how a bare
-            # SELECT * from the wrong table shipped as an "answer". NO repair retry on
-            # a gate failure: a dropped qualifier isn't fixable by IR nudging (the
-            # schema doesn't change between attempts), and each retry is a full SLM
-            # round — measured blowing the q61-class past 200s on CPU fallback.
-            _ok2, _why2 = _tier2_validate(query, psql, sm, allowed_tables, allowed_cols,
-                                          llm_written=True, tf=tf)
-            if not _ok2:
-                print(f"  [Tier2] gated (kept safe): {_why2}")
-                return {"status": "tier2_rejected", "ok": False, "error": _why2}
+                        _repair_hint = _repair_hint_for(_fv.reason); continue
+                print(f"  [Tier2] firewall {_fv.verdict} (kept safe): {_fv.reason[:120]}")
+                return {"status": "tier2_rejected", "ok": False, "error": _fv.reason,
+                        "firewall": _fv.trace_dict()}
+            psql, params = _fv.sql, _fv.params
             cols, rows, eerr = execute_sql(psql, list(params))
             if eerr:
                 if _is_param_mismatch(eerr):
