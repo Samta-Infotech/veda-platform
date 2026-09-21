@@ -81,6 +81,21 @@
 #                                             hold a host-local difference (e.g. a pg17
 #                                             data dir) WITHOUT editing the tracked
 #                                             docker-compose.yml, which another host reads.
+#   --all-sources           ALL_SOURCES=1     re-ingest EVERY previously-ingested source, not
+#                                             just the ones this branch invalidated. Ordered
+#                                             cheap-first (document/datalake, then relational)
+#                                             so a failure surfaces before the multi-hour one.
+#   --full                  FULL_INGEST=1     defeat the auto-resume for the sources being
+#                                             re-ingested: apps/ingestion/tasks.py::_should_resume
+#                                             sets VEDA_RESUME=1 when the source has ANY prior
+#                                             FAILED job in its history — and under resume, L3
+#                                             skips when a semantic model exists on disk and L4
+#                                             skips when the source already has column
+#                                             embeddings. Without --full such a run LOOKS like a
+#                                             full ingest and silently reuses the old model and
+#                                             the old vectors. --full moves the model aside
+#                                             (timestamped, reversible) and clears that source's
+#                                             embedding rows so both stages genuinely re-run.
 #   --artifact-owner 2      ARTIFACT_OWNER=2  the source that PRODUCED the flat artifacts in
 #                                             <artifact_root>/*.json. Never inferred: those
 #                                             files came from exactly one source's ingestion,
@@ -125,6 +140,8 @@ ARTIFACT_OWNER="${ARTIFACT_OWNER:-}"
 # from PHASES alone: a preview that reports a blocker the run it previews would not hit is
 # worse than no preview. CHECK_MODE says "judge against the full run".
 CHECK_MODE="${CHECK_MODE:-0}"
+ALL_SOURCES="${ALL_SOURCES:-0}"
+FULL_INGEST="${FULL_INGEST:-0}"
 
 # Derived artifacts a reader resolves per-source (every name passed to
 # config.resolve_source_artifact / source_artifact_path in the tree). Deliberately EXCLUDES
@@ -149,11 +166,17 @@ while [ $# -gt 0 ]; do
     --tenant)       TENANT="$2"; shift ;;
     --file)         EXTRA_COMPOSE="$EXTRA_COMPOSE -f $2"; shift ;;
     --artifact-owner) ARTIFACT_OWNER="$2"; shift ;;
+    --all-sources)  ALL_SOURCES=1 ;;
+    --full)         FULL_INGEST=1 ;;
     -h|--help)      sed -n '2,/^# =\{20,\}$/p' "$0" | sed -n '2,$p' | tail -r | sed -n '2,$p' | tail -r; exit 0 ;;
     *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
   shift
 done
+
+if [ "$ALL_SOURCES" = "1" ] && [ "$INGEST_TIMEOUT" = "7200" ]; then
+  INGEST_TIMEOUT=28800   # source 2 is 178 tables; its LLM stage alone runs for hours
+fi
 
 COMPOSE_FILES="-f docker-compose.yml"
 [ "$PROD" = "1" ] && COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.prod.yml"
@@ -276,6 +299,7 @@ STALE_DOC_SOURCES=""   # document sources needing a re-embed (set by inventory)
 NOCARD_SOURCES=""      # sources with no routing card (set by inventory)
 NOARTIFACT_SOURCES=""  # relational sources with no scoped model (set by inventory)
 NEVER_INGESTED=""      # sources with no successful ingestion at all (set by inventory)
+INGESTED_SOURCES=""    # every previously-ingested source, cheap kinds first (set by inventory)
 
 # =============================================================================
 # preflight
@@ -416,6 +440,7 @@ inventory() {
   printf '  %s\n' "-------------------------------------------------------------------------------------------"
 
   STALE_DOC_SOURCES=""; NOCARD_SOURCES=""; NOARTIFACT_SOURCES=""; NEVER_INGESTED=""
+  INGESTED_SOURCES=""; local _relational_last=""
   local id dialect name last freshness kind a_state c_state k_state
   while IFS='|' read -r id dialect name last freshness <&3; do
     [ -n "$id" ] || continue
@@ -454,16 +479,28 @@ inventory() {
       k_state="STALE"; STALE_DOC_SOURCES="${STALE_DOC_SOURCES}${id},"
     fi
 
+    # Cheap kinds first, relational last: a broken connector or a missing SLM shows up in
+    # minutes instead of after the multi-hour relational source has already run.
+    if [ "$last" != "never" ]; then
+      if [ "$kind" = "relational" ]; then _relational_last="${_relational_last}${id},"
+      else INGESTED_SOURCES="${INGESTED_SOURCES}${id},"; fi
+    fi
+
     printf '  %-4s %-12s %-16s %-17s %-9s %-6s %s\n' \
            "$id" "$dialect" "${name:0:16}" "$last" "$a_state" "$c_state" "$k_state"
   done 3<<< "$rows"
 
+  INGESTED_SOURCES="${INGESTED_SOURCES}${_relational_last}"; INGESTED_SOURCES="${INGESTED_SOURCES%,}"
   STALE_DOC_SOURCES="${STALE_DOC_SOURCES%,}"; NOCARD_SOURCES="${NOCARD_SOURCES%,}"
   NOARTIFACT_SOURCES="${NOARTIFACT_SOURCES%,}"; NEVER_INGESTED="${NEVER_INGESTED%,}"
 
   echo
   if [ -n "$NOARTIFACT_SOURCES" ]; then
-    if [ -n "$ARTIFACT_OWNER" ] && { want_phase artifacts || [ "$CHECK_MODE" = "1" ]; } \
+    if { [ "$ALL_SOURCES" = "1" ] || [ "$REINGEST_MISSING_ARTIFACTS" = "1" ]; } \
+       && { want_phase reingest || [ "$CHECK_MODE" = "1" ]; }; then
+      ok "no scoped model for source(s) $NOARTIFACT_SOURCES — the reingest phase rebuilds it from scratch"
+      act "re-ingest $NOARTIFACT_SOURCES (rebuilds its scoped artifacts)"
+    elif [ -n "$ARTIFACT_OWNER" ] && { want_phase artifacts || [ "$CHECK_MODE" = "1" ]; } \
        && has_flat_artifact "$probe_svc"; then
       # A remedy is already selected for this run, so it is an action, not a blocker.
       ok "no scoped model for source(s) $NOARTIFACT_SOURCES — the artifacts phase adopts source $ARTIFACT_OWNER's flat files"
@@ -616,6 +653,10 @@ do_reingest() {
   if [ -n "$SOURCES" ]; then
     targets="$SOURCES"
     info "explicit --sources: $targets (detection skipped)"
+  elif [ "$ALL_SOURCES" = "1" ]; then
+    targets="$INGESTED_SOURCES"
+    info "--all-sources: every previously-ingested source, cheap kinds first -> $targets"
+    [ -n "$NEVER_INGESTED" ] && info "excluded (never ingested here, so this is not a RE-ingest): $NEVER_INGESTED"
   else
     targets="$STALE_DOC_SOURCES"
     if [ "$REINGEST_MISSING_ARTIFACTS" = "1" ] && [ -n "$NOARTIFACT_SOURCES" ]; then
@@ -638,15 +679,93 @@ do_reingest() {
     return 0
   fi
 
+  # An ingestion that cannot reach its SLM does not fail fast — the LLM stage degrades and
+  # the run still reports success, hours later, with a poorer semantic model. Check first.
+  check_ingest_slm
+
+  # Auto-resume turns a "full re-ingest" into a partial one, silently (see --full in the
+  # header). Report it per source BEFORE asking for confirmation, because it changes what
+  # the operator is actually agreeing to.
+  local sid resuming=""
+  for sid in ${targets//,/ }; do
+    if [ "$(prior_failed_jobs "$sid")" -gt 0 ]; then resuming="${resuming}${sid},"; fi
+  done
+  resuming="${resuming%,}"
+  if [ -n "$resuming" ]; then
+    if [ "$FULL_INGEST" = "1" ]; then
+      warn "source(s) $resuming have a prior FAILED job -> VEDA_RESUME=1; --full will clear the skip preconditions"
+    else
+      warn "source(s) $resuming have a prior FAILED job -> VEDA_RESUME=1: L3 (semantic model) and L4"
+      info "    (biencoder) will SKIP for them and the old artifacts/vectors survive. That is not a"
+      info "    full ingest. Re-run with --full to make those stages actually run."
+    fi
+  fi
+
   echo
-  info "about to re-ingest source(s): $targets   (force=True — a resume would skip exactly the stages we need)"
+  info "about to re-ingest source(s): $targets   (force=True, timeout ${INGEST_TIMEOUT}s per source)"
   info "this reads the source systems and rewrites their embeddings; it is the expensive step."
+  [ "$FULL_INGEST" = "1" ] && [ -n "$resuming" ] && \
+    info "--full will move aside the scoped semantic model and DELETE the column embeddings of: $resuming"
   confirm "proceed?" || { warn "re-ingestion declined — sources still stale: $targets"; return 0; }
 
-  local sid
   for sid in ${targets//,/ }; do
+    [ "$FULL_INGEST" = "1" ] && defeat_resume "$sid"
     ingest_one "$sid" || bad "ingestion failed for source $sid"
   done
+}
+
+prior_failed_jobs() {  # $1 = source id -> count of FAILED jobs in its history
+  # _should_resume() looks at the source's WHOLE history, not just the previous job, so one
+  # failure years ago still forces every later run into resume mode.
+  psql_q "$PG_DB" "SELECT count(*) FROM ingestion_ingestionjob WHERE source_id=$1 AND status='failed'" \
+    2>/dev/null | tr -d '[:space:]' || echo 0
+}
+
+check_ingest_slm() {
+  local probe
+  probe="$(dc exec -T "$WORKER" python -c "
+import os, json, urllib.request
+url = os.environ.get('OLLAMA_URL', 'http://ollama:11434').rstrip('/')
+want = os.environ.get('SLM_MODEL_NAME', '')
+try:
+    have = [m.get('name', '') for m in json.load(urllib.request.urlopen(url + '/api/tags', timeout=8)).get('models', [])]
+except Exception as e:
+    print('UNREACHABLE', url, type(e).__name__); raise SystemExit
+print('OK' if want in have else 'MISSING', want, url, '|', ','.join(have)[:160])
+" </dev/null 2>/dev/null || true)"
+
+  case "$probe" in
+    OK*)          ok "ingestion SLM reachable and the pinned model is pulled (${probe#OK })" ;;
+    MISSING*)     bad "the ingestion SLM host does not serve the pinned model: ${probe#MISSING }"
+                  info "    pull it first, or the LLM stages degrade for the whole run:"
+                  info "    $DC exec $WORKER sh -c 'ollama pull \$SLM_MODEL_NAME'  (or on the Ollama host)" ;;
+    UNREACHABLE*) bad "the ingestion SLM is unreachable: ${probe#UNREACHABLE }"
+                  info "    ingest-worker points OLLAMA_URL at the HOST's native Ollama; start it before ingesting" ;;
+    *)            warn "could not probe the ingestion SLM — proceeding blind" ;;
+  esac
+}
+
+defeat_resume() {  # $1 = source id — make L3/L4 actually re-run under VEDA_RESUME=1
+  local sid="$1" root svc="$INFER" engine_db stamp
+  [ "$(prior_failed_jobs "$sid")" -gt 0 ] || return 0
+  svc_up "$svc" || svc="$API"
+  root="$(art_root "$svc")"; [ -n "$root" ] || { warn "no artifact root — cannot clear the resume skip for $sid"; return 0; }
+  stamp="$(date +%Y%m%d-%H%M%S)"
+
+  log "Clearing the resume skip for source $sid (--full)"
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '  \033[0;35m[dry-run]\033[0m mv veda_semantic_model.json -> .bak-%s ; DELETE column_embeddings_v2 WHERE source_id=%s\n' "$stamp" "$sid"
+    return 0
+  fi
+  # Moved, not deleted: if the run dies before L3 rewrites it, the old model is one mv away.
+  dc exec -T "$svc" sh -c '
+      f="$1/$2/$3/veda_semantic_model.json"
+      [ -f "$f" ] && mv "$f" "$f.bak-$4" && echo "    moved aside $f -> $f.bak-$4" || echo "    no scoped model to move (L3 will run)"
+    ' sh "$root" "$TENANT" "$sid" "$stamp" </dev/null
+  engine_db="$(dc exec -T "$API" sh -c 'printf "%s" "${VEDA_INTERNAL_DBNAME:-veda_engine}"' </dev/null | tr -d '\r')"
+  psql_q "$engine_db" "DELETE FROM column_embeddings_v2 WHERE source_id='$sid'" >/dev/null 2>&1 \
+    && ok "cleared source $sid's column embeddings — L4 will re-embed them this run" \
+    || warn "could not clear source $sid's column embeddings; L4 may still skip"
 }
 
 ingest_one() {
@@ -676,6 +795,8 @@ ingest_one() {
       success) echo; ok "source $sid ingested (job $jid)"; return 0 ;;
       failed)  echo
                bad "source $sid FAILED (job $jid)"
+               info "    NOTE: this failure now forces every LATER ingest of source $sid into resume mode"
+               info "    (L3/L4 skip). Retry with --full, or those stages will not re-run."
                psql_q "$PG_DB" "SELECT name, status, left(replace(error_traceback, chr(10), ' '), 300) FROM ingestion_ingestionstage WHERE job_id=${jid} AND status='failed'" | sed 's/^/      /'
                return 1 ;;
     esac
