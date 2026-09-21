@@ -149,4 +149,23 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     except Exception as e:
         out.append(StageOutcome("cross_source_fk", False, fatal=False, error=str(e)))
 
+    # routing card (Checkpoint B.1) — the compact per-source map the routing SLM reads
+    # instead of inferring what a source IS from whichever columns one question
+    # happened to surface. Runs LAST in L5 because it reads the cross_source_fk edges
+    # the stage immediately above just (re)discovered, plus this run's own semantic
+    # model / scan result. Pure transform: no LLM, no new scan, no new embedding — so
+    # it runs in skip_llm too, exactly like the registry/graph builds. Non-fatal: a
+    # source with no card simply routes the way it did before cards existed.
+    try:
+        from ingestion.routing_card import write_routing_card
+        _cpath = write_routing_card(ctx, state, verbose=verbose)
+        import json as _cjson
+        with open(_cpath) as _cf:
+            _card = _cjson.load(_cf)
+        out.append(StageOutcome("routing_card", True, detail=(
+            f"{len(_card.get('entities') or [])} entities, "
+            f"{len(_card.get('joins_to') or [])} linked sources -> {_cpath}")))
+    except Exception as e:
+        out.append(StageOutcome("routing_card", False, fatal=False, error=str(e)))
+
     return out

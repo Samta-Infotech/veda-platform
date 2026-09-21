@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional, TypedDict
 from config import (
     SLM_OLLAMA_BASE_URL,
     SLM_MODEL_NAME,
+    SLM_NUM_CTX,
     SLM_TEMPERATURE,
     SLM_TIMEOUT_SECS,
 )
@@ -99,20 +100,32 @@ class VEDAQueryState(TypedDict, total=False):
 # Shared Ollama helper
 # =============================================================================
 
-def _call_node(system_prompt: str, user_msg: str) -> Optional[Dict]:
+def _call_node(system_prompt: str, user_msg: str,
+               purpose: str = "lg_node") -> Optional[Dict]:
     """
     Calls Ollama with a focused system prompt and user message.
     Returns parsed dict or None on any failure.
     num_predict=256 — each node outputs a small JSON object.
+
+    num_ctx is the CONFIGURED window (SLM_NUM_CTX), never omitted: an Ollama
+    request that sends no num_ctx gets the model's own default, so a process
+    that mixes sized and unsized calls makes the host re-load the model at a
+    different context length between them. That reload — not the prompt — is
+    what veda/generation.py measured at 1218s vs 16.3s for the same question.
+
+    `purpose` carries the NODE NAME (lg_classify_intent, lg_select_entity, …)
+    rather than one flat "lg_node" label, so the per-purpose SLM report can say
+    which graph node is actually spending the time and tokens.
     """
     try:
         from slm import call_slm
         content = call_slm(
             user_msg,
             system=system_prompt,
-            purpose="lg_node",
+            purpose=purpose,
             temperature=SLM_TEMPERATURE,
             num_predict=256,
+            num_ctx=SLM_NUM_CTX,
             timeout=SLM_TIMEOUT_SECS,
         )
         # Strip markdown fences if present
@@ -139,7 +152,7 @@ def node_classify_intent(state: VEDAQueryState) -> Dict:
     times = dict(state.get("node_times", {}))
 
     user_msg = f'Query: "{query}"'
-    result   = _call_node(INTENT_PROMPT, user_msg)
+    result   = _call_node(INTENT_PROMPT, user_msg, purpose="lg_classify_intent")
 
     _VALID_INTENTS    = {"SELECT", "COUNT", "AGGREGATE"}
     _VALID_COMPLEXITY = {"SIMPLE", "MODERATE", "COMPLEX"}
@@ -198,7 +211,7 @@ def node_select_entity(state: VEDAQueryState) -> Dict:
         f"TABLE REFERENCE (copy table_id exactly):\n{table_ref_lines}"
     )
 
-    result = _call_node(ENTITY_PROMPT, user_msg)
+    result = _call_node(ENTITY_PROMPT, user_msg, purpose="lg_select_entity")
 
     # Fallback: most frequent table in top_k
     def _most_frequent_table() -> str:
@@ -290,7 +303,7 @@ def node_select_columns(state: VEDAQueryState) -> Dict:
     if must_lines:
         user_msg += f"\n\nMust-include columns (MUST appear in selected_col_ids):\n{must_lines}"
 
-    result = _call_node(COLUMN_PROMPT, user_msg)
+    result = _call_node(COLUMN_PROMPT, user_msg, purpose="lg_select_columns")
 
     selected_col_ids = []
     group_by_col_id  = None
@@ -359,7 +372,7 @@ def node_build_filters(state: VEDAQueryState) -> Dict:
         f"COLUMN REFERENCE (copy col_id exactly):\n{col_ref_lines}"
     )
 
-    result      = _call_node(FILTER_PROMPT, user_msg)
+    result      = _call_node(FILTER_PROMPT, user_msg, purpose="lg_build_filters")
     filter_tree = {"type": "AND", "children": []}
 
     if result:

@@ -100,12 +100,25 @@ def run_chat_turn(
 
     return {
         "session_id": session_id,
+        # M4 (C.6): the SUPERVISOR's own SLM calls this turn — classify / followup /
+        # standalone-check. They go through chatbot/llm.py, a deliberately separate client
+        # from the engine's (see that module's docstring), so they never appear in the
+        # engine's explain trace and a trace-derived count cannot see them at all. This is
+        # the number the turn budget is about: the deterministic delta layer's whole job
+        # is to drive it to 0 on a follow-up, leaving only the engine's prose summary.
+        "supervisor_slm_calls": len(_chat_calls),
+        "supervisor_slm_purposes": [c.get("purpose") for c in _chat_calls],
         "answer_text": result.get("reply_text"),
         "reply_text": result.get("reply_text"),
         "needs_clarification": result.get("needs_clarification", False),
         "clarification_question": result.get("clarification_question"),
         "sql": result.get("sql"),
         "rows": result.get("rows"),
+        # M4 (C.7): the IR-derived surfaces format_reply_node computed. Both are
+        # deterministic and may legitimately be absent (a refusal has no result to
+        # describe), so callers must treat None as "nothing to show", not as an error.
+        "context_strip": result.get("context_strip"),
+        "follow_up_questions": result.get("follow_up_questions"),
         # result.get("status") or ... (not .get(key, default)): classify_node
         # explicitly resets status to None every turn, so a missing-vs-None
         # distinction would break this fallback for smalltalk turns.

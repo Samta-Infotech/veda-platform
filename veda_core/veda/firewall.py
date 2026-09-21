@@ -374,4 +374,19 @@ def check_federated(ir: Optional[QueryIR], sql: str, *, query: str, scope_source
         v = _ir_vs_sql(ir, sql)
         if v is not None:
             return _v(v)
+    # (2b) TEXT qualifier completeness. The IR check above only runs for a COMPLETE IR,
+    # and a federated plan's IR is almost always partial — so a plan that simply omits a
+    # filter had nothing checking it: no literal to validate (the filter is absent), no
+    # IR to compare against. That is how a "properties in Mumbai" follow-up came back as
+    # a GROUP BY over every city (cross-source battery §9.2). The single-source gate has
+    # always had this check; the federated one never did.
+    try:
+        from veda.validation import federated_qualifier_completeness
+        ok_q, missing = federated_qualifier_completeness(query, sql)
+        if not ok_q:
+            return _v(FirewallVerdict(QUALIFIER_DROPPED,
+                                      reason=f"dropped qualifier {missing!r}",
+                                      slot="qualifier", detail=missing))
+    except Exception:
+        pass                                  # never fail a query on the gate's own error
     return _v(FirewallVerdict(OK, sql=sql, params=[]))

@@ -154,7 +154,7 @@ def _temporal_predicate(table, sm, tf):
 
 
 def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None,
-              _reentry=False):
+              _reentry=False, summarise=True):
     """Run one NL→SQL→result. Reuses the shared engine; never closes it.
 
     Returns an int status code (0 ok / 1 error) by default — backward-compatible.
@@ -166,7 +166,15 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     — set only by the salvage retry after a first pass refused with a dropped
     qualifier whose QSR referent lives in a table retrieval never surfaced. Every
     downstream correctness gate still judges the plan; the hint also marks the run as
-    a retry so salvage can never recurse."""
+    a retry so salvage can never recurse.
+
+    summarise (default True): when False, skip the SLM PROSE call (insight engine /
+    run_nl_answer) and leave the deterministic fallback answer in place. Everything
+    else — SQL, execution, the analytics pass, `explain` — is unchanged. Set by
+    callers that discard this answer and write their own: the hybrid path runs
+    run_query for its correct-by-construction rows and then has run_hybrid_layer
+    synthesise the prose over those same rows, so the summary paid for here was
+    computed and thrown away — a second summary-class SLM call on every hybrid turn."""
     start = time.time()
     join_constraints = None
     fanout_guard = None
@@ -174,6 +182,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # M3 checkpoint 1: branch state the firewall's IR is built from (bound later by the
     # branches that have it; these defaults mean "unknown" → partial IR slots).
     _u = None; _arb_filters = []; _rank = None; _tpred = None; _tcol = None; _rank_sort_col = None
+    # M4: the QueryIR the firewall checked, surfaced on the RESULT so the api tier's
+    # session memory can stack it (chatbot/memory/frame.py). A mutable holder, not a
+    # plain local, because _done() is a closure that also runs on refusal paths that
+    # return BEFORE the IR is built — reading an unbound local there would NameError.
+    _ir_holder = {"ir": None}
     # the understanding candidate's state — bound in the planning block, read by the firewall
     # IR on EVERY path (the fast path returns before the planning block runs)
     _analytical_sql = None; _analytical_primary = None; _analytical_spec = None
@@ -195,7 +208,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                   f"grounded candidate (fast path off)")
             log_route(f"{tail}.reentry", query, (time.time() - start) * 1000)
             return run_query(query, sm, all_cols, return_result=return_result,
-                             anchor_hint=anchor_hint, on_event=on_event, _reentry=True)
+                             anchor_hint=anchor_hint, on_event=on_event, _reentry=True,
+                             summarise=summarise)
         log_route(tail, query, (time.time() - start) * 1000)
         _kw = dict(done_kw)
         if msg is not None:
@@ -335,10 +349,16 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             if status == "answered" and explain:
                 kw.setdefault("business_intent",
                               (explain.get("understanding") or {}).get("summary"))
+            _ir_obj = _ir_holder.get("ir")
             return {"status": status, "ok": (status == "answered"),
                     # the source this answer ran against (P4, 2026-09-18): the chat frame
                     # records it so a drill-down stays on the same source
                     "source_id": getattr(_ambient_ctx(), "source_id", None),
+                    # M4: the structured question this answer actually answered. The chat
+                    # tier stacks it and applies the next turn's delta to it, instead of
+                    # re-deriving intent from a restated English sentence. None on a
+                    # refusal that never reached the firewall.
+                    "ir": (_ir_obj.to_dict() if _ir_obj is not None else None),
                     "trace": tr.to_dict(), "explain": explain,
                     "usage": {"prompt_tokens": tr.total_prompt_tokens,
                               "completion_tokens": tr.total_completion_tokens,
@@ -1915,6 +1935,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         _ir = _ir_from_branch(f"branch.{_route}", primary, arb_filters=_arb_filters,
                               tpred_col=(_tcol if _tpred else None), tf=tf,
                               rank=_rank, rank_col=_rank_sort_col, complete=False)
+    _ir_holder["ir"] = _ir
     _fv = _fw.check(_ir, sql, sm, query=query, allowed_tables=allowed_tables, allowed_columns=allowed_columns,
                     ctx=_ambient_ctx(), resolve_table=_resolve, skip_values=skip_values,
                     llm_generated=_llm_sql, tf=tf, join_constraints=join_constraints, fanout_guard=fanout_guard,
@@ -2278,6 +2299,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         NL_SUMMARY_TIMEOUT_MS = 10000
         INSIGHT_ENGINE_ENABLED = False
         RESULT_ANALYZER_MAX_ROWS = 200
+    if not summarise:
+        # Caller writes its own prose — don't spend a summary-class SLM call on one
+        # that will be discarded. deterministic_fallback_answer() below still fills
+        # `answer`, so the result dict keeps its shape for every other consumer.
+        INSIGHT_ENGINE_ENABLED = False
     nl_answer_text = None
     _insight_extra = {}
     _summary_engine = None            # which summariser produced the prose (trace)
@@ -2346,6 +2372,16 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         except Exception:
             _analytical_ctx = None
         _slm_wove_patterns = False   # did a summary SLM already phrase the findings?
+        # Did this result fill its fetch limit? If so row_count is a FLOOR, and the
+        # summariser must say "at least N" instead of presenting the cap as the total.
+        # Read off the executed SQL's own AST — deterministic, no LLM, no extra query.
+        _truncated, _fetch_limit = False, None
+        try:
+            from veda.business_explain import extract_sql_facts as _esf
+            _fetch_limit = (_esf(param_sql or "") or {}).get("limit")
+            _truncated = bool(_fetch_limit and len(rows) >= int(_fetch_limit))
+        except Exception:
+            _truncated, _fetch_limit = False, None
 
         if INSIGHT_ENGINE_ENABLED and _ictx is not None:
             try:
@@ -2374,7 +2410,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                        insight_engine_error=f"{type(_ie).__name__}: {str(_ie)[:200]}")
                 INSIGHT_ENGINE_ENABLED = False   # this turn only — fall through below
 
-        if not INSIGHT_ENGINE_ENABLED:
+        if not INSIGHT_ENGINE_ENABLED and summarise:
             try:
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,
@@ -2385,7 +2421,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                    rank_column=_rank_column_for_nl,
                                    patterns=_all_findings,
                                    result_shape=getattr(_ictx, "result_shape", None),
-                                   analytical_context=_analytical_ctx)
+                                   analytical_context=_analytical_ctx,
+                                   truncated=_truncated, fetch_limit=_fetch_limit)
                 if getattr(nl, "answer", None):
                     nl_answer_text = nl.answer
                     # run_nl_answer wove the patterns only when the SLM actually ran;
@@ -2417,7 +2454,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 _nl_model = None
             record_result_stages(
                 engine=_summary_engine, cols=list(cols), row_count=len(rows),
-                truncated=(len(rows) >= 20), ictx=_ictx, answer=nl_answer_text,
+                truncated=_truncated, ictx=_ictx, answer=nl_answer_text,
                 summary_model=_nl_model, summary_ok=bool(_summary_engine),
                 visualization=_insight_extra.get("visualization"))
             # PROJECTION funnel (Tier-1): the SQL SELECT columns actually produced,

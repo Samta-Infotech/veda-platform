@@ -220,6 +220,65 @@ def _gate_strip():
 _GATE_STRIP = None
 
 
+# Labelish semantic types in the engine's sampled-value store — the ones that can hold a
+# value a user would name in a question. Mirrors the set ingestion/routing_card.py samples.
+_STORE_VALUE_TYPES = ("CATEGORY", "STATUS", "LOCATION", "NAME", "TYPE", "IDENTIFIER",
+                      "FREE_TEXT")
+_STORE_VALUE_CACHE: dict = {}
+
+
+def _value_in_engine_store(token: str) -> bool:
+    """Is `token` an actual sampled DATA VALUE anywhere the tenant has ingested?
+
+    Consults the engine's own `column_values` store — the values ingestion sampled from
+    every column of every ingested source. This is the only oracle that survives SCOPE
+    NARROWING, and that is the whole point of it:
+
+    `_is_grounded_filter_value` promises to check a token against "ANY table in the
+    schema — NOT only the tables this SQL happens to query", but everything it can reach
+    (`sm`, the probed relational DB, the parquet `sample_values`) belongs to whichever
+    single source the router narrowed to. So a value that is real in ANOTHER source was
+    invisible, the token was written off as filler, and the SQL's missing filter was
+    approved. Measured: "how many maintenance records are in Mumbai" routed to the
+    maintenance datalake — which has no city column at all — produced
+    `SELECT COUNT(*) FROM "maintenance"` with no WHERE clause, and the answer was
+    presented as "There are 8 maintenance records in Mumbai." Mumbai is a real value in
+    assets_asset.city_name and generics_city.name; nothing in the narrowed scope could
+    see that.
+
+    Only reached for tokens already established as UNACCOUNTED by the SQL, so a value the
+    query did filter on (it appears as a literal) never gets here — this cannot start
+    refusing correctly-filtered questions. Exact match on the normalised value, and only
+    in value-bearing column types, so a token is never "grounded" by coincidence with a
+    numeric id or a free-form blob.
+
+    Fails OPEN (False = "no evidence this is a value"): an unreachable store must not
+    invent a refusal, and every pre-existing check still runs.
+    """
+    tok = (token or "").strip().lower()
+    if len(tok) < 4:                      # too short to be a distinctive value
+        return False
+    if tok in _STORE_VALUE_CACHE:
+        return _STORE_VALUE_CACHE[tok]
+    found = False
+    try:
+        from ingestion.db_abstraction import internal_connection
+        with internal_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute("SET statement_timeout = 2000")
+                cur.execute(
+                    """SELECT 1 FROM column_values
+                        WHERE lower(value_norm) = %s
+                          AND semantic_type = ANY(%s)
+                        LIMIT 1""",
+                    (tok, list(_STORE_VALUE_TYPES)))
+                found = cur.fetchone() is not None
+    except Exception:
+        found = False                     # cannot look ⇒ no evidence, never a refusal
+    _STORE_VALUE_CACHE[tok] = found
+    return found
+
+
 def _is_grounded_filter_value(token, tables_in_sql, sm):
     """Decide whether an unaccounted query token is a REAL dropped filter or just filler.
 
@@ -305,7 +364,9 @@ def _is_grounded_filter_value(token, tables_in_sql, sm):
     except Exception:
         _has_db = True
     if not _has_db:
-        return _grounded_in_sm_samples()
+        # sm samples first (this source's own parquet values), then the tenant-wide store
+        # for a value that belongs to a source outside the narrowed scope.
+        return _grounded_in_sm_samples() or _value_in_engine_store(tok_l)
 
     absent = set()                                    # tables confirmed missing from the probed DB
     conn = None
@@ -334,7 +395,9 @@ def _is_grounded_filter_value(token, tables_in_sql, sm):
                     continue
                 if cur.fetchone() is not None:
                     return True                       # token IS a real value somewhere → dropped filter
-        return False                                  # confirmed: not a value in any categorical/id col
+        # The probe only saw the tables of the CURRENT scope. Before declaring the token
+        # filler, ask the tenant-wide value store whether it names real data elsewhere.
+        return _value_in_engine_store(tok_l)          # else: not a value anywhere → filler
     except Exception:
         return True                                   # safe: preserve refusal on any error
     finally:
@@ -413,6 +476,63 @@ def invalidate_domain_synonyms_cache(source_id=None):
     sid = str(source_id)
     for key in [k for k in _DS_SYN_CACHE if k[1] == sid]:
         del _DS_SYN_CACHE[key]
+
+
+def federated_qualifier_completeness(query, sql):
+    """Qualifier gate for FEDERATED SQL — the same "no silently dropped filter" rule the
+    single-source gate enforces, with the one oracle a federated query can use.
+
+    veda.firewall.check_federated checks literal values, IR-vs-SQL and table scope, but
+    never qualifier completeness: there is no single semantic model to run it against.
+    That left the exact hole the single-source gate exists to close — a federated plan
+    that simply omits a filter has no literal to validate and (with a partial IR) nothing
+    to compare against, so it was approved. Measured on the cross-source battery §9.2: a
+    "properties in Mumbai" follow-up answered with
+    `SELECT city_name, COUNT(id) ... GROUP BY city_name` over EVERY city, unfiltered.
+
+    Oracle: a content token the SQL does not account for is a dropped filter iff it is a
+    real sampled DATA VALUE somewhere in the tenant (`_value_in_engine_store`). No
+    semantic model, no word list — the same evidence the single-source gate now uses.
+    Fails OPEN on anything it cannot assess: a federated refusal must be earned.
+
+    Returns (ok, missing|None).
+    """
+    global _GATE_STRIP
+    if _GATE_STRIP is None:
+        _GATE_STRIP = _gate_strip()
+    content = {_singularize(w) for w in re.findall(r"[a-z]+", (query or "").lower())
+               if len(w) > 2 and w not in _GATE_STRIP and _singularize(w) not in _GATE_STRIP}
+    if not content:
+        return True, None
+    try:
+        tree = sqlglot.parse_one(sql, read="duckdb")
+    except Exception:
+        return True, None
+
+    def _idtoks(name):
+        return {_singularize(w) for w in re.findall(r"[a-z]+", (name or "").lower()) if len(w) > 2}
+
+    sqltoks = set()
+    for t in tree.find_all(exp.Table):
+        sqltoks |= _idtoks(t.name)
+    for c in tree.find_all(exp.Column):
+        sqltoks |= _idtoks(c.name)
+    for a in tree.find_all(exp.Alias):
+        if a.alias:
+            sqltoks |= _idtoks(a.alias)
+    for lit in tree.find_all(exp.Literal):
+        if lit.is_string:
+            sqltoks |= _idtoks(lit.name)
+
+    def _accounted(ct):
+        if ct in sqltoks:
+            return True
+        return len(ct) >= 4 and any(len(s) >= 4 and (ct in s or s in ct) for s in sqltoks)
+
+    for ct in sorted(ct for ct in content if not _accounted(ct)):
+        if _value_in_engine_store(ct):
+            return False, ct
+    return True, None
 
 
 def qualifier_completeness(query, sql, sm=None, strict=False):

@@ -62,3 +62,7 @@ docs/multisource_routing/
 certs/
 *.key
 *.pem
+
+# scripts/slm_purpose_report.py --mark sidecar (a local before/after cursor into the
+# trace log; never meaningful in another checkout)
+.slm_purpose_report.marker

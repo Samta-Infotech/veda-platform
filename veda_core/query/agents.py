@@ -74,8 +74,16 @@ def _from_sql_dict(d, source_id, source_type) -> AgentResult:
         # _extract_engine_result derives it from the SubResult); only the payload was missing it.
         return AgentResult(
             source_id, source_type, STATUS_OK, engine="deterministic_sql",
+            # `analytics` and `ir` (M4, 2026-09-21) are the same class of omission this
+            # whitelist already made once with `status` (see the note above). The chat
+            # tier's IR stack is built from exactly these two — the engine's QueryIR and
+            # the single post-execution analytics pass — so dropping them here left every
+            # stack entry empty: no dimensions, no measures, no top_values, and therefore
+            # no deterministic delta could ever resolve, silently sending every follow-up
+            # back to the SLM classifier. Anything the memory layer needs has to be named
+            # here; this list is the actual payload contract.
             data={k: d.get(k) for k in ("cols", "rows", "answer", "sql", "table", "explain",
-                                        "status")},
+                                        "status", "analytics", "ir", "business_intent")},
         )
     # clarify is a terminal, understood outcome (not a failure) — surface as refused-with-reason.
     if status_str in ("clarify", "refuse", "tier2_rejected"):
@@ -103,6 +111,14 @@ def _from_result_obj(obj, source_id, source_type, engine) -> AgentResult:
     return AgentResult(
         source_id, source_type, STATUS_OK, engine=engine,
         data={
+            # `status` for the same reason the SQL branch above carries it, and it was
+            # missed here: chatbot/memory/frame.py::harvest_frame refuses to harvest any
+            # payload that does not say status == "answered". Without it NO document or
+            # NoSQL answer could ever be harvested, so a document source had no session
+            # memory at all — every follow-up on it was treated as a new topic and
+            # re-routed from scratch (measured on session script s3: inherited 0/9).
+            "status": "answered",
+            "source_id": source_id,
             "answer": getattr(obj, "answer", ""),
             "citations": list(getattr(obj, "citations", []) or []),
             "cols": list(getattr(obj, "cols", []) or []),

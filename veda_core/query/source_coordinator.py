@@ -553,10 +553,16 @@ def plan_route(query: str, source_ids, *,
                profile_provider: Callable = None,
                item_prior_provider: Callable = None,
                slm_call: Callable = None,
-               query_id: str = "", trace_id: str = "") -> RoutingDecision:
+               query_id: str = "", trace_id: str = "",
+               prior: dict = None) -> RoutingDecision:
     """Produce a RoutingDecision for a query over an authorized source scope — WITHOUT executing.
     Deterministic-first; the SLM is consulted only for a genuinely ambiguous candidate set and its
     output is validated before it can route.
+
+    `prior` (optional) is the conversation's previous scope — {"source_ids": [...],
+    "anchor": "..."} — stated to the boundary SLM as context it may override. It only
+    ever reaches the SLM prompt: the deterministic policy above is untouched by it, so
+    a confident single-source or structural-MULTI decision is exactly what it was.
     """
     evidence_provider = evidence_provider or _default_evidence_provider
     edge_provider = edge_provider or _default_edge_provider
@@ -619,7 +625,7 @@ def plan_route(query: str, source_ids, *,
         else:
             _attach_item_summaries(query, boundary_candidates)   # give the SLM the matched item summaries
             decision = resolve_boundary(query, boundary_candidates, slm_call=slm_call,
-                                        query_id=query_id, trace_id=trace_id)
+                                        query_id=query_id, trace_id=trace_id, prior=prior)
 
     decision.query_id = decision.query_id or query_id
     decision.trace_id = decision.trace_id or trace_id

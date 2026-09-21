@@ -172,6 +172,63 @@ def from_query_intent(qi, head: str = "fast_path", source_scope=None) -> QueryIR
                    grounding_method={"anchor": "registry"}, head=head)
 
 
+# sqlglot predicate class name → SQL operator, for from_sql_facts below.
+_SQLGLOT_OP = {"EQ": "=", "NEQ": "!=", "GT": ">", "GTE": ">=", "LT": "<", "LTE": "<=",
+               "In": "IN", "Like": "LIKE", "ILike": "LIKE", "Is": "IS NULL",
+               "Between": "BETWEEN", "NotIn": "NOT IN"}
+
+
+def from_sql_facts(facts: Dict[str, Any], head: str, *, source_scope=None) -> QueryIR:
+    """The EXECUTED SQL's own AST facts (business_explain.extract_sql_facts) → IR.
+
+    For heads that never built structured state — Tier-2, the LLM-SQL branch, a cache
+    replay — this reverse-engineers the IR from the statement that actually ran. It is
+    used ONLY for session memory (the api tier stacks it and applies the next turn's
+    delta to it); it is never handed to the firewall, which would be circular — checking
+    SQL against an IR derived from that same SQL proves nothing.
+
+    Always `ir_partial=True`. The structural slots are real (they came from the AST), but
+    the per-slot GROUNDING provenance is not recoverable from SQL: this cannot distinguish
+    a filter value the value-arbiter grounded from one an LLM wrote. Marking it partial is
+    what makes the chat tier fall back to the text restatement for these frames rather
+    than trusting slots whose origin is unknown — and the partial COUNT is the measure of
+    how much of the stack is genuinely structured (see this module's docstring).
+    """
+    ents = list(facts.get("entities") or [])
+    anchor = ents[0] if ents else None
+    filters = []
+    for f in (facts.get("filters") or []):
+        try:
+            col, kind, val = f
+        except (TypeError, ValueError):
+            continue
+        filters.append(IRFilter(table=anchor, column=col,
+                                op=_SQLGLOT_OP.get(str(kind), "="), value=val,
+                                grounding="sql_ast"))
+    measure = None
+    for agg in (facts.get("aggregations") or []):
+        try:
+            fn, col = agg
+        except (TypeError, ValueError):
+            continue
+        measure = IRMeasure(aggregation=str(fn).lower(), column=col, table=anchor,
+                            distinct=bool(facts.get("distinct")))
+        break                      # the first aggregate is the headline measure
+    orderings = list(facts.get("orderings") or [])
+    order = None
+    if orderings:
+        _c, _desc = orderings[0]
+        order = {"column": _c, "direction": "desc" if _desc else "asc"}
+    ir = QueryIR(anchor=anchor, secondaries=ents[1:], measure=measure, filters=filters,
+                 group_keys=list(facts.get("groupings") or []), order=order,
+                 limit=facts.get("limit"), distinct=bool(facts.get("distinct")),
+                 source_scope=list(source_scope or []),
+                 grounding_method={"anchor": "sql_ast"}, head=head)
+    ir.ir_partial = True
+    ir.partial_slots = list(SLOTS)
+    return ir
+
+
 def from_branch_state(head: str, primary: str, *, arb_filters=None, tpred_col=None, tf=None,
                       agg: Optional[str] = None, measure_col: Optional[str] = None,
                       group_col: Optional[str] = None, rank=None, rank_col: Optional[str] = None,

@@ -148,6 +148,30 @@ def _load_semantic_model():
     scope = _sm_scope()               # primary (source, tenant) — Redis sm key for the SQL head
     cache_key = _sm_cache_key()       # full scope SET — cache identity (P5)
     entry = _SM.get(cache_key)
+    # MULTI-SOURCE scope: hand the SQL head the MERGED model, not the primary's alone.
+    # The retrieval engine has always used the merge for a multi-source scope
+    # (veda/runtime.py::_load_scoped_sm, via get_engine), so the two disagreed: retrieval
+    # ranked columns across every source in scope while the SQL head could only plan
+    # against ONE source's schema. A cross-source follow-up ("which properties do these
+    # maintenance records belong to") therefore had no table for the other half of the
+    # question and either refused or silently answered from the one schema it could see.
+    # This is the merge veda_hybrid._sm_scope()'s own docstring anticipated.
+    if entry is None:
+        _ctx = _current_ctx()
+        _ids = [str(s) for s in (getattr(_ctx, "source_ids", ()) or ())] if _ctx else []
+        if len(_ids) > 1:
+            try:
+                from veda.runtime import _load_one_sm, _merge_scoped_sms
+                _tenant = str(getattr(_ctx, "tenant", "default"))
+                _merged = _merge_scoped_sms([(sid, _load_one_sm(sid, _tenant)) for sid in _ids])
+                if _merged.get("tables"):
+                    print(f"  [sm] multi-source scope {_ids} → merged model "
+                          f"({len(_merged['tables'])} tables)")
+                    entry = {"sm": _merged, "cols": list(_merged.get("columns", {}).keys())}
+                    _SM[cache_key] = entry
+            except Exception as _me:
+                print(f"  [sm] multi-source merge failed ({type(_me).__name__}: {_me}) "
+                      f"— falling back to the primary source's model")
     if entry is None:
         sm = _load_sm_from_redis(scope)
         if sm is None:
@@ -838,7 +862,20 @@ def _run_coordinator(query, verbose=False, on_event=None):
             except Exception:
                 pass
 
-        decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
+        # The conversation's previous scope, stated to the boundary SLM as a prior. This
+        # is what keeps a WIDENED session scope from drifting: the chat tier widens so a
+        # cross-source follow-up can reach another source, and this tells routing which
+        # source the thread is actually on so it only moves when the question warrants it.
+        _prior = None
+        try:
+            _pids = [str(s) for s in (getattr(ctx, "session_prior", ()) or ())]
+            if _pids:
+                _prior = {"source_ids": _pids,
+                          "anchor": str(getattr(ctx, "session_anchor", "") or "") or None}
+        except Exception:
+            _prior = None
+        decision = plan_route(query, sids, profile_provider=lambda _s: _profiles,
+                              prior=_prior)
 
         # Scoped authoritative rollout (2026-09-10, see docs/backlog/query-engine-open-items.md):
         # live-testing MULTISOURCE_ROUTING_SHADOW=0 unscoped against this deployment's data showed
@@ -866,10 +903,23 @@ def _run_coordinator(query, verbose=False, on_event=None):
                              and not _is_multi_decision and not _is_single_decision)
 
         try:
+            # slm_consulted / slm_decision_discarded make the routing SLM's COST
+            # auditable against its effect. The plan for this pass was to skip the
+            # source_routing call entirely under SHADOW because "the decision will be
+            # discarded" — that was true before 2026-09-18, but is not true now: the
+            # scoped-authoritative wiring just above makes BOTH MULTI and SINGLE
+            # decisions authoritative regardless of SHADOW, and whether a decision is
+            # one of those is only knowable AFTER the call. Skipping it would not save
+            # a wasted call, it would delete the routing. The genuinely discarded case
+            # is narrow — an SLM-decided NO_MATCH/CLARIFICATION_REQUIRED under
+            # SHADOW=1 — so it is measured here instead of guessed at.
+            _slm_used = decision.decision_method == "slm"
             _cur_trace().set(
                 "routing", status=decision.status, mode=decision.mode,
                 source_ids=decision.source_ids, reason_code=decision.reason_code,
                 decision_method=decision.decision_method,
+                slm_consulted=_slm_used,
+                slm_decision_discarded=bool(_slm_used and _effective_shadow),
                 shadow=_effective_shadow, shadow_flag=bool(MULTISOURCE_ROUTING_SHADOW))
         except Exception:
             pass
@@ -1770,7 +1820,13 @@ def _dispatch_single(query, verbose=False, precomputed_sql=None, on_event=None):
         # Run the DETERMINISTIC SQL head first and feed its EXECUTED rows into the
         # fusion (the correct-by-construction numbers), instead of letting the fusion
         # rely on LLM-written SQL. (Also supplies the previously-missing sql_columns.)
-        sqlres = run_query(query, sm, cols, return_result=True, on_event=on_event)
+        # summarise=False: run_hybrid_layer below synthesises the answer the user
+        # actually sees, over these same executed rows. Letting the SQL head also
+        # write prose meant two summary-class SLM calls per hybrid turn and the
+        # first one's output was never read (only cols/rows/explain/table are taken
+        # from sqlres). One prose call per turn.
+        sqlres = run_query(query, sm, cols, return_result=True, on_event=on_event,
+                           summarise=False)
         sql_result = None
         if isinstance(sqlres, dict) and sqlres.get("ok"):
             _c, _r = sqlres.get("cols", []), sqlres.get("rows", [])
@@ -2068,6 +2124,15 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     except Exception:
         pass
     result["table"] = table
+    # M4: the IR for session memory, reverse-engineered from the SQL that actually ran.
+    # Tier-2 builds no structured intent of its own (its firewall IR is a bare
+    # `partial("tier2")`), so the AST facts extracted just above are the only structural
+    # description of this answer that exists. Always ir_partial — see ir.from_sql_facts.
+    try:
+        from veda.ir import from_sql_facts as _ir_from_facts
+        result["ir"] = _ir_from_facts(facts or {}, head=f"tier2.{source}").to_dict()
+    except Exception:
+        result["ir"] = None
     # sql_generation — every Tier-2 answer funnels through here, so this one place
     # records the final SQL shape for all Tier-2 return paths (envelope / shared
     # planner / IR). Reads the AST facts already extracted above; no re-parse.
@@ -2100,6 +2165,10 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     _ictx = None
     _confidence = None
     _summary_engine = None            # which summariser produced the prose (trace)
+    # Function scope, not the NL_ANSWER_ENABLED block below: record_result_stages()
+    # at the end of this function reads it, and that call sits outside the block.
+    _truncated_t2 = False
+    _fetch_limit_t2 = None
     if NL_ANSWER_ENABLED and cols:
         row_dicts = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
         # Deterministic analytics (ALWAYS, not flag-gated) — same single
@@ -2130,10 +2199,27 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
         result["answer"] = deterministic_fallback_answer(query, list(cols), row_dicts)
         got_real_answer = False
 
+        # rank_column: the column Tier-2's own SQL ordered by. Tier-1 takes this from
+        # its ranking plan; Tier-2 has no such plan, but its ORDER BY is the same fact.
+        # Read off the AST facts already extracted at the top of _tier2_finish — no
+        # re-parse. Derived HERE because both summarisers below need it.
+        _rank_column_t2 = None
+        try:
+            _ord = (facts or {}).get("orderings") or []
+            _rank_column_t2 = _ord[0][0] if _ord else None
+        except Exception:
+            _rank_column_t2 = None
+        # Did this result fill its fetch limit? Then row_count is a FLOOR and the
+        # summariser must say "at least N". Same AST facts, no re-parse.
+        _fetch_limit_t2 = (facts or {}).get("limit")
+        _truncated_t2 = bool(_fetch_limit_t2 and len(rows or []) >= int(_fetch_limit_t2))  # noqa: F841 — read below
+
         if INSIGHT_ENGINE_ENABLED and _ictx is not None:
             try:
                 from query.result_explainer import run_insight_engine
-                insight = run_insight_engine(_ictx)   # same ctx as above — one analysis pass
+                # rank_column, like the run_nl_answer call below: Tier-1 passes it and
+                # Tier-2 did not, so a Tier-2 "top N" narrative had to guess the sorted field.
+                insight = run_insight_engine(_ictx, rank_column=_rank_column_t2)   # same ctx as above — one analysis pass
                 if getattr(insight, "answer", None):
                     result["answer"] = insight.answer
                     got_real_answer = True
@@ -2170,13 +2256,43 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                             if (_ictx is not None and getattr(_ictx, "patterns", None)) else [])
         _slm_wove_patterns = got_real_answer
 
+        # Summary-input parity with Tier-1 (veda/pipeline.py L7b). Tier-2 was calling
+        # the SAME summariser with strictly less to work with: no `table`, no
+        # `rank_column`, no `analytical_context`, and only the top-2 pattern details
+        # instead of all verified findings. The visible effect was a Tier-2 "top N"
+        # answer narrating an arbitrary column (often an id) because nothing told it
+        # which field the ranking had actually sorted by — the same question answered
+        # by Tier-1 got that right. Every value below is read off work this path has
+        # ALREADY done (the SQL AST facts extracted at the top of _tier2_finish, the
+        # single analytics pass, the caller's business_intent); nothing is re-derived
+        # and no new LLM call is made.
+        _all_findings = ([p.detail for p in _ictx.patterns]
+                         if (_ictx is not None and getattr(_ictx, "patterns", None)) else [])
+        _analytical_ctx_t2 = None
+        try:
+            from veda.planning import aggregate_operator as _agg_op
+            from veda.semantic_validation import user_requested_identifier as _uri
+            _analytical_ctx_t2 = {
+                "intent": business_intent,
+                "operation": _agg_op(query),
+                "ranking": _rank_column_t2,
+                "temporal": None,   # Tier-2 carries no resolved temporal window here
+                "explicit_identifier": _uri(query),
+            }
+        except Exception:
+            _analytical_ctx_t2 = None
+
         if not got_real_answer:
             try:
                 from query.nl_answer import run_nl_answer
                 nl = run_nl_answer(query, list(cols), row_dicts,
                                    timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0, semantic_model=sm,
-                                   patterns=_pattern_details,
-                                   result_shape=getattr(_ictx, "result_shape", None))
+                                   table=str(table) if table else None,
+                                   rank_column=_rank_column_t2,
+                                   patterns=_all_findings,
+                                   result_shape=getattr(_ictx, "result_shape", None),
+                                   analytical_context=_analytical_ctx_t2,
+                                   truncated=_truncated_t2, fetch_limit=_fetch_limit_t2)
                 if getattr(nl, "answer", None):
                     result["answer"] = nl.answer
                     _slm_wove_patterns = True   # SLM prose wove them; fallback blended them itself
@@ -2217,7 +2333,7 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
         _cur_trace().set("tier2", answered_via=source, row_count=len(rows or []))
         record_result_stages(
             engine=_summary_engine, cols=cols, row_count=len(rows or []),
-            truncated=(len(rows or []) >= 20), ictx=_ictx, answer=result.get("answer"),
+            truncated=_truncated_t2, ictx=_ictx, answer=result.get("answer"),
             summary_model=_nl_model, summary_ok=bool(_summary_engine),
             visualization=visualization, explain_payload=result.get("explain"))
     except Exception:

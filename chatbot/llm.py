@@ -45,6 +45,13 @@ VLLM_URL = os.environ.get("VLLM_URL", "http://localhost:8000/v1").rstrip("/")
 # if unset, so an untouched deployment behaves exactly as before.
 CHATBOT_CLASSIFY_MODEL = os.environ.get("CHATBOT_CLASSIFY_MODEL") or SLM_MODEL_NAME
 
+# The context window every request asks for. Ollama re-loads the model whenever a
+# request names a context length different from the resident one, so this MUST match
+# what veda_core sends (config.SLM_NUM_CTX) — otherwise the engine and the supervisor
+# sharing one Ollama host evict each other's model on alternating calls, and the cost
+# lands as multi-second latency on whichever spoke last. Read from the same env var.
+SLM_NUM_CTX = int(os.environ.get("SLM_NUM_CTX", "4096"))
+
 
 # ---------------------------------------------------------------------------
 # Token usage capture — same collect_usage()/usage_totals() shape as
@@ -124,7 +131,8 @@ def _call_ollama(system: str, user: str, *, temperature: float, max_tokens: int,
             {"role": "system", "content": system},
             {"role": "user", "content": user},
         ],
-        "options": {"temperature": temperature, "num_predict": max_tokens},
+        "options": {"temperature": temperature, "num_predict": max_tokens,
+                    "num_ctx": SLM_NUM_CTX},
     }
     body = _post_json(f"{OLLAMA_URL}/api/chat", payload, timeout)
     if body is None:

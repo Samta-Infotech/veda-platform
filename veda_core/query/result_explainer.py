@@ -186,18 +186,61 @@ def _strip_invented_currency(answer: str, facts: dict) -> str:
     return answer
 
 
+def _count_like_integers(facts: dict) -> set:
+    """The integers this result can legitimately be COUNTED by: the true row_count
+    and every whole number appearing in the aggregate metrics or the sampled rows.
+    These are the values an ordinal/positional mention ("the top 3", "4 of the 5")
+    is actually drawn from."""
+    out = set()
+    try:
+        rc = int(facts.get("row_count", 0) or 0)
+        if rc:
+            out.add(rc)
+    except Exception:
+        pass
+
+    def _walk(v):
+        if isinstance(v, bool):
+            return
+        if isinstance(v, (int, float, Decimal)):
+            f = float(v)
+            if f.is_integer():
+                out.add(abs(f))
+        elif isinstance(v, dict):
+            for x in v.values():
+                _walk(x)
+        elif isinstance(v, (list, tuple)):
+            for x in v:
+                _walk(x)
+
+    for key in ("metrics", "sample_rows", "fields"):
+        if key in facts:
+            _walk(facts[key])
+    return out
+
+
 def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[str]]) -> bool:
     """True when EVERY number the summary states is traceable to the precomputed
-    facts/metrics/patterns (within ±2%, floor ±2) — or is a small count/position
-    (≤ row_count, ≤ 12) the model may legitimately mention ("4 of the 5"). A single
-    ungrounded figure ⇒ False, so the caller can fall back to the deterministic
-    answer rather than ship a confident wrong number. Deliberately lenient (large
-    allowed set + tolerance) so it only trips on genuine invention, not rounding."""
+    facts/metrics/patterns (within ±2%, floor ±2). A single ungrounded figure ⇒
+    False, so the caller can fall back to the deterministic answer rather than ship
+    a confident wrong number.
+
+    Integer leniency (2026-09-20): a whole number ≤ max(row_count, 12) used to pass
+    UNCONDITIONALLY, as "a count / rank / ordinal — always fair game". That hole is
+    exactly the shape of the hallucination this guard exists to catch: on a 45-row
+    result the model could state "23 properties are overdue" — a figure appearing
+    nowhere in the data — and the guard waved it through because 23 ≤ 45. The pass
+    now also requires the integer to actually BE one of the result's count-like
+    values (row_count, or a whole number in the metrics/sample rows); anything else
+    falls through to the normal ±2%/±2 grounding check. The legitimate cases still
+    pass: "the top 3" of a 3-row result matches row_count, and the "4" in "4 of the
+    5" lands inside the ±2 tolerance of the 5 that is grounded."""
     allowed = _collect_allowed_numbers(facts, patterns)
     ceiling = max(int(facts.get("row_count", 0) or 0), 12)
+    count_like = _count_like_integers(facts)
     for n in _parse_numbers_from_text(answer):
-        if float(n).is_integer() and abs(n) <= ceiling:
-            continue   # a count / rank / ordinal — always fair game
+        if float(n).is_integer() and abs(n) <= ceiling and abs(float(n)) in count_like:
+            continue   # a genuine count / rank / ordinal drawn from this result
         if any(abs(n - a) <= max(2.0, 0.02 * abs(a)) for a in allowed):
             continue
         return False   # stated a figure that appears nowhere in the grounded inputs
@@ -318,7 +361,8 @@ def _numeric_aggregates(columns: List[str], rows: List[dict], max_cols: int = 6)
     return metrics
 
 
-def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[str] = None) -> dict:
+def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[str] = None,
+                   truncated: bool = False, fetch_limit: Optional[int] = None) -> dict:
     """Precompute the compact 'facts' payload that is the ONLY data given to the
     SLM — never the raw rows/table. Cheap (no SLM call), deterministic, and
     constant-size: a 3-row result and a 3,000-row result produce a same-sized
@@ -330,6 +374,13 @@ def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[s
     "ranked_by" — otherwise the SLM has no way to know WHICH field made these
     "top"/"latest" and tends to narrate the wrong one (e.g. an id column).
     Always kept in the sampled fields even if outside the first 6 columns.
+
+    `truncated` / `fetch_limit`: the executed SQL carried a LIMIT and the result
+    filled it, so `row_count` is the number of rows FETCHED, not the number that
+    exist. Without this the narrator states a capped count as a total — "there are
+    100 overdue invoices" when 100 is just the row limit — which is a wrong answer,
+    not a rounding error. Recorded in the facts payload so the prompt can require
+    "at least N" and so the numeric guard treats the capped count as count-like.
     """
     row_count = len(rows)
     cols = list(columns[:6])
@@ -345,6 +396,13 @@ def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[s
         facts = {"row_count": row_count, "sample_rows": sample}
         if row_count > len(sample):
             facts["note"] = f"showing {len(sample)} of {row_count} rows"
+    if truncated:
+        facts["truncated"] = True
+        if fetch_limit:
+            facts["fetch_limit"] = int(fetch_limit)
+        # overwrite any "showing N of M" note — M is itself capped here
+        facts["note"] = (f"the query returned the maximum {row_count} rows it was "
+                         f"allowed to fetch; the true total is AT LEAST {row_count}")
     if rank_column:
         facts["ranked_by"] = rank_column
     # Aggregates over the result, bounded to ANALYSIS_MAX_ROWS (Phase-7 scalability).
@@ -447,6 +505,8 @@ def run_nl_answer(
     patterns:       Optional[List[str]] = None,
     result_shape:   Optional[str] = None,
     analytical_context: Optional[dict] = None,
+    truncated:      bool = False,
+    fetch_limit:    Optional[int] = None,
 ) -> NLAnswerResult:
     """
     Converts result rows into a natural-language prose answer using a small local
@@ -481,7 +541,8 @@ def run_nl_answer(
         return NLAnswerResult(answer="No results found.", row_count=0,
                               duration_ms=round((time.time() - t0) * 1000, 2))
 
-    facts = _extract_facts(columns, rows, rank_column=rank_column)
+    facts = _extract_facts(columns, rows, rank_column=rank_column,
+                           truncated=truncated, fetch_limit=fetch_limit)
     glossary = _column_glossary(columns, table, semantic_model)
 
     rank_line = (f"\n\nThese rows are already ordered by \"{rank_column}\" — "
@@ -515,6 +576,17 @@ def run_nl_answer(
             f"based on that sample, and do NOT state a partial sum or count as the "
             f"full-result total.")
 
+    # The result filled its fetch limit, so row_count is a floor, not a total.
+    truncated_line = ""
+    if facts.get("truncated"):
+        _fl = facts.get("fetch_limit") or facts["row_count"]
+        truncated_line = (
+            f"\nNOTE: this result hit its {_fl}-row fetch limit, so {facts['row_count']} is "
+            f"the number of rows RETURNED, not the number that exist. Say \"at least "
+            f"{facts['row_count']}\" (or \"the first {facts['row_count']}\") — never state it "
+            f"as the complete total, and do not compute a total, average or share from it "
+            f"as though it covered everything.")
+
     if _mode == "analytical":
         role_line = (
             "You are a business analyst turning VERIFIED analytics into clear business "
@@ -537,7 +609,8 @@ def run_nl_answer(
     prompt = (
         f"User question: {query}\n\n"
         f"Extracted data: {json.dumps(facts, default=str)}"
-        f"{glossary}{ctx_line}{rank_line}{findings_line}{partial_line}{_STYLE_EXEMPLAR}\n\n"
+        f"{glossary}{ctx_line}{rank_line}{findings_line}{partial_line}{truncated_line}"
+        f"{_STYLE_EXEMPLAR}\n\n"
         + role_line
         + f"{shape_line}\n"
         f"Speak in business terms using the column meanings above — name each entity by its "

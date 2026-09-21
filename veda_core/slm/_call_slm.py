@@ -210,6 +210,14 @@ def _config():
         # vLLM serves under the model's HF path, not the Ollama tag — overridable.
         "vllm_model": g("VLLM_MODEL_NAME", None),
         "timeout": int(g("SLM_TIMEOUT_SECS", 240)),
+        # The configured context window, applied to EVERY call that does not name
+        # its own (see call_slm). Ollama re-loads the model whenever a request asks
+        # for a context length different from the resident one, so a process that
+        # mixes sized and unsized calls pays a model reload between them — the
+        # 1218s-vs-16.3s effect veda/generation.py measured and blamed on the data.
+        # Defaulting here (not at 20-odd call sites) means a NEW call site cannot
+        # reintroduce the bug by forgetting the kwarg.
+        "num_ctx": int(g("SLM_NUM_CTX", 4096)),
     }
 
 
@@ -270,6 +278,11 @@ class OllamaBackend:
             payload = {"model": model or self.model, "prompt": user_message,
                        "stream": False, "keep_alive": "24h", "options": options}
             body = _post_json(f"{self.base_url}/api/generate", payload, timeout)
+            # Same accounting as the /api/chat branch below. Omitting it here meant
+            # every raw-prompt call was invisible to llm_usage.per_purpose while
+            # still showing up in the per-CALL slm ledger — the two views of the
+            # same query disagreed, and the token totals under-counted silently.
+            _note_usage(body)
             usage = {"prompt_tokens": body.get("prompt_eval_count"),
                       "completion_tokens": body.get("eval_count")}
             return (body.get("response") or "").strip(), usage
@@ -385,6 +398,11 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
     side into whatever collect_usage() scope is currently open, if any."""
     backend = get_backend()
     _mdl = model or backend.model
+    if num_ctx is None:
+        try:
+            num_ctx = _config()["num_ctx"]
+        except Exception:
+            num_ctx = None
     # Centralized per-CALL SLM visibility: time the invocation and record it (on
     # success AND failure) into the ambient query trace, so every SLM call — for
     # any purpose, from any stage — shows up in ONE place under the query's
@@ -415,13 +433,28 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
                 purpose, backend.name, usage, getattr(_usage_tls, "calls", None) is not None)
     _record_usage(purpose, _mdl,
                   usage.get("prompt_tokens"), usage.get("completion_tokens"))
+    # Fold into the ContextVar accumulator too. This is the one that explain.py's
+    # _stamp() reads via get_usage() to populate the trace's llm_usage section —
+    # _fold_usage() had no caller, so get_usage() always reported calls=0, the
+    # `if u and u.get("calls")` guard never passed, and llm_usage was absent from
+    # every trace while MLflow's token metrics sat at zero. The two accumulators
+    # are deliberately kept: _record_usage is thread-local (per collect_usage()
+    # scope), this one is a ContextVar (per request).
+    _fold_usage(purpose)
     return content
 
 
-def prewarm(model: Optional[str] = None, timeout: int = 120) -> None:
+def prewarm(model: Optional[str] = None, timeout: int = 120) -> bool:
     """Best-effort model prewarm (Ollama: loads + pins via keep_alive; vLLM: a
-    1-token completion touches the weights). Never raises."""
+    1-token completion touches the weights). Never raises.
+
+    Returns True only when the call actually succeeded. It used to return None
+    unconditionally, so inference/loaders.py's `prewarm(...)` then
+    `_STATE["nl_summary_model_warm"] = True` recorded the model as warm even when
+    the host served no such model — which is exactly what was happening here, and
+    made the `nl_summary_slm_unreachable` degrade flag unreachable code."""
     try:
         call_slm("ok", purpose="prewarm", timeout=timeout, num_predict=1, model=model)
+        return True
     except Exception:
-        pass
+        return False

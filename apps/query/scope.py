@@ -170,6 +170,70 @@ def resolve_query_scope(data, tenant, user=None, effective=_UNRESOLVED) -> list[
     return [default_source_id]
 
 
+def _routing_card_entities(source_id, tenant: str = "default") -> list:
+    """The business-facing entity names on one source's routing CARD.
+
+    Read as plain JSON from the card artifact (veda_core/ingestion/routing_card.py writes
+    it at L5). This deliberately does NOT import veda_core: the api tier must not (see
+    apps/query/inference_client.py's docstring) — it reads a data file, which is a
+    different thing from importing the engine package.
+
+    Used to answer one question the api tier could not otherwise answer: "does this
+    message name something that lives in a DIFFERENT source than the one this session is
+    on?" Without it a session pinned to source 4 answers "which properties do they belong
+    to" from source 4's own tables — a confidently wrong answer to a question source 4
+    cannot address. Empty list when the source has no card (never ingested since cards
+    existed), which simply disables widening for it.
+    """
+    import json
+    import os
+    root = os.environ.get("VEDA_ARTIFACT_ROOT") or "/app/veda_core/data"
+    path = os.path.join(root, str(tenant), str(source_id), "veda_routing_card.json")
+    try:
+        with open(path) as f:
+            card = json.load(f)
+    except (OSError, ValueError):
+        return []
+    names = []
+    for e in (card.get("entities") or []):
+        for key in ("business_name", "table"):
+            v = str(e.get(key) or "").strip()
+            if v and v.lower() not in {n.lower() for n in names}:
+                names.append(v)
+    return names[:40]
+
+
+def _routing_card_joins(source_id, tenant: str = "default") -> list:
+    """Source ids this source can actually be JOINED to, from its routing card's
+    `joins_to` (discovered cross_source_fk edges).
+
+    This is the bound on scope widening. A session may only follow a cross-source
+    follow-up into a source it has a structural join to — without that bound, widening a
+    maintenance session to the whole authorised scope let routing pick the DOCUMENT
+    source and answer "how many of those are in Mumbai" out of maintenance_policy.docx,
+    then kept the thread there for the rest of the conversation. A source with no join to
+    the current one cannot be the other half of a drill-across, so it is not a candidate.
+    """
+    import json
+    import os
+    root = os.environ.get("VEDA_ARTIFACT_ROOT") or "/app/veda_core/data"
+    path = os.path.join(root, str(tenant), str(source_id), "veda_routing_card.json")
+    try:
+        with open(path) as f:
+            card = json.load(f)
+    except (OSError, ValueError):
+        return []
+    out = []
+    for j in (card.get("joins_to") or []):
+        try:
+            sid = int(j.get("source_id"))
+        except (TypeError, ValueError):
+            continue
+        if sid not in out:
+            out.append(sid)
+    return out
+
+
 def source_profiles_for(source_ids) -> dict:
     """Routing profiles for the given (already-authorised) source ids, keyed by str(source_id):
     ``{sid: {source_type, is_canonical, domain_tags, description}}``. Forwarded to the engine's
@@ -189,6 +253,13 @@ def source_profiles_for(source_ids) -> dict:
                 "is_canonical": bool(s.is_canonical),
                 "domain_tags": list(s.domain_tags or []),
                 "description": s.description or "",
+                # entity names from this source's routing card — lets the chat tier tell
+                # when a follow-up has moved to a different source's subject matter
+                # (chatbot/nodes.py's scope widening). Best-effort; [] disables widening.
+                "entities": _routing_card_entities(s.pk),
+                # sources this one has a discovered cross-source join to — the only
+                # legitimate targets for a session's scope to widen INTO.
+                "joins_to": _routing_card_joins(s.pk),
             }
         return out
     except Exception:

@@ -537,7 +537,15 @@ def analytics_summary(ctx: "InsightContext") -> dict:
         "available_measures":   list(ctx.available_measures),
         "available_dimensions": list(ctx.available_dimensions),
         "display_columns":      [s.name for s in ctx.column_stats if s.role != "identifier"],
-        "column_stats":         [{"name": s.name, "kind": s.kind, "role": s.role}
+        # top_values (M4): the actual values each dimension took in THIS result. The chat
+        # tier's deterministic delta layer matches a follow-up's literal ("only the Kochi
+        # ones") against these before it will call the classifier SLM, so without them the
+        # rule layer cannot resolve a value and every value-narrowing turn falls through
+        # to an SLM call. Capped at 12 per column and stringified — this rides the HTTP
+        # response, and a high-cardinality column must not be able to bloat it.
+        "column_stats":         [{"name": s.name, "kind": s.kind, "role": s.role,
+                                  "distinct_count": s.distinct_count,
+                                  "top_values": [str(v) for v in (s.top_values or [])[:12]]}
                                  for s in ctx.column_stats],
         "patterns":             [{"kind": p.kind, "column": p.column, "detail": p.detail,
                                   "strength": p.strength} for p in ctx.patterns],

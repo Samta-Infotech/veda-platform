@@ -38,6 +38,12 @@ except Exception:  # importable outside the engine cwd too (unit tests)
 #   retrieval_health — sparse_active/reranker_active/embed_backend (P1-4, 2026-09-10):
 #                whether Signal 2, the cross-encoder, and the metal/cpu embed backend
 #                are actually live for THIS query, not just "the process warmed ok".
+#   nl_summary — the prose layer's own record (model asked for vs. model that
+#                answered, timeout budget, whether the SLM or the deterministic
+#                template produced the text). Recorded by result_explainer; it was
+#                being written into a section name absent from this list, so
+#                to_dict() filtered it straight back out and the summary layer was
+#                invisible in every trace.
 #   llm_usage  — per-purpose SLM TOKEN totals, stamped by finish() from
 #                slm/_call_slm.py::get_usage().
 #   slm        — per-CALL SLM ledger (purpose/model/duration/ok), appended live by
@@ -49,7 +55,7 @@ _SECTIONS = [
     "schema_linking", "entity_selection", "projection", "join_planning",
     "tier1", "tier2", "sql_planning", "sql_generation", "validation",
     "execution", "result_analysis", "summary", "visualization",
-    "explainability", "slm", "llm_usage", "output", "totals",
+    "explainability", "nl_summary", "slm", "llm_usage", "output", "totals",
     # M2/M3 (2026-09-16): the understanding layer's decision, the firewall's verdict on
     # the SQL that executed ({verdict, ir_partial, checks_run, head, slot, reason}), the
     # analytical-spec candidate, and the dimension guard's grounded-GROUP-BY note.
@@ -171,6 +177,11 @@ class ExplainTrace:
             nxt = touched[i + 1][1] if i + 1 < len(touched) else self.total_ms
             durations[sec] = round(max(0.0, nxt - t), 1)
         slm_calls = (s.get("slm", {}) or {}).get("calls") or []
+        # turn_slm_calls (M4 / C.6) — the per-TURN budget, named explicitly rather than
+        # left to be inferred from slm_call_count. They are the same number today; the
+        # separate name is the contract scripts/eval_sessions.py asserts against, so a
+        # future change that splits a turn across traces has to decide what it means
+        # instead of silently reporting half.
         exec_sec = s.get("execution", {}) or {}
         viz = s.get("visualization", {}) or {}
         out = s.get("output", {}) or {}
@@ -180,6 +191,7 @@ class ExplainTrace:
             "total_duration_ms": self.total_ms,
             "stage_durations_ms": durations,
             "slm_call_count": len(slm_calls),
+            "turn_slm_calls": len(slm_calls),
             "slm_total_duration_ms": round(
                 sum(c.get("duration_ms", 0) for c in slm_calls), 1),
             "slm_total_tokens": self.total_tokens,
@@ -208,6 +220,15 @@ class ExplainTrace:
             "total_prompt_tokens": self.total_prompt_tokens,
             "total_completion_tokens": self.total_completion_tokens,
             "total_tokens": self.total_tokens,
+            # The per-CALL ledger and the per-PURPOSE token totals ride the COMPACT
+            # record, not just the verbose `full` payload: they are the operational
+            # numbers (which purpose ran, on which model, how long, did it succeed,
+            # what did it cost) and scripts/slm_purpose_report.py reads them. Safe to
+            # persist unconditionally — slm_call() records light metadata only, never
+            # prompt or response bodies, so this leaks nothing a compact record
+            # shouldn't carry. Bounded by the number of SLM calls in one query.
+            "slm_calls": list((s.get("slm", {}) or {}).get("calls") or []),
+            "llm_usage": dict(s.get("llm_usage", {}) or {}),
         }
 
     # ── persistence + human view ──────────────────────────────────────────────
@@ -220,7 +241,15 @@ class ExplainTrace:
         try:  # best-effort: token accounting can never break the query path
             from slm._call_slm import get_usage
             u = get_usage()
-            if u and u.get("calls"):
+            # `if u` — NOT `if u.get("calls")`. A query whose only SLM call FAILED folds
+            # no usage (call_slm records tokens on success only), and gating on calls>0
+            # then omitted the section entirely — so "the SLM was never needed" and "the
+            # SLM was called and errored" produced byte-identical traces. That is the
+            # exact ambiguity pipeline.py and veda_hybrid.py already work around with
+            # their own insight_engine_failed notes. An explicit zero is the answer: the
+            # section is present on every traced query, and the per-CALL slm ledger
+            # beside it says whether anything was attempted.
+            if u:
                 self.sections.setdefault("llm_usage", {}).update(
                     calls=u["calls"],
                     total_prompt_tokens=u["prompt_tokens"],
@@ -507,6 +536,11 @@ def use_trace(tr):
         unbind_trace(token)
 
 
+# The call purposes that produce the user-visible prose answer. summary.model /
+# summary.success are read back from the SLM ledger under these labels.
+_SUMMARY_PURPOSES = {"nl_answer", "insight_engine", "multi_summary", "rag_synthesis"}
+
+
 def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=False,
                          ictx=None, answer=None, summary_model=None, summary_ok=None,
                          visualization=None, explain_payload=None) -> None:
@@ -548,10 +582,27 @@ def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=Fa
         pass
     try:  # summary — WHICH summariser produced the prose, model, size, success
         if engine is not None or answer is not None:
+            # model/success come from the trace's OWN per-call SLM ledger, not from
+            # the caller. Both call sites passed config.NL_SUMMARY_MODEL (the model
+            # that was ASKED for) and bool(_summary_engine) ("some summariser ran"),
+            # so a trace claimed a successful qwen2.5:7b-instruct summary even when
+            # that model was not served, the call failed, and the deterministic
+            # template wrote the text. The ledger records what actually happened.
+            _mdl, _ok = summary_model, summary_ok
+            try:
+                _calls = ((getattr(tr, "sections", {}) or {}).get("slm", {}) or {}).get("calls") or []
+                _sum = [c for c in _calls if c.get("purpose") in _SUMMARY_PURPOSES]
+                if _sum:
+                    _last = _sum[-1]
+                    _mdl = _last.get("model") or summary_model
+                    _ok = bool(_last.get("ok"))
+            except Exception:
+                pass
             tr.set("summary",
                    engine=engine,
-                   model=summary_model,
-                   success=summary_ok,
+                   model=_mdl,
+                   model_requested=summary_model,
+                   success=_ok,
                    answer_chars=(len(answer) if isinstance(answer, str) else None))
     except Exception:
         pass

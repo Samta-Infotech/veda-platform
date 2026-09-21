@@ -30,6 +30,10 @@ _ERROR_DETAIL_MAX_CHARS = 500
 # Header names forwarded to the inference tier (§6.2, §6.3).
 _HEADER_SOURCE_ID = "X-Veda-Source-Id"
 _HEADER_SOURCE_IDS = "X-Veda-Source-Ids"
+# "<comma-separated source ids>|<anchor>" — what the previous turn of this conversation
+# answered from. Read by the inference middleware into RequestContext.session_prior and
+# stated to the routing SLM as a prior (never a constraint).
+_HEADER_SESSION_PRIOR = "X-Veda-Session-Prior"
 _HEADER_TENANT = "X-Veda-Tenant"
 _HEADER_REQUEST_ID = "X-Request-Id"
 # Gate 1 (User Story 3, Task 15) — the precomputed RBAC data scope (see
@@ -70,6 +74,7 @@ class InferenceClient:
 
     def _request(self, path: str, body: dict, source_id, tenant, request_id=None,
                  accept: str | None = None, source_ids=None, data_scope=None,
+                 session_prior=None,
                  source_profiles=None, no_cache: bool = False) -> urllib.request.Request:
         url = f"{self.config.base_url.rstrip('/')}{path}"
         data = json.dumps(body).encode("utf-8")
@@ -78,6 +83,11 @@ class InferenceClient:
             headers["Accept"] = accept
         if source_id is not None:
             headers[_HEADER_SOURCE_ID] = str(source_id)
+        if session_prior:
+            _pids, _anchor = session_prior
+            if _pids:
+                headers[_HEADER_SESSION_PRIOR] = (
+                    ",".join(str(s) for s in _pids) + "|" + str(_anchor or "")[:120])
         if source_ids:
             # Server-validated scope SET (P5). Comma-separated, ownership already checked
             # in the view — the inference tier trusts these because they arrive from the
@@ -140,6 +150,7 @@ class InferenceClient:
     def stream_hybrid_query(
         self, query: str, source_id=None, tenant=None, flags=None, request_id=None,
         source_ids=None, data_scope=None, source_profiles=None, no_cache: bool = False,
+        session_prior=None,
     ) -> Iterator[tuple[str, dict]]:
         """Yields (event, data) as the inference tier's SSE stream delivers them
         (progress events as the pipeline advances, then one final "result" event).
@@ -157,6 +168,7 @@ class InferenceClient:
             # datalake-isolated semantic model, and plans SQL against the primary source's
             # schema — which does not contain the datalake tables at all.
             source_profiles=source_profiles, no_cache=no_cache,
+            session_prior=session_prior,
         )
         response = self._open(request, self.config.timeout_s)
         try:

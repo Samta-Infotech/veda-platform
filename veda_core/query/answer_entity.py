@@ -27,12 +27,10 @@ network error) degrades to the pre-existing "no cue found" behaviour.
 
 from __future__ import annotations
 
-import json
 import re
-import urllib.request
 from typing import Callable, Dict, List, Optional
 
-from config import ANSWER_ENTITY_LLM_FALLBACK_ENABLED, SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL
+from config import ANSWER_ENTITY_LLM_FALLBACK_ENABLED
 from query.lg_prompts import ANSWER_ENTITY_RELATION_PROMPT
 
 try:
@@ -103,25 +101,22 @@ def _llm_relation_word(query: str) -> Optional[str]:
     if not ANSWER_ENTITY_LLM_FALLBACK_ENABLED:
         return None
     try:
-        payload = {
-            "model": SLM_MODEL_NAME,
-            "stream": False,
-            "messages": [
-                {"role": "system", "content": ANSWER_ENTITY_RELATION_PROMPT},
-                {"role": "user", "content": query},
-            ],
-            "options": {"temperature": 0.0, "num_predict": 8},
-        }
-        req = urllib.request.Request(
-            f"{SLM_OLLAMA_BASE_URL.rstrip('/')}/api/chat",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        # Through the shared choke-point, not a hand-rolled urlopen. The raw POST
+        # here bypassed everything call_slm() exists to provide: it never reached
+        # the SLM ledger (so this call was invisible in the trace and in the
+        # per-purpose report), never recorded its tokens, ignored SLM_BACKEND
+        # entirely (it always spoke Ollama, so on a vLLM deployment it simply
+        # failed every time and silently returned None), and sent no num_ctx.
+        from slm._call_slm import call_slm
+        word = call_slm(
+            query,
+            system=ANSWER_ENTITY_RELATION_PROMPT,
+            purpose="answer_entity_relation",
+            temperature=0.0,
+            num_predict=8,
+            timeout=8,
         )
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            body = json.loads(resp.read().decode("utf-8"))
-        word = (body.get("message", {}).get("content") or "").strip().lower()
-        word = re.sub(r"[^a-z]", "", word)
+        word = re.sub(r"[^a-z]", "", (word or "").strip().lower())
         return word if word and word != "none" else None
     except Exception:
         return None

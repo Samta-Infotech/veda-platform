@@ -157,6 +157,24 @@ def create_app():
         source_id = request.headers.get("x-veda-source-id")
         source_ids_hdr = request.headers.get("x-veda-source-ids")
         tenant = request.headers.get("x-veda-tenant")
+        # An UNPINNED request carries X-Veda-Source-Ids but no X-Veda-Source-Id (the api
+        # tier only sends the primary when the caller pinned one — see
+        # apps/query/inference_client.py). This used to require BOTH, so an unpinned
+        # multi-source request set NO context at all: `_current_ctx()` returned None,
+        # `veda_hybrid._sm_scope()` fell back to the VEDA_SM_SOURCE_ID env default of
+        # "1" — a source that is not even ready — and every such query died with
+        # "this data source hasn't been fully prepared for querying yet". That is why
+        # unpinned multi-source questions had never worked from the chat path.
+        #
+        # There is always a defensible primary when a scope was sent: the first member
+        # of the already-validated set. It only decides which source is "primary" for
+        # the single-source exec/audit path; the SCOPE is what the query traverses.
+        if source_id is None and source_ids_hdr and tenant is not None:
+            _first = next((s.strip() for s in source_ids_hdr.split(",") if s.strip()), None)
+            if _first is not None:
+                source_id = _first
+                logger.debug("no X-Veda-Source-Id; using first of X-Veda-Source-Ids (%s) "
+                             "as the primary for an unpinned scope", source_id)
         if source_id is not None and tenant is not None:
             source_ids = tuple(int(s) for s in source_ids_hdr.split(",") if s.strip()) \
                 if source_ids_hdr else ()
@@ -178,10 +196,23 @@ def create_app():
             # query cache (api tier forwards the request's `no_cache` field; every eval
             # script sets the same flag in-process). See RequestContext.cache_back.
             _no_cache = str(request.headers.get("x-veda-no-cache", "")).strip().lower() in ("1", "true", "yes")
+            # X-Veda-Session-Prior: "<comma-separated source ids>|<anchor>" — what the
+            # previous turn of this conversation answered from. See RequestContext.
+            _prior_hdr = request.headers.get("x-veda-session-prior") or ""
+            _prior_ids, _prior_anchor = (), ""
+            if _prior_hdr:
+                _ids_part, _, _anchor_part = _prior_hdr.partition("|")
+                try:
+                    _prior_ids = tuple(int(s) for s in _ids_part.split(",") if s.strip())
+                except ValueError:
+                    _prior_ids = ()
+                _prior_anchor = _anchor_part.strip()[:120]
             set_context(RequestContext(source_id=int(source_id), tenant=tenant,
                                        source_ids=source_ids,
                                        allowed_resources=allowed_resources,
-                                       cache_back=not _no_cache))
+                                       cache_back=not _no_cache,
+                                       session_prior=_prior_ids,
+                                       session_anchor=_prior_anchor))
             # Multi-source routing profiles (source_type/is_canonical/domain_tags/description),
             # server-resolved by the api tier from the Source registry (apps/query/scope.py::
             # source_profiles_for) and sent as X-Veda-Source-Profiles. This was the one forwarded

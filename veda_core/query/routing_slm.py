@@ -75,21 +75,91 @@ def _system_prompt():
         return _SYSTEM
 
 
-def _build_user_message(query: str, candidates: List[CandidateSource]) -> str:
-    lines = [f"QUESTION: {query}", "", "CANDIDATE SOURCES (choose only from these source_ids):"]
+def _card_block(c: "CandidateSource") -> str:
+    """This candidate's ROUTING CARD as prompt text, or "" when it has none.
+
+    The card (ingestion/routing_card.py, built by L5) is what the source IS: its main
+    entities, how they are named in business terms, what they can be grouped and
+    measured by, real sample values, and which other sources it can be JOINED to. The
+    evidence block below it is what THIS question matched. The model needs both — the
+    evidence alone tells it which columns lit up but never what the source is for, and
+    "can these two be combined at all" is a structural fact no per-question evidence
+    carries.
+
+    Best-effort: a source ingested before cards existed has none, and this returns ""
+    so the prompt is exactly what it was before.
+    """
+    try:
+        from config import ROUTING_CARDS_ENABLED
+        if not ROUTING_CARDS_ENABLED:
+            return ""       # A/B switch for scripts/eval_routing_cards.py
+    except Exception:
+        pass
+    try:
+        from ingestion.routing_card import load_routing_card, render_card
+    except Exception:
+        return ""
+    try:
+        from veda_core.context import current_source_profiles as _csp
+    except Exception:
+        try:
+            from context import current_source_profiles as _csp
+        except Exception:
+            _csp = lambda: {}
+    card = load_routing_card(c.source_id)
+    if not card:
+        return ""
+    profile = (_csp() or {}).get(str(c.source_id)) or {}
+    # the candidate's own already-resolved profile fields win when the ambient
+    # profiles map is empty (a CLI/eval call with no request context)
+    profile = {**{"source_type": c.source_type, "domain_tags": list(c.domain_tags or [])},
+               **{k: v for k, v in profile.items() if v}}
+    try:
+        return render_card(card, profile=profile)
+    except Exception:
+        return ""
+
+
+def _build_user_message(query: str, candidates: List[CandidateSource],
+                        prior: Optional[dict] = None) -> str:
+    lines = [f"QUESTION: {query}", ""]
+    if prior:
+        # A stated PRIOR, not an instruction. In a multi-turn session the previous turn
+        # already established which source the conversation is on, and a follow-up
+        # ("of those, only the Mumbai ones") carries almost no routing signal of its own
+        # — scored cold it looks like a new, vague question. Saying what the last turn
+        # answered from lets the model keep the thread when the new message is a
+        # continuation, while leaving it free to move when the message is genuinely
+        # about something else. It is deliberately phrased as context the model may
+        # override, never as "use this source".
+        _ps = ", ".join(str(x) for x in (prior.get("source_ids") or []))
+        if _ps:
+            _anchor = prior.get("anchor")
+            lines.append(f"CONTEXT: the previous turn in this conversation was answered "
+                         f"from source {_ps}"
+                         + (f" (about {_anchor})" if _anchor else "")
+                         + ". If this question continues that thread, prefer that source; "
+                           "if it is about something else, ignore this.")
+            lines.append("")
+    lines.append("CANDIDATE SOURCES (choose only from these source_ids):")
     for c in candidates:
         ev = c.evidence_summary or {}
         cols = ", ".join(ev.get("columns", [])[:8])
         docs = ", ".join(ev.get("documents", [])[:5])
-        lines.append(f"- source_id={c.source_id} type={c.source_type} domains={c.domain_tags}")
-        if ev.get("description"):
-            lines.append(f"    description: {ev['description']}")
-        for it in (ev.get("items") or [])[:3]:
-            lines.append(f"    item: {it.get('name')} — {it.get('summary')}")
+        card = _card_block(c)
+        if card:
+            lines.append(card)
+        else:
+            lines.append(f"- source_id={c.source_id} type={c.source_type} domains={c.domain_tags}")
+            if ev.get("description"):
+                lines.append(f"    description: {ev['description']}")
+            for it in (ev.get("items") or [])[:3]:
+                lines.append(f"    item: {it.get('name')} — {it.get('summary')}")
+        # evidence is per-QUESTION and always shown: it is what this question matched
         if cols:
-            lines.append(f"    columns: {cols}")
+            lines.append(f"    matched columns: {cols}")
         if docs:
-            lines.append(f"    documents: {docs}")
+            lines.append(f"    matched documents: {docs}")
     lines.append("")
     lines.append('Allowed decisions: SINGLE, MULTI, NONE. Reply with STRICT JSON only.')
     return "\n".join(lines)
@@ -97,9 +167,29 @@ def _build_user_message(query: str, candidates: List[CandidateSource]) -> str:
 
 def _default_slm_call(system: str, user: str) -> str:
     """Real SLM call through the shared choke-point. Lazily imported so this module stays import-cheap
-    and the call is monkeypatchable in tests."""
+    and the call is monkeypatchable in tests.
+
+    Bounded on all three axes, because this call sits in front of EVERY ambiguous
+    question and a hung one stalls the whole turn:
+      * num_ctx  — the configured window, never the model default (a request that
+                   omits it makes Ollama re-load the model at a different context
+                   length than the sized calls around it).
+      * num_predict — the reply is one small JSON object ({decision, selected_source_ids,
+                   reason}); without a cap the model may keep generating prose past it.
+      * timeout  — ROUTING_SLM_TIMEOUT_SECS (default 20s), not the shared
+                   SLM_TIMEOUT_SECS of 240s. Routing is a pre-answer decision with a
+                   deterministic fallback (validate_slm_decision degrades to
+                   clarification), so waiting four minutes on it is strictly worse
+                   than degrading: the fallback is instant and safe.
+    Temperature is left at call_slm's 0.0 default — a routing decision must not vary run to run."""
     from slm._call_slm import call_slm
-    return call_slm(user, system=system, purpose="source_routing")
+    try:
+        from config import SLM_NUM_CTX, ROUTING_SLM_TIMEOUT_SECS
+    except Exception:  # importable outside the engine cwd (unit tests)
+        SLM_NUM_CTX, ROUTING_SLM_TIMEOUT_SECS = 4096, 20
+    return call_slm(user, system=system, purpose="source_routing",
+                    num_ctx=SLM_NUM_CTX, num_predict=192,
+                    timeout=ROUTING_SLM_TIMEOUT_SECS)
 
 
 def _decision_field(parsed):
@@ -189,7 +279,8 @@ def _parse(raw: str):
 
 
 def resolve_boundary(query: str, candidates: List[CandidateSource], *,
-                     slm_call=None, query_id: str = "", trace_id: str = "") -> RoutingDecision:
+                     slm_call=None, query_id: str = "", trace_id: str = "",
+                     prior: Optional[dict] = None) -> RoutingDecision:
     """The bounded SEMANTIC decision boundary (P1). The coordinator calls this ONLY for
     evidence-grounded boundary cases — never for high-confidence deterministic SINGLE/structural MULTI.
     The SLM sees only the query + candidate sources (descriptions + evidence summaries) and returns
@@ -210,7 +301,7 @@ def resolve_boundary(query: str, candidates: List[CandidateSource], *,
             query_id=query_id, trace_id=trace_id).to_decision()
 
     try:
-        raw = slm_call(_system_prompt(), _build_user_message(query, candidates))
+        raw = slm_call(_system_prompt(), _build_user_message(query, candidates, prior=prior))
     except Exception as e:  # noqa: BLE001
         return _clarify(RC_INVALID_SLM,
                         f"Could not decide the source automatically ({type(e).__name__}).")

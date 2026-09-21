@@ -96,8 +96,14 @@ async def hydrate() -> dict:
         _STATE["degraded"].append("reranker_warm_failed")
     try:
         from veda_core.slm._call_slm import prewarm
-        prewarm()               # loads + pins the SLM on the (host Metal) backend
-        _p("✓ SLM")
+        # prewarm() never raises — it returns False instead — so the except below
+        # only catches an import/config failure. The RESULT is what says whether
+        # the model is actually resident.
+        if prewarm():           # loads + pins the SLM on the (host Metal) backend
+            _p("✓ SLM")
+        else:
+            _p("SLM prewarm failed — the primary SLM is not reachable/served")
+            _STATE["degraded"].append("slm_unreachable")
     except Exception as exc:
         _p(f"SLM warm deferred: {exc}")
         _STATE["degraded"].append("slm_unreachable")
@@ -110,9 +116,21 @@ async def hydrate() -> dict:
         # (~800ms), which silently degrades every early answer to the generic
         # deterministic fallback until something else happens to warm it. Prewarming
         # here means the first real query already finds it resident (keep_alive 24h).
-        prewarm(model=NL_SUMMARY_MODEL)
-        _STATE["nl_summary_model_warm"] = True
-        _p("✓ NL summary SLM")
+        # Only "warm" if the call actually succeeded. This unconditionally set True
+        # before, and prewarm() swallowed its own exception and returned None — so
+        # nl_summary_model_warm reported True on a host that served no such model,
+        # and the nl_summary_slm_unreachable degrade below was unreachable code.
+        # That is precisely the state this deployment was in: NL_SUMMARY_MODEL named
+        # qwen2.5:7b-instruct, the host served only qwen2.5-coder:7b, and /readyz
+        # said the summary model was warm.
+        _warm = prewarm(model=NL_SUMMARY_MODEL)
+        _STATE["nl_summary_model_warm"] = bool(_warm)
+        if _warm:
+            _p("✓ NL summary SLM")
+        else:
+            _p(f"NL summary SLM ({NL_SUMMARY_MODEL}) unreachable — answers will use "
+               f"the deterministic template")
+            _STATE["degraded"].append("nl_summary_slm_unreachable")
     except Exception as exc:
         # Non-fatal by design (query/result_explainer.py falls back to deterministic
         # template answers) — but surfaced in /readyz so a missing/unpulled

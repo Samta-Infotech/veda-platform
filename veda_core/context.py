@@ -50,6 +50,17 @@ class RequestContext:
     # the battery, so test traffic can neither be answered from a cached SQL nor
     # poison the cache with its own answers. Default True = production behaviour.
     cache_back: bool = True
+    # ``session_prior`` (M4): what the PREVIOUS turn of this conversation answered from —
+    # ``(source_ids_tuple, anchor)``. Forwarded by the api tier from the chat frame and
+    # read by the routing coordinator, which states it to the boundary SLM as a prior
+    # ("the last turn answered from source 4, about vendors"). It is context, never a
+    # constraint: routing may move sources, it just no longer decides from a cold start.
+    # Without it, widening a session's scope so a cross-source follow-up CAN reach another
+    # source also let the thread drift to an unrelated one — measured: a maintenance
+    # session asked "how many of those are in Mumbai" drifted to the document source and
+    # stayed there for the rest of the script. Tuple + str so the context stays hashable.
+    session_prior: tuple = ()
+    session_anchor: str = ""
 
     def narrowed(self, source_id, source_ids=None) -> "RequestContext":
         """A copy of this context re-scoped to `source_id` (and optionally a subset
@@ -62,7 +73,9 @@ class RequestContext:
         return RequestContext(source_id=int(source_id), tenant=self.tenant,
                               source_ids=tuple(source_ids) if source_ids else (int(source_id),),
                               allowed_resources=self.allowed_resources,
-                              cache_back=self.cache_back)
+                              cache_back=self.cache_back,
+                              session_prior=self.session_prior,
+                              session_anchor=self.session_anchor)
 
     def __post_init__(self):
         # Normalize the set: default to the primary, dedupe preserving order, and

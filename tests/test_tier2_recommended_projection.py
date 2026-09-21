@@ -198,7 +198,11 @@ def test_build_user_message_omits_block_when_none():
 # ---------------------------------------------------------------------------
 
 def test_node_select_columns_renders_recommended_projection_block(monkeypatch):
-    def fake_call_node(system_prompt, user_msg):
+    # **kwargs absorbs `purpose` (2026-09-21: _call_node now carries the graph NODE
+    # NAME through to the SLM ledger so the per-purpose report can attribute time
+    # per node instead of one flat "lg_node" label). This double only inspects the
+    # rendered user message, so the label is irrelevant to what it asserts.
+    def fake_call_node(system_prompt, user_msg, **kwargs):
         fake_call_node.captured_user_msg = user_msg
         return {"selected_col_ids": [f"{TABLE}.revenue"], "group_by_col_id": None,
                 "order_by_col_id": None, "order_direction": "ASC"}
@@ -235,7 +239,11 @@ def test_node_select_columns_omits_block_when_absent(monkeypatch):
     """No recommended_projection key at all (existing state shape, pre-this-
     change callers) must render the exact same prompt as before."""
 
-    def fake_call_node(system_prompt, user_msg):
+    # **kwargs absorbs `purpose` (2026-09-21: _call_node now carries the graph NODE
+    # NAME through to the SLM ledger so the per-purpose report can attribute time
+    # per node instead of one flat "lg_node" label). This double only inspects the
+    # rendered user message, so the label is irrelevant to what it asserts.
+    def fake_call_node(system_prompt, user_msg, **kwargs):
         fake_call_node.captured_user_msg = user_msg
         return {"selected_col_ids": [], "group_by_col_id": None,
                 "order_by_col_id": None, "order_direction": "ASC"}

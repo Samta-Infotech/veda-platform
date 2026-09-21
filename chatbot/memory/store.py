@@ -32,7 +32,11 @@ _MEMORY_REDIS_URL = os.environ.get(
     "CHATBOT_MEMORY_REDIS_URL",
     os.environ.get("CHATBOT_CHECKPOINTER_REDIS_URL", "redis://localhost:6380/0"),
 )
-_TTL_SECS = int(os.environ.get("VEDA_MEMORY_TTL_SECS", str(4 * 3600)))   # sliding 4h idle window
+# Sliding idle window, refreshed on every read AND write. 24h (M4, was 4h): the IR stack
+# is what a 10-turn drill-down is resumed from, and a session left overnight — lunch, a
+# meeting, the next morning — must still be able to say "go back". 4h silently turned a
+# resumed conversation into turn 1, with no signal that anything had been lost.
+_TTL_SECS = int(os.environ.get("VEDA_MEMORY_TTL_SECS", str(24 * 3600)))
 _EPISODIC_MAX = 3
 _STACK_MAX = 10
 

@@ -83,6 +83,12 @@ class ChatState(TypedDict, total=False):
     # ── output ───────────────────────────────────────────────────────────────
     reply_text: str
     needs_clarification: bool
+    # M4 (C.7) IR-derived reply surfaces, set by format_reply_node. They MUST be declared
+    # here: this TypedDict is the graph's channel set, and LangGraph drops any key a node
+    # returns that has no channel — which is exactly why they arrived as None at
+    # run_chat_turn despite format_reply_node computing them correctly.
+    context_strip: str                 # "Vendors in Kochi · grouped by category · source: 4"
+    follow_up_questions: List[str]     # deterministic next steps from drill_options
     clarification_question: Optional[str]
     sql: Optional[str]
     rows: Optional[list]
@@ -98,6 +104,10 @@ class ChatState(TypedDict, total=False):
     frame: Dict[str, Any]              # chatbot.memory.frame.QueryFrame
     drill_stack: List[Dict[str, Any]]  # chatbot.memory.frame.DrillLevel list
     delta_type: str                    # "new_topic"|"refine"|"drill_down"|"drill_up"|"compare"|"ambiguous"
+    ir_used: bool                      # M4: did this turn build its query by editing the
+                                       # previous turn's IR (True) or by restating it as
+                                       # text (False)? The ratio is how much of the stack
+                                       # is genuinely structured — see chatbot/memory/frame.py.
     # Audit fix (H1): the short capped Redis episodic buffer (MemoryStore's
     # ":episodic" key), loaded by memory_read_node and passed to
     # classify_delta() for reference-resolution ("it"/"that"/"tell me more")

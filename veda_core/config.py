@@ -385,6 +385,18 @@ VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or No
 # regressions are meaningless while the same input can produce a different intent each run.
 SLM_TEMPERATURE      = float(__import__("os").environ.get("SLM_TEMPERATURE", "0.3"))
 SLM_TIMEOUT_SECS     = 240
+# Routing is a PRE-answer decision with a safe deterministic fallback (routing_slm
+# degrades an unusable/slow answer to a clarification), so it gets its own short
+# budget instead of the shared 240s: a hung router stalls the turn before any work
+# has happened, while the fallback costs nothing. 20s is ~4x the warm p90 of this
+# 192-token JSON reply on this hardware.
+ROUTING_SLM_TIMEOUT_SECS = int(__import__("os").environ.get("ROUTING_SLM_TIMEOUT_SECS", "20"))
+# Routing cards (ingestion/routing_card.py) in the boundary-SLM prompt. Default ON: a
+# source with no card falls back to the previous evidence-only block on its own, so this
+# needs no staged rollout. The flag exists so scripts/eval_routing_cards.py can measure
+# the SAME question set with and without cards in one run — a claimed routing improvement
+# that cannot be switched off cannot be attributed.
+ROUTING_CARDS_ENABLED = __import__("os").environ.get("ROUTING_CARDS_ENABLED", "1") == "1"
 SLM_MAX_RETRIES      = 2
 SLM_MAX_TOKENS       = 2048
 # IR-JSON output is small (~150–500 tokens); a dedicated, smaller cap than the shared

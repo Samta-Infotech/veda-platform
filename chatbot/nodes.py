@@ -19,6 +19,7 @@ from langchain_core.runnables import RunnableConfig
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 from .llm import CHATBOT_CLASSIFY_MODEL, call_slm
+from .memory import delta as memory_delta
 from .memory import frame as memory_frame
 from .memory.classify import DELTA_TYPES, classify_delta, parse_delta_response
 from .memory.store import MemoryStore
@@ -222,6 +223,29 @@ def _turn_delta(state: ChatState, assistant_reply: str) -> list:
     ]
 
 
+def _deterministic_followup(message: str, frame: dict):
+    """The delta_type the RULE layer is confident about, or None.
+
+    Returns None for `new_topic` even when the rules are confident: a new topic may still
+    be smalltalk or a runtime-context question, and only the classify call can tell those
+    apart — short-circuiting it would route "thanks, and how many users are there" as a
+    data question or vice-versa. Follow-up edits carry no such ambiguity.
+    """
+    try:
+        entry = memory_frame.stack_top(frame or {})
+        if not entry:
+            return None
+        d = memory_delta.detect(message, entry, list((frame or {}).get("stack") or []))
+        if not memory_delta.is_confident(d):
+            return None
+        return {"add_filter": "drill_down", "change_group": "refine",
+                "change_measure": "refine", "change_order": "refine",
+                "drill_up": "drill_up", "switch_frame": "refine"}.get(d["op"])
+    except Exception:
+        logger.exception("_deterministic_followup failed — falling back to the classify call")
+        return None
+
+
 def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     """Decide what kind of message this is. Defaults to 'answer' (route to the
     engine) on any failure — refuse-over-guess: never silently short-circuit
@@ -269,6 +293,24 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         action = "followup"
         delta_type = "drill_up"
         logger.info("classify_node: deterministic drill_up match, message=%r", message)
+    elif _deterministic_followup(message, frame) is not None:
+        # M4 (C.6): the rule layer (chatbot/memory/delta.py) recognised this message as a
+        # specific edit to the previous turn's result — "only the Kochi ones", "by
+        # category", "top 3". A message that edits the previous RESULT is a follow-up by
+        # definition, so neither half of this call's job is in doubt and it can be skipped
+        # entirely.
+        #
+        # This is the change that actually meets the turn budget. context_resolve_node
+        # already reused this node's merged delta_type rather than making a second call,
+        # so the floor was 2 SLM calls per follow-up (classify + summary) no matter what
+        # the rule layer concluded downstream — measured at exactly 2 on every answered
+        # follow-up in scripts/eval_sessions.py. Skipping here takes it to 1: the prose
+        # summary, which is the only call that produces something the user reads.
+        _d = _deterministic_followup(message, frame)
+        action = "followup"
+        delta_type = _d
+        logger.info("classify_node: deterministic follow-up delta=%s, message=%r — "
+                    "NO classify SLM call", delta_type, message)
     else:
         _emit(config, "supervisor_classify", "Understanding your message...")
         raw = call_slm(
@@ -507,8 +549,36 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
                     message, resolved)
         return {"resolved_query": resolved, "delta_type": "new_topic"}
 
+    # ── M4: deterministic delta FIRST ────────────────────────────────────────
+    # The rule layer (chatbot/memory/delta.py) resolves the closed-class follow-up
+    # constructions — "only the Kochi ones", "by category", "top 3", "go back" — against
+    # the previous result's OWN dimensions and values. It runs before anything else
+    # because it is free: no SLM call, no round-trip. Only what it returns as `ambiguous`
+    # costs a classification, which is the whole turn-budget argument (C.3/C.6).
+    _entry = memory_frame.stack_top(frame)
+    _stack = list(frame.get("stack") or [])
+    _rule_delta = None
+    try:
+        _rule_delta = memory_delta.detect(message, _entry, _stack)
+    except Exception:
+        logger.exception("context_resolve_node: deterministic delta failed — falling back to SLM")
+        _rule_delta = None
+
     delta_type = state.get("delta_type")
-    if delta_type in DELTA_TYPES:
+    if _rule_delta is not None and memory_delta.is_confident(_rule_delta):
+        _op = _rule_delta["op"]
+        # The rule layer's ops map onto the existing DELTA_TYPES vocabulary so every
+        # downstream consumer (memory_write_node's drill bookkeeping, the frame merge)
+        # keeps working unchanged. add_filter is a narrowing — `drill_down` — which is
+        # also what makes the drill stack record a level for it.
+        delta_type = {"add_filter": "drill_down", "change_group": "refine",
+                      "change_measure": "refine", "change_order": "refine",
+                      "drill_up": "drill_up", "switch_frame": "refine",
+                      "new_topic": "new_topic"}.get(_op, "ambiguous")
+        logger.info("context_resolve_node: deterministic delta op=%s (rule=%s conf=%.2f) "
+                    "-> delta_type=%s — NO SLM call", _op, _rule_delta.get("rule"),
+                    _rule_delta.get("confidence"), delta_type)
+    elif delta_type in DELTA_TYPES:
         # classify_node's merged call already produced this — ZERO extra SLM
         # call here, which is the whole point of the merge.
         logger.info("context_resolve_node: reusing delta_type=%s from classify_node's "
@@ -526,20 +596,80 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         # actually typed). classify_delta()/parse_delta_response already
         # applied the H3 confidence gate before delta_type reaches here.
 
-    if delta_type == "drill_up" and drill_stack:
-        drill_stack = memory_frame.pop_drill(drill_stack)
-        frame = memory_frame.rebuild_frame_from_stack(frame, drill_stack)
+    # A message that points BACK at the previous result is not a new topic, whatever the
+    # classifier said — see memory_delta.has_back_reference. Downgraded to "ambiguous"
+    # rather than forced to a specific op: we know it continues the thread (so the scope
+    # is inherited and the frame survives), but not what it does to the IR, so the text
+    # passes through unresolved exactly as any ambiguous turn does.
+    if (delta_type == "new_topic" and _entry is not None
+            and memory_delta.continues_thread(_rule_delta, message)):
+        logger.info("context_resolve_node: classifier said new_topic but %r carries a "
+                    "back-reference — keeping the session frame (ambiguous)", message)
+        delta_type = "ambiguous"
+
+    if delta_type == "drill_up":
+        if drill_stack:
+            drill_stack = memory_frame.pop_drill(drill_stack)
+            frame = memory_frame.rebuild_frame_from_stack(frame, drill_stack)
+        # M4: move the IR-stack cursor back one entry as well, so the NEXT delta is
+        # applied to the question before this one. Without this "go back" popped the flat
+        # drill_path but left the cursor on the newest entry, and the turn after a
+        # "go back" re-applied itself to the state the user had just backed out of.
+        _st = list(frame.get("stack") or [])
+        if _st:
+            _cur = frame.get("cursor", -1)
+            _cur = _cur if isinstance(_cur, int) else -1
+            frame = {**frame, "cursor": max(-len(_st), _cur - 1)}
+            _entry = memory_frame.stack_top(frame)
 
     # "new_topic"/"refine"/"drill_down"/"drill_up"/"compare" all merge
     # deterministically; "ambiguous" (judgment OR timeout) passes the message
     # through untouched — no second SLM call, see docstring above.
-    resolved = (memory_frame.render_frame_as_query(frame, message, delta_type)
-                if delta_type != "ambiguous" else message)
+    # ── M4: apply the delta to the previous IR ───────────────────────────────
+    # The structured path: edit the slot the delta names on the previous turn's IR and
+    # restate THAT as the question. What reaches the engine is built from the previous
+    # turn's validated slots, not from a paraphrase of its English — so a filter already
+    # applied cannot be dropped by a rewording, which is the failure the text path had.
+    # The engine still re-grounds and re-checks everything (there is no compile-from-IR
+    # entry point yet — M3 checkpoint 2), so this changes where the structure comes from,
+    # never which validations run.
+    resolved = None
+    _ir_used = False
+    if delta_type == "drill_up" and memory_frame.entry_is_structured(_entry):
+        # "go back" is not an edit — the cursor already moved above, so the question is
+        # simply the entry we moved TO, restated from its own slots.
+        try:
+            _q = memory_frame.ir_to_question((_entry or {}).get("ir"))
+            if _q:
+                resolved, _ir_used = _q, True
+                logger.info("context_resolve_node: drill_up to stacked IR -> %r", _q)
+        except Exception:
+            logger.exception("context_resolve_node: drill_up IR restate failed")
+    elif (_rule_delta is not None and delta_type not in ("new_topic", "ambiguous")
+            and memory_frame.entry_is_structured(_entry)):
+        try:
+            _next_ir = memory_frame.apply_delta((_entry or {}).get("ir"), _rule_delta)
+            _q = memory_frame.ir_to_question(_next_ir) if _next_ir else ""
+            if _q:
+                resolved, _ir_used = _q, True
+                logger.info("context_resolve_node: IR delta applied — %r -> %r", message, _q)
+        except Exception:
+            logger.exception("context_resolve_node: apply_delta failed — using text fallback")
 
-    logger.info("context_resolve_node: delta_type=%s frame-merge %r -> %r",
-                delta_type, message, resolved)
+    if resolved is None:
+        # Fallback for ir_partial / unstructured frames and for ambiguous turns. This is
+        # the pre-M4 behaviour, kept verbatim and now scoped to exactly the cases the IR
+        # path cannot serve; the log line is the count of how often that is.
+        resolved = (memory_frame.render_frame_as_query(frame, message, delta_type)
+                    if delta_type != "ambiguous" else message)
+        if delta_type not in ("new_topic", "ambiguous"):
+            logger.info("context_resolve_node: TEXT FALLBACK (ir_partial or no IR) "
+                        "delta_type=%s", delta_type)
+
+    logger.info("context_resolve_node: delta_type=%s ir_used=%s %r -> %r",
+                delta_type, _ir_used, message, resolved)
     return {"resolved_query": resolved, "delta_type": delta_type,
-            "frame": frame, "drill_stack": drill_stack}
+            "frame": frame, "drill_stack": drill_stack, "ir_used": _ir_used}
 
 
 def _extract_engine_result(payload: dict) -> tuple[dict, str]:
@@ -634,28 +764,141 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
     res0: dict = {}
     status = "error"
 
-    # Drill-down keeps the SOURCE (P4, 2026-09-18): a follow-up that refines / drills the
-    # previous frame runs on the source that frame's answer came from, not the whole scope
-    # re-deciding (which can land a "how many of those…" on a different source). Only
-    # narrows within the turn's authorised scope; a new topic keeps the full scope.
+    # Session-sticky scope (P4 2026-09-18, widened 2026-09-21). A follow-up runs on the
+    # scope the previous turn's answer came from, rather than re-deciding the source from
+    # a message that carries almost no routing signal of its own ("how many of those are
+    # overdue" scored cold can land on a different source than "those" came from).
+    #
+    # The rule is now EVERY delta except new_topic, where it used to be an explicit list
+    # of four. The one type the list omitted was "ambiguous" — which is precisely the
+    # case that needs the inherited scope most: "ambiguous" means the message refers to
+    # something in the current frame ("it", "that one") and the classifier could not say
+    # which, so its text is passed through UNRESOLVED (see context_resolve_node). Routing
+    # that bare pronoun cold was the worst-grounded routing decision the system could
+    # make, and it was the only one not covered.
+    #
+    # Still only ever NARROWS, and only within the turn's already-authorised scope: the
+    # RBAC-resolved `source_ids` is the ceiling, so this can never reach a source the
+    # caller is not entitled to. A new topic keeps the full scope.
     _turn_source_id = state.get("source_id")
     _turn_source_ids = state.get("source_ids")
+    _route_source = "pin" if _turn_source_id else "coordinator"
     try:
-        _frame_sid = (state.get("frame") or {}).get("source_id")
+        _frame = state.get("frame") or {}
         _delta = state.get("delta_type")
-        if (_frame_sid and _delta in ("drill_down", "drill_up", "refine", "compare")
-                and (not _turn_source_ids or int(_frame_sid) in {int(s) for s in _turn_source_ids})):
-            _turn_source_id, _turn_source_ids = int(_frame_sid), [int(_frame_sid)]
-            _emit(config, "route", f"Continuing on the same source ({_frame_sid})…",
-                  {"source_ids": _turn_source_ids, "mode": "single", "inherited": True})
+        # the frame's full scope when the previous turn was multi-source, else its one
+        # source — primary_source_id names the anchor within a multi-source frame
+        _frame_ids = [s for s in (_frame.get("source_ids") or []) if s is not None]
+        if not _frame_ids and _frame.get("source_id") is not None:
+            _frame_ids = [_frame["source_id"]]
+        _allowed = {int(s) for s in (_turn_source_ids or [])}
+        _inherit = [int(s) for s in _frame_ids if not _allowed or int(s) in _allowed]
+        # WIDEN when the message names subject matter that belongs to a DIFFERENT source
+        # in the authorised scope. Inheritance alone narrows and never lets go, so a
+        # cross-source follow-up ("which properties do they belong to", asked of a
+        # maintenance session) was answered from the inherited source's own tables — a
+        # confident answer to a different question, which is the one outcome this
+        # codebase's refuse-over-guess norm exists to prevent.
+        #
+        # Widening only ADDS sources already inside the turn's authorised set, so it can
+        # never reach data RBAC withheld; the inherited source stays PRIMARY, so planning
+        # is still anchored on the thread. Entity names come from each source's routing
+        # card, handed over by the api tier in source_profiles — this tier reads no engine
+        # files and imports no veda_core.
+        # WIDEN on anything the rule layer could not resolve as an IN-SCOPE edit.
+        #
+        # A confident add_filter / change_group / change_measure / change_order / drill_up
+        # is by construction an edit to the CURRENT result — its slot and value were
+        # matched against that result's own dimensions and values — so it belongs on the
+        # inherited source and the scope stays narrow. Anything else is, by definition, a
+        # follow-up we could not account for from this source's substrate, and that is
+        # exactly the case where it may have moved to another source's subject matter
+        # ("which properties do they belong to", asked of a maintenance session).
+        #
+        # Deciding WHICH source it moved to is the routing coordinator's job, not this
+        # tier's: it has the embeddings, the evidence and the routing cards, and it is now
+        # given the previous scope as a stated prior (query/routing_slm.py). An earlier
+        # attempt here matched the message against card entity NAMES and failed on the
+        # vocabulary gap that routing exists to bridge — source 2's entity is "Asset", the
+        # user says "properties".
+        #
+        # Widening only restores sources already inside the turn's AUTHORISED set, so it
+        # can never reach data RBAC withheld; the inherited source stays primary, so
+        # planning is still anchored on the thread.
+        # Recomputed here rather than threaded from context_resolve_node: memory_delta is
+        # a pure function over the frame and the message (no I/O, no SLM), and that node
+        # is SKIPPED entirely on the first turn of a session, so state could not be relied
+        # on to carry it.
+        _rule = memory_delta.detect(state.get("message", ""),
+                                    memory_frame.stack_top(_frame),
+                                    list(_frame.get("stack") or []))
+        _resolved_in_scope = bool(memory_delta.is_confident(_rule)
+                                  and _rule.get("op") not in ("new_topic", "switch_frame"))
+        if _inherit and _delta and _delta != "new_topic" and not _resolved_in_scope:
+            # Widen ONLY into sources the current one has a discovered cross-source JOIN
+            # to (the card's joins_to, via source_profiles). Widening to the whole
+            # authorised scope was tried and was worse than not widening: with every
+            # source in play, routing answered "how many of those are in Mumbai" from the
+            # DOCUMENT source and the session then stayed there for six turns. A source
+            # with no join to the current one cannot be the other half of a drill-across,
+            # so it is not a candidate — and the bound is structural, discovered at
+            # ingestion, not a heuristic.
+            _profiles = state.get("source_profiles") or {}
+            _joinable = set()
+            for _sid in _inherit:
+                for _j in ((_profiles.get(str(_sid)) or {}).get("joins_to") or []):
+                    try:
+                        _joinable.add(int(_j))
+                    except (TypeError, ValueError):
+                        continue
+            _widen = sorted((_joinable - set(_inherit)) & (_allowed or _joinable))
+            if _widen:
+                logger.info("call_engine_node: follow-up %r is not an edit to the current "
+                            "result — widening %s -> %s (joinable sources only)",
+                            state.get("message", ""), _inherit, _inherit + _widen)
+                _inherit = _inherit + _widen
+        if _inherit and _delta and _delta != "new_topic":
+            _primary = _frame.get("primary_source_id")
+            _turn_source_ids = _inherit
+            # primary stays the source the thread is on, even after widening — it is what
+            # anchors planning; the widened members are what make the join reachable.
+            _turn_source_id = (int(_primary) if _primary is not None and int(_primary) in _inherit
+                               else _inherit[0])
+            _route_source = "inherited"
+            _label = (f"Continuing on the same source ({_inherit[0]})…" if len(_inherit) == 1
+                      else f"Continuing on the same sources ({', '.join(map(str, _inherit))})…")
+            _emit(config, "route", _label,
+                  {"source_ids": _turn_source_ids,
+                   "mode": "single" if len(_inherit) == 1 else "multi",
+                   "inherited": True, "route_source": "inherited"})
     except Exception:
         pass
+    # route_source is recorded on EVERY turn, not only the inherited ones, so a session
+    # script can assert turn 1 = coordinator/pin and turns 2..n = inherited rather than
+    # inferring it from the absence of an event.
+    _emit(config, "route_source", _route_source, {"route_source": _route_source,
+                                                  "source_ids": _turn_source_ids})
+
+    # What the PREVIOUS turn answered from — stated to the engine's router as a prior so
+    # a widened scope stays anchored on the thread instead of re-deciding cold. Only sent
+    # when a frame exists; a new topic sends nothing and routes normally.
+    _prior = None
+    try:
+        _pf = state.get("frame") or {}
+        _pids = [s for s in (_pf.get("source_ids") or []) if s is not None]
+        if not _pids and _pf.get("source_id") is not None:
+            _pids = [_pf["source_id"]]
+        if _pids:
+            _prior = (_pids, _pf.get("entity_display") or _pf.get("entity") or "")
+    except Exception:
+        _prior = None
 
     try:
         for kind, data in client.stream_hybrid_query(
             query,
             source_id=_turn_source_id,
             source_ids=_turn_source_ids,
+            session_prior=_prior,
             tenant=state.get("tenant"),
             request_id=state.get("request_id"),
             data_scope=state.get("data_scope"),
@@ -725,6 +968,33 @@ def memory_write_node(state: ChatState) -> dict:
         prev_frame, harvested, delta_type, tenant, session_id)
 
     reset = delta_type == "new_topic" or memory_frame.is_topic_switch(prev_frame, harvested)
+
+    # ── M4: push this answered turn onto the IR stack ────────────────────────
+    # The stack is the structured half of memory: the next turn applies a DELTA to the
+    # top entry's IR instead of restating this question in English and having the engine
+    # re-derive its intent. Built only from what the engine already shipped (its own
+    # QueryIR + the single post-execution analytics pass) — nothing is re-derived here.
+    # A new topic starts a fresh stack, exactly as it resets the flat frame.
+    try:
+        _prev_stack_entries = [] if reset else list(prev_frame.get("stack") or [])
+        _entry = memory_frame.harvest_entry(
+            engine_result, state.get("message", ""),
+            turn_index=int(new_frame.get("turn_index") or 0))
+        if _entry is not None:
+            new_frame["stack"] = memory_frame.push_entry(_prev_stack_entries, _entry)
+            new_frame["cursor"] = -1        # newest entry is what a follow-up edits
+            if not memory_frame.entry_is_structured(_entry):
+                # Visible count of how much of the stack is NOT slot-editable — the same
+                # ir_partial signal veda/ir.py says to watch. These turns fall back to the
+                # text restatement, so a rising count means M4 is degrading quietly.
+                logger.info("memory_write_node: ir_partial entry pushed (head=%s) — "
+                            "next follow-up will use the text fallback",
+                            ((_entry.get("ir") or {}).get("head") or "?"))
+        else:
+            new_frame["stack"] = _prev_stack_entries
+            new_frame["cursor"] = -1
+    except Exception:
+        logger.exception("memory_write_node: IR stack update failed — flat frame still written")
     if reset:
         new_stack: list = []
     elif delta_type == "drill_down":
@@ -846,10 +1116,26 @@ def ask_clarification_node(state: ChatState) -> dict:
 
 
 def format_reply_node(state: ChatState) -> dict:
-    """Final assembly for the 'answered' path."""
+    """Final assembly for the 'answered' path.
+
+    M4 (C.7) adds two IR-derived surfaces, both deterministic and LLM-free:
+
+      context_strip       one line naming what the user is currently looking at
+                          ("sum of amount · category = Repair · grouped by status").
+                          Ten turns into a drill-down the answer text alone no longer
+                          says which slice it describes, and the user has no way to see
+                          which filters are still applied.
+      follow_up_questions next steps built from THIS result's own drill_options, so each
+                          one names a dimension or measure the result actually has and is
+                          answerable by construction — unlike an SLM-generated suggestion,
+                          which can propose a breakdown the data cannot support.
+
+    Both are computed from the entry just pushed onto the IR stack. Best-effort: either
+    failing leaves the reply exactly as it was before this change.
+    """
     res0 = state.get("engine_result", {})
     answer = res0.get("answer") or "Here's what I found."
-    return {
+    out = {
         "reply_text": answer,
         "needs_clarification": False,
         "sql": res0.get("sql"),
@@ -857,3 +1143,18 @@ def format_reply_node(state: ChatState) -> dict:
         "engine_unavailable": False,
         "history": _turn_delta(state, answer),
     }
+    try:
+        _entry = memory_frame.stack_top(state.get("frame") or {})
+        if _entry:
+            _strip = memory_frame.describe_ir((_entry.get("ir") or {}))
+            _scope = (_entry.get("scope") or [])
+            if _strip:
+                out["context_strip"] = (
+                    f"{_strip} · source: {', '.join(str(s) for s in _scope)}"
+                    if _scope else _strip)
+            _fups = memory_frame.follow_up_questions(_entry)
+            if _fups:
+                out["follow_up_questions"] = _fups
+    except Exception:
+        logger.exception("format_reply_node: IR-derived surfaces skipped")
+    return out
