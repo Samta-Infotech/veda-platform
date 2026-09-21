@@ -121,6 +121,10 @@ REINGEST_MISSING_ARTIFACTS="${REINGEST_MISSING_ARTIFACTS:-0}"
 INGEST_TIMEOUT="${INGEST_TIMEOUT:-7200}"
 EXTRA_COMPOSE="${EXTRA_COMPOSE:-}"
 ARTIFACT_OWNER="${ARTIFACT_OWNER:-}"
+# --check trims PHASES to `preflight`, so "will a later phase fix this?" cannot be answered
+# from PHASES alone: a preview that reports a blocker the run it previews would not hit is
+# worse than no preview. CHECK_MODE says "judge against the full run".
+CHECK_MODE="${CHECK_MODE:-0}"
 
 # Derived artifacts a reader resolves per-source (every name passed to
 # config.resolve_source_artifact / source_artifact_path in the tree). Deliberately EXCLUDES
@@ -134,7 +138,7 @@ veda_hnsw.json veda_profiling.json concepts.json dimensions.json metrics.json MA
 
 while [ $# -gt 0 ]; do
   case "$1" in
-    --check)        PHASES="preflight" ;;
+    --check)        PHASES="preflight"; CHECK_MODE=1 ;;
     --prod)         PROD=1 ;;
     --yes|-y)       ASSUME_YES=1 ;;
     --dry-run)      DRY_RUN=1 ;;
@@ -153,7 +157,18 @@ done
 
 COMPOSE_FILES="-f docker-compose.yml"
 [ "$PROD" = "1" ] && COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.prod.yml"
-[ -n "${COMPOSE_FILE:-}" ] && COMPOSE_FILES="-f ${COMPOSE_FILE}"
+# COMPOSE_FILE is docker compose's OWN env var, and its value is path-separator delimited
+# ("a.yml:b.yml"). Honour that shape instead of passing it as one -f, so a host that exports
+# COMPOSE_FILE=docker-compose.yml:docker-compose.pg17.yml to make every bare `docker compose`
+# safe does not silently break this script.
+if [ -n "${COMPOSE_FILE:-}" ]; then
+  COMPOSE_FILES=""
+  _ifs_save="$IFS"; IFS=":,"
+  for _cf in $COMPOSE_FILE; do
+    [ -n "$_cf" ] && COMPOSE_FILES="$COMPOSE_FILES -f $_cf"
+  done
+  IFS="$_ifs_save"
+fi
 # Overlays come LAST so they win, and they are never written back to the tracked compose
 # file: the pg pin differs per host (one machine's pg_data is PG16, another's PG17) and
 # editing docker-compose.yml to suit this host silently breaks the other one.
@@ -448,7 +463,8 @@ inventory() {
 
   echo
   if [ -n "$NOARTIFACT_SOURCES" ]; then
-    if [ -n "$ARTIFACT_OWNER" ] && want_phase artifacts && has_flat_artifact "$probe_svc"; then
+    if [ -n "$ARTIFACT_OWNER" ] && { want_phase artifacts || [ "$CHECK_MODE" = "1" ]; } \
+       && has_flat_artifact "$probe_svc"; then
       # A remedy is already selected for this run, so it is an action, not a blocker.
       ok "no scoped model for source(s) $NOARTIFACT_SOURCES — the artifacts phase adopts source $ARTIFACT_OWNER's flat files"
       act "adopt flat artifacts into <artifact_root>/$TENANT/$ARTIFACT_OWNER/"
@@ -751,7 +767,8 @@ if [ ${#BLOCKERS[@]} -gt 0 ]; then
   # A missing scoped artifact is the one blocker with an in-script answer.
   case " ${BLOCKERS[*]} " in
     *"no scoped semantic model"*)
-      info "re-run with REINGEST_MISSING_ARTIFACTS=1 to have this script re-ingest them" ;;
+      info "cheapest remedy first: --artifact-owner <id of the source that produced the flat files>"
+      info "only if there are no flat artifacts to adopt: REINGEST_MISSING_ARTIFACTS=1 (re-ingests, hours)" ;;
   esac
   exit 1
 fi
