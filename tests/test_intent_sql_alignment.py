@@ -13,8 +13,19 @@ ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
 sys.path.insert(0, ROOT)
 sys.path.insert(0, os.path.join(ROOT, "veda_core"))
 
+import pytest  # noqa: E402
+
 import config as _config  # noqa: E402
 from veda import intent_sql_alignment as A  # noqa: E402
+
+try:                      # the entity-coverage check resolves nouns through the planner's
+    from veda.understanding.grounding import ground_entity as _ground_entity  # noqa: F401
+    _GROUNDING_IMPORTABLE = True                     # own resolver, which pulls in veda.runtime
+except Exception:                                    # (DB/embedding handles). A whole-suite run
+    _GROUNDING_IMPORTABLE = False                    # without those deps can't exercise it at all —
+                                                     # skip rather than assert a vacuous pass.
+_needs_grounding = pytest.mark.skipif(
+    not _GROUNDING_IMPORTABLE, reason="grounding stack (veda.runtime) not importable here")
 
 
 def _col(table, sem, role):
@@ -347,3 +358,116 @@ if __name__ == "__main__":
             failed += 1; print("FAIL", name); traceback.print_exc()
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ---------------------------------------------------------------------------
+# C. ENTITY COVERAGE — the question named several entities, the SQL answers a
+# subset. Never refuses; the caller reports it and caps the confidence.
+# Regression: "audit of ticket updates, assignees and attachments by category"
+# counted ticket updates alone and shipped at confidence 1.0 with
+# "no requested filters were ignored" — the dropped entities aren't filters.
+# ---------------------------------------------------------------------------
+
+# Underscore-separated names: the concatenated Django-style names the real schema uses
+# ("worklists_ticketattachment") are segmented by semantic/name_tokens against the ACTIVE
+# scope's model, which a hermetic unit test has no business loading. The coverage logic
+# under test is the same either way.
+COVER_SM = {"tables": {
+    "worklists_ticket": {"primary_entity": "A support ticket."},
+    "worklists_ticket_update": {"primary_entity": "An update to a ticket."},
+    "worklists_ticket_category": {"primary_entity": "A single category for tickets."},
+    "worklists_ticket_attachment": {"primary_entity": "A single attachment for a ticket."},
+    "assets_asset_attachment": {"primary_entity": "An attachment for an asset."},
+}, "columns": {}}
+
+COVER_SQL = (
+    'SELECT "t2"."name" AS "category_name", COUNT("t0"."id") AS "activity_count" '
+    'FROM "worklists_ticket_update" AS "t0" '
+    'JOIN "worklists_ticket" AS "t1" ON "t1"."id" = "t0"."ticket_id" '
+    'JOIN "worklists_ticket_category" AS "t2" ON "t2"."id" = "t1"."ticket_category_id" '
+    'GROUP BY "t2"."name" ORDER BY "activity_count" DESC LIMIT 100'
+)
+
+
+def _neighbours(monkeypatch, tables, *, on=True):
+    """Stand in for the ingested join-path artifact (no DB / no artifacts in tests), and
+    set the flag on the guard itself. The flag is patched through `_coverage_enabled`
+    rather than the config module because a whole-suite run imports the repo-ROOT
+    `config/` package over veda_core's (see the EXPLAIN_TRACE_ENABLED failures in the
+    same run), so assigning an attribute there reaches a different module object than
+    the guard reads."""
+    monkeypatch.setattr(A, "_coverage_enabled", lambda: on)
+    monkeypatch.setattr(A, "_join_neighbourhood", lambda sql_tables: set(tables) - set(sql_tables))
+
+
+@_needs_grounding
+def test_entity_coverage_reports_an_entity_the_sql_never_reached(monkeypatch):
+    _neighbours(monkeypatch, {"worklists_ticket_attachment"})
+    ok, missing, terms = A.entity_coverage(
+        "audit of ticket updates and attachments grouped by ticket category",
+        COVER_SQL, COVER_SM)
+    assert ok is False
+    assert missing == ["worklists_ticket_attachment"]
+    # the USER'S word for it — what the summariser must not claim to have measured
+    assert terms == ["attachment"]
+
+
+@_needs_grounding
+def test_entity_coverage_silent_when_every_named_entity_is_in_the_sql(monkeypatch):
+    _neighbours(monkeypatch, {"worklists_ticket_attachment"})
+    assert A.entity_coverage("ticket updates grouped by ticket category",
+                             COVER_SQL, COVER_SM) == (True, [], [])
+
+
+@_needs_grounding
+def test_entity_coverage_ignores_a_table_outside_the_join_neighbourhood(monkeypatch):
+    """An unrelated same-named entity elsewhere in the schema is never reported —
+    only what hangs directly off the tables being queried."""
+    _neighbours(monkeypatch, set())            # nothing joinable
+    assert A.entity_coverage("ticket updates and attachments by ticket category",
+                             COVER_SQL, COVER_SM) == (True, [], [])
+
+
+@_needs_grounding
+def test_entity_coverage_needs_one_named_entity_actually_present(monkeypatch):
+    """A SQL sharing NO entity with the question is a wrong-anchor problem, which the
+    alignment guards above own — coverage must not also fire on it."""
+    _neighbours(monkeypatch, {"worklists_ticket_attachment"})
+    assert A.entity_coverage("attachments", COVER_SQL.replace(
+        "worklists_ticket_update", "assets_asset_attachment"), COVER_SM)[0] is True
+
+
+def test_entity_coverage_off_is_byte_identical(monkeypatch):
+    _neighbours(monkeypatch, {"worklists_ticket_attachment"}, on=False)
+    assert A.entity_coverage("ticket updates and attachments by category",
+                             COVER_SQL, COVER_SM) == (True, [], [])
+
+
+@_needs_grounding
+def test_entity_coverage_resolves_a_noun_only_the_description_carries(monkeypatch):
+    """"assignees" is nowhere in worklists_ticketuser's NAME — the table describes itself
+    as "a single ticket assignment record", and assignee/assignment share a stem no
+    substring test finds. A UNIQUE description match in the neighbourhood resolves it."""
+    sm = {"tables": {**COVER_SM["tables"],
+                     "worklists_ticket_user": {
+                         "primary_entity": "A single ticket assignment record.",
+                         "business_purpose": "Tracks ticket assignments."}},
+          "columns": {}}
+    _neighbours(monkeypatch, {"worklists_ticket_user"})
+    ok, missing, terms = A.entity_coverage(
+        "audit of ticket updates and assignees grouped by ticket category", COVER_SQL, sm)
+    assert (ok, missing, terms) == (False, ["worklists_ticket_user"], ["assignee"])
+
+
+@_needs_grounding
+def test_description_match_must_be_unique_to_count(monkeypatch):
+    """A word every neighbour's description carries ("ticket") names no single entity —
+    ambiguity is ignored rather than guessed at, so it can never invent a coverage gap."""
+    sm = {"tables": {**COVER_SM["tables"],
+                     "worklists_ticket_review": {"primary_entity": "A ticket review record."},
+                     "worklists_ticket_payment": {"primary_entity": "A ticket payment record."}},
+          "columns": {}}
+    _neighbours(monkeypatch, {"worklists_ticket_review", "worklists_ticket_payment"})
+    assert A._description_referent("tickets", set(sm["tables"]), sm) is None
+    # and a short word is never stemmed at all
+    assert A._description_referent("pay", set(sm["tables"]), sm) is None

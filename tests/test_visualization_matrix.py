@@ -197,7 +197,10 @@ def test_K_high_cardinality_bucketed_single_bar():
         "SELECT label, SUM(amount) AS amount FROM t GROUP BY label",
         ["label", "amount"], [{"label": f"C{i}", "amount": i} for i in range(50)], SM)
     assert types == ["bar"]                          # top-N + Other, not 50 slices
-    assert len(specs[0].chart_data["labels"]) <= 10
+    # 20 bars, not 10: the bar cap (_TOP_N_CATEGORIES) is no longer tied to the much
+    # tighter PIE limit — a bar chart stays legible far past 10 categories, and the old
+    # cap collapsed readable results (a 12-category breakdown became 9 bars + "Other").
+    assert len(specs[0].chart_data["labels"]) <= 20
 
 
 def test_L_single_row_no_chart():

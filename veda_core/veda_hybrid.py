@@ -2165,6 +2165,17 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     _ictx = None
     _confidence = None
     _summary_engine = None            # which summariser produced the prose (trace)
+    # Entity COVERAGE (flag-gated, never refuses) — the same check Tier-1 runs at L6c.
+    # Computed HERE, before the summariser runs, because its `not_covered` terms are an
+    # INPUT to that summary: the narrator sees only the question and the numbers, so
+    # without them it reads the question's own entity list back as something the figures
+    # cover. The explainability block at the end of this function reuses the result.
+    _cov_ok, _cov_missing, _cov_terms = True, [], []
+    try:
+        from veda.intent_sql_alignment import entity_coverage
+        _cov_ok, _cov_missing, _cov_terms = entity_coverage(query, sql or "", sm)
+    except Exception:
+        _cov_ok, _cov_missing, _cov_terms = True, [], []
     # Function scope, not the NL_ANSWER_ENABLED block below: record_result_stages()
     # at the end of this function reads it, and that call sits outside the block.
     _truncated_t2 = False
@@ -2292,7 +2303,8 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                                    patterns=_all_findings,
                                    result_shape=getattr(_ictx, "result_shape", None),
                                    analytical_context=_analytical_ctx_t2,
-                                   truncated=_truncated_t2, fetch_limit=_fetch_limit_t2)
+                                   truncated=_truncated_t2, fetch_limit=_fetch_limit_t2,
+                                   not_covered=_cov_terms)
                 if getattr(nl, "answer", None):
                     result["answer"] = nl.answer
                     _slm_wove_patterns = True   # SLM prose wove them; fallback blended them itself
@@ -2307,11 +2319,27 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
             from query.result_explainer import blend_patterns
             result["answer"] = blend_patterns(result.get("answer") or "", _pattern_details)
 
+    # Entity COVERAGE (flag-gated, never refuses) — the same check Tier-1 runs after its
+    # qualifier gate (veda/pipeline.py L6c). Tier-2 answers the same shape of question, so
+    # a partial answer must be as visible here: the entities left out are named in the
+    # panel and the confidence is capped, instead of the answer reading as complete.
+    try:
+        if not _cov_ok:
+            _cur_trace().check("entity_coverage", False, "not covered: " + ", ".join(_cov_missing))
+            from config import ENTITY_COVERAGE_CONFIDENCE
+            _confidence = (ENTITY_COVERAGE_CONFIDENCE if _confidence is None
+                           else min(_confidence, ENTITY_COVERAGE_CONFIDENCE))
+            print(f"  [Tier2] Coverage  ⚠  partial — not covered: {', '.join(_cov_missing)}")
+        else:
+            _cur_trace().check("entity_coverage", True, "")
+    except Exception:
+        pass
     try:
         from veda.business_explain import build_explain
         result["explain"] = build_explain(sql=sql or "", table=table or "", sm=sm,
                                           visualization=visualization,
-                                          confidence=_confidence)
+                                          confidence=_confidence,
+                                          not_included=_cov_missing or None)
     except Exception:
         print("  [Tier2] explainability skipped")
     # business_intent (advisory): deterministic reading of the EXECUTED SQL

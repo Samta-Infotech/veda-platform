@@ -347,3 +347,81 @@ def test_ranking_rescue_prefers_non_identifier_label():
     ]}
     specs = VisualizationRecommender().recommend(cols, rows, analytics=analytics)
     assert specs and specs[0].to_dict()["chart_data"]["labels"][0] == "note-0"
+
+
+# ---------------------------------------------------------------------------
+# Long-tail bucketing: the label must not collide with a real category, the cap
+# must not fire on a readable result, and the bucket is a SUM — so it only
+# exists for a measure that can be summed.
+# Regression: a 12-category ticket breakdown charted a real category "Others"
+# (6) beside a synthetic bucket "Other" (6) — two near-identical bars with the
+# same value, three named categories hidden behind one of them.
+# ---------------------------------------------------------------------------
+
+_TICKET_COLS = ["category_name", "activity_count"]
+_TICKET_ROWS = [[n, v] for n, v in
+                [("Electrical Fittings", 22), ("Modular Kitchen", 14), ("Carpentry", 8),
+                 ("Others", 6), ("Painting", 5), ("Deep Cleaning", 4), ("Seepage", 4),
+                 ("Consumer Appliances", 2), ("Fixtures and Fittings", 2),
+                 ("Renovation and Rectification", 2), ("Structural damage", 2),
+                 ("Furniture", 2)]]
+_COUNT_ANALYTICS = {"measure_aggregates": {"activity_count": "COUNT"}}
+
+
+def test_twelve_categories_are_all_charted_not_bucketed():
+    r = _recommender()
+    spec = r.build_category_specs(_TICKET_COLS, _TICKET_ROWS, 0, 1, _COUNT_ANALYTICS)[0]
+    labels = spec.chart_data["labels"]
+    assert len(labels) == 12
+    assert labels.count("Others") == 1 and "Other" not in labels
+    assert sum(spec.chart_data["values"]) == sum(r[1] for r in _TICKET_ROWS)
+
+
+def test_tail_bucket_never_collides_with_a_real_category_name():
+    """A real catch-all category called "Others" must not be shadowed by an "Other"
+    bucket — singular/plural counts as the same name."""
+    r = _recommender()
+    rows = [[f"C{i}", 30 - i] for i in range(24)] + [["Others", 99]]
+    spec = r.build_category_specs(["cat", "n_count"], rows, 0, 1,
+                                  {"measure_aggregates": {"n_count": "COUNT"}})[0]
+    labels = spec.chart_data["labels"]
+    assert len(labels) == 20                       # 19 + one bucket
+    assert labels[-1] == "All other categories"
+    assert "Others" in labels                      # the real category survives
+    assert sum(spec.chart_data["values"]) == sum(r[1] for r in rows)   # nothing lost
+
+
+def test_non_additive_measure_drops_the_tail_instead_of_summing_it():
+    r = _recommender()
+    rows = [[f"C{i}", 30 - i] for i in range(25)]
+    spec = r.build_category_specs(["cat", "avg_rating"], rows, 0, 1,
+                                  {"measure_aggregates": {"avg_rating": "AVG"}})[0]
+    assert len(spec.chart_data["labels"]) == 19
+    assert not any(l.startswith("Other") or l.startswith("All other")
+                   for l in spec.chart_data["labels"])
+    assert spec.title.endswith("(top 19)")         # the chart says it is a subset
+
+
+def test_non_additive_measure_with_duplicate_rows_gets_no_chart():
+    """Ungrouped rows + an average = no honest way to combine them. A SUM of the same
+    shape still charts, exactly as before."""
+    r = _recommender()
+    rows = [["A", 4.0], ["A", 2.0], ["B", 5.0]]
+    assert r.build_category_specs(["cat", "avg_score"], rows, 0, 1,
+                                  {"measure_aggregates": {"avg_score": "AVG"}}) == []
+    specs = r.build_category_specs(["cat", "total_amount"], rows, 0, 1,
+                                   {"measure_aggregates": {"total_amount": "SUM"}})
+    assert specs and specs[0].chart_data["slices"][0] == {"name": "A", "value": 6.0}
+
+
+def test_additivity_falls_back_to_the_measure_name_without_analytics():
+    """Federated results carry no measure_aggregates — the column's own name is then
+    the signal, and anything unrecognised stays additive (today's behaviour)."""
+    from apps.chat.visualization import _measure_is_additive
+    assert _measure_is_additive("activity_count", None) is True
+    assert _measure_is_additive("total_amount", None) is True
+    assert _measure_is_additive("avg_rating", None) is False
+    assert _measure_is_additive("completion_rate", None) is False
+    assert _measure_is_additive("pct_overdue", None) is False
+    # the engine's own aggregate outranks the name
+    assert _measure_is_additive("avg_rating", {"measure_aggregates": {"avg_rating": "SUM"}}) is True

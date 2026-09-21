@@ -270,6 +270,11 @@ class InsightContext:
     available_dimensions: List[str] = field(default_factory=list)   # this table's DIMENSION/TIME_DIMENSION columns
     patterns:             List[Pattern] = field(default_factory=list)  # detect_patterns() output
     chart_candidates:     List[dict] = field(default_factory=list)  # compute_chart_candidates() output
+    # {result column (SELECT alias) -> aggregate function} straight off the executed
+    # SQL's AST. The chart tier needs it to know whether a measure may be SUMMED: a
+    # long-tail "Other" bucket and a duplicate-row roll-up are both sums, and summing
+    # averages/rates/shares yields a meaningless number (apps/chat/visualization.py).
+    measure_aggregates:   Dict[str, str] = field(default_factory=dict)
 
 
 def _column_stats(columns: List[str], rows: List[dict], max_rows: int,
@@ -462,11 +467,24 @@ def detect_patterns(result_shape: str, column_stats: List[ColumnStat], rows: Lis
                 hi = max(pairs, key=lambda p: p[1])
                 lo = min(pairs, key=lambda p: p[1])
                 if hi[0] is not None and hi[1] != lo[1]:
+                    # A TIED extreme has no single holder. max()/min() return the first
+                    # row that reaches the value, so naming it states a uniqueness the
+                    # data doesn't have — "Consumer Appliances has the lowest at 2" on a
+                    # result where five categories all sit at 2. Say it's a tie instead.
+                    _noun = d_col or "groups"
+                    _hi_tied = sum(1 for _, v in pairs if v == hi[1])
+                    _lo_tied = sum(1 for _, v in pairs if v == lo[1])
                     pats.append(Pattern("leader", m_col,
-                        f"{hi[0]} has the highest {m_col} at {_fmt_num(hi[1])}", 0.95))
+                        (f"{hi[0]} has the highest {m_col} at {_fmt_num(hi[1])}"
+                         if _hi_tied == 1 else
+                         f"{_hi_tied} {_noun} tie for the highest {m_col} at {_fmt_num(hi[1])}"),
+                        0.95))
                     if lo[0] is not None:
                         pats.append(Pattern("laggard", m_col,
-                            f"{lo[0]} has the lowest {m_col} at {_fmt_num(lo[1])}", 0.72))
+                            (f"{lo[0]} has the lowest {m_col} at {_fmt_num(lo[1])}"
+                             if _lo_tied == 1 else
+                             f"{_lo_tied} {_noun} tie for the lowest {m_col} at {_fmt_num(lo[1])}"),
+                            0.72))
             if n >= 3:
                 total = sum(nums)
                 if total > 0 and max(nums) / total >= _CONCENTRATION_SHARE:
@@ -485,8 +503,18 @@ def detect_patterns(result_shape: str, column_stats: List[ColumnStat], rows: Lis
             if result_shape == "RANKING" and n >= 2 and nums[1] and abs(nums[1]) > 0:
                 gap = (nums[0] - nums[1]) / abs(nums[1])
                 if gap >= _GAP_RATIO:
+                    # NAME both entries. "the #1 entry leads #2 by 57%" is the only
+                    # finding in this set with no subject, and the narrator fills that
+                    # slot from whatever name is nearest — measured: it borrowed the
+                    # laggard finding's entity and wrote "leading Consumer Appliances by
+                    # 57%" about a category that is 12th, not 2nd. The labels are right
+                    # here in `pairs`, the same two rows nums[0]/nums[1] come from.
+                    _first, _second = pairs[0][0], pairs[1][0]
+                    _who = (f"{_first} leads {_second}"
+                            if _first is not None and _second is not None
+                            else "the #1 entry leads #2")
                     pats.append(Pattern("top_gap", m_col,
-                        f"the #1 entry leads #2 by {round(gap * 100)}% on {m_col}", min(gap, 1.0)))
+                        f"{_who} by {round(gap * 100)}% on {m_col}", min(gap, 1.0)))
 
     pats.sort(key=lambda p: -p.strength)
     return pats[:_MAX_PATTERNS]
@@ -550,6 +578,8 @@ def analytics_summary(ctx: "InsightContext") -> dict:
         "patterns":             [{"kind": p.kind, "column": p.column, "detail": p.detail,
                                   "strength": p.strength} for p in ctx.patterns],
         "chart_candidates":     list(ctx.chart_candidates),
+        # See InsightContext.measure_aggregates — the chart tier's additivity signal.
+        "measure_aggregates":   dict(ctx.measure_aggregates or {}),
     }
 
 
@@ -626,6 +656,8 @@ def analyze_result(
         primary_entity=primary_entity, related_entities=related_entities,
         available_measures=available_measures, available_dimensions=available_dimensions,
         patterns=patterns, chart_candidates=chart_candidates,
+        measure_aggregates={alias: func for alias, (func, _c)
+                            in (facts.get("alias_aggs") or {}).items()},
     )
 
 

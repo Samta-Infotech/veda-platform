@@ -36,8 +36,15 @@ _OP_WORD = {
 _CHECK_LABELS = {
     "ast_readonly_parameterized_fanout": ["Read-only query", "Duplicate-safe (no double-counting)"],
     "qualifier_completeness": ["No requested filters were ignored"],
+    "entity_coverage": ["Every entity you asked about was included"],
     "ir_equivalence": ["No extra filters, joins, or grouping were added"],
     "value_grounding": ["All filter values exist in the data"],
+    # The pipeline runs the firewall in STAGES and records one check per stage, so this
+    # name arrives several times per answer. Unmapped, it rendered the raw internal word
+    # "firewall" four times in the end-user panel; mapped, the duplicates collapse (see
+    # build_explain's dedupe) into one plain statement of what it guarantees.
+    "firewall": ["Passed every SQL safety check"],
+    "tier2_firewall": ["Passed every SQL safety check"],
 }
 
 # Stripped when humanizing a raw table name into a business-facing dataset name,
@@ -61,8 +68,20 @@ def _humanize(name: str) -> str:
     return " ".join(w for w in name.replace("_", " ").split() if w).title()
 
 
+# Function words that separate a noun phrase's HEAD from its object ("update TO a
+# ticket") — used only to find which word to pluralize, never to interpret meaning.
+_PREPOSITIONS = ("to", "for", "of", "in", "on", "with", "by", "from", "at", "about",
+                 "against", "per")
+
+
 def _pluralize(word: str) -> str:
     lower = word.lower()
+    # Already plural. The semantic model's own entity sentences contain plural nouns
+    # ("A single category for tickets."), and appending to those produced "Ticketses".
+    # "ss"/"us"/"is" endings are SINGULAR words that merely end in s (address, status,
+    # analysis), so they still take the "es" branch below.
+    if lower.endswith("s") and not lower.endswith(("ss", "us", "is")):
+        return word
     if lower.endswith(("s", "x", "z", "ch", "sh")):
         return word + "es"
     if lower.endswith("y") and len(word) > 1 and lower[-2] not in "aeiou":
@@ -71,10 +90,24 @@ def _pluralize(word: str) -> str:
 
 
 def _pluralize_phrase(phrase: str) -> str:
+    """Pluralize the phrase's HEAD noun, not its last word. "update to a ticket" is a
+    phrase about updates, so the dataset is "Updates To A Ticket" — pluralizing the
+    trailing object instead ("Update To A Tickets") names the wrong entity. The head is
+    the word before the first preposition; with no preposition the last word IS the head
+    ("support ticket" -> "Support Tickets")."""
     words = phrase.split()
     if not words:
         return phrase
-    words[-1] = _pluralize(words[-1])
+    head = len(words) - 1
+    for i, w in enumerate(words):
+        if i > 0 and w.lower() in _PREPOSITIONS:
+            head = i - 1
+            break
+    # Walk back over a participle that only MODIFIES the head ("a single activity
+    # ASSOCIATED with a ticket" — the entity is activities, not "associateds").
+    while head > 0 and words[head].lower().endswith(("ed", "ing")):
+        head -= 1
+    words[head] = _pluralize(words[head])
     return " ".join(words)
 
 
@@ -107,9 +140,14 @@ def _business_field_name(table: str, col: str, sm: Optional[dict]) -> str:
     cols_meta = (sm or {}).get("columns", {}) or {}
     meta = cols_meta.get(f"{table}.{col}") if table else None
     if meta is None:
-        # filters/aggregations/orderings from the SQL AST carry bare column names
-        # (no table qualifier) — fall back to a suffix match across the model.
-        meta = next((v for k, v in cols_meta.items() if k.endswith(f".{col}")), None)
+        # No table resolved for this column — a bare reference in a multi-table query
+        # (_extract's `column_tables` resolves every ALIAS-qualified one). A model-wide
+        # suffix match is only safe when the name is UNIQUE in the model: when it isn't,
+        # the first arbitrary hit is confidently wrong — a GROUP BY on a ticket
+        # category's `name` was labelled "Device Name" off an unrelated fcm-device
+        # table. Ambiguous -> humanize the raw column name: plainer, never wrong.
+        hits = [v for k, v in cols_meta.items() if k.endswith(f".{col}")]
+        meta = hits[0] if len(hits) == 1 else None
     if meta and meta.get("business_role"):
         return meta["business_role"]
     return _humanize(col)
@@ -129,7 +167,8 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     values be resolved back by position for explainability/memory purposes."""
 
     out = {"entities": [], "filters": [], "aggregations": [], "groupings": [],
-           "orderings": [], "distinct": False, "limit": None, "aliases": {}}
+           "orderings": [], "distinct": False, "limit": None, "aliases": {},
+           "column_tables": {}, "alias_aggs": {}, "from_table": None}
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
     except Exception:
@@ -149,6 +188,38 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     out["entities"] = sorted({t.name for t in tree.find_all(exp.Table) if t.name})
     out["distinct"] = tree.find(exp.Distinct) is not None
 
+    # Alias -> REAL table, for every table reference ("FROM x AS t0", "JOIN y AS t2").
+    # Column nodes carry the ALIAS ("t2"."name"), never the table name, so without this
+    # map every qualified column below is orphaned from the table it came from — and a
+    # business-name lookup then guesses across the whole semantic model.
+    alias_to_table: Dict[str, str] = {}
+    for t in tree.find_all(exp.Table):
+        if not t.name:
+            continue
+        alias_to_table[t.name] = t.name
+        if t.alias:
+            alias_to_table[t.alias] = t.name
+
+    # The DRIVING table (the FROM), not the alphabetically-first table of a join —
+    # `entities` is sorted for consumer stability, so its first element is an
+    # alphabetical accident wherever one table has to stand for "the dataset".
+    _from = tree.find(exp.From)
+    _from_tbl = _from.find(exp.Table) if _from is not None else None
+    out["from_table"] = _from_tbl.name if _from_tbl is not None and _from_tbl.name else None
+    _sole_table = out["entities"][0] if len(out["entities"]) == 1 else None
+
+    def _note_table(col) -> None:
+        """Record which REAL table a column came from, keyed by the bare column name the
+        rest of this module carries. First occurrence wins: two joined tables can each
+        have a `status` and a bare name cannot tell them apart — still strictly better
+        than the model-wide scan this feeds, which matched ANY table in the schema,
+        including tables that aren't in this query at all."""
+        if col is None or not col.name:
+            return
+        tbl = alias_to_table.get(col.table) if col.table else _sole_table
+        if tbl and col.name not in out["column_tables"]:
+            out["column_tables"][col.name] = tbl
+
     # Aggregations, DEDUPED by (function, column). A ranked aggregate repeats its
     # measure in both the SELECT list and the ORDER BY ("SELECT dim, AVG(m) ... ORDER
     # BY AVG(m) DESC" — exactly what the deterministic grouped/superlative planner
@@ -161,6 +232,7 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     _seen_aggs = set()
     for a in tree.find_all(exp.AggFunc):
         col = a.find(exp.Column)
+        _note_table(col)
         key = (a.key.upper(), col.name if col is not None else None)
         if key in _seen_aggs:
             continue
@@ -177,12 +249,22 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
                 col = proj.this.find(exp.Column)
                 if col is not None:
                     out["aliases"][proj.alias] = col.name
+                    _note_table(col)
+                # Aliases whose expression is an AGGREGATE. A ranked aggregate is ordered
+                # by its alias ("activity_count"), so resolving that alias to the
+                # aggregate's inner column claims the rows are ranked by an id when they
+                # are ranked by the count — a statement about the query that is simply
+                # untrue. Recorded here so the label can name the MEASURE instead.
+                if isinstance(proj.this, exp.AggFunc):
+                    out["alias_aggs"][proj.alias] = (proj.this.key.upper(),
+                                                     col.name if col is not None else None)
 
     grp = tree.find(exp.Group)
     if grp is not None:
         for e in grp.expressions:
             c = e.find(exp.Column)
             if c is not None:
+                _note_table(c)
                 out["groupings"].append(c.name)
 
     order = tree.find(exp.Order)
@@ -190,6 +272,7 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
         for e in order.expressions:
             c = e.find(exp.Column)
             if c is not None:
+                _note_table(c)
                 out["orderings"].append((c.name, bool(e.args.get("desc"))))
 
     limit_node = tree.find(exp.Limit)
@@ -220,6 +303,7 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
             col = pred.find(exp.Column)
             if col is None:
                 continue
+            _note_table(col)
             lit = pred.find(exp.Literal)
             if lit is not None:
                 val = lit.name
@@ -286,7 +370,8 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
                    visualization: Optional[dict] = None,
                    params: Optional[List[Any]] = None,
                    timeline: Optional[List[Tuple[str, str]]] = None,
-                   confidence: Optional[float] = None) -> Dict[str, Any]:
+                   confidence: Optional[float] = None,
+                   not_included: Optional[List[str]] = None) -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
     Returns a plain dict matching the documented explainability schema.
 
@@ -301,6 +386,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     same order) — without these every filter's value comes back None (see
     _extract()'s docstring).
 
+    `not_included`: tables the QUESTION named that this SQL never reached
+    (veda/intent_sql_alignment.entity_coverage, decided by the caller — this
+    module still derives nothing from the query text). Rendered as
+    `data_used.not_included`, the counterpart to `datasets`: an answer that
+    covers part of a question has to say which part, or its dataset list reads
+    as the whole of what was asked for. Omitted entirely when there is no gap.
+
     `timeline`: the run's own `_tick()` (phase, message) checkpoints
     (veda/pipeline.py's `_ticks`), passively collected — NOT recomputed or
     re-derived here, just relayed. Always present in the returned dict as a
@@ -309,17 +401,50 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     omitted entirely when not applicable rather than genuinely unknown."""
     ir = _extract(sql or "", params=params)
     entities = ir["entities"] or ([table] if table else [])
-    primary = entities[0] if entities else table
+    primary = ir.get("from_table") or (entities[0] if entities else table)
 
     aliases = ir["aliases"]
-    field_of = lambda col: _business_field_name(primary, aliases.get(col, col), sm)   # noqa: E731
+    alias_aggs = ir.get("alias_aggs") or {}
+    column_tables = ir.get("column_tables") or {}
 
-    datasets = [_business_table_name(t, sm) for t in entities] or (
+    def field_of(col: str) -> str:
+        """Business name for a column reference, resolved against the table it ACTUALLY
+        came from (_extract's alias map). `primary` is only the fallback for a bare
+        reference no alias could resolve."""
+        target = aliases.get(col, col)
+        return _business_field_name(column_tables.get(target, primary), target, sm)
+
+    def measure_of(col: str) -> Optional[str]:
+        """Label for a SELECT-list name that is a COMPUTED measure rather than a stored
+        column, or None when it isn't one. Without this, "ORDER BY activity_count" —
+        where activity_count IS COUNT(...) — is described as sorting by the aggregate's
+        inner column ("Sort by Ticket Identifier"), which states the wrong ranking."""
+        agg = alias_aggs.get(col)
+        if not agg:
+            return None
+        func, inner = agg
+        if func == "COUNT":
+            # Deliberately not "count of <dataset>": the counted table's display name is
+            # an entity SENTENCE ("updates to a ticket"), which reads as nonsense inside
+            # a measure phrase. "record count" is always true of a COUNT.
+            return "record count"
+        word = _AGG_WORD.get(func, func.lower())
+        return f"{word} {field_of(inner)}" if inner else word
+
+    label_of = lambda col: measure_of(col) or field_of(col)   # noqa: E731
+
+    # Driving table first: datasets[0] stands for "the dataset" in the understanding
+    # sentence, so it must be the table the query is about, not an alphabetical accident.
+    ordered = ([primary] + [e for e in entities if e != primary]) if primary in entities else entities
+    datasets = [_business_table_name(t, sm) for t in ordered] or (
         [_business_table_name(table, sm)] if table else [])
 
     fields: List[str] = []
+    # Ordering by an aggregate ALIAS contributes no field of its own — the column it
+    # aggregates is already listed from ir["aggregations"].
     for col in [col for _, col in ir["aggregations"] if col] + ir["groupings"] + \
-                [col for col, _ in ir["orderings"]] + [col for col, _, _ in ir["filters"]]:
+                [col for col, _ in ir["orderings"] if col not in alias_aggs] + \
+                [col for col, _, _ in ir["filters"]]:
         name = field_of(col)
         if name and name not in fields:
             fields.append(name)
@@ -338,7 +463,7 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     for g in ir["groupings"]:
         operations.append({"type": "group", "summary": f"Group by {field_of(g)}"})
     for col, desc in ir["orderings"]:
-        operations.append({"type": "sort", "summary": f"Sort by {field_of(col)} ({'highest' if desc else 'lowest'} first)"})
+        operations.append({"type": "sort", "summary": f"Sort by {label_of(col)} ({'highest' if desc else 'lowest'} first)"})
     if ir["limit"] is not None:
         operations.append({"type": "limit", "summary": f"Return top {ir['limit']}"})
     if not operations:
@@ -347,15 +472,27 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     understanding = _build_understanding(
         dataset=(datasets[0] if datasets else "records").lower(),
         aggregations=ir["aggregations"], groupings=ir["groupings"], orderings=ir["orderings"],
-        limit=ir["limit"], filter_phrases=filter_phrases, field_of=field_of,
+        limit=ir["limit"], filter_phrases=filter_phrases, field_of=label_of,
     )
 
     check_items = []
     all_passed = True
+    _seen_checks = set()
     for c in (checks or []):
         passed = c.get("status") == "pass"
         all_passed = all_passed and passed
         for label in _CHECK_LABELS.get(c.get("name"), [c.get("name")]):
+            # One guarantee, stated once. A gate the pipeline runs in stages reports the
+            # same check repeatedly, and a list that says the same thing four times reads
+            # as noise rather than assurance. A FAILED instance always wins over a passed
+            # one for the same label — never hide a failure behind an earlier pass.
+            if label in _seen_checks:
+                if not passed:
+                    for item in check_items:
+                        if item["label"] == label:
+                            item["passed"] = False
+                continue
+            _seen_checks.add(label)
             check_items.append({"label": label, "passed": passed})
 
     # One short phrase per operation/filter, for callers that want a
@@ -388,6 +525,9 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         "confidence": confidence,
         "timeline": [{"phase": p, "message": m} for p, m in (timeline or [])],
     }
+    if not_included:
+        out["data_used"]["not_included"] = [
+            _business_table_name(t, sm) or t for t in not_included]
     if visualization:
         vtype = visualization.get("type")
         out["visualization"] = {
@@ -396,8 +536,8 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
             # text (which can be vague/generic) — same principle as the rest of
             # this module: explain = f(final SQL/shape), never f(an LLM's prose).
             "reason": _CHART_REASON_TEMPLATES.get(vtype, visualization.get("reason")),
-            "fields": [f for f in (field_of(visualization.get("x_axis")) if visualization.get("x_axis") else None,
-                                   field_of(visualization.get("y_axis")) if visualization.get("y_axis") else None)
+            "fields": [f for f in (label_of(visualization.get("x_axis")) if visualization.get("x_axis") else None,
+                                   label_of(visualization.get("y_axis")) if visualization.get("y_axis") else None)
                       if f],
         }
     return out

@@ -278,3 +278,56 @@ def test_chart_confidence_lower_for_non_canonical():
     canonical = chart_confidence("TREND", "line", "date", "measure")
     noncanonical = chart_confidence("TREND", "pie", "date", "measure")
     assert noncanonical < canonical
+
+
+# ---------------------------------------------------------------------------
+# Findings must name their own subjects.
+# Regression: "the #1 entry leads #2 by 57%" was the only finding in the set
+# with no subject, so the narrator filled the slot from the nearest name it had
+# — the laggard finding's — and shipped "leading Consumer Appliances by 57%"
+# about a category ranked 12th. And that laggard finding itself named one
+# arbitrary row as "the lowest" while five categories were tied at 2.
+# ---------------------------------------------------------------------------
+
+_RANK_SQL = ('SELECT "t2"."name" AS "category_name", COUNT("t0"."id") AS "activity_count" '
+             'FROM "worklists_ticketupdate" AS "t0" '
+             'JOIN "worklists_ticketcategory" AS "t2" ON "t2"."id" = "t0"."c_id" '
+             'GROUP BY "t2"."name" ORDER BY "activity_count" DESC LIMIT 100')
+
+
+def _patterns(pairs, sql=_RANK_SQL):
+    rows = [{"category_name": n, "activity_count": v} for n, v in pairs]
+    ctx = analyze_result("audit", sql, ["category_name", "activity_count"], rows)
+    return {p.kind: p.detail for p in ctx.patterns}
+
+
+_TIED_TAIL = [("Electrical Fittings", 22), ("Modular Kitchen", 14), ("Carpentry", 8),
+              ("Others", 6), ("Painting", 5), ("Deep Cleaning", 4), ("Seepage", 4),
+              ("Consumer Appliances", 2), ("Fixtures and Fittings", 2),
+              ("Renovation and Rectification", 2), ("Structural damage", 2),
+              ("Furniture", 2)]
+
+
+def test_top_gap_names_both_entries():
+    d = _patterns(_TIED_TAIL)
+    assert d["top_gap"] == "Electrical Fittings leads Modular Kitchen by 57% on activity_count"
+    assert "#1 entry" not in d["top_gap"]
+
+
+def test_tied_extreme_is_reported_as_a_tie_not_an_arbitrary_row():
+    d = _patterns(_TIED_TAIL)
+    assert d["laggard"] == "5 category_name tie for the lowest activity_count at 2"
+    assert "Consumer Appliances" not in d["laggard"]
+    # the unique maximum is still named
+    assert d["leader"] == "Electrical Fittings has the highest activity_count at 22"
+
+
+def test_unique_extremes_keep_naming_their_row():
+    d = _patterns([("A", 10), ("B", 6), ("C", 3)])
+    assert d["leader"] == "A has the highest activity_count at 10"
+    assert d["laggard"] == "C has the lowest activity_count at 3"
+
+
+def test_tied_maximum_is_also_reported_as_a_tie():
+    d = _patterns([("A", 10), ("B", 10), ("C", 3)])
+    assert d["leader"] == "2 category_name tie for the highest activity_count at 10"

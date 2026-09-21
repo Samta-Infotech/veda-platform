@@ -247,6 +247,118 @@ def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[s
     return True
 
 
+# ── Extreme/range claims: a sampled value is not an extreme ───────────────────────
+# Same guard family as _answer_numbers_grounded above, different failure shape: every
+# number the summary states IS in the data, but one of them is presented as a minimum /
+# maximum / range bound when it is only the smallest or largest value in the 5-row
+# SAMPLE. Measured on a 12-row grouped result whose true minimum was 2: the summary read
+# "the range spans from 5 to 22", 5 being the last of the five sampled rows. The numeric
+# guard passes it (5 is a real cell) — only the CLAIM about it is false.
+_RANGE_CLAIM = re.compile(
+    r'\b(?:rang\w+|spans?|spanning|between|from)\b[^.;]{0,30}?'
+    r'(?<![\w.])(?P<lo>\d[\d,]*(?:\.\d+)?)\s*(?:to|and|-|–|—)\s*'
+    r'(?P<hi>\d[\d,]*(?:\.\d+)?)',
+    re.IGNORECASE)
+_EXTREME_CLAIM = re.compile(
+    r'\b(?P<kind>lowest|minimum|smallest|highest|maximum|largest)\b'
+    r'[^.;]{0,30}?(?<![\w.])(?P<val>\d[\d,]*(?:\.\d+)?)',
+    re.IGNORECASE)
+
+
+def _claimed_extremes(answer: str) -> List[float]:
+    """Every number the summary asserts AS an extreme or a range bound. Deliberately
+    narrow: a number merely sitting near a superlative word ("the highest three
+    categories, above the average of 6.08") is not a claim about that number being the
+    extreme, so the short non-greedy window keeps the match on the figure the phrase is
+    actually about."""
+    raw: List[str] = []
+    for m in _RANGE_CLAIM.finditer(str(answer or "")):
+        raw.extend((m.group("lo"), m.group("hi")))
+    for m in _EXTREME_CLAIM.finditer(str(answer or "")):
+        raw.append(m.group("val"))
+    out: List[float] = []
+    for v in raw:
+        try:
+            out.append(float(v.replace(",", "")))
+        except ValueError:
+            continue
+    return out
+
+
+def _extreme_claims_grounded(answer: str, facts: dict) -> bool:
+    """False ONLY on positive evidence that the narrator read an extreme off the sample
+    instead of the precomputed metrics: the claimed bound matches NO column's true
+    min/max, but DOES match a value in the sampled rows. A claim that matches a real
+    extreme passes; a number that is neither (a computed mean, a percentage) is left to
+    _answer_numbers_grounded rather than judged here — this never fails a summary on the
+    mere absence of a match, so a correct answer is never downgraded by it."""
+    metrics = facts.get("metrics") or {}
+    sample = facts.get("sample_rows") or []
+    if not metrics or not sample:
+        return True
+    true_extremes = [n for m in metrics.values() for n in
+                     (_as_number((m or {}).get("min")), _as_number((m or {}).get("max")))
+                     if n is not None]
+    if not true_extremes:
+        return True
+    sampled = [n for row in sample for n in
+               (_as_number(v) for v in (row or {}).values()) if n is not None]
+
+    def _same(a: float, b: float) -> bool:
+        return abs(a - b) <= max(0.01, 0.005 * abs(b))
+
+    for claim in _claimed_extremes(answer):
+        if any(_same(claim, e) for e in true_extremes):
+            continue                                  # a REAL minimum/maximum
+        if any(_same(claim, s) for s in sampled):
+            return False                              # a sampled value passed off as one
+    return True
+
+
+def _scope_terms(not_covered: Optional[List[str]], columns: Optional[List[str]]) -> List[str]:
+    """The out-of-scope terms the summary must actually avoid — every term EXCEPT those
+    that name a column of the result itself. "activity" can be both: the query named a
+    ticket-activity entity the SQL never joined AND the measure is literally
+    `activity_count`, so gagging the word would forbid the correct sentence ("the highest
+    activity count at 22") while the real omissions are assignees and attachments. A word
+    the result's own columns use is the data's vocabulary, not a false claim."""
+    if not not_covered:
+        return []
+    col_words = {w for c in (columns or []) for w in re.findall(r"[a-z]+", str(c).lower())}
+    col_stems = {w[:-1] if w.endswith("s") else w for w in col_words}
+    out = []
+    for term in not_covered:
+        t = str(term or "").lower()
+        stem = t[:-1] if t.endswith("s") else t
+        if len(t) < 4 or stem in col_stems or any(cs.startswith(stem) for cs in col_stems):
+            continue
+        out.append(term)
+    return out
+
+
+def _uncovered_claimed(answer: str, not_covered: Optional[List[str]]) -> Optional[str]:
+    """The term this summary claims to have measured but the query never touched, or None.
+
+    The summariser is handed the QUESTION and the NUMBERS, never the scope — so when the
+    question asks about three things and the SQL answered one, it happily writes "…in
+    ticket updates and assignee activities" over a result with no assignee figures in it.
+    That is a false statement about what the data shows, and a worse one than an invented
+    number: it asserts coverage the engine has ALREADY determined is absent
+    (veda/intent_sql_alignment.entity_coverage). Matched on the singular stem so the
+    plural the user wrote and the singular the model writes both count."""
+    if not not_covered:
+        return None
+    words = set(re.findall(r"[a-z]+", str(answer or "").lower()))
+    for term in not_covered:
+        t = str(term or "").lower()
+        if len(t) < 4:
+            continue
+        stem = t[:-1] if t.endswith("s") else t
+        if any(w == t or w == stem or w.startswith(stem) for w in words):
+            return term
+    return None
+
+
 def _fmt_value(v):
     """Human-friendly scalar formatting (thousands separators for ints)."""
     if isinstance(v, bool):
@@ -507,6 +619,7 @@ def run_nl_answer(
     analytical_context: Optional[dict] = None,
     truncated:      bool = False,
     fetch_limit:    Optional[int] = None,
+    not_covered:    Optional[List[str]] = None,
 ) -> NLAnswerResult:
     """
     Converts result rows into a natural-language prose answer using a small local
@@ -576,6 +689,29 @@ def run_nl_answer(
             f"based on that sample, and do NOT state a partial sum or count as the "
             f"full-result total.")
 
+    # The sample is the FIRST few rows in the query's own order, not a sorted view, so
+    # its smallest/largest values are not the result's — say so, or a 5-row sample's
+    # floor gets narrated as the result's minimum.
+    sample_line = ""
+    _sample_rows = facts.get("sample_rows") or []
+    if _sample_rows and facts.get("metrics") and facts.get("row_count", 0) > len(_sample_rows):
+        sample_line = (
+            f"\nNOTE: sample_rows shows only the first {len(_sample_rows)} of "
+            f"{facts['row_count']} rows, so the smallest and largest values in the result "
+            f"are NOT necessarily among them. Take every minimum, maximum, range or "
+            f"lowest/highest figure from `metrics` (min/max) — never from sample_rows.")
+
+    # Scope: the question named entities this SQL never reached. Without this the model
+    # reads the question's own list back into a claim about the numbers.
+    scope_line = ""
+    _scope = _scope_terms(not_covered, columns)
+    if _scope:
+        _nc = ", ".join(str(t) for t in _scope)
+        scope_line = (
+            f"\nNOTE: these numbers do NOT cover {_nc}, even though the question asked "
+            f"about that. Describe ONLY what the data above measures — never state or "
+            f"imply that {_nc} are included, counted or reflected in any figure here.")
+
     # The result filled its fetch limit, so row_count is a floor, not a total.
     truncated_line = ""
     if facts.get("truncated"):
@@ -609,7 +745,8 @@ def run_nl_answer(
     prompt = (
         f"User question: {query}\n\n"
         f"Extracted data: {json.dumps(facts, default=str)}"
-        f"{glossary}{ctx_line}{rank_line}{findings_line}{partial_line}{truncated_line}"
+        f"{glossary}{ctx_line}{rank_line}{findings_line}{sample_line}{partial_line}"
+        f"{truncated_line}{scope_line}"
         f"{_STYLE_EXEMPLAR}\n\n"
         + role_line
         + f"{shape_line}\n"
@@ -657,6 +794,22 @@ def run_nl_answer(
             logger.warning("run_nl_answer: summary stated an ungrounded number — "
                            "falling back to deterministic answer. summary=%r", answer)
             raise ValueError("ungrounded number in SLM summary")
+        # Every number real, but one asserted as a min/max/range bound that is only the
+        # sample's own floor or ceiling — a false statement about the result, so it gets
+        # the same treatment as an invented figure.
+        # Claiming to have measured something the query never touched — same class of
+        # falsehood as an invented number, and caught the same way.
+        _claimed = _uncovered_claimed(answer, _scope)
+        if _claimed:
+            logger.warning("run_nl_answer: summary claimed coverage of %r, which this "
+                           "query does not measure — falling back to deterministic "
+                           "answer. summary=%r", _claimed, answer)
+            raise ValueError(f"summary claimed uncovered entity {_claimed!r}")
+        if NL_SUMMARY_NUMERIC_GUARD and not _extreme_claims_grounded(answer, facts):
+            logger.warning("run_nl_answer: summary stated a SAMPLED value as a "
+                           "minimum/maximum/range bound — falling back to deterministic "
+                           "answer. summary=%r metrics=%r", answer, facts.get("metrics"))
+            raise ValueError("sampled value stated as an extreme in SLM summary")
         # Deterministic backstop: drop any currency symbol the model prefixed that
         # the data doesn't actually carry (7B doesn't always obey the prompt rule).
         answer = _strip_invented_currency(answer, facts)

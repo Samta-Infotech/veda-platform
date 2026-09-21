@@ -459,3 +459,127 @@ def test_insight_engine_prompt_includes_result_shape_hint(monkeypatch):
     assert ctx.result_shape == "RANKING"
     re_mod.run_insight_engine(ctx)
     assert "RANKING" in captured["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# A sampled value is not an extreme.
+# Regression: the facts payload carries exact metrics (min/max) AND the first 5
+# rows. On a 12-row grouped result whose true minimum was 2, the summary read
+# "the range spans from 5 to 22" — 5 being the last SAMPLED row. Every number is
+# real, so the numeric guard passed it; only the claim about it was false.
+# ---------------------------------------------------------------------------
+
+def _ranked_rows():
+    return ["category_name", "activity_count"], [
+        {"category_name": n, "activity_count": v} for n, v in
+        [("Electrical Fittings", 22), ("Modular Kitchen", 14), ("Carpentry", 8),
+         ("Others", 6), ("Painting", 5), ("Deep Cleaning", 4), ("Seepage", 4),
+         ("Consumer Appliances", 2), ("Fixtures and Fittings", 2),
+         ("Renovation and Rectification", 2), ("Structural damage", 2), ("Furniture", 2)]]
+
+
+def test_sampled_value_stated_as_range_floor_is_rejected():
+    columns, rows = _ranked_rows()
+    facts = _extract_facts(columns, rows)
+    assert facts["metrics"]["activity_count"]["min"] == 2.0      # the TRUE minimum
+    assert re_mod._extreme_claims_grounded(
+        "Electrical Fittings leads at 22, and the range spans from 5 to 22 across 12 "
+        "groups.", facts) is False
+    assert re_mod._extreme_claims_grounded(
+        "Counts fall between 5 and 22 across the 12 categories.", facts) is False
+
+
+def test_real_extremes_and_non_extreme_figures_still_pass():
+    columns, rows = _ranked_rows()
+    facts = _extract_facts(columns, rows)
+    # the true range
+    assert re_mod._extreme_claims_grounded("Counts range from 2 to 22.", facts) is True
+    # a superlative about a real maximum
+    assert re_mod._extreme_claims_grounded(
+        "Electrical Fittings has the highest activity_count at 22.", facts) is True
+    # a computed mean near a superlative word is NOT an extreme claim — must not trip
+    assert re_mod._extreme_claims_grounded(
+        "The three highest categories sit above the average of 6.08.", facts) is True
+    # nothing to judge without metrics or sample rows
+    assert re_mod._extreme_claims_grounded("Counts range from 5 to 22.", {}) is True
+
+
+def test_run_nl_answer_falls_back_when_summary_misstates_the_minimum(monkeypatch):
+    """End-to-end: the SLM returns the exact summary that shipped, and the answer
+    must NOT be that text — the guard rejects it and the deterministic blend stands."""
+    bad = ("Electrical Fittings has the highest activity_count at 22, leading Modular "
+           "Kitchen by 57%. Three categories have an activity_count above the average of "
+           "6.08, while the range spans from 5 to 22 across 12 groups.")
+    monkeypatch.setattr(slm, "call_slm", lambda prompt, **kw: bad)
+    columns, rows = _ranked_rows()
+    result = re_mod.run_nl_answer("audit by category", columns, rows)
+    assert "from 5 to 22" not in result.answer
+
+
+def test_nl_prompt_tells_the_narrator_extremes_come_from_metrics(monkeypatch):
+    captured = {}
+
+    def fake_call_slm(prompt, **kwargs):
+        captured["prompt"] = prompt
+        return "Electrical Fittings leads with 22."
+
+    monkeypatch.setattr(slm, "call_slm", fake_call_slm)
+    columns, rows = _ranked_rows()
+    re_mod.run_nl_answer("audit by category", columns, rows)
+    assert "only the first 5 of 12 rows" in captured["prompt"]
+    assert "never from sample_rows" in captured["prompt"]
+
+
+# ---------------------------------------------------------------------------
+# Scope: never claim to have measured what the query didn't touch.
+# Regression: asked for "ticket updates, assignees and attachments", the SQL
+# counted updates alone — and the summary read "...far outpacing others in
+# ticket updates and assignee activities", over a result with no assignee
+# figures in it. The summariser sees the QUESTION and the NUMBERS, never the
+# scope, so it read the question's own entity list back as coverage.
+# ---------------------------------------------------------------------------
+
+_SHIPPED_OVERCLAIM = (
+    "Electrical Fittings has the highest activity count at 22, leading Modular Kitchen "
+    "by 57%. Three categories exceed the average activity count of 6.08, with Electrical "
+    "Fittings far outpacing others in ticket updates and assignee activities.")
+
+
+def test_scope_terms_keep_a_word_the_result_columns_use():
+    """"activity" is both an entity the SQL skipped AND the measure's own name
+    (activity_count) — gagging it would forbid the correct sentence."""
+    assert re_mod._scope_terms(["activity", "attachment", "assignee"],
+                               ["category_name", "activity_count"]) == ["attachment", "assignee"]
+    assert re_mod._scope_terms([], ["a"]) == []
+
+
+def test_summary_claiming_an_uncovered_entity_is_rejected():
+    scope = ["attachment", "assignee"]
+    assert re_mod._uncovered_claimed(_SHIPPED_OVERCLAIM, scope) == "assignee"
+    assert re_mod._uncovered_claimed("22 updates and 4 attachments recorded", scope) == "attachment"
+    # the same sentence without the overclaim is fine
+    assert re_mod._uncovered_claimed(
+        "Electrical Fittings has the highest activity count at 22.", scope) is None
+    assert re_mod._uncovered_claimed(_SHIPPED_OVERCLAIM, []) is None
+
+
+def test_run_nl_answer_falls_back_when_the_summary_overclaims_scope(monkeypatch):
+    monkeypatch.setattr(slm, "call_slm", lambda prompt, **kw: _SHIPPED_OVERCLAIM)
+    columns, rows = _ranked_rows()
+    result = re_mod.run_nl_answer("audit of updates, assignees and attachments", columns, rows,
+                                  not_covered=["activity", "attachment", "assignee"])
+    assert "assignee" not in result.answer
+
+
+def test_nl_prompt_states_what_the_numbers_do_not_cover(monkeypatch):
+    captured = {}
+
+    def fake_call_slm(prompt, **kwargs):
+        captured["prompt"] = prompt
+        return "Electrical Fittings leads with 22."
+
+    monkeypatch.setattr(slm, "call_slm", fake_call_slm)
+    columns, rows = _ranked_rows()
+    re_mod.run_nl_answer("audit", columns, rows, not_covered=["activity", "attachment", "assignee"])
+    assert "do NOT cover attachment, assignee" in captured["prompt"]
+    assert "activity," not in captured["prompt"].split("do NOT cover")[1][:40]

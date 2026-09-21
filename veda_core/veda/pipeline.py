@@ -262,6 +262,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         except Exception:
             return None
 
+    # Entity-coverage verdict (veda/intent_sql_alignment.entity_coverage), filled in after the
+    # qualifier gate below and read by _done(): the entities the question named that this SQL does
+    # NOT cover. A dict, not a name, so the check can be recorded where the SQL is final while the
+    # confidence/explainability that report it stay in the one place that builds them.
+    _coverage = {}
+
     def _done(rc, status, **kw):
         if status != "answered":
             _refusal = kw.get("msg") or kw.get("error") or kw.get("missing")
@@ -300,6 +306,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     _join_conf = tr.sections.get("join_planning", {}).get("confidence")
                     _conf_inputs = {k: v for k, v in
                                    (("anchor", _anchor_conf), ("join", _join_conf)) if v is not None}
+                    # A partial answer is a good answer, not a certain one — it must never
+                    # reach the 1.0 an uncaveated complete answer gets.
+                    if _coverage.get("missing"):
+                        from config import ENTITY_COVERAGE_CONFIDENCE
+                        _conf_inputs["entity_coverage"] = ENTITY_COVERAGE_CONFIDENCE
                     _confidence = synthesize_confidence(_conf_inputs)
                 except Exception:
                     logger.exception("synthesize_confidence failed — result confidence omitted")
@@ -312,6 +323,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         params=params,
                         timeline=_ticks,
                         confidence=_confidence,
+                        not_included=_coverage.get("missing"),
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
@@ -693,10 +705,16 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             pass
     if fp:
         print(f"  [FastPath] {fp.route}  ({'; '.join(fp.why)})  — no retrieval / no LLM")
+        # The two SHORTEST lanes (fast path, cache replay) answer without touching the
+        # planner, which is where every other _tick() lives — so their timeline arrived
+        # at the UI with a single "output" entry and the progress feature looked dead
+        # for exactly the queries that reach the user fastest.
+        _tick("sql_planning", "Answering this one directly")
         sql, primary, from_cache = fp.sql, fp.primary, False
         allowed_tables, allowed_columns = set(fp.tables), list(fp.columns)
     elif cached_sql:
         print(f"  [cache] verified-query hit (sim={sim:.2f}) — skipping retrieval + SLM")
+        _tick("sql_planning", "Reusing a query already verified for this question")
         sql, from_cache = cached_sql, True
         import sqlglot
         from sqlglot import exp
@@ -2088,6 +2106,29 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                               always_done=True, missing=missing)   # this site always returned _done()
     print("  [L6b] Qualifier    ✓  every named qualifier is represented in the SQL")
 
+    # Entity COVERAGE (flag-gated, never refuses): the companion to the qualifier gate above for the
+    # other half of "nothing the user asked for was silently dropped". That gate owns filters and the
+    # attributes of the QUERIED tables; this one owns whole ENTITIES the question named that the SQL
+    # never reached ("updates, assignees and attachments" answered with updates alone). The answer is
+    # still correct for what it covers, so it ships — but as a failed check naming what was left out,
+    # and at a capped confidence, instead of "no requested filters were ignored" at 1.0.
+    if sql:
+        try:
+            from veda.intent_sql_alignment import entity_coverage
+            _cov_ok, _cov_missing, _cov_terms = entity_coverage(query, sql, sm)
+        except Exception:
+            logger.exception("entity_coverage failed — coverage check omitted")
+            _cov_ok, _cov_missing, _cov_terms = True, [], []
+        if not _cov_ok:
+            _coverage["missing"] = _cov_missing
+            # The user's own words for what was dropped — the summariser needs these, it
+            # never sees a table name (see run_nl_answer's `not_covered`).
+            _coverage["terms"] = _cov_terms
+            tr.check("entity_coverage", False, "not covered: " + ", ".join(_cov_missing))
+            print(f"  [L6c] Coverage    ⚠  partial — not covered: {', '.join(_cov_missing)}")
+        else:
+            tr.check("entity_coverage", True, "")
+
     # Grouped-intent shape guard (flag-gated): an LLM-written PURE PROJECTION for a "how many X by Y" /
     # "distribution" query can't answer the grouping, and the NL summariser then fabricates a
     # distribution ("62% in Singapore"). Refuse instead of answering wrong. Deterministic grouped SQL
@@ -2422,7 +2463,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                    patterns=_all_findings,
                                    result_shape=getattr(_ictx, "result_shape", None),
                                    analytical_context=_analytical_ctx,
-                                   truncated=_truncated, fetch_limit=_fetch_limit)
+                                   truncated=_truncated, fetch_limit=_fetch_limit,
+                                   not_covered=_coverage.get("terms"))
                 if getattr(nl, "answer", None):
                     nl_answer_text = nl.answer
                     # run_nl_answer wove the patterns only when the SLM actually ran;

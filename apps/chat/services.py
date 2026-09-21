@@ -81,7 +81,8 @@ def _positional_rows(cols: list, rows: list) -> list:
     ]
 
 
-def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
+def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None,
+                          analytics: dict | None = None):
     """Turn the query tier's validated {type,x_axis,y_axis,...} column-name
     suggestion into a real VisualizationSpec, reusing the existing
     recommender's own chart-data builders (never re-implemented here) — the
@@ -103,7 +104,8 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None):
         # the raw list (a list has no .to_dict(), which crashed _build_visualizations
         # on any bar/pie candidate/suggestion that reached this fallback). None when the
         # data can't be charted (e.g. a single category).
-        specs = _visualization_recommender.build_category_specs(cols, rows, x_idx, y_idx)
+        specs = _visualization_recommender.build_category_specs(cols, rows, x_idx, y_idx,
+                                                                analytics)
         if not specs:
             return None
         return next((s for s in specs if s.type.value == vtype), specs[0])
@@ -476,7 +478,8 @@ class ConversationQueryService:
         # query/result_explainer.py's validate_visualization). Still built into
         # the SAME chart_data shape via the existing recommender's own builders,
         # never served as a bare column-name suggestion.
-        spec = _spec_from_suggestion(cols, rows, res0.get("visualization"))
+        spec = _spec_from_suggestion(cols, rows, res0.get("visualization"),
+                                     res0.get("analytics"))
         if spec:
             return [spec.to_dict()]
         # Second deterministic fallback (2026-07-17): the engine ALSO computes
@@ -487,6 +490,7 @@ class ConversationQueryService:
         # already consumes, so no new plumbing: just try its first (highest-
         # confidence) candidate before giving up on a chart entirely.
         candidates = (res0.get("analytics") or {}).get("chart_candidates") or []
-        spec = _spec_from_suggestion(cols, rows, candidates[0]) if candidates else None
+        spec = (_spec_from_suggestion(cols, rows, candidates[0], res0.get("analytics"))
+                if candidates else None)
         return [spec.to_dict()] if spec else []
 

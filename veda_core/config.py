@@ -923,6 +923,24 @@ INTENT_SQL_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_ALIGNMENT_ENABLED", "
 # on every produced SQL path. OFF -> byte-identical.
 INTENT_SQL_DIMENSION_ALIGNMENT_ENABLED = _os.environ.get("INTENT_SQL_DIMENSION_ALIGNMENT_ENABLED", "1") == "1"
 
+# Intent<->SQL ENTITY-COVERAGE check (veda/intent_sql_alignment.py::entity_coverage) — the third
+# referent class. The question NAMES several entities and the SQL answers only some of them: nothing
+# in it is wrong, it is INCOMPLETE ("audit of ticket updates, assignees and attachments by category"
+# counted ticket updates alone, shipped with "no requested filters were ignored" and confidence 1.0 —
+# the dropped entities are not filters, so qualifier_completeness has no opinion on them). UNLIKE
+# every other guard in that module this NEVER refuses: a correct answer to part of the question is
+# worth shipping, it just must not claim to be the whole answer. The miss is recorded as a failed
+# validation check (surfaced in the explainability panel, naming what was left out) and caps the
+# answer's confidence at ENTITY_COVERAGE_CONFIDENCE. Reports a gap only when the noun grounds through
+# the planner's own resolver to a table JOINABLE to the SQL's tables while ≥1 other named entity IS
+# in the SQL — quiet when unsure, so it under-reports rather than false-accuses. OFF -> byte-identical.
+INTENT_SQL_ENTITY_COVERAGE_ENABLED = _os.environ.get("INTENT_SQL_ENTITY_COVERAGE_ENABLED", "1") == "1"
+
+# Confidence ceiling for an answer that covered only SOME of the entities the question named (see
+# above). A partial answer is still a good answer — it is simply not a certain one, so it must never
+# reach the 1.0 an uncaveated complete answer gets. Weakest-link, like every other confidence input.
+ENTITY_COVERAGE_CONFIDENCE = float(_os.environ.get("ENTITY_COVERAGE_CONFIDENCE", "0.6"))
+
 # Canonical-QueryIntent SHADOW measurement (Phase 1 spike — query/fast_path.py preserves the fast-path
 # QueryIntent on decline via a request-scoped ContextVar; veda/canonical_intent_shadow.py compares it to
 # extract_sql_facts(final_sql) and LOGS field-level agreement). OBSERVE-ONLY: it never influences SQL,

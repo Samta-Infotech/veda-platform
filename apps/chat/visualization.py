@@ -105,7 +105,52 @@ _TEXT_NAME_HINTS = ("email", "notes", "description", "remarks", "comment", "addr
 _TEXT_AVG_LEN_THRESHOLD = 40  # avg sampled value length above this reads as free text, not a category
 
 _MAX_PIE_SLICES = 6
-_TOP_N_CATEGORIES = 9  # + 1 "Other" bucket for the long tail = 10 slices/bars, still readable
+# Bar-chart category cap: beyond this the long tail collapses into one bucket (+1 bar).
+# Was 9, which bucketed a 12-category result down to 10 bars — hiding three named
+# categories to save two slots, on a chart that was perfectly readable at 12. A bar
+# chart stays legible to roughly 20 bars; a PIE does not, which is what _MAX_PIE_SLICES
+# is for. These are two different limits and must not be conflated.
+_TOP_N_CATEGORIES = 19  # + 1 bucket for the long tail = 20 bars
+
+# An aggregate whose values can be ADDED UP across rows. A long-tail bucket and the
+# duplicate-row roll-up below are both sums, so they are only meaningful for these:
+# summing averages, medians, rates or shares produces a number that means nothing.
+_ADDITIVE_AGGS = frozenset({"COUNT", "SUM", "TOTAL"})
+# Fallback when the engine didn't tell us the aggregate (federated results, un-aliased
+# SQL): the measure column's OWN name. Deliberately narrow — a name that doesn't match
+# is treated as additive, i.e. exactly today's behaviour.
+_NON_ADDITIVE_NAME_HINTS = ("avg", "average", "mean", "median", "rate", "ratio",
+                            "pct", "percent", "share")
+
+
+def _agg_key(name: object) -> str:
+    """Comparison key that treats a plural as the same word — "Others" (a real category
+    in ticketing/CRM schemas) must not be considered distinct from the synthetic
+    "Other" bucket just because of one letter."""
+    return re.sub(r"[^a-z0-9]+", "", str(name).lower()).rstrip("s")
+
+
+def _measure_is_additive(col_name: str, analytics: dict | None) -> bool:
+    """Can this measure's values legitimately be summed across rows? The engine's own
+    SQL-derived aggregate (analytics.measure_aggregates, keyed by SELECT alias = the
+    result column name) is authoritative; the column name is the fallback."""
+    agg = ((analytics or {}).get("measure_aggregates") or {}).get(col_name)
+    if agg:
+        return str(agg).upper() in _ADDITIVE_AGGS
+    words = re.sub(r"[^a-z0-9]+", " ", str(col_name).lower())
+    return not any(h in words for h in _NON_ADDITIVE_NAME_HINTS)
+
+
+def _tail_label(existing_names: list, rest_count: int) -> str:
+    """A name for the collapsed long tail that cannot be mistaken for a real category.
+    A genuine catch-all category named "Other"/"Others" is common, and a chart carrying
+    a real "Others" bar of 6 beside a synthetic "Other" bar of 6 is unreadable — which
+    is exactly what shipped before this."""
+    taken = {_agg_key(n) for n in existing_names}
+    for cand in ("Other", "All other categories"):
+        if _agg_key(cand) not in taken:
+            return cand
+    return f"All other ({rest_count} categories)"
 
 # Below this, no chart is returned at all — a table-only response is always
 # safer than a low-confidence or borderline-meaningless chart.
@@ -222,7 +267,8 @@ class VisualizationRecommender:
                 return [line_spec, bar_spec]
 
         if categorical_idx and numeric_idx:
-            specs = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0])
+            specs = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0],
+                                           analytics)
             # A RANKING (top/bottom-N) is NOT a part-of-whole: a pie of the top N
             # misrepresents proportions (the N don't sum to the whole). When the engine
             # classified the shape as RANKING, lead with the bar (its canonical chart,
@@ -331,12 +377,16 @@ class VisualizationRecommender:
     # internal entry points and are exercised directly by the visualization tests.
 
     def build_category_specs(self, cols: list, rows: list, cat_idx: int,
-                             val_idx: int) -> list[VisualizationSpec]:
+                             val_idx: int, analytics: dict | None = None) -> list[VisualizationSpec]:
         """Chart(s) for a (category, measure) pairing — pie and/or bar. Returns a
         LIST because a small category breakdown supports two equally valid
         renderings of the same totals; empty when the data can't be charted (e.g.
-        a single category)."""
-        return self._category_numeric(cols, rows, cat_idx, val_idx)
+        a single category).
+
+        `analytics`: the engine's own analysis payload, same one `recommend` takes —
+        its `measure_aggregates` is what tells this builder whether the measure may be
+        summed. Optional: without it the measure's name is the fallback signal."""
+        return self._category_numeric(cols, rows, cat_idx, val_idx, analytics)
 
     def build_line_spec(self, cols: list, rows: list, x_idx: int, y_idx: int) -> VisualizationSpec:
         """The line chart for an (x, measure) pairing. Always returns one spec."""
@@ -344,16 +394,26 @@ class VisualizationRecommender:
 
     # --- chart builders ------------------------------------------------------
 
-    def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int) -> list[VisualizationSpec]:
+    def _category_numeric(self, cols: list, rows: list, cat_idx: int, val_idx: int,
+                          analytics: dict | None = None) -> list[VisualizationSpec]:
+        # Whether this measure may be ADDED across rows decides two things below: the
+        # duplicate-row roll-up here, and the long-tail bucket further down. Both are
+        # sums, and a sum of averages/rates/shares is not a number that means anything.
+        additive = _measure_is_additive(cols[val_idx], analytics)
         # SQL upstream doesn't guarantee GROUP BY on the category column, so the
         # same category name can appear across multiple rows — sum them here
         # rather than plotting one slice/bar per raw row.
         totals: dict[str, float] = {}
+        duplicates = False
         for row in rows:
             if not _is_numeric(row[val_idx]):
                 continue
             name = str(row[cat_idx])
+            if name in totals:
+                duplicates = True
             totals[name] = totals.get(name, 0) + _to_number(row[val_idx])
+        if duplicates and not additive:
+            return []  # no honest way to combine an average/rate across rows — no chart
         pairs = list(totals.items())
         if len(pairs) < 2:
             return []  # a single category isn't a chart — never force one
@@ -393,8 +453,14 @@ class VisualizationRecommender:
         ranked = sorted(pairs, key=lambda p: p[1], reverse=True)
         top, rest = ranked[:_TOP_N_CATEGORIES], ranked[_TOP_N_CATEGORIES:]
         slices = [{"name": name, "value": value} for name, value in top]
-        if rest:
-            slices.append({"name": "Other", "value": sum(value for _, value in rest)})
+        if rest and additive:
+            slices.append({"name": _tail_label([n for n, _ in ranked], len(rest)),
+                           "value": sum(value for _, value in rest)})
+        elif rest:
+            # A non-additive measure has no honest single value for the tail, so the
+            # tail is DROPPED rather than faked — and the title then has to say that
+            # the chart is a subset, or it reads as the whole distribution.
+            title = f"{title} (top {len(top)})"
 
         if len(slices) <= _MAX_PIE_SLICES and not has_negative:
             return [VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},

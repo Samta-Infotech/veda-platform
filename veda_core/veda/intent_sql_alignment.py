@@ -429,3 +429,158 @@ def dimension_alignment(query, sql, sm):
         return DIM_CLARIFY, ("this dimension is ambiguous — did you mean "
                              f"{' or '.join(sorted(acceptable))}?")
     return DIM_ALIGNED, ""
+
+
+# ── C. ENTITY COVERAGE — the question named several entities, the SQL answers a subset ─────────────
+# The third referent class, and the one the other two cannot see: nothing about the SQL is WRONG, it
+# is INCOMPLETE. "Audit of ticket updates, assignees and attachments by category" produced a correct
+# COUNT over ticket updates alone, while validation reported "no requested filters were ignored" and
+# the answer shipped at confidence 1.0 — the two entities that were dropped are not filters, so
+# qualifier_completeness (filters + attributes of the QUERIED tables) has no opinion on them.
+#
+# Unlike A and B this NEVER refuses: a correct answer to part of the question is worth shipping, it
+# just must not present itself as the whole answer. The caller records the miss as a failed check and
+# drops the confidence, so the gap is visible in the explainability panel instead of silent.
+#
+# Deliberately conservative — it reports a gap only on evidence of ALL of:
+#   (1) the noun grounds, through the SAME deterministic resolver the planner uses
+#       (understanding.grounding.ground_entity: curated aliases → model vocabulary → name tokens),
+#   (2) to a table JOINABLE to the SQL's own tables (the ingested join-path artifact) — so an
+#       unrelated same-named table elsewhere in the schema is never reported, and
+#   (3) at least one other named entity IS in the SQL — the SQL answers a SUBSET. A SQL that shares
+#       no entity with the question is a wrong-anchor problem, which the guards above own.
+# A noun the model has no vocabulary for stays unresolved and is simply not reported: this makes the
+# check quiet-when-unsure (an under-report), never a false accusation.
+
+def _coverage_enabled() -> bool:
+    try:
+        from config import INTENT_SQL_ENTITY_COVERAGE_ENABLED
+        return bool(INTENT_SQL_ENTITY_COVERAGE_ENABLED)
+    except Exception:
+        return False
+
+
+# Direct FK neighbours only. The ingested artifact reaches 4 hops, but at 2 the neighbourhood is
+# most of the schema (everything meets at users_user) and the nouns start grounding to unrelated
+# look-alikes — measured on the trigger query: 1 hop reports the attachment/activity entities the
+# question named, 2 reports assets_amenitycategory. An entity the user expects in a "ticket audit"
+# hangs directly off the tables being queried.
+_MAX_COVERAGE_HOPS = 1
+
+
+def _join_neighbourhood(sql_tables):
+    """Tables reachable from the SQL's tables in the ingested join-path artifact (the same
+    veda_join_paths.json the join planner uses). Empty set when the artifact is absent — the
+    check then reports nothing, rather than judging joinability by guesswork."""
+    try:
+        import json as _json
+        import os as _os
+        from config import resolve_source_artifact
+        p = resolve_source_artifact("veda_join_paths.json")
+        pairs = (_json.load(open(p)) or {}).get("pairs", {}) if (p and _os.path.exists(p)) else {}
+    except Exception:
+        return set()
+    near = set()
+    for key, meta in pairs.items():
+        a, _, b = str(key).partition("|")
+        if not b:
+            continue
+        hops = (meta or {}).get("hops")
+        if hops is not None and hops > _MAX_COVERAGE_HOPS:
+            continue
+        if a in sql_tables:
+            near.add(b)
+        if b in sql_tables:
+            near.add(a)
+    return near - set(sql_tables)
+
+
+def _query_nouns(query):
+    """Content words of the question, singularized, minus the query-LANGUAGE layer — the same
+    content/grammar split validation.qualifier_completeness applies, reused rather than restated."""
+    try:
+        from veda.validation import _gate_strip, _singularize
+        strip = _gate_strip()
+    except Exception:
+        # The query-LANGUAGE layer is unavailable. ground_entity applies its own stop-word
+        # set anyway, and a grammar word that slips through simply grounds to nothing — so
+        # fall back to that rather than silently skipping the check entirely.
+        from veda.understanding.grounding import _STOP as strip, _singularize
+    out, seen = [], set()
+    for w in re.findall(r"[a-z]+", (query or "").lower()):
+        if len(w) <= 2:
+            continue
+        s = _singularize(w)
+        if w in strip or s in strip or s in seen:
+            continue
+        seen.add(s)
+        out.append(s)
+    return out
+
+
+_COVERAGE_STEM = 6
+
+
+def _description_referent(noun, candidates, sm):
+    """Fallback for a noun the NAME-based resolver can't place: match it against the
+    candidate tables' own descriptions, and accept the match ONLY when exactly one table
+    in the neighbourhood carries it.
+
+    "assignees" appears nowhere in `worklists_ticketuser`'s name; that table describes
+    itself as "a single ticket assignment record", and assignee/assignment share a stem
+    no substring test finds — so the coverage check stayed silent about the dropped
+    entity. Uniqueness is what makes this safe: "ticket" matches seven neighbours here,
+    so it is ambiguous and ignored, while "assign" matches exactly one. A shared stem of
+    """ + str(_COVERAGE_STEM) + """ characters is long enough that unrelated words don't
+    collide, and short enough to cross the morphology (assign|ee/ment)."""
+    if len(noun) < _COVERAGE_STEM:
+        return None
+    stem = noun[:_COVERAGE_STEM]
+    tables = (sm or {}).get("tables", {}) or {}
+    hits = set()
+    for t in candidates:
+        meta = tables.get(t) or {}
+        text = f"{meta.get('primary_entity') or ''} {meta.get('business_purpose') or ''}".lower()
+        if any(w[:_COVERAGE_STEM] == stem
+               for w in re.findall(r"[a-z]+", text) if len(w) >= _COVERAGE_STEM):
+            hits.add(t)
+    return next(iter(hits)) if len(hits) == 1 else None
+
+
+def entity_coverage(query, sql, sm=None):
+    """(ok, missing_tables, missing_terms). ok=False means the SQL answers a STRICT SUBSET of the
+    entities the question named — never a reason to refuse, only to stop claiming completeness.
+
+    `missing_tables` are real table names, for the caller to label and display.
+    `missing_terms` are the USER'S OWN WORDS for them ("assignees"), which is what the summariser
+    must not claim to have measured — it never sees a table name, only the question and the
+    numbers, so without these it papers over the gap in prose ("…in ticket updates and assignee
+    activities", about a result containing no assignee figures at all)."""
+    if not _coverage_enabled() or not sql:
+        return True, [], []
+    facts = _facts(sql)
+    sql_tables = set(facts.get("entities") or [])
+    if not sql_tables:
+        return True, [], []
+    near = _join_neighbourhood(sql_tables)
+    if not near:
+        return True, [], []                               # no join artifact → nothing to judge against
+    try:
+        from veda.understanding.grounding import ground_entity
+    except Exception:
+        return True, [], []
+    candidates = near | sql_tables
+    grounded = {}
+    for noun in _query_nouns(query):
+        try:
+            t = ground_entity(noun, candidates, set(), sm)
+        except Exception:
+            t = None
+        if t is None:
+            t = _description_referent(noun, candidates, sm)
+        if t:
+            grounded.setdefault(t, noun)                  # the word the user used for this table
+    missing = sorted(set(grounded) - sql_tables)
+    if not missing or not (set(grounded) & sql_tables):
+        return True, [], []                               # nothing dropped, or no shared entity
+    return False, missing, [grounded[t] for t in missing]
