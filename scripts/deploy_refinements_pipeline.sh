@@ -45,6 +45,8 @@
 #              NOT exist in either compose file (B6 outstanding), so this runs in `api`.
 #   up         docker compose up -d  — recreate, never `restart`: env is read at container
 #              CREATE time, so `restart` keeps the old .env while looking healthy.
+#   artifacts  adopt a pre-scoping source's FLAT artifacts into its scoped directory
+#              (the cheap alternative to re-ingesting it — see ARTIFACT_OWNER below).
 #   backfill   routing cards for any source missing one (idempotent, re-runnable).
 #   reingest   re-ingest the document sources whose chunks predate the sparse fix, and
 #              (only with REINGEST_MISSING_ARTIFACTS=1) sources with no scoped artifacts.
@@ -75,6 +77,19 @@
 #   --phases a,b,c          PHASES=a,b,c
 #   --sources 3,4           SOURCES=3,4       re-ingest exactly these, skip detection
 #   --tenant default        TENANT=default
+#   --file f.yml            EXTRA_COMPOSE     extra `-f` overlay, repeatable. Use this to
+#                                             hold a host-local difference (e.g. a pg17
+#                                             data dir) WITHOUT editing the tracked
+#                                             docker-compose.yml, which another host reads.
+#   --artifact-owner 2      ARTIFACT_OWNER=2  the source that PRODUCED the flat artifacts in
+#                                             <artifact_root>/*.json. Never inferred: those
+#                                             files came from exactly one source's ingestion,
+#                                             and handing them to the wrong source is the
+#                                             semantic-model bleed in MULTI_SOURCE_DEPLOYMENT
+#                                             §2 (wrong-schema answers that pass the firewall).
+#                                             Set it and the `artifacts` phase copies them into
+#                                             <artifact_root>/<tenant>/<id>/, which is what the
+#                                             M1 close-out expects — no re-ingest.
 #   COMPOSE                 docker compose invocation      (default: "docker compose")
 #   COMPOSE_FILE            single -f override             (default: the repo's files)
 #   API/INFER/WORKER/PG     service names   (api / inference / ingest-worker / postgres)
@@ -95,7 +110,7 @@ ASSUME_YES="${ASSUME_YES:-0}"
 DRY_RUN="${DRY_RUN:-0}"
 TENANT="${TENANT:-default}"
 SOURCES="${SOURCES:-}"
-PHASES="${PHASES:-preflight,build,migrate,up,backfill,reingest,verify}"
+PHASES="${PHASES:-preflight,build,migrate,up,artifacts,backfill,reingest,verify}"
 API="${API:-api}"; INFER="${INFER:-inference}"; WORKER="${WORKER:-ingest-worker}"; PG="${PG:-postgres}"
 EXPECT_BRANCH="${EXPECT_BRANCH:-feat/refinements-pipeline}"
 # The commit that made chunk_embedder lowercase text before sparse encoding. Chunks
@@ -104,6 +119,18 @@ EXPECT_BRANCH="${EXPECT_BRANCH:-feat/refinements-pipeline}"
 SPARSE_FIX_UTC="${SPARSE_FIX_UTC:-2026-09-16 00:00:00+00}"
 REINGEST_MISSING_ARTIFACTS="${REINGEST_MISSING_ARTIFACTS:-0}"
 INGEST_TIMEOUT="${INGEST_TIMEOUT:-7200}"
+EXTRA_COMPOSE="${EXTRA_COMPOSE:-}"
+ARTIFACT_OWNER="${ARTIFACT_OWNER:-}"
+
+# Derived artifacts a reader resolves per-source (every name passed to
+# config.resolve_source_artifact / source_artifact_path in the tree). Deliberately EXCLUDES
+# veda_semantic_checkpoint.json (a resume checkpoint — adopting it would make a later resume
+# skip stages it should run) and the caches (veda_verified_queries/parity_baseline/
+# synonym_enrich_cache), which are not per-source artifacts.
+SCOPED_ARTIFACTS="veda_semantic_model.json veda_relationship_graph.json veda_join_paths.json \
+veda_unified_graph.json veda_enrichment_index.json veda_rerank_docs.json veda_value_referents.json \
+veda_concept_graph.json veda_domain_synonyms.json veda_entity_aliases.json veda_glossary.json \
+veda_hnsw.json veda_profiling.json concepts.json dimensions.json metrics.json MANIFEST.json"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -116,6 +143,8 @@ while [ $# -gt 0 ]; do
     --phases)       PHASES="$2"; shift ;;
     --sources)      SOURCES="$2"; shift ;;
     --tenant)       TENANT="$2"; shift ;;
+    --file)         EXTRA_COMPOSE="$EXTRA_COMPOSE -f $2"; shift ;;
+    --artifact-owner) ARTIFACT_OWNER="$2"; shift ;;
     -h|--help)      sed -n '2,/^# =\{20,\}$/p' "$0" | sed -n '2,$p' | tail -r | sed -n '2,$p' | tail -r; exit 0 ;;
     *) echo "unknown argument: $1 (try --help)" >&2; exit 2 ;;
   esac
@@ -125,6 +154,10 @@ done
 COMPOSE_FILES="-f docker-compose.yml"
 [ "$PROD" = "1" ] && COMPOSE_FILES="$COMPOSE_FILES -f docker-compose.prod.yml"
 [ -n "${COMPOSE_FILE:-}" ] && COMPOSE_FILES="-f ${COMPOSE_FILE}"
+# Overlays come LAST so they win, and they are never written back to the tracked compose
+# file: the pg pin differs per host (one machine's pg_data is PG16, another's PG17) and
+# editing docker-compose.yml to suit this host silently breaks the other one.
+[ -n "$EXTRA_COMPOSE" ] && COMPOSE_FILES="$COMPOSE_FILES $EXTRA_COMPOSE"
 DC="${COMPOSE} ${COMPOSE_FILES}"
 
 # .env keys with no code default that matter to this deployment. A missing one is a
@@ -205,6 +238,12 @@ has_artifact() {  # $1 = service, $2 = source id, $3 = artifact filename
   local root; root="$(art_root "$1")"
   [ -n "$root" ] || return 1
   dc exec -T "$1" sh -c 'test -f "$0/$1/$2/$3"' "$root" "$TENANT" "$2" "$3" </dev/null >/dev/null 2>&1
+}
+
+has_flat_artifact() {  # $1 = service — is there a pre-scoping flat semantic model to adopt?
+  local root; root="$(art_root "$1")"
+  [ -n "$root" ] || return 1
+  dc exec -T "$1" sh -c 'test -f "$0/veda_semantic_model.json"' "$root" </dev/null >/dev/null 2>&1
 }
 
 kind_of() {  # dialect -> engine source kind (apps/sources/models.py::_DIALECT_TO_ENGINE)
@@ -409,10 +448,25 @@ inventory() {
 
   echo
   if [ -n "$NOARTIFACT_SOURCES" ]; then
-    bad "no scoped semantic model for relational source(s): $NOARTIFACT_SOURCES"
-    info "resolve_source_artifact() has no flat fallback — these sources will plan SQL with an EMPTY model"
-    info "fix: re-ingest them (REINGEST_MISSING_ARTIFACTS=1), or regenerate their artifacts into"
-    info "     <artifact_root>/$TENANT/<id>/ before serving traffic"
+    if [ -n "$ARTIFACT_OWNER" ] && want_phase artifacts && has_flat_artifact "$probe_svc"; then
+      # A remedy is already selected for this run, so it is an action, not a blocker.
+      ok "no scoped model for source(s) $NOARTIFACT_SOURCES — the artifacts phase adopts source $ARTIFACT_OWNER's flat files"
+      act "adopt flat artifacts into <artifact_root>/$TENANT/$ARTIFACT_OWNER/"
+      case ",$NOARTIFACT_SOURCES," in
+        *",$ARTIFACT_OWNER,"*) ;;
+        *) warn "ARTIFACT_OWNER=$ARTIFACT_OWNER is not among the sources missing a model ($NOARTIFACT_SOURCES) — check that id" ;;
+      esac
+    else
+      bad "no scoped semantic model for relational source(s): $NOARTIFACT_SOURCES"
+      info "resolve_source_artifact() has no flat fallback — these sources will plan SQL with an EMPTY model"
+      if has_flat_artifact "$probe_svc"; then
+        info "flat artifacts ARE present at <artifact_root>/*.json — they were produced by ONE source's"
+        info "ingestion. Re-run with --artifact-owner <that source id> to adopt them (seconds, no re-ingest)."
+      else
+        info "no flat artifacts to adopt either — these sources must be re-ingested"
+        info "(REINGEST_MISSING_ARTIFACTS=1)"
+      fi
+    fi
   else
     ok "every ingested relational source has its own scoped semantic model"
   fi
@@ -458,6 +512,67 @@ do_up() {
     sleep 3
   done
   dc ps --format '  {{.Service}}\t{{.State}}\t{{.Status}}' || true
+}
+
+do_artifacts() {
+  log "Artifacts — adopt the flat, pre-scoping artifacts into their owner's scoped directory"
+
+  if [ -z "$ARTIFACT_OWNER" ]; then
+    ok "no --artifact-owner given — nothing to adopt (this phase never guesses whose files those are)"
+    return 0
+  fi
+
+  local svc="$INFER"
+  svc_up "$svc" || svc="$API"
+  svc_up "$svc" || { bad "neither $INFER nor $API is running — cannot adopt artifacts"; return 0; }
+
+  local root; root="$(art_root "$svc")"
+  [ -n "$root" ] || { bad "could not resolve the artifact root inside $svc"; return 0; }
+  info "root=$root  owner=source $ARTIFACT_OWNER  tenant=$TENANT"
+
+  # cp, never mv: the flat files stay put as the rollback, and nothing else reads them any
+  # more anyway (resolve_source_artifact stopped falling back to them). Executed directly
+  # rather than through run(): %q-quoting a multi-line shell body prints an unreadable
+  # line, so the intent is stated instead.
+  if [ "$DRY_RUN" = "1" ]; then
+    printf '  \033[0;35m[dry-run]\033[0m cp %s/{%s,...} -> %s/%s/%s/  (never overwrites)\n' \
+           "$root" "veda_semantic_model.json" "$root" "$TENANT" "$ARTIFACT_OWNER"
+  else
+    dc exec -T "$svc" sh -c '
+      root="$1"; tenant="$2"; sid="$3"; shift 3
+      mkdir -p "$root/$tenant/$sid"
+      for f in "$@"; do
+        if [ -f "$root/$tenant/$sid/$f" ]; then
+          echo "    kept    $f (already scoped, not overwritten)"
+        elif [ -f "$root/$f" ]; then
+          cp -p "$root/$f" "$root/$tenant/$sid/$f" && echo "    adopted $f"
+        else
+          echo "    absent  $f (no flat copy)"
+        fi
+      done' sh "$root" "$TENANT" "$ARTIFACT_OWNER" $SCOPED_ARTIFACTS </dev/null
+  fi
+
+  [ "$DRY_RUN" = "1" ] && return 0
+
+  # Prove the adopted model actually belongs to this source: its table count must match the
+  # table nodes THIS source has in the engine store. A mismatch is the bleed — a model
+  # describing another schema passes the firewall and answers from the wrong data.
+  local model_tables node_tables engine_db
+  engine_db="$(dc exec -T "$API" sh -c 'printf "%s" "${VEDA_INTERNAL_DBNAME:-veda_engine}"' </dev/null | tr -d '\r')"
+  model_tables="$(dc exec -T "$svc" python -c \
+    "import json;print(len(json.load(open('$root/$TENANT/$ARTIFACT_OWNER/veda_semantic_model.json')).get('tables',{})))" \
+    </dev/null 2>/dev/null | tr -d '[:space:]' || true)"
+  node_tables="$(psql_q "$engine_db" "SELECT count(*) FROM graph_nodes WHERE source_id='$ARTIFACT_OWNER' AND node_type='table'" | tr -d '[:space:]' || true)"
+
+  if [ -n "$model_tables" ] && [ -n "$node_tables" ] && [ "$model_tables" = "$node_tables" ]; then
+    ok "adopted model describes $model_tables tables — matches source $ARTIFACT_OWNER's own table nodes"
+  elif [ -n "$model_tables" ] && [ -n "$node_tables" ]; then
+    bad "adopted model has $model_tables tables but source $ARTIFACT_OWNER owns $node_tables in graph_nodes"
+    info "that is the semantic-model bleed — the flat files likely belong to a DIFFERENT source."
+    info "remove $root/$TENANT/$ARTIFACT_OWNER/ and re-check the owner id before serving traffic."
+  else
+    warn "could not cross-check the adopted model against graph_nodes (model=$model_tables nodes=$node_tables)"
+  fi
 }
 
 do_backfill() {
@@ -583,14 +698,28 @@ do_verify() {
     local sql rows id dialect
     sql="SELECT id, dialect FROM sources_source ORDER BY id"
     rows="$(psql_q "$PG_DB" "$sql" 2>/dev/null || true)"
+    local engine_db sm_tables n_sm n_nodes
+    engine_db="$(dc exec -T "$API" sh -c 'printf "%s" "${VEDA_INTERNAL_DBNAME:-veda_engine}"' </dev/null | tr -d '\r')"
     while IFS='|' read -r id dialect <&3; do
       [ -n "$id" ] || continue
       [ "$(kind_of "$dialect")" = "relational" ] && continue
-      dc exec -T -w /app/veda_core -e PYTHONPATH=/app:/app/veda_core "$INFER" python -c "
+      sm_tables="$(dc exec -T -w /app/veda_core -e PYTHONPATH=/app:/app/veda_core "$INFER" python -c "
 from veda_hybrid import _load_sm_from_redis
 sm = _load_sm_from_redis(scope=($id, '$TENANT'))
-print('    source $id ($dialect):', sorted({k.split('.')[0] for k in (sm or {}).get('columns', {})}))" </dev/null 2>/dev/null \
-        || info "source $id ($dialect): could not read the published model"
+print(','.join(sorted({k.split('.')[0] for k in (sm or {}).get('columns', {})})))" </dev/null 2>/dev/null | tr -d '\r' || true)"
+      info "source $id ($dialect): [${sm_tables}]"
+
+      # The bleed is a COUNT mismatch, not an empty model: before the per-source build
+      # existed every source published homzhub's model, so a 4-column datalake source came
+      # back describing 8 foreign tables — and answered from them, past the firewall.
+      # awk NF, not `tr | wc -l`: the list has no trailing newline, so wc undercounts by one
+      # (a two-table model read as one, which then "detected" a bleed that was not there).
+      n_sm=0; [ -n "$sm_tables" ] && n_sm="$(printf '%s' "$sm_tables" | awk -F, '{print NF}')"
+      n_nodes="$(psql_q "$engine_db" "SELECT count(*) FROM graph_nodes WHERE source_id='$id' AND node_type='table'" 2>/dev/null | tr -d '[:space:]' || true)"
+      if [ -n "$n_nodes" ] && [ "${n_nodes:-0}" -gt 0 ] && [ "$n_sm" -ne "${n_nodes:-0}" ]; then
+        warn "source $id publishes a model of $n_sm table(s) but owns $n_nodes in graph_nodes — possible semantic-model bleed"
+        info "    fix without re-ingesting:  $DC exec $API python scripts/backfill_semantic_model.py --source-ids $id --tenant $TENANT"
+      fi
     done 3<<< "$rows"
   fi
 
@@ -627,9 +756,10 @@ if [ ${#BLOCKERS[@]} -gt 0 ]; then
   exit 1
 fi
 
-want_phase build    && do_build
-want_phase migrate  && do_migrate
-want_phase up       && do_up
+want_phase build     && do_build
+want_phase migrate   && do_migrate
+want_phase up        && do_up
+want_phase artifacts && do_artifacts
 want_phase backfill && do_backfill
 want_phase reingest && do_reingest
 want_phase verify   && do_verify

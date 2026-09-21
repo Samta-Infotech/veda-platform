@@ -1,0 +1,21 @@
+# =============================================================================
+# docker-compose.pg17.yml — HOST-LOCAL overlay, applied with an extra `-f`.
+#
+# docker-compose.yml pins pgvector:pg16 because ONE machine's `pg_data` volume is
+# PG16-formatted. Postgres refuses to start against a data directory written by a
+# different major version — in EITHER direction — so a host whose volume is PG17
+# needs this overlay instead of an edit to the tracked file (that edit would break
+# the pg16 host the moment it pulled).
+#
+#   docker compose -f docker-compose.yml -f docker-compose.pg17.yml up -d
+#   ./scripts/deploy_refinements_pipeline.sh --file docker-compose.pg17.yml
+#
+# Check which one this host needs:
+#   docker compose exec -T postgres cat /var/lib/postgresql/data/PG_VERSION
+#
+# This is a pin, not an upgrade. Converging the two hosts on one major version is a
+# pg_dumpall-and-restore (or pg_upgrade) — docs/backlog/query-engine-open-items.md.
+# =============================================================================
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
