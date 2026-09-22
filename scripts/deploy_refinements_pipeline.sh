@@ -140,6 +140,7 @@ ARTIFACT_OWNER="${ARTIFACT_OWNER:-}"
 # from PHASES alone: a preview that reports a blocker the run it previews would not hit is
 # worse than no preview. CHECK_MODE says "judge against the full run".
 CHECK_MODE="${CHECK_MODE:-0}"
+SKIP_PHASES=""
 ALL_SOURCES="${ALL_SOURCES:-0}"
 FULL_INGEST="${FULL_INGEST:-0}"
 
@@ -159,8 +160,8 @@ while [ $# -gt 0 ]; do
     --prod)         PROD=1 ;;
     --yes|-y)       ASSUME_YES=1 ;;
     --dry-run)      DRY_RUN=1 ;;
-    --skip-build)   PHASES="$(echo "$PHASES" | sed 's/\bbuild\b,\?//')" ;;
-    --skip-ingest)  PHASES="$(echo "$PHASES" | sed 's/\breingest\b,\?//')" ;;
+    --skip-build)   SKIP_PHASES="${SKIP_PHASES}build," ;;
+    --skip-ingest)  SKIP_PHASES="${SKIP_PHASES}reingest," ;;
     --phases)       PHASES="$2"; shift ;;
     --sources)      SOURCES="$2"; shift ;;
     --tenant)       TENANT="$2"; shift ;;
@@ -173,6 +174,18 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# Drop the --skip-* phases in bash, not sed: `\b` is a GNU extension, so on macOS the old
+# `sed 's/\breingest\b,\?//'` matched nothing and --skip-ingest silently did nothing at all
+# — the run still reached the phase and asked to ingest.
+if [ -n "$SKIP_PHASES" ]; then
+  _kept=""; _ifs_save="$IFS"; IFS=','
+  for _p in $PHASES; do
+    case ",${SKIP_PHASES}" in *",${_p},"*) continue ;; esac
+    _kept="${_kept:+$_kept,}$_p"
+  done
+  IFS="$_ifs_save"; PHASES="$_kept"
+fi
 
 if [ "$ALL_SOURCES" = "1" ] && [ "$INGEST_TIMEOUT" = "7200" ]; then
   INGEST_TIMEOUT=28800   # source 2 is 178 tables; its LLM stage alone runs for hours
@@ -382,8 +395,13 @@ preflight() {
 
   # --- who consumes the ingestion queue ----------------------------------------
   if svc_defined "$WORKER"; then
-    svc_up "$WORKER" && ok "$WORKER is running (consumes the 'ingestion' queue)" \
-                     || warn "$WORKER is defined but not running — re-ingestion will queue and never start"
+    if svc_up "$WORKER"; then
+      ok "$WORKER is running (consumes the 'ingestion' queue)"
+    elif want_phase up; then
+      ok "$WORKER is defined but not running — the up phase starts it before anything is enqueued"
+    else
+      warn "$WORKER is defined but not running — re-ingestion would queue and never start"
+    fi
   else
     warn "no '$WORKER' service in this compose configuration"
     info "docker-compose.prod.yml has no ingest worker (PRODUCTION_READINESS_PLAN B7 is outstanding)."
@@ -680,8 +698,15 @@ do_reingest() {
   fi
 
   # An ingestion that cannot reach its SLM does not fail fast — the LLM stage degrades and
-  # the run still reports success, hours later, with a poorer semantic model. Check first.
-  check_ingest_slm
+  # the run still reports success, hours later, with a poorer semantic model. Checking and
+  # then continuing anyway (which this did) is the worst of both: the operator is warned
+  # about a degraded run they are then allowed to start. Abort unless waived.
+  if ! check_ingest_slm && [ "${IGNORE_SLM_CHECK:-0}" != "1" ]; then
+    info "refusing to ingest with a degraded SLM. Pull the model, or waive with IGNORE_SLM_CHECK=1"
+    info "(a document source's chunking/embedding does not use the SLM — waiving is reasonable there;"
+    info " a relational source's semantic layer is LLM-authored, so waiving costs you model quality)."
+    return 0
+  fi
 
   # Auto-resume turns a "full re-ingest" into a partial one, silently (see --full in the
   # header). Report it per source BEFORE asking for confirmation, because it changes what
@@ -735,13 +760,17 @@ print('OK' if want in have else 'MISSING', want, url, '|', ','.join(have)[:160])
 " </dev/null 2>/dev/null || true)"
 
   case "$probe" in
-    OK*)          ok "ingestion SLM reachable and the pinned model is pulled (${probe#OK })" ;;
+    OK*)          ok "ingestion SLM reachable and the pinned model is pulled (${probe#OK })"
+                  return 0 ;;
     MISSING*)     bad "the ingestion SLM host does not serve the pinned model: ${probe#MISSING }"
-                  info "    pull it first, or the LLM stages degrade for the whole run:"
-                  info "    $DC exec $WORKER sh -c 'ollama pull \$SLM_MODEL_NAME'  (or on the Ollama host)" ;;
+                  info "    pull it on the Ollama host it points at, e.g.:  ollama pull <SLM_MODEL_NAME>"
+                  info "    or re-pin SLM_MODEL_NAME in .env to a model that host already serves"
+                  return 1 ;;
     UNREACHABLE*) bad "the ingestion SLM is unreachable: ${probe#UNREACHABLE }"
-                  info "    ingest-worker points OLLAMA_URL at the HOST's native Ollama; start it before ingesting" ;;
-    *)            warn "could not probe the ingestion SLM — proceeding blind" ;;
+                  info "    ingest-worker points OLLAMA_URL at the HOST's native Ollama; start it before ingesting"
+                  return 1 ;;
+    *)            warn "could not probe the ingestion SLM — proceeding blind"
+                  return 0 ;;
   esac
 }
 
