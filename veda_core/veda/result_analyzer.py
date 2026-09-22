@@ -204,8 +204,14 @@ def detect_result_shape(result_type: str, dimensions: List[str], measures: List[
     if result_type != "multi_row":
         return "SCALAR"
     kinds = {s.name: s.kind for s in column_stats}
-    has_temporal = any(kinds.get(d) == "temporal" for d in dimensions) or \
-        any(k == "temporal" for k in kinds.values())
+    # An ALL-NULL column cannot be a time axis — there is no series to plot along it.
+    # `booking_amount_grace_period` (a duration, never populated) is read as temporal by
+    # name alone, and that alone was enough to classify a plain "cheapest properties"
+    # listing as a TREND — which then had the api tier chart it as a time series
+    # (2026-09-11). distinct_count is 0 exactly when every sampled value was NULL.
+    _plottable = {s.name for s in column_stats if (s.distinct_count or 0) > 0}
+    has_temporal = any(kinds.get(d) == "temporal" and d in _plottable for d in dimensions) or \
+        any(s.kind == "temporal" and s.name in _plottable for s in column_stats)
     has_numeric_measure = bool(measures) or any(k == "numeric" for k in kinds.values())
     agg_funcs = {f for f, _ in (aggregations or [])}
     is_count_only = bool(agg_funcs) and agg_funcs <= {"COUNT"}
@@ -559,6 +565,13 @@ def analytics_summary(ctx: "InsightContext") -> dict:
         "result_shape":         ctx.result_shape,
         "result_type":          ctx.result_type,
         "row_count":            ctx.row_count,
+        # The SQL's own ORDER BY / LIMIT. Crosses the boundary so the api tier can
+        # chart a listing on the measure the question actually ranked by, in the
+        # order the rows arrived — without it the chart re-sorts and re-picks its
+        # own columns, which is how a "cheapest properties" bar chart ended up
+        # leading with the most expensive (2026-09-11).
+        "orderings":            [[c, asc] for c, asc in ctx.orderings],
+        "limit":                ctx.limit,
         "table":                ctx.table,
         "primary_entity":       ctx.primary_entity,
         "related_entities":     list(ctx.related_entities),

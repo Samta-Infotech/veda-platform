@@ -127,7 +127,7 @@ def source_connection() -> dict:
     source_id, _tenant = _scope()  # fail-closed if context unset (§4.1)
     with _connection().cursor() as cur:
         cur.execute(
-            "SELECT host, port, dbname, db_user, password_env, password_inline "
+            "SELECT host, port, dbname, db_user, password_env, password_inline, schema_filter "
             "FROM sources_source WHERE id = %s",
             [source_id],
         )
@@ -137,10 +137,14 @@ def source_connection() -> dict:
             f"Source id={source_id} not found in the sources registry — cannot resolve "
             "its connection (§3.1: the Source row is the single source of truth)."
         )
-    host, port, dbname, db_user, password_env, password_inline = row
+    host, port, dbname, db_user, password_env, password_inline, schema_filter = row
     password = os.environ.get(password_env, "") if password_env else (password_inline or "")
+    # `schema` carries the row's schema_filter through to runtime._pg() /
+    # execution.execute_sql(), which SET search_path from it. Without it every
+    # unqualified table name resolved against `public` and a non-public source
+    # (homzhub) failed with `relation "assets_…" does not exist` on EVERY query.
     return {"host": host, "port": port or 5432, "database": dbname,
-            "user": db_user, "password": password}
+            "user": db_user, "password": password, "schema": schema_filter or None}
 
 
 _FK_ADJACENCY_CACHE: dict = {}   # (source_id, tenant) → List[FKEdge] (ALL edges); cleared on rehydrate

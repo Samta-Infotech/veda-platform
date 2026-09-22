@@ -27,6 +27,8 @@ import logging
 
 from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
                                set_source_profiles)
+from veda_core.context import (RequestContext, parse_allowed_resources, set_context,
+                               set_source_profiles)
 
 logger = logging.getLogger(__name__)
 
@@ -231,9 +233,12 @@ def create_app():
             profiles_hdr = request.headers.get("x-veda-source-profiles")
             if profiles_hdr:
                 try:
-                    set_source_profiles(json.loads(profiles_hdr))
+                    import json as _json
+                    parsed = _json.loads(profiles_hdr)
+                    set_source_profiles(parsed if isinstance(parsed, dict) else {})
                 except Exception:
-                    logger.warning("malformed X-Veda-Source-Profiles header; ignoring")
+                    logger.warning("malformed X-Veda-Source-Profiles header; "
+                                   "continuing without source display names")
                     set_source_profiles({})
             else:
                 set_source_profiles({})

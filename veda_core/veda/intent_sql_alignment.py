@@ -114,9 +114,27 @@ def temporal_alignment_ok(query, sql, sm):
         return True, ""
     if _sql_has_temporal_bucket(sql, sm, _facts(sql)):
         return True, ""
-    # Plain language (see the aggregate-omission message below for the same reasoning).
-    return False, ("I couldn't break this down by time period reliably, so I'd rather not show "
-                   "a result that might be wrong")
+    return False, ("this asks for a breakdown over time, but the information it would be grouped "
+                   "by isn't a date — so a per-period breakdown can't be produced for it")
+
+
+def _plain(name: str) -> str:
+    """An internal identifier rendered as ordinary words.
+
+    These refusal strings are shown to the USER verbatim as the reply, so they may
+    not carry `column`, `table`, `SQL` or a raw identifier — the same rule the whole
+    safe-projection layer enforces on the explainability payload. Measured live on a
+    verified-cache clarify: the reply read "the query's measure lives on another
+    table than the one the SQL ranks/aggregates".
+    """
+    return " ".join(w for w in str(name).replace("_", " ").split() if w)
+
+
+def _plain_list(names) -> str:
+    vals = [_plain(n) for n in sorted(names)]
+    if len(vals) <= 1:
+        return vals[0] if vals else ""
+    return ", ".join(vals[:-1]) + " or " + vals[-1]
 
 
 # ── B. ENTITY-ANCHOR ────────────────────────────────────────────────────────────────────────────────
@@ -422,12 +440,12 @@ def dimension_alignment(query, sql, sm):
         return DIM_NOT_APPLICABLE, ""                     # can't confidently build candidates → decline
     in_set = [g for g in group_cols if g in acceptable]
     if not in_set:
-        return DIM_REFUSE, ("the SQL groups by a column outside the dimension you asked for "
-                            f"({', '.join(sorted(group_cols))}) — expected one of "
-                            f"{', '.join(sorted(acceptable))}")
+        return DIM_REFUSE, ("this would be broken down by "
+                            f"{_plain_list(group_cols)}, which isn't the grouping you asked for "
+                            f"— the available groupings here are {_plain_list(acceptable)}")
     if len(acceptable) >= 2:
-        return DIM_CLARIFY, ("this dimension is ambiguous — did you mean "
-                             f"{' or '.join(sorted(acceptable))}?")
+        return DIM_CLARIFY, ("more than one grouping fits what you asked for — did you mean "
+                             f"{_plain_list(acceptable)}?")
     return DIM_ALIGNED, ""
 
 

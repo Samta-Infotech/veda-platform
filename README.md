@@ -8,6 +8,17 @@ gates refuses rather than guesses.
 On-premise, **zero-egress**: every model runs locally; no source-DB schema, values, or
 query text leaves the server.
 
+## Deploying
+
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — single VM + Docker Compose, from bare host to smoke test.
+- [`docs/MULTI_SOURCE_DEPLOYMENT.md`](docs/MULTI_SOURCE_DEPLOYMENT.md) — **read before onboarding a
+  second data source.** Routing to the right source, and refusing a source the asker has no
+  permission for, depend on flags whose code defaults are wrong for it; every failure mode there
+  is silent (a plausible answer from the wrong source).
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — running it once it is up.
+
+## Layout
+
 ```
         ┌───────────────────────────────────────────────────────────────┐
   user  │  Django / DRF api  ──HTTP──▶  FastAPI inference (warm engine)  │

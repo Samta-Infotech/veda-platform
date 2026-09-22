@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import time
+
 import json
 import logging
 
@@ -107,6 +109,13 @@ class ConversationQueryView(APIView):
         # without apps.access_management in INSTALLED_APPS for a caller that
         # never touches RBAC at all.
 
+        # Measure the REAL access-check cost. The four-step progress UI shows this
+        # as a timed sub-check, and the engine's own `access_check` phase spans
+        # "scope resolved" -> "validation passed" — which is when access could be
+        # CONFIRMED, not how long checking took (it reported 26.6 s live for work
+        # that is sub-millisecond). The RBAC resolution happens HERE, so this is the
+        # only honest place to time it.
+        _access_t0 = time.monotonic()
         effective = resolve_effective_permissions(user)
 
         # Authenticated + RBAC active but permitted NOTHING -> fail closed
@@ -160,9 +169,11 @@ class ConversationQueryView(APIView):
         # /api/v1/query answered such questions correctly while chat clarified — this closes that
         # gap. Best-effort by contract ({} on any lookup failure), so a query is never blocked.
         source_profiles = source_profiles_for(source_ids)
+        _access_ms = (time.monotonic() - _access_t0) * 1000.0
         service = ConversationQueryService(
             user=user, source_id=source_ids[0], source_ids=source_ids,
             data_scope=data_scope, source_profiles=source_profiles,
+            access_check_ms=_access_ms,
             # optional `no_cache` field → the engine skips the verified-query cache for this
             # turn (no replay, no write). Same flag /api/v1/query accepts.
             no_cache=str(request.data.get("no_cache", "")).lower() in ("1", "true", "yes"))
@@ -222,6 +233,7 @@ class ConversationQueryView(APIView):
 
         metadata = turn.metadata()
         assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
+        _audit_chat_turn(service, service.user, message, service.source_ids, rid)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
 
@@ -275,6 +287,10 @@ class ConversationQueryView(APIView):
 
         metadata = turn.metadata()
         assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
+        # Same audit row as the JSON path, from the same shared writer. Placed after
+        # persistence and BEFORE the terminal "completed" frame, so a client that
+        # disconnects on seeing "completed" cannot race the audit write.
+        _audit_chat_turn(service, service.user, message, service.source_ids, rid)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
                     chat.pk, assistant_msg.pk)
         yield _sse_format("completed",
@@ -384,6 +400,43 @@ class ConversationHistoryView(APIView):
         })
 
 
+def _audit_chat_turn(service, user, message, source_ids, rid) -> None:
+    """Append this chat turn's QueryLog row (traceability Part 19).
+
+    The chat front door previously wrote NO audit row at all — chat turns existed
+    only as ``ChatMessage`` content, which carries no status, route, executed SQL,
+    latency or source. Both chat response paths (JSON and SSE) call this, and it
+    delegates to ``apps.query.audit.record_query`` — the same writer
+    ``/api/v1/query`` uses, so the two front doors cannot drift.
+
+    Everything comes from what the turn ALREADY produced (``service.last_audit``,
+    stashed by ``_build_reply_events``); nothing is re-derived. ``rid`` is the
+    correlation key that joins this row to the engine trace and to the
+    ``support.trace_id`` the user was shown.
+
+    Never raises — ``record_query`` is best-effort by contract.
+    """
+    from apps.query.audit import audit_fields_from_explain, record_query
+
+    audit = getattr(service, "last_audit", None) or {}
+    fields = audit_fields_from_explain(audit.get("explain"))
+    fields.pop("request_id", None)          # rid is authoritative here
+    record_query(
+        query=message,
+        tenant=DEFAULT_TENANT,
+        user=user,
+        source_id=source_ids[0] if source_ids else None,
+        status=fields.pop("status", None) or audit.get("status") or "",
+        route=audit.get("route") or "",
+        latency_ms=audit.get("latency_ms"),
+        usage=audit.get("usage") or {},
+        cache_hit=bool(audit.get("cache_hit")),
+        request_id=rid,
+        participating_sources=fields.pop("participating_sources", None) or source_ids,
+        **fields,
+    )
+
+
 def _serialize_history_message(msg) -> dict:
     """Serialize a Message model instance for the conversation history API response."""
     if msg.type == MessageType.ASSISTANT:
@@ -392,16 +445,32 @@ def _serialize_history_message(msg) -> dict:
         except (TypeError, ValueError):
             response = [{"type": "markdown", "content": msg.content}]
         meta = msg.metadata or {}
-        content = {
-            "response": response,
-            "metadata": {
-                "thinking": meta.get("thinking", ""),
-                "explainability": meta.get("explainability"),
-                # dict() copy: the shared constant must never be handed out by
-                # reference into a mutable response payload.
-                "usage": meta.get("usage") or dict(_ZERO_USAGE),
-            },
+        history_meta = {
+            "thinking": meta.get("thinking", ""),
+            "explainability": meta.get("explainability"),
+            # dict() copy: the shared constant must never be handed out by
+            # reference into a mutable response payload.
+            "usage": meta.get("usage") or dict(_ZERO_USAGE),
         }
+        # The projection stays an explicit ALLOWLIST (never `dict(meta)`) so a
+        # metadata key added for internal use can't leak by default. These two are
+        # persisted by TurnEventAccumulator.metadata() and were being dropped here,
+        # so a user who RELOADED a conversation lost the execution timeline and the
+        # support reference that the live SSE stream had shown them.
+        #
+        # "Absent, not null" (apps.core.api's documented envelope convention, and
+        # what the accumulator itself does): omitted entirely for a turn that has
+        # none — e.g. every turn recorded before this feature existed.
+        if meta.get("trace_id"):
+            history_meta["trace_id"] = meta["trace_id"]
+        # The four-step model, so a reloaded conversation shows the SAME progress
+        # panel the live stream did. `timeline` below is the raw backend phase list
+        # and is audit-level; it is not a substitute for this.
+        if meta.get("steps"):
+            history_meta["steps"] = meta["steps"]
+        if meta.get("timeline"):
+            history_meta["timeline"] = meta["timeline"]
+        content = {"response": response, "metadata": history_meta}
     else:
         content = msg.content
     return {

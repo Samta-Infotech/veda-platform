@@ -8,11 +8,12 @@ own module instead of accreting into one file — the two grant EDGES share
 Django requires models to be importable from the app's ``models`` namespace, which is
 what the re-export below provides.
 """
+from .audit import AuthorizationDecision, Decision, DenialReason
 from .catalog import CatalogResource
 from .grants import Effect, RolePermission, UserRole
 from .permissions import Permission
 from .profile import UserProfile
 from .roles import Role
 
-__all__ = ["CatalogResource", "Effect", "Permission", "Role", "RolePermission",
-          "UserProfile", "UserRole"]
+__all__ = ["AuthorizationDecision", "CatalogResource", "Decision", "DenialReason",
+           "Effect", "Permission", "Role", "RolePermission", "UserProfile", "UserRole"]

@@ -92,7 +92,15 @@ class RequiresPermission(BasePermission):
             # bug in an authorization gate must be loud, not permissive.
             logger.error("gate: %s uses RequiresPermission but declares no %s",
                          view.__class__.__name__, self.VIEW_ATTRIBUTE)
-            return mode != MODE_ENFORCE and self._shadow(request, view, "", "", False)
+            # Same outcome as before — ENFORCE denies, SHADOW passes through
+            # _shadow — but the enforce branch now records the denial too. It used
+            # to short-circuit on `mode != MODE_ENFORCE` and never reach the audit,
+            # so the ONE denial caused by a code bug was the one invisible in the
+            # audit trail (caught by test_undeclared_permission_is_audited...).
+            if mode == MODE_ENFORCE:
+                self._audit(request, view, "", "", MODE_ENFORCE)
+                return False
+            return self._shadow(request, view, "", "", False)
 
         resource = self._resource_for(view, request)
         allowed = self._effective(request).allows(code, resource)
@@ -104,6 +112,7 @@ class RequiresPermission(BasePermission):
             logger.warning("gate: DENIED %s user_id=%s permission=%s resource=%s %s",
                            view.__class__.__name__, self._user_id(request),
                            code, resource or "(global)", self._context(request))
+            self._audit(request, view, code, resource, MODE_ENFORCE)
         return allowed
 
     # -- internals ----------------------------------------------------------
@@ -120,6 +129,7 @@ class RequiresPermission(BasePermission):
                 "gate[shadow]: WOULD DENY %s user_id=%s permission=%s resource=%s %s",
                 view.__class__.__name__, self._user_id(request),
                 code or "(undeclared)", resource or "(global)", self._context(request))
+            self._audit(request, view, code, resource, MODE_SHADOW)
         return True
 
     @staticmethod
@@ -145,6 +155,60 @@ class RequiresPermission(BasePermission):
             cached = PermissionResolver(request).resolve(getattr(request, "user", None))
             request._veda_effective_permissions = cached
         return cached
+
+    def _audit(self, request, view, code, resource, mode) -> None:
+        """Append one AuthorizationDecision row for a denial (traceability Part 21).
+
+        Records the coarse resource KIND, never the resource path — writing
+        ``db:crm:employee:salary`` into a durable table on every denial would build
+        exactly the catalogue of restricted names the denial exists to protect (see
+        apps/access_management/models/audit.py).
+
+        The reason is taken from the resolver's own distinction, not re-derived: an
+        explicit DENY grant and "nothing was ever granted" need different fixes, and
+        ``EffectivePermissions.denies()`` is deliberately separate from
+        ``not allows()`` precisely so they can be told apart.
+
+        Best-effort: any failure is logged and swallowed. An audit write must never
+        change an authorization outcome — least of all turn a deny into a 500.
+        """
+        try:
+            if not getattr(settings, "VEDA_AUTHZ_AUDIT", False):
+                return
+            from .models import AuthorizationDecision, Decision, DenialReason
+
+            if not code:
+                reason = DenialReason.UNDECLARED
+            else:
+                try:
+                    reason = (DenialReason.EXPLICIT_DENY
+                              if self._effective(request).denies(code, resource or "")
+                              else DenialReason.NO_GRANT)
+                except Exception:
+                    reason = DenialReason.RESOLUTION_ERROR
+
+            kind = ""
+            if resource:
+                try:
+                    from . import resource_path as rp
+                    kind = rp.kind_of(resource) or ""
+                except Exception:
+                    kind = ""      # unparseable path -> no kind, never the raw path
+
+            user = getattr(request, "user", None)
+            AuthorizationDecision.objects.create(
+                user=user if getattr(user, "pk", None) else None,
+                action=str(code or "")[:64],
+                resource_kind=str(kind)[:16],
+                decision=Decision.DENY,
+                reason_code=reason,
+                mode=mode,
+                request_id=str(getattr(request, "request_id", "") or "")[:64],
+                view_name=view.__class__.__name__[:128],
+            )
+        except Exception:  # noqa: BLE001 — auditing must never affect the decision
+            logger.exception("gate: authorization audit write failed view=%s",
+                             view.__class__.__name__)
 
     @staticmethod
     def _user_id(request):

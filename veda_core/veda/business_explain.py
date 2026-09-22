@@ -365,13 +365,94 @@ def _build_understanding(*, dataset: str, aggregations: List[Tuple[str, Optional
     return head.strip() + "."
 
 
+def _expose_sql() -> bool:
+    """Whether the generated SQL may appear in the end-user explain payload."""
+    try:
+        import config
+        return bool(getattr(config, "EXPLAIN_EXPOSE_SQL", True))
+    except Exception:
+        return True
+
+
+#: The federated executor attaches every source under a catalog named `src_<id>`
+#: (query/federated_executor.py::catalog_name), so a cross-source statement reads
+#: `src_2.homzhub."assets_asset"`. That is the SOURCE ID, in the one string this
+#: layer publishes verbatim — it would walk straight past `demote_source_ids`,
+#: which exists precisely to keep ids out of the user-facing blocks.
+_CATALOG_REF = re.compile(r"\bsrc_([A-Za-z0-9_]+)\b")
+
+
+def _name_catalogs(sql):
+    """Replace `src_<id>` catalog qualifiers with the source's display NAME.
+
+    The reader gets the same statement, still says which source each table came
+    from, and no longer carries an internal identifier. An unknown or unauthorised
+    source resolves to the generic label rather than its id — display_name never
+    falls back to the raw id, which is what makes this safe rather than cosmetic.
+
+    Always quoted, because a display name may contain spaces or dots. A statement
+    with no `src_` in it — every single-source query — comes back untouched.
+    """
+    if not sql:
+        return sql or None
+    try:
+        from veda import source_names as _sn
+        return _CATALOG_REF.sub(
+            lambda m: '"%s"' % _sn.display_name(m.group(1)).replace('"', ""), sql)
+    except Exception:
+        # Never publish the raw catalog because the lookup failed.
+        return _CATALOG_REF.sub('"a data source"', sql)
+
+
+def _apply_v2(out: Dict[str, Any], *, trace: Any = None, trace_id: str = "") -> None:
+    """Merge the v2 blocks (sources / routing / execution / warnings / result /
+    cross_source / support) into an already-built v1 payload, in place.
+
+    ADDITIVE BY CONTRACT: no v1 key is removed, renamed or reshaped, so a client
+    reading `data_used.datasets` or `validation.checks` is unaffected. Only the
+    `version` string changes, which is exactly how a consumer detects the richer
+    shape. A no-op when EXPLAIN_V2_ENABLED is off or no trace is available.
+
+    Everything merged here comes from veda/safe_projection.py — the single place
+    allowed to read the internal trace — so this function never touches a trace
+    section itself.
+    """
+    try:
+        import config
+        if not bool(getattr(config, "EXPLAIN_V2_ENABLED", False)):
+            return
+    except Exception:
+        return
+    try:
+        tr = trace
+        if tr is None:
+            from veda.explain import current_trace
+            tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return
+        from veda import safe_projection as sp
+        ext = sp.build_explain_extension(
+            tr, trace_id=trace_id or getattr(tr, "trace_id", "") or "",
+            operations=out.get("operations"),
+            validation=out.get("validation"))
+        if not ext:
+            return
+        out.update(ext)
+        out["version"] = "2.0"
+    except Exception:
+        # An explainability failure must never cost the caller its v1 payload.
+        pass
+
+
 def build_explain(*, sql: str, table: str, sm: Optional[dict],
                    checks: Optional[List[dict]] = None,
                    visualization: Optional[dict] = None,
                    params: Optional[List[Any]] = None,
                    timeline: Optional[List[Tuple[str, str]]] = None,
                    confidence: Optional[float] = None,
-                   not_included: Optional[List[str]] = None) -> Dict[str, Any]:
+                   not_included: Optional[List[str]] = None,
+                   trace: Any = None,
+                   trace_id: str = "") -> Dict[str, Any]:
     """Deterministic, LLM-free explainability for the end-user chat UI.
     Returns a plain dict matching the documented explainability schema.
 
@@ -514,8 +595,30 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
             ],
             "summary": ", ".join(filter_phrases) if filter_phrases else "No filters applied.",
         },
-        "validation": {"passed": all_passed, "checks": check_items},
-        "sql": {"enabled": True, "query": sql or None},
+        # `passed` is None when NOTHING was checked. It used to be True, because
+        # all_passed starts True and an empty check list never falsifies it — so a
+        # payload with `checks: []` claimed `passed: true`. That is a false
+        # assurance: the reader is told the result cleared checks that never ran.
+        # Observed live on a document answer.
+        "validation": {"passed": (all_passed if check_items else None),
+                       "checks": check_items},
+        # SQL visibility is now a decision, not a constant. This used to be a
+        # hardcoded True, so the generated SQL reached EVERY end user with no way
+        # to turn it off. EXPLAIN_EXPOSE_SQL defaults True again (2026-09-11, after
+        # a brief spell defaulting off under D2) — and the api tier can gate it by
+        # setting the flag or stripping the block for non-technical users. When
+        # off, the key stays present with query=None so no consumer has to
+        # null-check the block itself.
+        # `enabled` means "there IS SQL and you may see it", not merely "you may
+        # see SQL". Both halves matter now that EXPLAIN_EXPOSE_SQL defaults ON
+        # again (2026-09-11): a head that ran NO SQL — a document answer, a
+        # refusal — would otherwise advertise `enabled: true, query: null`, which
+        # reads as "SQL exists and we are withholding it" rather than "this
+        # question was not answered with SQL at all". That exact contradiction was
+        # observed live on a document answer and is what apps/chat/services.py's
+        # `_NO_EXPLAIN` fallback already guards against on its own path.
+        "sql": {"enabled": bool(sql) and _expose_sql(),
+                "query": _name_catalogs(sql) if _expose_sql() else None},
         # Weakest-link confidence from the run's own anchor-selection + join-plan
         # gating signals (veda/pipeline.py's _done(), query/result_explainer.py's
         # synthesize_confidence) — never an LLM self-report. None only when the
@@ -528,6 +631,7 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     if not_included:
         out["data_used"]["not_included"] = [
             _business_table_name(t, sm) or t for t in not_included]
+    _apply_v2(out, trace=trace, trace_id=trace_id)
     if visualization:
         vtype = visualization.get("type")
         out["visualization"] = {
@@ -543,7 +647,8 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     return out
 
 
-def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dict[str, Any]]:
+def build_refusal_explain(status: str, feedback: Optional[dict],
+                          *, trace: Any = None, trace_id: str = "") -> Optional[Dict[str, Any]]:
     """The refusal-path counterpart to build_explain() — same explainability
     CONTRACT (a structured object the chat UI can render), but for a turn
     that never produced SQL. Deliberately thin: reuses veda/feedback.py's
@@ -556,7 +661,7 @@ def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dic
     via the existing `explain = None` init in pipeline.py::_done()."""
     if not feedback:
         return None
-    return {
+    out = {
         "version": "1.0",
         "status": status,
         "understanding": {"summary": feedback.get("why")},
@@ -564,3 +669,66 @@ def build_refusal_explain(status: str, feedback: Optional[dict]) -> Optional[Dic
         "what_would_help": feedback.get("what_needed"),
         "suggestions": feedback.get("suggestions") or [],
     }
+    # A REFUSED turn is exactly where a user most needs the caveats and a support
+    # reference, and it previously got neither (the v2 extension only reached the
+    # success path). Only the blocks that MEAN something without a result are
+    # merged — never `routing`/`execution`/`result`, which would describe work
+    # that did not produce an answer.
+    _apply_v2_refusal(out, trace=trace, trace_id=trace_id)
+    return out
+
+
+def _apply_v2_refusal(out: Dict[str, Any], *, trace: Any = None, trace_id: str = "") -> None:
+    """The refusal-path counterpart to _apply_v2: warnings + limitations + timeline
+    + provenance + support only. No-op when EXPLAIN_V2_ENABLED is off. Never raises.
+
+    Provenance is included here deliberately. A replayed verified query is MORE
+    relevant on a refusal than on a success — measured live, 2 of 3 verified-cache
+    replays were stopped by the alignment gate, so the reuse is often the very
+    reason the question could not be answered. The blocks that are still omitted
+    (routing / execution / execution_plan) are omitted because they genuinely do
+    not apply: a refusal executed nothing.
+    """
+    try:
+        import config
+        if not bool(getattr(config, "EXPLAIN_V2_ENABLED", False)):
+            return
+    except Exception:
+        return
+    try:
+        tr = trace
+        if tr is None:
+            from veda.explain import current_trace
+            tr = current_trace()
+        if tr is None or not getattr(tr, "enabled", False):
+            return
+        from veda import safe_projection as sp
+        out["warnings"] = sp.build_warnings(tr)
+        out["limitations"] = sp.build_limitations(tr)
+        # WHERE WE LOOKED. A refusal executed nothing, so no source "participated"
+        # — but the reader still needs to know which data was searched, and the
+        # thinking model was already telling them one source was found while this
+        # payload named none. Two true facts that read as a contradiction.
+        #
+        # Safe against overclaiming: build_data_sources only ever names a source
+        # with proof it was in play, and the per-source `rows` it can attach is
+        # absent here because nothing was retrieved — so the block says "this is
+        # where we looked", never "this is what answered".
+        _srcs = sp.build_data_sources(tr)
+        if _srcs:
+            out["sources"] = _srcs
+            sp.demote_source_ids(out)      # ids belong in `audit`, on BOTH paths
+        # Under `audit` — level 3 (§9), the same as the answered path. Keeping a
+        # top-level copy here is how `source_selection` was still reaching the
+        # normal UX on refusals after the answered path had been moved: the SAME
+        # "wired to one path" mistake as EXP-B1/B4/B5 and the terminal step frame.
+        out.setdefault("audit", {})["timeline_summary"] = sp.build_timeline_summary(tr)
+        _prov = sp.build_provenance(tr)
+        if _prov:
+            out["provenance"] = _prov
+        _tid = trace_id or getattr(tr, "trace_id", "") or ""
+        if _tid:
+            out["support"] = {"trace_id": _tid}
+        out["version"] = "2.0"
+    except Exception:
+        pass

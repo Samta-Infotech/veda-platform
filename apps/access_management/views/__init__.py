@@ -44,7 +44,6 @@ __all__ = [
     "CatalogListView",
     "CatalogTreeView",
     "EffectivePermissionsView",
-
     "PermissionDetailView",
     "PermissionDropdownView",
     "PermissionListView",

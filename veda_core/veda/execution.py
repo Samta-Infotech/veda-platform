@@ -77,6 +77,39 @@ PARAM_MISMATCH_ERROR = ("generated SQL parameter mismatch "
                         "(placeholder count != bound values) — refused")
 
 
+from time import perf_counter as _perf_counter
+
+
+def _record_db_timing(elapsed_ms: float, row_count: int) -> None:
+    """Stamp REAL database-side execution time onto the trace (Part 24).
+
+    Until now the only timing available was the gap between two trace stage
+    offsets, which folds planning, fetch and post-processing into one number and
+    silently attributes them all to "execution". This measures the cursor round
+    trip itself. Also raises the truncation warning HERE, at the one place that
+    can actually observe it — the fetch is capped at EXECUTION_RESULT_LIMIT, so
+    a full page back means the result was almost certainly cut short.
+
+    Flag-gated and best-effort; never raises, never changes the returned rows.
+    """
+    try:
+        import config
+        if not bool(getattr(config, "DB_EXECUTION_TIMING_ENABLED", False)):
+            return
+        from veda.explain import current_trace
+        tr = current_trace()
+        if getattr(tr, "enabled", False):
+            tr.set("execution", db_execution_ms=round(float(elapsed_ms), 1))
+        # NOTE (EXP-B2): the truncation warning used to be raised HERE, against
+        # EXECUTION_RESULT_LIMIT (1000). That was the wrong signal — the pipeline decides
+        # truncation at a far smaller display limit, so a 20-row truncated page never
+        # tripped a 1000-row test and shipped to the user with no caveat at all. The
+        # warning now lives with the flag that actually decides it (explain.record_result_stages),
+        # so there is ONE truncation signal instead of two disagreeing ones.
+    except Exception:
+        pass
+
+
 def _param_mismatch(sql, params):
     """True when the %s placeholder count disagrees with the bound-value count —
     the exact condition that makes psycopg2 raise IndexError at execute time.
@@ -135,9 +168,11 @@ def execute_sql(sql, params=None):
             if schema:
                 cur.execute(_sql.SQL("SET search_path TO {}, public").format(
                     _sql.Identifier(schema)))
+            _t0 = _perf_counter()
             cur.execute(sql, params or [])   # parameterized — no value interpolation
             cols = [d[0] for d in cur.description]
             rows = cur.fetchmany(EXECUTION_RESULT_LIMIT)
+            _record_db_timing((_perf_counter() - _t0) * 1000.0, len(rows))
         return cols, rows, None
     except (IndexError, ValueError, TypeError):
         # psycopg2's client-side %-formatting crash (stray %, tuple/list mismatch)

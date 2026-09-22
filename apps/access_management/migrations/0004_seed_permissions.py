@@ -27,7 +27,7 @@ PERMISSIONS = [
     ("data.read", "Read data",
      "Read data from the sources a role has been granted."),
     # apps/sources — source registration and connection configuration.
-    ("source.manage", "Manage data sources",
+    ("source.manage", "Data Sources",
      "Register, configure and retire data sources."),
     # apps/query/views.py::IngestTriggerView (currently IsAdminUser)
     ("ingestion.run", "Run ingestion",
@@ -36,10 +36,10 @@ PERMISSIONS = [
     ("evaluation.run", "Run evaluations",
      "Trigger evaluation runs and read their results."),
     # apps/access_management users/* (currently IsAdminUser)
-    ("user.manage", "Manage users",
+    ("user.manage", "Users",
      "Create, view and update user accounts."),
     # apps/access_management roles/* (currently IsAdminUser)
-    ("role.manage", "Manage roles",
+    ("role.manage", "Roles",
      "Create, view, update and retire roles."),
     # apps/access_management permissions/* — read-only by design.
     ("permission.read", "View permissions",

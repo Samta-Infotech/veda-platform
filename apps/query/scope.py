@@ -236,9 +236,16 @@ def _routing_card_joins(source_id, tenant: str = "default") -> list:
 
 def source_profiles_for(source_ids) -> dict:
     """Routing profiles for the given (already-authorised) source ids, keyed by str(source_id):
-    ``{sid: {source_type, is_canonical, domain_tags, description}}``. Forwarded to the engine's
-    multi-source routing coordinator (canonical/domain tie-break). Best-effort — a lookup failure
-    returns {} so a query is never blocked on profile metadata."""
+    ``{sid: {name, source_type, is_canonical, domain_tags, description}}``. Forwarded to the
+    engine's multi-source routing coordinator (canonical/domain tie-break). Best-effort — a
+    lookup failure returns {} so a query is never blocked on profile metadata.
+
+    ``name`` is the SINGLE controlled boundary at which a source's display name crosses into the
+    engine (traceability Part 6). veda_core must never import the Django source registry, so
+    before this the engine only ever had a numeric id and every explanation it produced said
+    "2". Resolving it here — once, for the ids the caller is ALREADY authorised for — means no
+    DB join is spread through the pipeline and an unauthorised source can never be named,
+    because it is never in this map (see veda/source_names.py, which is its only reader)."""
     try:
         ids = [int(s) for s in (source_ids or [])]
     except (TypeError, ValueError):
@@ -249,6 +256,7 @@ def source_profiles_for(source_ids) -> dict:
         out: dict = {}
         for s in Source.objects.filter(pk__in=ids):
             out[str(s.pk)] = {
+                "name": s.name or "",
                 "source_type": s.source_kind(),
                 "is_canonical": bool(s.is_canonical),
                 "domain_tags": list(s.domain_tags or []),

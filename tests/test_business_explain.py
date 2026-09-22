@@ -200,7 +200,33 @@ def test_build_explain_existing_fields_unaffected_by_new_keys():
         {"type": "total", "summary": "Calculate total Amount"},
         {"type": "group", "summary": "Group by Payer Name"},
     ]
-    assert out["sql"]["query"].startswith("SELECT payer_name")
+    # The SQL block's SHAPE is part of the v1 contract and must always be present;
+    # whether it is POPULATED is EXPLAIN_EXPOSE_SQL's call, so assert against the
+    # flag rather than against whatever the default happens to be. That default has
+    # moved (on -> off under D2 -> back on 2026-09-11 at the user's request), which
+    # is exactly why this test pins the SHAPE and leaves the value to the flag.
+    assert "sql" in out and "query" in out["sql"] and "enabled" in out["sql"]
+
+
+def test_sql_block_follows_the_expose_flag_in_both_states(monkeypatch):
+    """D2: the SQL is exposed only when EXPLAIN_EXPOSE_SQL says so, and the block
+    keeps its shape either way so an existing v1 consumer never sees a missing key."""
+    import config
+    sm = {"columns": {"ledger.total": {"business_role": "Total Amount"}}}
+    sql = 'SELECT payer_name, SUM(amount) AS total FROM ledger GROUP BY payer_name'
+
+    monkeypatch.setattr(config, "EXPLAIN_EXPOSE_SQL", True, raising=False)
+    on = build_explain(sql=sql, table="ledger", sm=sm)
+    assert on["sql"]["enabled"] is True
+    assert on["sql"]["query"].startswith("SELECT payer_name")
+
+    monkeypatch.setattr(config, "EXPLAIN_EXPOSE_SQL", False, raising=False)
+    off = build_explain(sql=sql, table="ledger", sm=sm)
+    assert off["sql"]["enabled"] is False
+    assert off["sql"]["query"] is None
+    # And nothing else in the payload may carry the SQL text as a side effect.
+    import json
+    assert "SELECT payer_name" not in json.dumps(off)
 
 
 def test_build_refusal_explain_returns_none_without_feedback():
@@ -383,3 +409,82 @@ def test_a_failed_stage_is_never_hidden_by_an_earlier_pass():
     assert out["validation"]["checks"] == [
         {"label": "Passed every SQL safety check", "passed": False}]
     assert out["validation"]["passed"] is False
+def test_validation_passed_is_unknown_when_nothing_was_checked():
+    """`all_passed` starts True and an empty check list never falsifies it, so a
+    payload with `checks: []` used to claim `passed: true` — telling the reader the
+    result cleared checks that never ran. Observed live on a document answer."""
+    out = build_explain(sql="", table="", sm=None)
+    assert out["validation"]["checks"] == []
+    assert out["validation"]["passed"] is None, (
+        "no checks ran, so `passed` must be unknown — not True")
+
+
+def test_validation_passed_still_reflects_real_checks():
+    sm = {"columns": {"ledger.total": {"business_role": "Total Amount"}}}
+    sql = "SELECT payer_name, SUM(amount) AS total FROM ledger GROUP BY payer_name"
+    ok = build_explain(sql=sql, table="ledger", sm=sm,
+                       checks=[{"name": "value_grounding", "status": "pass"}])
+    assert ok["validation"]["checks"] and ok["validation"]["passed"] is True
+
+    bad = build_explain(sql=sql, table="ledger", sm=sm,
+                        checks=[{"name": "value_grounding", "status": "fail"}])
+    assert bad["validation"]["passed"] is False
+
+
+# ===================================================== catalog names, not ids
+class TestExposedSqlCarriesNoSourceIds:
+    """The federated executor attaches every source under a catalog named
+    `src_<id>`, so a cross-source statement reads `src_2.homzhub."assets_asset"`.
+    With the SQL restored to the payload (2026-09-11) that identifier would walk
+    straight past `demote_source_ids`, which exists precisely to keep source ids
+    out of the user-facing blocks."""
+
+    def _profiles(self, prof=None):
+        import importlib
+        prof = prof if prof is not None else {
+            "2": {"name": "homzhub", "source_type": "relational"},
+            "4": {"name": "invoices_csv", "source_type": "datalake"}}
+        for name in ("context", "veda_core.context"):
+            try:
+                importlib.import_module(name).set_source_profiles(prof)
+            except Exception:
+                pass
+
+    def _f(self):
+        from veda.business_explain import _name_catalogs
+        return _name_catalogs
+
+    def test_a_catalog_becomes_the_display_name(self):
+        self._profiles()
+        assert self._f()('SELECT COUNT(*) FROM src_2.homzhub."assets_asset"') == \
+            'SELECT COUNT(*) FROM "homzhub".homzhub."assets_asset"'
+
+    def test_every_catalog_in_a_join_is_replaced(self):
+        self._profiles()
+        out = self._f()('SELECT a.x FROM src_2.homzhub."assets" a '
+                        'FULL JOIN src_4."invoices" b USING ("city")')
+        assert "src_2" not in out and "src_4" not in out
+        assert '"homzhub"' in out and '"invoices_csv"' in out
+
+    def test_a_single_source_statement_is_untouched(self):
+        self._profiles()
+        sql = 'SELECT "amount" FROM "accounts_txn" WHERE id = %s'
+        assert self._f()(sql) == sql
+
+    def test_an_unauthorised_source_gets_the_generic_label_never_its_id(self):
+        """display_name never falls back to the raw id — that is what makes this
+        safe rather than cosmetic."""
+        self._profiles()
+        out = self._f()('SELECT * FROM src_99."secret_table"')
+        assert "src_99" not in out and "99" not in out
+        assert '"a data source"' in out
+
+    def test_nothing_is_published_raw_when_the_lookup_itself_fails(self, monkeypatch):
+        import veda.source_names as sn
+        monkeypatch.setattr(sn, "display_name",
+                            lambda *_a, **_k: (_ for _ in ()).throw(RuntimeError("boom")))
+        out = self._f()('SELECT * FROM src_2."t"')
+        assert "src_2" not in out, "a failed lookup must not fall through to the id"
+
+    def test_empty_and_missing_sql_stay_none(self):
+        assert self._f()("") is None and self._f()(None) is None

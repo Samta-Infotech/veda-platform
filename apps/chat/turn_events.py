@@ -41,9 +41,20 @@ class TurnEventAccumulator:
         self.content_blocks: list = []
         self.explainability: dict | None = None
         self.thinking_text: str = ""
+        #: The normalized four-step model, as it stood at the LAST frame that
+        #: carried one — i.e. the terminal frame. Only the terminal frame is worth
+        #: keeping: the intermediate ones are the same model part-way through.
+        self.steps: dict | None = None
         self.summary_text: str = ""
         self.usage: dict = {}
         self.insights: dict | None = None
+        #: Ordered, user-safe lifecycle events for this turn (traceability Phase 1).
+        #: Accumulated from the SAME `thinking` events the SSE path streams, so the
+        #: persisted timeline and what the user watched can never disagree. Only
+        #: STRUCTURED thinking events (those carrying a `phase` + `status`) are
+        #: collected — a legacy free-text progress message is streamed but not
+        #: folded in, since it has no phase to file it under.
+        self.timeline: list = []
 
     def consume(self, kind: str, payload: dict) -> None:
         """Fold one ``{event, data}`` pair into the accumulated turn state.
@@ -54,6 +65,20 @@ class TurnEventAccumulator:
         """
         if kind == "thinking":
             self.thinking_text = payload.get("message", "")
+            # Last-write-wins, but ONLY over a frame that actually carries the
+            # model. A trailing legacy-only frame (phase + message, no `steps`)
+            # must not wipe the terminal one — and a turn that bypassed the engine
+            # carries no model at all, which is correctly stored as absent.
+            _st = payload.get("steps")
+            if isinstance(_st, dict) and _st.get("steps"):
+                self.steps = _st
+            if payload.get("phase") and payload.get("status"):
+                self.timeline.append({
+                    "phase": payload.get("phase"),
+                    "status": payload.get("status"),
+                    "title": payload.get("title", ""),
+                    "message": payload.get("message", ""),
+                })
         elif kind in self.CONTENT_KINDS:
             self.content_blocks.append(payload)
             if payload.get("is_summary"):
@@ -66,6 +91,26 @@ class TurnEventAccumulator:
             self.insights = payload
 
     def metadata(self) -> dict:
-        """The persisted/returned ``metadata`` block for this turn."""
-        return {"thinking": self.thinking_text, "explainability": self.explainability,
-                "usage": self.usage}
+        """The persisted/returned ``metadata`` block for this turn.
+
+        ``trace_id`` is read back out of the explainability payload
+        (build_explain's ``support.trace_id``) rather than threaded separately —
+        one source of truth, and it is simply absent on a turn that produced no
+        explain block. It is the support reference a user can quote and an
+        operator can grep the engine trace by.
+        """
+        md = {"thinking": self.thinking_text, "explainability": self.explainability,
+              "usage": self.usage}
+        # The four-step model the user actually watched. Without it, reopening a
+        # conversation could not rebuild the progress panel: `thinking` is a single
+        # legacy line ("Finalizing the results...") and `timeline` is the RAW
+        # backend phase list, which is audit-level content and not what was shown.
+        # Absent, not null, for a turn that produced no progress.
+        if self.steps:
+            md["steps"] = self.steps
+        if self.timeline:
+            md["timeline"] = self.timeline
+        trace_id = ((self.explainability or {}).get("support") or {}).get("trace_id")
+        if trace_id:
+            md["trace_id"] = trace_id
+        return md

@@ -425,3 +425,82 @@ def test_additivity_falls_back_to_the_measure_name_without_analytics():
     assert _measure_is_additive("pct_overdue", None) is False
     # the engine's own aggregate outranks the name
     assert _measure_is_additive("avg_rating", {"measure_aggregates": {"avg_rating": "SUM"}}) is True
+# --- listing charts: row-preserving, never aggregated (2026-09-11) ----------------
+#
+# Production bug: "Show me the cheapest properties currently on the market for sale"
+# returned a correct table but a chart that (1) summed rows sharing a building name,
+# (2) re-sorted by value DESC and swept the three cheapest rows into an "Other"
+# bucket, and (3) picked its axes positionally, charting a column the user never saw
+# in the table. A RANKING/DETAIL_TABLE is a listing, not a breakdown — one bar per
+# row, in the result's own order.
+
+_CHEAPEST_COLS = ["asset_name", "expected_price", "market_status"]
+_CHEAPEST_ROWS = [
+    ["Shri sai reality", 4, "For Sale"],
+    ["Hanuman Road 150", 150, "For Sale"],
+    ["Information Technology Park", 465, "For Sale"],
+    ["Sumangal Vihar", 500, "For Sale"],
+    ["Information Technology Park", 545, "For Sale"],   # same building, a SECOND listing
+    ["Copy Quick", 1242, "For Sale"],
+    ["Alpha", 2000, "For Sale"], ["Beta", 3000, "For Sale"],
+    ["Gamma", 4000, "For Sale"], ["Delta", 5000, "For Sale"],
+    ["Epsilon", 6000, "For Sale"], ["Zeta", 7000, "For Sale"],
+]
+_CHEAPEST_ANALYTICS = {
+    "result_shape": "RANKING",
+    "orderings": [["expected_price", True]],
+    "column_stats": [{"name": "asset_name", "kind": "categorical", "role": "dimension"},
+                     {"name": "expected_price", "kind": "numeric", "role": "measure"},
+                     {"name": "market_status", "kind": "categorical", "role": "dimension"}],
+}
+
+
+def test_listing_preserves_result_order_and_never_buckets_other():
+    specs = _recommender().recommend(_CHEAPEST_COLS, _CHEAPEST_ROWS, _CHEAPEST_ANALYTICS)
+    assert len(specs) == 1 and specs[0].type.value == "bar"
+    data = specs[0].chart_data
+    assert "Other" not in data["labels"]                      # cheapest rows stay visible
+    assert data["values"] == [r[1] for r in _CHEAPEST_ROWS]   # cheapest-first, not re-sorted
+
+
+def test_listing_never_sums_rows_sharing_a_label():
+    data = _recommender().recommend(
+        _CHEAPEST_COLS, _CHEAPEST_ROWS, _CHEAPEST_ANALYTICS)[0].chart_data
+    assert 465 in data["values"] and 545 in data["values"]    # two listings, two bars
+    assert 1010 not in data["values"]                         # never the merged total
+    assert len(data["labels"]) == len(set(data["labels"]))    # both stay distinguishable
+
+
+def test_listing_charts_the_ordered_measure_and_the_identifying_label():
+    """Axes come from the SQL's own ORDER BY + the most row-distinct label column —
+    not from whatever the SELECT list happens to start with."""
+    cols = ["sale_listing_id", "expected_price", "booking_amount_grace_period",
+            "cancellation_reason_title", "building_name"]
+    rows = [[i, 100 * (i + 1), 7, "Duplicate" if i % 2 else "Other", f"Bldg{i}"]
+            for i in range(6)]
+    spec = _recommender().recommend(
+        cols, rows, {"result_shape": "DETAIL_TABLE",
+                     "orderings": [["expected_price", True]]})[0]
+    assert spec.x_axis_title == "Building Name"      # not Cancellation Reason Title
+    assert spec.y_axis_title == "Expected Price"     # not the grace period
+    assert spec.chart_data["values"] == [100, 200, 300, 400, 500, 600]
+
+
+def test_listing_truncates_the_tail_instead_of_bucketing_it():
+    cols = ["name", "price"]
+    rows = [[f"P{i}", i] for i in range(40)]
+    spec = _recommender().recommend(
+        cols, rows, {"result_shape": "RANKING", "orderings": [["price", True]]})[0]
+    assert spec.chart_data["values"] == list(range(25))   # the cheapest 25, in order
+    assert "Other" not in spec.chart_data["labels"]
+    assert "of 40 rows" in (spec.sub_title or "")         # truncation is disclosed
+
+
+def test_grouped_breakdown_still_aggregates_unchanged():
+    """The listing path must not change GROUPED/DISTRIBUTION, where summing rows
+    per category and bucketing a long tail into 'Other' is the correct behavior."""
+    specs = _recommender().recommend(
+        _CHEAPEST_COLS, _CHEAPEST_ROWS, {"result_shape": "GROUPED"})
+    labels = specs[0].chart_data["labels"]
+    assert "Other" in labels                              # long-tail bucketing intact
+    assert 1010 in specs[0].chart_data["values"]          # per-category totals intact

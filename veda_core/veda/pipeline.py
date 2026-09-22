@@ -222,6 +222,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
 
     _ticks: list = []   # passive (phase, message) record of every _tick() below,
                         # for build_explain()'s "timeline" — see _done()'s return.
+    # In-flight narration handles. Cancelled in _done() so a narration that loses
+    # the race to the answer is DISCARDED rather than waited for (veda/narrator.py).
+    _narration_handles: list = []
 
     def _tick(phase, message):
         """Fire a live, user-facing thinking event. Static string only — no LLM/SLM
@@ -258,6 +261,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 if (_restricted["tables"] or _restricted["columns"]) else sm)
             fb = explain_failure(status, _sm_for_feedback, **ctx)
             print("\n" + fb["text"] + "\n")
+            # NOTE: the access_check downgrade used to happen HERE, the moment this
+            # feedback object was built. That was wrong: building feedback is not the
+            # same as ANSWERING with it. Measured live on the CSV-lake path, feedback
+            # was built for an intermediate failure, the pipeline then RECOVERED via
+            # Tier-2 and ended in a clarify about an ambiguous column — yet the user
+            # was left with a red cross on "Checking access permissions" and a reply
+            # that had nothing to do with permissions. The downgrade now happens in
+            # `_done`, the one exit, where the TERMINAL feedback is known.
             return fb
         except Exception:
             return None
@@ -267,8 +278,90 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # NOT cover. A dict, not a name, so the check can be recorded where the SQL is final while the
     # confidence/explainability that report it stay in the one place that builds them.
     _coverage = {}
+    # Which answer-producing LANE served this query. A plain local wouldn't do:
+    # `_done` is a closure and `from_cache` is assigned far below it, so an early
+    # refusal would read it UNBOUND. A holder set at the lane itself is always safe.
+    #
+    # WHY THIS EXISTS AT ALL: the audit's `cache_hit` was detected by comparing
+    # `engine_result["table"]` to the sentinel "(cached)". That sentinel was removed
+    # from this file (it was poisoning topic-switch detection), so the comparison has
+    # been silently False ever since — measured: the last `cache_hit=True` audit row
+    # is 2026-07-09, while the engine serves verified-cache hits every day, and
+    # `veda_cache_hits_total` has been stuck at 0 with it. Detect the lane at the
+    # lane, not by guessing from a display field.
+    _lane = {"cache": False}
+
+    def _emit_validation_phase(status: str = "answered"):
+        """EXP-B5: report the validation ledger on EVERY terminal path.
+
+        The previous emit sat after the AST check, which a refusal never reaches — so
+        refused answers showed no validation line at all (measured: 4 of 10 benchmark
+        queries). Called from _done, the one exit every status funnels through.
+
+        Emits NOTHING when the ledger is empty. A query refused before any SQL existed
+        genuinely ran no checks, and printing "checks passed" there would be a lie —
+        absent is the honest representation, not a green tick."""
+        try:
+            from veda import lifecycle as _lcd
+            _tld = _lcd.current_timeline()
+            if not getattr(_tld, "enabled", False):
+                return
+            if any(e.phase == _lcd.PHASE_VALIDATION for e in _tld.events):
+                return                      # already reported on this query
+            _ck = tr.sections.get("validation", {}).get("checks", []) or []
+            if not _ck:
+                return
+            _bad = [c for c in _ck if c.get("status") != "pass"]
+            if _bad:
+                _tld.failed(_lcd.PHASE_VALIDATION)
+            elif status == "answered":
+                # No COUNT here. This line is emitted before build_explain runs,
+                # so it can only count the trace's checks — while the panel the
+                # reader opens lists the EXPANDED labels, a different (larger)
+                # number. A live line that says "4" above a list of 5 is worse than
+                # one that says neither; the number belongs where the list is.
+                _tld.completed(_lcd.PHASE_VALIDATION, "Safety checks passed")
+            else:
+                # The ledger holds the AST/read-only/fan-out checks, and those DID
+                # pass. But this turn produced no answer — it was stopped by a LATER
+                # correctness gate (intent/SQL alignment, aggregate omission,
+                # dimension alignment) that writes no ledger entry. Reporting a green
+                # "N safety checks passed" under a step titled "checking the result is
+                # complete and safe", on a turn whose reply says it could not answer,
+                # is precisely the contradiction this layer exists to remove.
+                # Measured live on a verified-cache replay: 2 of 3 cache hits were
+                # stopped by the alignment gate and still rendered four green ticks.
+                _tld.warning(_lcd.PHASE_VALIDATION,
+                             "This result did not pass a completeness check")
+        except Exception:
+            pass
 
     def _done(rc, status, **kw):
+        for _h in _narration_handles:          # answer wins the race, always
+            try:
+                _h.cancel()
+            except Exception:
+                pass
+        # NOTE: the access_check downgrade is deliberately NOT made here either.
+        # This is TIER-1's exit, and Tier-1 refusing is not the TURN refusing — the
+        # deterministic head hands off to Tier-2, which can answer or clarify on a
+        # completely unrelated ground. Measured live on a data-lake question: Tier-1
+        # refused, feedback classified it as an access problem, Tier-2 then produced
+        # a clarify about an ambiguous column, and the user was left with a red cross
+        # on "Checking access permissions" above a reply about column names.
+        # The downgrade is made once, at the FRONT DOOR, from the turn's terminal
+        # feedback (veda_hybrid._reconcile_access_check).
+        _emit_validation_phase(status)
+        try:
+            # Resolve any still-open phase BEFORE build_explain reads the timeline.
+            # `access_check` completes late (after validation), so without this the
+            # PERSISTED payload recorded it as "started" forever — an unresolved
+            # step inside a finished, stored answer.
+            from veda import lifecycle as _lcc
+            _lcc.current_timeline().close_open_phases(failed=(status not in
+                ("answered", "clarify")))
+        except Exception:
+            pass
         if status != "answered":
             _refusal = kw.get("msg") or kw.get("error") or kw.get("missing")
             tr.set("output", refusal=_refusal)
@@ -315,6 +408,30 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 except Exception:
                     logger.exception("synthesize_confidence failed — result confidence omitted")
                 try:
+                    # EXP-B3: a low-confidence answer must SAY so. `confidence` was
+                    # already computed and already shipped inside the payload, but
+                    # nothing SURFACED it — measured on a real query, a 0.143-confidence
+                    # answer carried exactly the same green ticks as a 1.0 one.
+                    #
+                    # Raised here because this is the one place confidence exists; the
+                    # threshold is configurable because the right value is a product
+                    # call, not an engineering one (see LOW_CONFIDENCE_WARNING_BELOW).
+                    # Only a COMPUTED score triggers the caveat. Treating "no
+                    # score" as low was tried and reverted: on this path an empty
+                    # input set is normal for fast-path and cached answers, so it
+                    # put a "limited matching data" caveat on perfectly good
+                    # answers — measured on "top 5 credit transactions", which is
+                    # correct and was flagged. A caveat on everything is a caveat
+                    # on nothing.
+                    if _confidence is not None:
+                        import config as _cfgc
+                        _floor = float(getattr(_cfgc, "LOW_CONFIDENCE_WARNING_BELOW", 0.0) or 0.0)
+                        if _floor > 0 and float(_confidence) < _floor:
+                            from veda import warnings as _vwc
+                            _vwc.add(_vwc.LOW_EVIDENCE)
+                except Exception:
+                    pass
+                try:
                     from veda.business_explain import build_explain
                     explain = build_explain(
                         sql=kw.get("sql") or "", table=kw.get("table") or "", sm=sm,
@@ -324,21 +441,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         timeline=_ticks,
                         confidence=_confidence,
                         not_included=_coverage.get("missing"),
+                        # The v2 blocks (sources / routing / execution / warnings /
+                        # result / cross_source / support) are projected FROM the
+                        # trace by veda/safe_projection.py. No-op while
+                        # EXPLAIN_V2_ENABLED is off — payload stays v1.
+                        trace=tr,
+                        trace_id=getattr(tr, "trace_id", "") or "",
                     )
                 except Exception:
                     logger.exception("business_explain failed — end-user explainability omitted")
                 # EXPLAINABILITY (compact) — never the full payload; just the shape.
                 try:
                     if isinstance(explain, dict):
-                        _checks = explain.get("check_items") or []
-                        tr.set("explainability",
-                               datasets=explain.get("datasets"),
-                               operation_count=len(explain.get("operations") or []),
-                               filter_count=len(explain.get("filters")
-                                                or explain.get("filter_phrases") or []),
-                               validation_passed=(all(
-                                   str(c.get("status")).lower() in ("pass", "true", "ok")
-                                   for c in _checks) if _checks else None))
+                        # Reads build_explain()'s REAL nested shape (data_used.datasets,
+                        # validation.checks) — see explain.summarize_explain_payload for
+                        # why this is shared rather than re-derived here.
+                        from veda.explain import summarize_explain_payload
+                        tr.set("explainability", **summarize_explain_payload(explain))
                 except Exception:
                     pass
             elif kw.get("feedback"):
@@ -350,7 +469,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 # one — see those call sites), same as before this change.
                 try:
                     from veda.business_explain import build_refusal_explain
-                    explain = build_refusal_explain(status, kw.get("feedback"))
+                    explain = build_refusal_explain(
+                        status, kw.get("feedback"),
+                        trace=tr, trace_id=getattr(tr, "trace_id", "") or "")
                 except Exception:
                     logger.exception("build_refusal_explain failed — refusal explainability omitted")
             # business_intent (advisory, Phase-1 business-aware output): the
@@ -371,6 +492,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     # re-deriving intent from a restated English sentence. None on a
                     # refusal that never reached the firewall.
                     "ir": (_ir_obj.to_dict() if _ir_obj is not None else None),
+                    # Private (underscore) by convention: audit-only. The user-facing
+                    # payload is built solely by veda/safe_projection.py, which has no
+                    # reader for this, so it cannot leak into an explanation.
+                    "_from_cache": bool(_lane["cache"]),
                     "trace": tr.to_dict(), "explain": explain,
                     "usage": {"prompt_tokens": tr.total_prompt_tokens,
                               "completion_tokens": tr.total_completion_tokens,
@@ -458,6 +583,58 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                grouped=_grp, ratio=_rat)
     tr.set("query_understanding", **_qu)
     es.query_understanding = _qu
+    try:  # user-safe: says WHAT was recognised, never the internal grammar dicts
+        from veda import lifecycle as _lc
+        _tl = _lc.current_timeline()
+        if getattr(_tl, "enabled", False):
+            _bits = []
+            if _qu.get("temporal"):
+                _bits.append("the requested time range")
+            if _qu.get("aggregation", {}) and _qu["aggregation"].get("op"):
+                _bits.append("the requested metric")
+            if _qu.get("grouped"):
+                _bits.append("how to group the results")
+            # SAFE STRUCTURED FACTS for the progress UI (4-step thinking UX).
+            # Only the SHAPE of the question and the period the user themselves
+            # asked for — never a table, column, source or score. The api tier
+            # turns these into the contextual sentence under each step, and the
+            # narrator is allowed to see exactly this and nothing more.
+            _facts = {}
+            _agg = (_qu.get("aggregation") or {})
+            if _qu.get("existence"):
+                _facts["intent"] = "existence"
+            elif _qu.get("superlative") or _agg.get("ranked"):
+                _facts["intent"] = "ranking"
+            elif _agg.get("op"):
+                _facts["intent"] = str(_agg["op"]).lower()
+            if _qu.get("grouped"):
+                _facts["grouped"] = True
+            _tf = _qu.get("temporal") or {}
+            if _tf.get("start") or _tf.get("end"):
+                _facts["period"] = f"{_tf.get('start') or '?'} to {_tf.get('end') or '?'}"
+            _tl.completed(
+                _lc.PHASE_UNDERSTANDING,
+                ("Identified " + " and ".join(_bits)) if _bits else None,
+                **_facts)
+            # Fire-and-forget narration. Never awaited, cancelled at the terminal —
+            # see veda/narrator.py on why this cannot delay the answer.
+            try:
+                from veda import narrator as _nar
+                if _facts and on_event is not None:
+                    def _deliver(_step, _sentence):
+                        try:
+                            on_event("narration", _sentence, {"step": _step})
+                        except Exception:
+                            pass
+                    # `trace=tr` so the narrator thread's SLM call lands in THIS
+                    # query's ledger — a fresh thread has no trace bound, so without
+                    # it the call would burn latency and tokens invisibly.
+                    _narration_handles.append(
+                        _nar.start(_facts, "analyzing", _deliver, trace=tr))
+            except Exception:
+                pass
+    except Exception:
+        pass
 
     # Deterministic fast path: count / aggregate / dimension-list questions resolve
     # straight from the compiled registries — no retrieval, no planner, no LLM (and
@@ -716,6 +893,15 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         print(f"  [cache] verified-query hit (sim={sim:.2f}) — skipping retrieval + SLM")
         _tick("sql_planning", "Reusing a query already verified for this question")
         sql, from_cache = cached_sql, True
+        _lane["cache"] = True
+        # Recorded in the trace as well as the private result key, because the
+        # USER-facing payload is projected only from the trace. A cached answer
+        # replays a query verified under possibly-OLDER code, so "where did this
+        # answer come from" is a fact the person reading it is entitled to.
+        try:
+            tr.set("execution", from_cache=True)
+        except Exception:
+            pass
         import sqlglot
         from sqlglot import exp
         try:
@@ -823,6 +1009,25 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 tr.note("retrieval", f"scope filter dropped {_before - len(results)} foreign candidates")
         if results is not None and len(results) != _before_rbac:
             tr.set("rbac_filter", before=_before_rbac, after=len(results))
+            # Part 3: RBAC narrowing was SILENT before this — a user could get a
+            # quietly narrower answer with no indication anything was withheld.
+            #
+            # Raised HERE, and only when the count actually CHANGED, because that is
+            # the one honest signal available: candidates this query's retrieval
+            # considered relevant were removed for access reasons. Merely running the
+            # filter is not newsworthy; removing a relevant candidate is.
+            #
+            # The warning states only THAT data was excluded — never which table,
+            # column or source, since naming it would be exactly the disclosure the
+            # restriction exists to prevent. `before`/`after` counts stay in the
+            # internal trace and are NOT projected (veda/safe_projection.py has no
+            # reader for the rbac_filter section) because the COUNT of hidden things
+            # is itself a disclosure.
+            try:
+                from veda import warnings as _vw
+                _vw.add(_vw.RESTRICTED_DATA)
+            except Exception:
+                pass
 
         # ── PRIMARY cross-encoder rerank (Step 2): the precision ranker now runs on the
         # PRIMARY path (not only Tier-2). Reorders candidates + updates final_score so anchor
@@ -1175,7 +1380,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                candidate_field_count=len(es.candidate_fields),
                selected_reason=("router" if primary == _router_primary else "grain_vet_override"))
         if primary:
-            _tick("schema_linking", f"Using {primary} for this")
+            # PRE-EXISTING LEAK, fixed here: this tick lands in the v1
+            # explainability payload's `timeline`, which is user-facing — and
+            # `primary` is a RAW TABLE NAME (observed live: "Using assets_asset
+            # for this"). A table name must never reach a user-facing payload.
+            # The table's identity is already available safely as a business
+            # label in `data_used.datasets`, so the progress line does not need
+            # to carry the identifier at all.
+            _tick("schema_linking", "Identified the relevant records")
         print(f"  [L3] Routing       {len(results)} cols across {len(_cand_tabs)} tables "
               f"({', '.join(_cand_tabs[:4])}…) → primary: {primary}")
         if not primary:
@@ -2279,6 +2491,18 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     param_sql, params, err = ((_fp_v.sql, _fp_v.params, None) if _fp_v.ok
                               else (None, [], _fp_v.reason))
     tr.check("ast_readonly_parameterized_fanout", not err, err or "")
+    try:  # one validation event carrying the PASS/FAIL rollup, not the AST detail
+        from veda import lifecycle as _lcv
+        _tlv = _lcv.current_timeline()
+        if getattr(_tlv, "enabled", False):
+            _checks = tr.sections.get("validation", {}).get("checks", []) or []
+            _failed = [c for c in _checks if c.get("status") != "pass"]
+            if _failed:
+                _tlv.failed(_lcv.PHASE_VALIDATION)
+            elif _checks:
+                _tlv.completed(_lcv.PHASE_VALIDATION, "Safety checks passed")
+    except Exception:
+        pass
     if not err and getattr(tr, "enabled", False):
         _jc = tr.sections.get("join_planning", {}).get("confidence")
         tr.set("output", sql=param_sql, params=[str(x) for x in (params or [])],
@@ -2312,7 +2536,45 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     print("  " + "-" * 74)
 
     print("  [L7] Execute       read-only connection · 30s timeout · fetch ≤20")
+    # Live-verification finding: the deterministic single-source path never reached
+    # source_coordinator.execute_decision, so it produced NO data_retrieval phase and
+    # NO per-source record — on the most common path of all. Both are opened here, at
+    # the one place this path actually touches a source.
+    _dr_rec = None
+    try:
+        from veda import exec_records as _er2
+        from veda_core.context import try_current as _tc2
+        _ctx2 = _tc2()
+        _sid2 = getattr(_ctx2, "source_id", None) if _ctx2 is not None else None
+        if _sid2 is None:
+            # A multi-source scope pins no single source on the context, so this
+            # used to record NOTHING — and with no record, build_data_sources falls
+            # back to the ROUTING decision, which names the source that was SELECTED,
+            # not the one that produced the rows. Measured live: routing picked the
+            # document store, the SQL ran against amenity data, and the payload told
+            # the user the answer came from the document store.
+            try:
+                _routed = (tr.sections.get("routing") or {}).get("source_ids")
+                if _routed:
+                    _sid2 = _routed[0]
+            except Exception:
+                pass
+        if _sid2 is not None:
+            _dr_rec = _er2.current_recorder().open(
+                _sid2, source_type="relational", engine="deterministic_sql", required=True)
+    except Exception:
+        _dr_rec = None
     cols, rows, err = execute_sql(param_sql, params)
+    try:
+        if _dr_rec is not None:
+            from veda import exec_records as _er3
+            _er3.current_recorder().close(
+                _dr_rec,
+                _er3.FAILED if err else _er3.COMPLETED,
+                rows=(len(rows) if rows is not None else None),
+                error=err or None)
+    except Exception:
+        pass
     if err:
         print(f"\n❌ [L7] Execution error: {err}\n")
         log_route(_route + ".exec_error", query, (time.time() - start) * 1000, error=err)
@@ -2458,6 +2720,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                    # 7B instruct summary (NL_SUMMARY_MODEL) needs the
                                    # full summary budget, not the 1.5B-era fast timeout.
                                    timeout=NL_SUMMARY_TIMEOUT_MS / 1000.0,
+                                   # so the narrator can tell a LIMIT-filled page from a
+                                   # complete result (config.SUMMARY_TRUNCATION_AWARE_ENABLED)
+                                   sql=param_sql,
                                    table=str(primary), semantic_model=sm,
                                    rank_column=_rank_column_for_nl,
                                    patterns=_all_findings,
