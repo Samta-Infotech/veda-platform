@@ -147,3 +147,33 @@ for r in CatalogResource.objects.filter(source_id=3).order_by('path'):
 
 A document that doesn't show up in either should be re-ingested; one that shows `is_active=False`
 means the last discovery run couldn't find it upstream (re-ingest, or check the filename rule).
+
+---
+
+## 5. Rebuilding everything (seed + full re-ingestion)
+
+Sections 1–4 add data to a source that is already registered and already ingested.
+For the other case — a fresh machine, a restored dump, an embedding-model change, or
+"I no longer trust what is in the stores" — use:
+
+```bash
+bash scripts/seed_and_reingest.sh --check      # read-only: what would happen, and what blocks it
+bash scripts/seed_and_reingest.sh --dry-run    # every mutation printed, none run
+bash scripts/seed_and_reingest.sh              # seed → ingest → enrich → verify
+bash scripts/seed_and_reingest.sh --reset --yes  # scope-wipe the derived state first, unattended
+```
+
+It registers the sources from `scripts/sources.seed.json` (regenerate that file from a live
+deployment with `--export`; it never contains credentials), re-ingests them in the order the
+semantic bridge requires, and then runs the five enrichment passes that `task_ingest_source`
+does **not** do for you — the RBAC catalog projection, source descriptions and the `SourceItem`
+routing prior are all flag-gated default-OFF, so a by-the-book ingestion leaves them empty and
+says nothing. `--phases verify` (read-only, safe to run any time) prints a per-source matrix of
+every store, so an empty one is visible immediately instead of being discovered as a thin answer
+weeks later.
+
+**Compose files:** the script uses `docker-compose.yml` alone by default. Whether that is right
+depends on the host — the base file pins Postgres to `pg16` and the demo override to `pg17`, and
+the correct choice is whichever major version the local `pg_data` volume was initialised with.
+Pass `--file docker-compose.demo.yml` (or export `COMPOSE_FILE=a.yml:b.yml`, which the script
+honours) on a host whose data directory is PG17.

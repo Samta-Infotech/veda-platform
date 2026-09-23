@@ -414,8 +414,17 @@ class RelationalConnector(BaseConnector):
             # ── 3. Assemble tables from the grouped metadata ──────────
             # Deterministic UUID — same table always gets the same UUID so
             # pgvector UPSERTs overwrite instead of accumulating stale rows.
+            #
+            # The source id is PART OF THE KEY (2026-09-23). Without it, two sources that
+            # share a schema-qualified table name mint the SAME uuid, and since these ids
+            # become the substrate primary keys, the second source to sync collides on
+            # substrate_schematable_pkey / substrate_schemacolumn_pkey instead of getting
+            # its own row. Observed live: homzhub's warm died on a duplicate PK after a
+            # 4-hour ingestion because copies of its tables were already stored under
+            # another source. The tabular paths below (and connectors/tabular_files.py)
+            # always included the source; this path was the outlier.
             for tname in table_names:
-                tid = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{schema}.{tname}"))
+                tid = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{self._source_id}.{schema}.{tname}"))
                 name_to_id[tname] = tid
 
                 pk_cols = pks_by_table.get(tname, set())
@@ -446,7 +455,8 @@ class RelationalConnector(BaseConnector):
                                  else ColumnRole.REGULAR)
 
                     columns.append(RawColumn(
-                        col_id          = str(uuid.uuid5(uuid.NAMESPACE_OID, f"{schema}.{tname}.{col_name}")),
+                        col_id          = str(uuid.uuid5(uuid.NAMESPACE_OID,
+                                                         f"{self._source_id}.{schema}.{tname}.{col_name}")),
                         col_name        = col_name,
                         table_id        = tid,
                         table_name      = tname,

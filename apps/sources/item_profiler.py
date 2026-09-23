@@ -27,9 +27,14 @@ from apps.sources.models import Source, SourceItem, SourceItemType
 
 logger = logging.getLogger(__name__)
 
-_SLM_URL = os.environ.get("VEDA_SLM_CHAT_URL", "http://192.168.1.35:11500/api/chat")
-_SLM_MODEL = os.environ.get("SLM_MODEL_NAME", "qwen2.5-coder:7b")
-_METAL_URL = os.environ.get("METAL_EMBED_URL", "http://192.168.1.39:11435").rstrip("/") + "/encode_dense"
+# `or`, not a get() default: an env var that is SET BUT EMPTY makes get() return "" rather
+# than the default, and blanking METAL_EMBED_URL is the documented way to fall back to CPU.
+# That produced _METAL_URL == "/encode_dense" and a bare ValueError from urllib, reported as
+# "item profile failed" with no hint of the cause.
+_SLM_URL = os.environ.get("VEDA_SLM_CHAT_URL") or "http://192.168.1.35:11500/api/chat"
+_SLM_MODEL = os.environ.get("SLM_MODEL_NAME") or "qwen2.5-coder:7b"
+_METAL_BASE = (os.environ.get("METAL_EMBED_URL") or "").rstrip("/")
+_METAL_URL = (_METAL_BASE + "/encode_dense") if _METAL_BASE else ""
 
 _SYS = ("You describe ONE data item (a table, dataset, or document) for a query router. Given its name "
         "and observed content, reply with STRICT JSON: {\"summary\": \"<one specific sentence: what it "
@@ -149,8 +154,45 @@ def _slm_summary(observed: str):
         return str(raw or "").strip()[:300], []
 
 
+# BGE-M3 dense width. The table below is created with this, and the query side compares
+# against column/chunk vectors of the same model.
+_EMBED_DIM = 1024
+
+_ITEM_EMB_DDL = f"""
+CREATE TABLE IF NOT EXISTS source_item_embeddings (
+    source_id  TEXT        NOT NULL,
+    item_type  TEXT        NOT NULL,
+    item_key   TEXT        NOT NULL,
+    name       TEXT,
+    summary    TEXT,
+    embedding  VECTOR({_EMBED_DIM}),
+    updated_at TIMESTAMPTZ DEFAULT now(),
+    PRIMARY KEY (source_id, item_type, item_key)
+);
+"""
+
+
+def _ensure_item_embeddings_table(conn) -> None:
+    """Create source_item_embeddings if absent.
+
+    Every other engine-side table creates itself in the module that writes it
+    (ingestion/biencoder.py, column_sketches.py, chunk_embedder.py). This one never did, so
+    the INSERT below always raised "relation does not exist" — swallowed by the caller's
+    `except Exception: logger.warning(...)`. Net effect: items got summaries, the routing
+    prior got nothing, and query/source_coordinator.py found no rows to score against.
+    """
+    with conn.cursor() as cur:
+        cur.execute(_ITEM_EMB_DDL)
+    conn.commit()
+
+
 def _embed(text: str):
     """Call the embedding endpoint to embed one item (name + summary). Returns a list of floats."""
+    if not _METAL_URL:
+        raise RuntimeError(
+            "METAL_EMBED_URL is empty — the item profiler has no embedding endpoint, so the "
+            "routing prior cannot be built. Set it, or run scripts/embed_source_items.py, "
+            "which embeds in-process on CPU via the engine's own m3_encoder.")
     return _post_json(_METAL_URL, {"texts": [text]}, timeout=30)["vecs"][0]
 
 
@@ -168,6 +210,7 @@ def profile_items(source: Source, force: bool = False) -> int:
             vec = _embed(f"{item.name}. {summary}")
             conn = _engine_connection()          # NOT django's `connection` — see _engine_connection
             try:
+                _ensure_item_embeddings_table(conn)
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO source_item_embeddings (source_id, item_type, item_key, name, summary, "

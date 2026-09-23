@@ -1262,7 +1262,25 @@ def _maybe_federated(query, verbose=False, strict=False):
     # path rather than hard-refusing the whole query. Only a PRINCIPLED refusal (truly
     # can't be answered across the scoped sources) is surfaced.
     _reason = str(payload.get("reason") or "").lower()
-    if any(k in _reason for k in (
+    # UNSUPPORTED is the operation classifier saying "there is NO cross-source operation
+    # here" — not a refusal to join sources that genuinely belong together. Nothing is
+    # dropped by answering it from one source, because no cross-source relationship was ever
+    # established; the question simply got routed to >1 source by relevance and then had no
+    # cross-source shape to plan. It therefore belongs with the mis-planned cases below
+    # (degrade to single source), not with the principled refusals.
+    #
+    # Read from the structured label the refusal already carries (federated_route.py's
+    # _refuse sets "operation"), not from another reason-string keyword: the prose is an
+    # SLM-facing message and will drift, the label will not. `strict` is still honoured —
+    # an authoritative MULTI route with a real cross_source_fk edge surfaces a controlled
+    # failure below exactly as before.
+    #
+    # Without this, "how many vendors are there" — a single-table COUNT that happens to
+    # match table names in two sources — was refused outright even though one source
+    # answers it deterministically (verified 2026-09-23: pinned to source 4 it returns
+    # SELECT COUNT(*) FROM "vendors" → 6).
+    _op_unsupported = str(payload.get("operation") or "").strip().upper() == "UNSUPPORTED"
+    if _op_unsupported or any(k in _reason for k in (
             "binder error", "does not have a column", "unparseable", "syntax error",
             "exec_error", "could not build", "no select generated", "does not exist",
             "unknown column", "not exist", "catalog error", "referenced column",

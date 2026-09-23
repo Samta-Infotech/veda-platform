@@ -616,8 +616,21 @@ def plan_route(query: str, source_ids, *,
     # `candidates` object when nothing is filtered (flag off, non-aggregation query, nothing
     # incompatible, or the all-incompatible fallback); only a genuine removal produces a new list.
     # See docs/architecture/VEDA_PHASE_C1_UNBLOCKED_BENCHMARK.md.
-    from query.capability_filter import filter_candidates_by_aggregation_capability
-    candidates = filter_candidates_by_aggregation_capability(query, candidates)
+    # GUARDED 2026-09-23. capability_filter.py is NOT in this tree (it was never written),
+    # and this import sat OUTSIDE its own flag check — so plan_route() raised
+    # ModuleNotFoundError on EVERY call. The caller swallows that as
+    # "[routing] skipped (...)" and carries on, which means `decide()` below, the ambiguity
+    # handling and all source narrowing have never actually run: every query fell through to
+    # a merged all-source scope. Observed live: "how many vendors are there" planned the
+    # correct SELECT COUNT(*) FROM "vendors" against a merged 181-table model and then
+    # executed it against homzhub, where that table does not exist.
+    try:
+        from config import CAPABILITY_FILTERING_ENABLED as _cap_filter_on
+    except Exception:
+        _cap_filter_on = False
+    if _cap_filter_on:
+        from query.capability_filter import filter_candidates_by_aggregation_capability
+        candidates = filter_candidates_by_aggregation_capability(query, candidates)
 
     edge_pairs = edge_provider(source_ids)
 

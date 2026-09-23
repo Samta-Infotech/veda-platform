@@ -43,8 +43,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from utils.logger import get_logger
 from ingestion.db_abstraction import get_internal_connection
-from evaluation.report import BASELINE_ESTIMATES
-from evaluation.test_queries import get_all_queries
+# evaluation.report / evaluation.test_queries are NOT in this tree, and never were (no
+# git history of either). They are used only by _print_query_summary, a CLI query-debug
+# printer — but as module-level imports they made this whole module unimportable, and
+# run_ingestion lives here too, so EVERY relational ingestion died at `import main` with
+# ModuleNotFoundError before a single stage ran (observed: job 31, source 2, 2026-09-22,
+# failed in 2s with all ten stages marked failed). Moved into the one function that needs
+# them, so the missing dependency breaks that debug printer alone.
 from ingestion.contracts import SourceContext
 from ingestion.dispatcher import dispatch
 from connectors.base import build_connector
@@ -176,6 +181,10 @@ def _fail(label: str, error: Exception) -> None:
 def _print_query_summary(query: str, l2, l3, l4) -> None:
     """Print a compact per-query metric summary against POC baseline values."""
     from config import TOP_K, EMBEDDING_MODEL_ID
+    # Absent from the tree — see the note where these used to live, at module scope. Kept
+    # local so importing `main` (i.e. running an ingestion) does not depend on them.
+    from evaluation.report import BASELINE_ESTIMATES
+    from evaluation.test_queries import get_all_queries
 
     W   = 64
     bar = "═" * W

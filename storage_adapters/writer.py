@@ -145,7 +145,26 @@ def sync_from_engine(internal_dsn: dict | None = None) -> dict:
     counts = {"fk": 0, "glossary": 0, "value_samples": 0}
     try:
         with conn.cursor() as cur:
-            # FK edges
+            # THIS source's own tables — the filter both reads below depend on.
+            own_tables = _own_table_names(cur, ctx.source_id)
+
+            # Build this source's structural substrate from graph_nodes, which IS
+            # source-scoped, instead of letting it fall out of the global column_values as a
+            # side effect of _sync_value_samples' FK backing. Two reasons: a source whose
+            # values were truncated by a later relational ingest would otherwise end up with
+            # NO tables at all (its rows only ever existed while it was the last one
+            # ingested), and the rows it did get were whoever's data happened to be sitting
+            # in the global table. Idempotent — the scope was cleared just above.
+            counts["tables"], counts["columns"] = _sync_own_schema(cur, ctx.source_id, ctx.tenant)
+
+            # FK edges. fk_adjacency has NO source_id column and is TRUNCATEd + rewritten by
+            # every relational ingest (ingestion/vector_store.py:253), so an unfiltered read
+            # hands whichever source happens to be warming the LAST relational source's
+            # schema — and _sync_value_samples below then CREATES SchemaTable/SchemaColumn
+            # rows for it under this source's id. That is how docs_contracts (a filesystem
+            # source) ended up owning 116 homzhub tables, and how homzhub's own warm later
+            # died on a duplicate substrate_schemacolumn PK (2026-09-23). Keep only edges
+            # whose BOTH endpoints are tables this source actually owns.
             cur.execute(
                 "SELECT from_col_id,from_col_name,from_table_id,from_table_name,"
                 "to_col_id,to_col_name,to_table_id,to_table_name FROM fk_adjacency"
@@ -153,14 +172,22 @@ def sync_from_engine(internal_dsn: dict | None = None) -> dict:
             cols = ["from_col_id", "from_col_name", "from_table_id", "from_table_name",
                     "to_col_id", "to_col_name", "to_table_id", "to_table_name"]
             edges = [dict(zip(cols, r)) for r in cur.fetchall()]
+            if own_tables is not None:
+                edges = [e for e in edges
+                         if e["from_table_name"] in own_tables and e["to_table_name"] in own_tables]
             counts["fk"] = store_fk_adjacency(edges) if edges else 0
 
             # value samples (column_values → ColumnValueSample). Each references a column;
             # create the missing SchemaTable/SchemaColumn rows so the FK holds (value-sample
             # columns are a superset of FK columns). Column is value_raw (not "value").
+            # column_values is global + TRUNCATEd per ingest exactly like fk_adjacency
+            # (ingestion/value_sampler.py:299) — same filter, same reason.
             try:
                 cur.execute("SELECT col_id, col_name, table_name, value_raw FROM column_values")
-                _sync_value_samples(cur.fetchall(), ctx.source_id, ctx.tenant)
+                rows = cur.fetchall()
+                if own_tables is not None:
+                    rows = [r for r in rows if r[2] in own_tables]
+                _sync_value_samples(rows, ctx.source_id, ctx.tenant)
                 counts["value_samples"] = _count_value_samples(ctx.source_id, ctx.tenant)
             except Exception:
                 pass
@@ -181,6 +208,65 @@ def sync_from_engine(internal_dsn: dict | None = None) -> dict:
     finally:
         conn.close()
     return counts
+
+
+def _sync_own_schema(cur, source_id, tenant):
+    """Create SchemaTable/SchemaColumn for `source_id` straight from its graph_nodes rows.
+
+    graph_nodes carries a real source_id plus ref_id (the engine's own table/column id),
+    table_id, name and data_type — everything the substrate needs, correctly scoped.
+    Returns (n_tables, n_columns); (0, 0) when the source has no graph nodes (a document
+    source legitimately has none).
+    """
+    from apps.substrate.models import SchemaColumn, SchemaTable
+
+    scope = dict(source_id=source_id, tenant=tenant)
+    try:
+        cur.execute("SELECT ref_id, name FROM graph_nodes "
+                    "WHERE source_id = %s AND node_type = 'table'", [str(source_id)])
+        tables = [(r[0], r[1]) for r in cur.fetchall() if r[0] and r[1]]
+        cur.execute("SELECT ref_id, table_id, name, data_type FROM graph_nodes "
+                    "WHERE source_id = %s AND node_type = 'column'", [str(source_id)])
+        columns = [r for r in cur.fetchall() if r[0] and r[1] and r[2]]
+    except Exception:
+        return 0, 0
+
+    if not tables:
+        return 0, 0
+
+    SchemaTable.objects.bulk_create(
+        [SchemaTable(id=tid, name=name, **scope) for tid, name in tables],
+        ignore_conflicts=True)
+    known = {tid for tid, _ in tables}
+    SchemaColumn.objects.bulk_create(
+        [SchemaColumn(id=cid, table_id=tid, name=name, data_type=dtype or "", **scope)
+         for cid, tid, name, dtype in columns if tid in known],
+        ignore_conflicts=True)
+    return len(tables), len(columns)
+
+
+def _own_table_names(cur, source_id):
+    """The set of table names `source_id` actually owns — possibly EMPTY (a document
+    source owns none). None only when the engine store could not be queried at all, in
+    which case the caller must not filter.
+
+    Authority order: graph_nodes (written by L4 graph_persist) then table_metadata — both
+    carry a real source_id, unlike fk_adjacency / column_values.
+    """
+    names, answered = set(), False
+    for sql in ("SELECT name FROM graph_nodes WHERE source_id = %s AND node_type = 'table'",
+                "SELECT table_name FROM table_metadata WHERE source_id = %s"):
+        try:
+            cur.execute(sql, [str(source_id)])
+            names.update(r[0] for r in cur.fetchall() if r[0])
+            answered = True
+        except Exception:
+            continue
+    # EMPTY is a real answer, not a missing one: a document source owns no tables at all, and
+    # treating that as "unknown" disables the filter and lets it adopt the last relational
+    # source's entire schema — which is the very bug this function exists to stop. Only a
+    # store that cannot be queried at all (both statements raised) means "do not filter".
+    return names if answered else None
 
 
 def _sync_value_samples(rows, source_id, tenant):

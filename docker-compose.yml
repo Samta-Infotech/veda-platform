@@ -182,11 +182,13 @@ services:
       HF_HUB_OFFLINE: "1"
       TRANSFORMERS_OFFLINE: "1"
       VEDA_APP_DIR: /app
-      # Ingestion SLM → native host Ollama (Apple Metal GPU) instead of the CPU-only
-      # dockerized ollama. Docker-on-macOS has no GPU passthrough, so the in-container
-      # ollama runs the 7B on CPU (~5–8× slower). Overrides .env OLLAMA_URL for THIS
-      # service only; other services keep using the docker `ollama` service.
-      OLLAMA_URL: http://host.docker.internal:11434
+      # Ingestion SLM → a Metal-GPU Ollama, never the CPU-only dockerized one:
+      # Docker-on-macOS has no GPU passthrough, so the in-container 7B runs ~5-8x slower.
+      # 2026-09-22: this used to HARDCODE host.docker.internal:11434, which silently beat
+      # whatever .env said — editing OLLAMA_URL in .env changed every service EXCEPT the
+      # two that matter for model latency. Now .env decides and this is only the fallback,
+      # so there is one place to point the fleet at a different SLM host.
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
     volumes:
       - ".:/app"
       - model_cache:/models:ro
@@ -218,8 +220,9 @@ services:
       TRANSFORMERS_OFFLINE: "1"
       # Docker-on-macOS has no GPU passthrough, so the in-container `ollama` runs the 7B
       # SLM on CPU (~5–8× slower → a single SQL-gen call measured 239s). Point the query
-      # tier at the host Metal-GPU ollama (model resident in VRAM), same as ingest-worker.
-      OLLAMA_URL: http://host.docker.internal:11434
+      # tier at a Metal-GPU ollama (model resident in VRAM), same as ingest-worker — and
+      # from .env, not hardcoded here (see the ingest-worker note, 2026-09-22).
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       # Multi-source serving: read the per-source assembled semantic models from redis
       # (veda:sm:{source}:{tenant}) so a scoped/cross-source query uses each source's OWN
       # model (and _merge_scoped_sms for multi-source), instead of the global homzhub file.
