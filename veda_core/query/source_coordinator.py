@@ -855,14 +855,14 @@ def _build_execution_context(decision, query):
 
 
 def _resolve_executable(source_kind: str):
-    """Phase A3 (Source Adapter Foundation) / Phase B2 (Execution Request): return the object whose
-    ``.execute(...)`` (or, Phase B2, ``.execute_request(...)``) runs this source kind — either
-    query/source_adapters.py::SourceAdapter (a thin call-through wrapper, same signature/return as
-    the bare agent) when SOURCE_ADAPTER_DISPATCH_ENABLED or EXECUTION_REQUEST_DISPATCH_ENABLED is on,
-    or the bare agent from query.agents.resolve_agent() otherwise. Both flags OFF -> resolve_agent()
-    is called exactly as before either phase existed — byte-identical. See
-    docs/architecture/VEDA_SOURCE_CAPABILITY_ADAPTER_AUDIT.md and
-    docs/architecture/VEDA_CANONICAL_EXECUTION_REQUEST_AUDIT.md."""
+    """Return the object whose ``.execute(...)`` runs this source kind: the bare agent from
+    query.agents.resolve_agent().
+
+    The Phase A3/B2 adapter branch this used to describe is GONE (see the note below) —
+    SOURCE_ADAPTER_DISPATCH_ENABLED and EXECUTION_REQUEST_DISPATCH_ENABLED no longer affect
+    dispatch at all. The docstring is corrected here (2026-09-23) because it still promised
+    that behaviour, and three tests in tests/test_source_coordinator.py were written against
+    the promise rather than the code; they failed the moment the suite was first run."""
     # 2026-09-16: the Phase A3/B2 adapter branch imported query/source_adapters, a module
     # deleted in the P2-3 cleanup (the flags were never on) — removed with its flags.
     from query.agents import resolve_agent

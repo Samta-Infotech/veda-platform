@@ -34,12 +34,26 @@ pick up `.env` changes (env is read at container *create* time); that needs `up 
 recreates. The same is true of `restart:` policies.
 
 **`.env` is gitignored, so its settings do not travel.** Anything set only there is local to
-this machine. Two settings currently matter and exist nowhere else — without them the engine
-asks the Ollama host for a model it will not serve (503, "server busy") and the same question
-can produce a different intent on each run:
+this machine. Two settings currently matter and exist nowhere else:
 
     SLM_MODEL_NAME=qwen2.5:7b-instruct
     SLM_TEMPERATURE=0
+
+Without `SLM_MODEL_NAME` the engine asks the Ollama host for a model it will not serve
+(503, "server busy").
+
+`SLM_TEMPERATURE=0` was, until 2026-09-23, **inert** — the claim that it kept runs
+deterministic was false. Nothing read the env var: `veda_core/config.py` held a hardcoded
+`0.3`, and that literal went straight into `rag_synthesis` (`query/rag_layer.py`), `ir_emit`
+(`query/slm_layer.py`) and `query/lg_nodes.py`. Measured: the same document question
+produced **5 distinct answers in 5 runs**. It is now read through `config._env_float` and
+verified at the wire (the POST to `OLLAMA_URL` carries `options.temperature=0`); the same
+question now produces a byte-identical answer 5/5. See
+`reports/VEDA_FIXES_2026-09-23.md` §0.3.
+
+More generally: **there is no generic `VEDA_*` settings bridge.** A key in `.env` only does
+something if one named constant in `veda_core/config.py` reads it by name. Ten keys were
+read by nothing. `tests/test_env_wiring.py` now fails the build if that recurs.
 
 **Two separate Postgres servers are in play.** Do not confuse them:
 

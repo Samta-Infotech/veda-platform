@@ -130,9 +130,11 @@ def classify(query: str, candidates: List[dict], slm_call=None) -> Optional[int]
     NOT_SEMI_JOIN answer returns None (safe defer), never a guess."""
     if not candidates:
         return None
+    # measured completions 16 tokens; 128 is ample
     slm_call = slm_call or (lambda system, user: call_slm(user, system=system,
                                                           purpose="semi_join_classify",
-                                                          temperature=0.0, json_format=True))
+                                                          temperature=0.0, json_format=True,
+                                                          num_predict=128, timeout=45))
     parsed = _parse(slm_call(_SYSTEM, _build_user(query, candidates)))
     if not isinstance(parsed, dict):
         return None

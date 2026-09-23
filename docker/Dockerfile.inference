@@ -26,6 +26,12 @@ WORKDIR /app
 
 COPY requirements/inference.txt /app/requirements/inference.txt
 RUN pip install -r /app/requirements/inference.txt
+# Test deps in the image on purpose (2026-09-23): the suite must be runnable
+# against the real dependency set. `python -m pytest` used to fail here with
+# "No module named pytest", which is why tests/test_source_coordinator.py had
+# never been executed and a dead-routing bug shipped. See requirements/test.txt.
+COPY requirements/test.txt /app/requirements/test.txt
+RUN pip install -r /app/requirements/test.txt
 
 # api/worker stack so this image can ALSO run the Celery ingest worker — ingestion
 # needs Django + celery ALONGSIDE torch, and no other image has both. Kept as a

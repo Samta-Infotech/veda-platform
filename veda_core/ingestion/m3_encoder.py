@@ -18,7 +18,10 @@ thin api image (which has no ML stack) — callers that never encode never pay f
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import functools
+import hashlib
 import logging
 import os
 import threading
@@ -66,11 +69,105 @@ def get_embed_backend() -> str:
     return _LAST_EMBED_BACKEND["v"]
 
 
-def _metal_post(path: str, payload: dict) -> dict:
+def _metal_post_uncached(path: str, payload: dict) -> dict:
     req = _u.Request(_METAL_URL.rstrip("/") + path, data=_json.dumps(payload).encode(),
                      headers={"Content-Type": "application/json"}, method="POST")
     with _u.urlopen(req, timeout=float(os.environ.get("METAL_EMBED_TIMEOUT", "60"))) as r:
         return _json.loads(r.read())
+
+
+# ---------------------------------------------------------------------------
+# Per-REQUEST single-flight memo for the Metal embed round-trips.
+# (Benchmark finding §6.1, 2026-09-23.)
+#
+# Measured: every query issued each encode EXACTLY TWICE with a byte-identical
+# payload. On "users created last month" that was /encode_sparse over 409 texts
+# (the column catalog) twice at ~1.8s each — ~35% of the query's whole wall clock.
+#
+# The duplication has TWO different shapes, which is why a plain dict memo is not
+# enough (measured with a thread-annotated probe):
+#   /encode_dense   — same thread, sequential (355ms then 223ms) → a memo suffices;
+#   /encode_sparse  — DIFFERENT threads, CONCURRENT (1823ms and 1827ms, overlapping)
+#                     → both callers miss a plain memo and both still compute.
+# So this is single-flight: the first caller for a key computes while the others
+# BLOCK on an Event and then reuse its result.
+#
+# Scope is a ContextVar set once per request by veda_hybrid.run_hybrid_query. Two
+# properties this buys, both verified rather than assumed:
+#   • worker threads DO see it — veda_core/context.with_context carries the parent
+#     context into the pool, confirmed by probe (ctxvar visible in
+#     ThreadPoolExecutor-0_1);
+#   • concurrent requests cannot share entries, and nothing survives the turn.
+# Outside a request scope (ingestion, CLI) the cache is None and this is a plain
+# pass-through — ingestion encodes thousands of distinct texts and must not
+# accumulate them.
+#
+# Failures are never cached: the owner removes the key and every waiter re-raises,
+# so each caller still takes its own documented CPU fallback.
+# ---------------------------------------------------------------------------
+_REQUEST_EMBED_CACHE: "contextvars.ContextVar[dict | None]" = contextvars.ContextVar(
+    "veda_m3_request_embed_cache", default=None)
+
+
+class _InFlight:
+    """One key's slot: an Event the waiters block on, plus the result or error."""
+    __slots__ = ("event", "value", "error")
+
+    def __init__(self):
+        self.event = threading.Event()
+        self.value = None
+        self.error = None
+
+
+@contextlib.contextmanager
+def request_embed_cache():
+    """Open a per-request single-flight scope. Re-entrant: an inner `with` is a
+    no-op pass-through so the outermost scope owns the cache for the whole turn."""
+    if _REQUEST_EMBED_CACHE.get() is not None:
+        yield
+        return
+    token = _REQUEST_EMBED_CACHE.set({"map": {}, "lock": threading.Lock()})
+    try:
+        yield
+    finally:
+        _REQUEST_EMBED_CACHE.reset(token)
+
+
+def _payload_key(path: str, payload: dict) -> str:
+    return path + ":" + hashlib.sha1(
+        _json.dumps(payload, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _metal_post(path: str, payload: dict) -> dict:
+    """Single-flight wrapper. Identical (path, payload) inside ONE request is sent
+    to the Metal server exactly once; byte-identical behaviour otherwise."""
+    cache = _REQUEST_EMBED_CACHE.get()
+    if cache is None:
+        return _metal_post_uncached(path, payload)
+
+    key = _payload_key(path, payload)
+    with cache["lock"]:
+        slot = cache["map"].get(key)
+        owner = slot is None
+        if owner:
+            slot = cache["map"][key] = _InFlight()
+
+    if not owner:
+        slot.event.wait()
+        if slot.error is not None:
+            raise slot.error
+        return slot.value
+
+    try:
+        slot.value = _metal_post_uncached(path, payload)
+    except BaseException as exc:
+        slot.error = exc
+        with cache["lock"]:          # never cache a failure
+            cache["map"].pop(key, None)
+        slot.event.set()
+        raise
+    slot.event.set()
+    return slot.value
 
 
 def _get_model():

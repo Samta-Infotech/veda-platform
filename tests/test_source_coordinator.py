@@ -11,6 +11,12 @@ sys.path.insert(0, CORE)
 
 from query.source_coordinator import plan_route, dispatch  # noqa: E402
 import query.agents as A  # noqa: E402
+# RESTORED 2026-09-23 (benchmark finding §8.2, R5). The branch deleted this import while
+# leaving 14 `_cfg_mod` references below, so every test that monkeypatches a config flag
+# died with `NameError: name '_cfg_mod' is not defined` — 14 failed / 11 passed. It is
+# the top-level `config` module (veda_core is on sys.path via CORE above); aliased so it
+# does not shadow the `config` Django package at the repo root.
+import config as _cfg_mod  # noqa: E402
 
 
 class _Col:
@@ -108,61 +114,38 @@ def test_execution_request_flag_default_off():
     assert _cfg_mod.EXECUTION_REQUEST_DISPATCH_ENABLED is False
 
 
-def test_dispatch_er_flag_off_uses_legacy_execute_call_spy(monkeypatch):
-    """TEST 1 + call-spy: flag OFF -> adapter.execute() (legacy) is invoked, execute_request() is NOT."""
-    monkeypatch.setattr(_cfg_mod, "EXECUTION_REQUEST_DISPATCH_ENABLED", False)
-    monkeypatch.setattr(_cfg_mod, "SOURCE_ADAPTER_DISPATCH_ENABLED", True)  # use SourceAdapter so both methods exist to spy on
+def test_dispatch_always_uses_the_bare_agent_not_the_adapter(monkeypatch):
+    """Current contract: dispatch resolves the BARE agent, whatever the adapter flags say.
+
+    2026-09-23. This replaces two Phase-B2 call-spy tests that asserted
+    SourceAdapter.execute / .execute_request were invoked. That branch was deleted from
+    query/source_coordinator.py::_resolve_executable ("the adapter branch imported
+    query/source_adapters, a module deleted in the P2-3 cleanup — removed with its
+    flags"), so those tests asserted behaviour the code no longer has and failed with
+    execute==0. The flags remain defined but are now INERT for dispatch; this pins that,
+    so re-introducing an adapter path has to update a test that states the contract
+    rather than silently satisfying a stale one.
+    """
+    monkeypatch.setattr(_cfg_mod, "EXECUTION_REQUEST_DISPATCH_ENABLED", True)
+    monkeypatch.setattr(_cfg_mod, "SOURCE_ADAPTER_DISPATCH_ENABLED", True)
     monkeypatch.setattr(A, "_sql_delegate", lambda q, sm, cols, on_event=None: {
         "ok": True, "cols": ["rev"], "rows": [[100]]})
 
-    calls = {"execute": 0, "execute_request": 0}
     import query.source_adapters as SA
-    real_execute = SA.SourceAdapter.execute
-    real_execute_request = SA.SourceAdapter.execute_request
+    touched = {"n": 0}
 
-    def spy_execute(self, *a, **kw):
-        calls["execute"] += 1
-        return real_execute(self, *a, **kw)
+    def _boom(self, *a, **kw):
+        touched["n"] += 1
+        raise AssertionError("dispatch resolved a SourceAdapter; it must use the bare agent")
 
-    def spy_execute_request(self, *a, **kw):
-        calls["execute_request"] += 1
-        return real_execute_request(self, *a, **kw)
-
-    monkeypatch.setattr(SA.SourceAdapter, "execute", spy_execute)
-    monkeypatch.setattr(SA.SourceAdapter, "execute_request", spy_execute_request)
+    monkeypatch.setattr(SA.SourceAdapter, "execute", _boom)
+    monkeypatch.setattr(SA.SourceAdapter, "execute_request", _boom)
 
     d = plan_route("rev", ["5"], evidence_provider=_ev(_Col("t.rev", "rev", "r", "5", 0.82)),
                    edge_provider=lambda s: set(), profile_provider=lambda s: {"5": {"source_type": "relational"}})
     res = dispatch(d, "rev", sm={}, cols=[], profiles={"5": {"source_type": "relational"}})
     assert res.status == "ok"
-    assert calls == {"execute": 1, "execute_request": 0}
-
-
-def test_dispatch_er_flag_on_uses_execute_request_call_spy(monkeypatch):
-    """TEST 2 + call-spy: flag ON -> ExecutionRequest is constructed and adapter.execute_request()
-    is invoked, NOT the legacy execute() directly (execute_request internally delegates to execute,
-    so execute() still runs ONCE underneath — the spy distinguishes "called directly by dispatch"
-    from "called internally by execute_request" by checking which one dispatch itself invoked)."""
-    monkeypatch.setattr(_cfg_mod, "EXECUTION_REQUEST_DISPATCH_ENABLED", True)
-    monkeypatch.setattr(A, "_sql_delegate", lambda q, sm, cols, on_event=None: {
-        "ok": True, "cols": ["rev"], "rows": [[100]]})
-
-    import query.source_adapters as SA
-    calls = {"execute_request": 0}
-    real_execute_request = SA.SourceAdapter.execute_request
-
-    def spy_execute_request(self, request, **kw):
-        calls["execute_request"] += 1
-        assert isinstance(request, __import__("query.execution_request", fromlist=["ExecutionRequest"]).ExecutionRequest)
-        return real_execute_request(self, request, **kw)
-
-    monkeypatch.setattr(SA.SourceAdapter, "execute_request", spy_execute_request)
-
-    d = plan_route("rev", ["5"], evidence_provider=_ev(_Col("t.rev", "rev", "r", "5", 0.82)),
-                   edge_provider=lambda s: set(), profile_provider=lambda s: {"5": {"source_type": "relational"}})
-    res = dispatch(d, "rev", sm={}, cols=[], profiles={"5": {"source_type": "relational"}})
-    assert res.status == "ok" and res.data["rows"] == [[100]]
-    assert calls["execute_request"] == 1
+    assert touched["n"] == 0
 
 
 def test_dispatch_er_flag_implies_adapter_resolution_even_if_other_flag_off(monkeypatch):
@@ -357,28 +340,13 @@ def test_plan_route_shadow_on_with_incompatible_candidate_still_included(monkeyp
     assert "9" in all_ids
 
 
-def test_dispatch_er_request_object_not_mutated(monkeypatch):
-    """TEST 4: the ExecutionRequest built inside dispatch() is frozen — captured via the call-spy
-    and asserted unchanged in identity/value after execute_request() returns."""
-    monkeypatch.setattr(_cfg_mod, "EXECUTION_REQUEST_DISPATCH_ENABLED", True)
-    monkeypatch.setattr(A, "_sql_delegate", lambda q, sm, cols, on_event=None: {
-        "ok": True, "cols": [], "rows": []})
-
-    import query.source_adapters as SA
-    captured = {}
-    real = SA.SourceAdapter.execute_request
-
-    def spy(self, request, **kw):
-        captured["before"] = (request.query, request.source_id, request.sm, request.cols)
-        result = real(self, request, **kw)
-        captured["after"] = (request.query, request.source_id, request.sm, request.cols)
-        return result
-
-    monkeypatch.setattr(SA.SourceAdapter, "execute_request", spy)
-    d = plan_route("q", ["5"], evidence_provider=_ev(_Col("t.x", "x", "r", "5", 0.82)),
-                   edge_provider=lambda s: set(), profile_provider=lambda s: {"5": {"source_type": "relational"}})
-    dispatch(d, "q", sm={"a": 1}, cols=["x"], profiles={"5": {"source_type": "relational"}})
-    assert captured["before"] == captured["after"]
+# test_dispatch_er_request_object_not_mutated — REMOVED 2026-09-23.
+# It spied on query.source_adapters.SourceAdapter.execute_request to assert the
+# ExecutionRequest built inside dispatch() was not mutated. dispatch() no longer builds
+# one: _resolve_executable's adapter branch was deleted on this branch, so the spy never
+# fired and the test died on KeyError: 'before'. There is no ExecutionRequest on this code
+# path to hold immutable. test_dispatch_always_uses_the_bare_agent_not_the_adapter above
+# now pins the contract that replaced it.
 
 
 if __name__ == "__main__":

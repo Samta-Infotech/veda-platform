@@ -318,9 +318,48 @@ def _doc_intent_by_evidence(query) -> bool:
         return False
 
 
+def _primary_is_document_source() -> bool:
+    """True when THIS request's primary source is a document/filesystem source.
+
+    Reads the source profiles the api tier already set (veda_core.context
+    .current_source_profiles, the same dict scripts and doc_bench.py install) rather
+    than re-deriving the type from the registry or from the engine store.
+    """
+    ctx = _current_ctx()
+    if ctx is None:
+        return False
+    try:
+        from veda_core.context import current_source_profiles as _csp
+    except Exception:
+        try:
+            from context import current_source_profiles as _csp
+        except Exception:
+            return False
+    prof = (_csp() or {}).get(str(getattr(ctx, "source_id", "")), {}) or {}
+    return str(prof.get("source_type", "")).strip().lower() in {"document", "filesystem"}
+
+
 def classify(query, verbose=False):
     """Return (intent, source_ids). Falls back to 'sql' if the router is off/unavailable
-    — the deterministic SQL head is the safe default."""
+    — the deterministic SQL head is the safe default.
+
+    R2 guard (benchmark finding §8.2, 2026-09-23): that "safe default" is not safe when
+    the request's PRIMARY source is a document source. The SQL head resolves its
+    connection from the primary source_id, so a document source sends it to a row with
+    no host and execution dies with "this source has no SQL endpoint (no host
+    configured)" — which the user was then shown as "I couldn't find any data relevant
+    to this question", for a question the documents answer perfectly well.
+
+    Measured: FS1 "what is the late fee percentage", primary source 3, scope (2,3,4,5).
+    The intent router returned "sql" (no document-referencing word in the utterance, so
+    the _DOC_REF_RE override never fired) and the answer — 2 percent, in
+    msa_green_tower.pdf — was lost. Note the routing coordinator had separately decided
+    SINGLE/source 2 on real `late_fee` column evidence in homzhub; that decision did not
+    reach execution, so this guard is about the head, not about routing.
+
+    Only the pure "sql" intent is overridden. "hybrid" is left alone: that lane already
+    consults _scope_has_structured_source() for its SQL half.
+    """
     # Deterministic doc-intent override (fast, before the SLM router): a document-referencing
     # question over a scope that actually has doc chunks routes to the RAG lane (pure doc ask)
     # or the HYBRID lane (doc + a DB clause), never the SQL head that would ignore the doc.
@@ -355,15 +394,26 @@ def classify(query, verbose=False):
     except Exception:
         QUERY_ROUTER_ENABLED = False
     if not QUERY_ROUTER_ENABLED:
-        return "sql", None
+        return _guard_sql_head("sql", verbose), None
     try:
         from query.query_router import route_query
         r = route_query(query, verbose=verbose)
-        return r.intent, r.source_ids
+        return _guard_sql_head(r.intent, verbose), r.source_ids
     except Exception as e:
         if verbose:
             print(f"  [router] unavailable ({type(e).__name__}: {e}) — defaulting to sql")
-        return "sql", None
+        return _guard_sql_head("sql", verbose), None
+
+
+def _guard_sql_head(intent, verbose=False):
+    """Demote a bare "sql" intent to "rag" when the primary source cannot run SQL.
+    See classify()'s docstring for the measured failure this closes."""
+    if intent == "sql" and _primary_is_document_source():
+        if verbose:
+            print("  [router] primary source is a document source — sql head cannot "
+                  "execute against it → rag")
+        return "rag"
+    return intent
 
 
 def _temporal(query):
@@ -502,8 +552,13 @@ def _summarise_multi_answers(query, items):
                   "compute new numbers; if they disagree, say so.\n\n"
                   f"Question: {query}\n" + "\n".join(f"- source {sid}: {ans}" for sid, ans in parts)
                   + "\n\nSummary:")
+        # timeout added 2026-09-23 (§6.6): num_predict was already bounded, but with no
+        # timeout this inherited SLM_TIMEOUT_SECS=240 — twice nginx's proxy_read_timeout,
+        # on the multi-source path. The deterministic join of the per-source answers is
+        # the documented fallback, so a slow summary degrades instead of hanging.
         out = call_slm(prompt, purpose="multi_summary", temperature=0.1,
-                       num_predict=NL_SUMMARY_MAX_TOKENS + 50, endpoint="chat", model=_nl_model()).strip()
+                       num_predict=NL_SUMMARY_MAX_TOKENS + 50, endpoint="chat",
+                       timeout=45, model=_nl_model()).strip()
         import re as _re
         nums_in = set(_re.findall(r"\d[\d,]*\.?\d*", " ".join(a for _, a in parts)))
         nums_out = set(_re.findall(r"\d[\d,]*\.?\d*", out))
@@ -812,8 +867,31 @@ def _run_coordinator(query, verbose=False, on_event=None):
             try:
                 from query.source_coordinator import (all_ready_source_ids,
                                                       best_matching_scored)
-                _permitted = {str(s) for s in sids}
-                _denied = set(all_ready_source_ids()) - _permitted
+                # R1 FIX (benchmark finding §8.2, 2026-09-23). This used to be
+                #     _permitted = set(sids);  _denied = all_ready - _permitted
+                # i.e. "every ready source outside the scope I was handed is one the
+                # caller is DENIED". That conflates two different things:
+                #   • an RBAC-narrowed scope  — the caller genuinely may not see the rest;
+                #   • a caller-PINNED scope   — "answer from source 3", which says
+                #     nothing at all about permission.
+                # Measured consequence: FS1P ("what is the late fee percentage", pinned
+                # to the document source) was refused in 409 ms with "You don't have
+                # permission to access this data", because sources 2/4/5 were read as
+                # denied and one of them out-scored source 3. The same probe answers
+                # correctly in 3.6 s with ROUTING_PERMISSION_PRECHECK_ENABLED=0.
+                #
+                # RequestContext.allowed_resources is the signal that already exists and
+                # already means exactly this: None == "no restriction" (see
+                # veda_core/context.py, which documents None and an empty structure as
+                # deliberately indistinguishable-in-effect on the read side). So a denial
+                # set is derived ONLY from RBAC; with no RBAC scope nothing is denied and
+                # this pre-check correctly does not fire.
+                _rbac_scope = getattr(ctx, "allowed_resources", None)
+                if _rbac_scope is None:
+                    _permitted, _denied = {str(s) for s in sids}, set()
+                else:
+                    _permitted = {str(_sid) for _sid, _entry in _rbac_scope}
+                    _denied = set(all_ready_source_ids()) - _permitted
                 if _denied:
                     _all_hit = best_matching_scored(query, sorted(_permitted | _denied), _profiles)
                     _best = _all_hit[0] if _all_hit is not None else None
@@ -946,7 +1024,6 @@ def _run_coordinator(query, verbose=False, on_event=None):
         # is enabled at all, independent of SHADOW; every other decision (SINGLE / NO_MATCH /
         # CLARIFICATION_REQUIRED / anything else) stays gated by SHADOW as before. SHADOW=1 in
         # .env today — flip to 0 only once a SINGLE-vs-legacy-engine regression test exists.
-        _is_multi_decision = decision.status == "ROUTED" and decision.mode == "MULTI"
         # 2026-09-18: a ROUTED/SINGLE decision is authoritative too. The condition the 09-10
         # note set for this ("a SINGLE-vs-legacy-engine regression test") exists now —
         # scripts/eval_cross_source_battery.py — and the routing evidence it was gated on has
@@ -955,9 +1032,18 @@ def _run_coordinator(query, verbose=False, on_event=None):
         # an unpinned single-source question can no longer land in the federated planner.
         # NO_MATCH / CLARIFICATION_REQUIRED stay advisory under SHADOW: the legacy engine is
         # strictly more capable than "no source", so they fall through instead of refusing.
-        _is_single_decision = decision.status == "ROUTED" and decision.mode == "SINGLE"
-        _effective_shadow = (bool(MULTISOURCE_ROUTING_SHADOW)
-                             and not _is_multi_decision and not _is_single_decision)
+        # 2026-09-23: which modes may override SHADOW is now a SETTING
+        # (config.ROUTING_AUTHORITATIVE_MODES), not a hardcoded "single and multi always
+        # win". Default empty => SHADOW is a real kill switch again. See that constant's
+        # comment for why the test this flip was justified by does not cover it.
+        try:
+            from config import ROUTING_AUTHORITATIVE_MODES as _auth_modes
+        except Exception:
+            _auth_modes = ()
+        _mode_is_authoritative = (
+            (decision.status == "ROUTED" and decision.mode in _auth_modes)
+            if _auth_modes else False)
+        _effective_shadow = bool(MULTISOURCE_ROUTING_SHADOW) and not _mode_is_authoritative
 
         try:
             # slm_consulted / slm_decision_discarded make the routing SLM's COST
@@ -983,7 +1069,7 @@ def _run_coordinator(query, verbose=False, on_event=None):
         if verbose:
             print(f"  [routing] {decision.status}/{decision.mode} sources={decision.source_ids} "
                   f"({decision.reason_code}){' [shadow]' if _effective_shadow else ''}"
-                  f"{' [multi-authoritative]' if _is_multi_decision and MULTISOURCE_ROUTING_SHADOW else ''}")
+                  f"{' [mode-authoritative]' if _mode_is_authoritative and MULTISOURCE_ROUTING_SHADOW else ''}")
 
         if _effective_shadow:
             return None   # observe only
@@ -1508,7 +1594,15 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
     from veda import exec_records as _er
     _tl = _lc.new_timeline(on_event=on_event, trace=tr)
     _rec = _er.new_recorder(trace=tr, timeline=_tl)
-    with use_trace(tr), _lc.use_timeline(_tl), _er.use_recorder(_rec):
+    # Per-request single-flight scope for the Metal embed round-trips (benchmark
+    # finding §6.1): every encode was being issued TWICE with a byte-identical
+    # payload — measured 1,968 ms of pure redundancy on "users created last month",
+    # ~35% of that query's wall clock. Opened HERE, at the one request entry point,
+    # so (a) the whole turn shares it, including the ThreadPoolExecutor workers that
+    # inherit this context, and (b) it is torn down with the turn — ingestion and the
+    # CLI never open it and are byte-identical. See ingestion/m3_encoder.py.
+    from ingestion.m3_encoder import request_embed_cache as _embed_cache
+    with use_trace(tr), _lc.use_timeline(_tl), _er.use_recorder(_rec), _embed_cache():
         _final_status = "error"
         _tl.completed(_lc.PHASE_RECEIVED)
         # Ordering (live-verification finding): routing runs BEFORE Tier-1's

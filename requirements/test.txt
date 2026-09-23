@@ -1,0 +1,16 @@
+# Test dependencies — pip install -r requirements/test.txt
+#
+# ADDED 2026-09-23 (benchmark finding §8.2, condition 4). Until now pytest appeared in NO
+# requirements file and was installed in NEITHER the api nor the inference image:
+# `python -m pytest` returned "No module named pytest" in both. The suite was therefore
+# never executed in the environment the code actually runs in.
+#
+# That is not a hygiene point, it is the process finding behind the branch's biggest bug:
+# veda_core/query/source_coordinator.py imported query.capability_filter, a module that has
+# never existed in any branch, UNCONDITIONALLY — so plan_route() raised ModuleNotFoundError
+# on every call and multi-source routing was silently dead product-wide.
+# tests/test_source_coordinator.py catches that 24 times over. It had never been run once.
+#
+# Installed into both images (docker/Dockerfile.api, docker/Dockerfile.inference) so the
+# suite can run against the real dependency set, not just a developer's host venv.
+pytest>=8.0

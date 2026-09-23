@@ -182,8 +182,10 @@ def classify_operation(query: str, ctx: OperationContext,
             f"{', '.join(offered)}\n\nReturn the JSON.")
 
     try:
+        # measured completions 27-43 tokens; 128 is >3x headroom
         obj = _extract_json(call_slm(user, system=_SYSTEM, purpose="operation_classify",
-                                     temperature=0.0, json_format=True))
+                                     temperature=0.0, json_format=True,
+                                     num_predict=128, timeout=45))
     except Exception:
         obj = None
 

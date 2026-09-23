@@ -378,8 +378,16 @@ def _generate_federated_plan(query: str, schema_text: str, join_text: str,
     if prior_error:
         user += (f"\n\nThe previous plan FAILED with this engine error — fix it (keep each "
                  f"metric a single flat INNER-JOIN aggregate grouped by the key):\n{prior_error}")
+    # num_predict deliberately NOT set here (2026-09-23). Capping the decode on this
+    # site CHANGED THE ANSWER: with num_predict=384 the planner returned a plan the
+    # question-gate accepted, so FS1 "what is the late fee percentage" took the
+    # federated SQL head and answered "818.000%" (fabricated — the true answer, 2
+    # percent, is in msa_green_tower.pdf). Uncapped, the plan is rejected and the
+    # query falls through to RAG, which answers correctly 3/3. The finding this cap
+    # came from (§6.6) is about unbounded TAIL LATENCY; the timeout below closes that
+    # without touching what the model emits.
     raw = call_slm(user, system=system, purpose="federated_plan", temperature=0.0,
-                   json_format=True)
+                   json_format=True, timeout=60)
     plan = _extract_json(raw)
     if not isinstance(plan, dict):
         return None
@@ -510,8 +518,16 @@ def _generate_structured_plan(query: str, schema_text: str, join_text: str) -> O
     user = (f"Question: {query}\n\nAvailable tables (name → columns):\n{schema_text}\n\n"
             f"(Join keys, for context only — you do NOT write joins:\n{join_text})\n\n"
             f"Return the JSON plan.")
+    # num_predict deliberately NOT set here (2026-09-23). Capping the decode on this
+    # site CHANGED THE ANSWER: with num_predict=384 the planner returned a plan the
+    # question-gate accepted, so FS1 "what is the late fee percentage" took the
+    # federated SQL head and answered "818.000%" (fabricated — the true answer, 2
+    # percent, is in msa_green_tower.pdf). Uncapped, the plan is rejected and the
+    # query falls through to RAG, which answers correctly 3/3. The finding this cap
+    # came from (§6.6) is about unbounded TAIL LATENCY; the timeout below closes that
+    # without touching what the model emits.
     plan = _extract_json(call_slm(user, system=system, purpose="federated_struct_plan",
-                                  temperature=0.0, json_format=True))
+                                  temperature=0.0, json_format=True, timeout=60))
     if not isinstance(plan, dict):
         return None
     if not (plan.get("group_table") and plan.get("group_col") and plan.get("group_alias")):

@@ -41,7 +41,7 @@ from ingestion.db_abstraction import (
     release_internal_connection,
     DICT_CURSOR,
 )
-from config import DOC_CHUNKS_TABLE_NAME, BIENCODER_DIM
+from config import DOC_CHUNKS_TABLE_NAME, BIENCODER_DIM, HNSW_M, HNSW_EF_CONSTRUCTION
 from utils.logger import get_logger
 
 logger = get_logger(__name__)
@@ -183,7 +183,7 @@ def _create_doc_chunks_table(cursor) -> None:
         CREATE INDEX IF NOT EXISTS idx_{DOC_CHUNKS_TABLE_NAME}_embedding
         ON {DOC_CHUNKS_TABLE_NAME}
         USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 200);
+        WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
     """)
     cursor.execute(f"""
         CREATE INDEX IF NOT EXISTS idx_{DOC_CHUNKS_TABLE_NAME}_doc_date

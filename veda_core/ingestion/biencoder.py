@@ -21,6 +21,8 @@ from config import (
     BIENCODER_COL_TABLE,
     BIENCODER_TABLE_TABLE,
     VEDA_INTERNAL_DB,
+    HNSW_M,
+    HNSW_EF_CONSTRUCTION,
 )
 from ingestion.column_text import build_enriched_column_text
 import psycopg2
@@ -68,7 +70,7 @@ def _ensure_v2_table(conn, table_name: str, dim: int):
             cur.execute(f"""
                 CREATE INDEX IF NOT EXISTS {table_name}_emb_idx
                 ON {table_name} USING hnsw (embedding vector_cosine_ops)
-                WITH (m = 16, ef_construction = 200)
+                WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION})
             """)
         except Exception:
             pass

@@ -35,6 +35,8 @@ from config import (
     GRAPH_NODE_EMB_DIM,
     GRAPH_TABLE_SENTENCE_TEMPLATE,
     DOC_CHUNKS_TABLE_NAME,
+    HNSW_M,
+    HNSW_EF_CONSTRUCTION,
 )
 from utils.logger import get_logger
 from ingestion import m3_encoder
@@ -110,7 +112,7 @@ def _create_node_emb_table(cursor) -> None:
         CREATE INDEX IF NOT EXISTS idx_{GRAPH_NODE_EMB_TABLE}_embedding
         ON {GRAPH_NODE_EMB_TABLE}
         USING hnsw (embedding vector_cosine_ops)
-        WITH (m = 16, ef_construction = 200);
+        WITH (m = {HNSW_M}, ef_construction = {HNSW_EF_CONSTRUCTION});
     """)
 
 

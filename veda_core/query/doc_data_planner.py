@@ -85,9 +85,11 @@ def classify(query: str, chunks: List[str], data_cols: List[dict], slm_call=None
     supplied candidate. Empty entities or an invalid column → None (defer)."""
     if not chunks or not data_cols:
         return None
+    # not observed in the benchmark set; sized like its sibling classifiers
     slm_call = slm_call or (lambda system, user: call_slm(user, system=system,
                                                           purpose="doc_data_ground",
-                                                          temperature=0.0, json_format=True))
+                                                          temperature=0.0, json_format=True,
+                                                          num_predict=256, timeout=45))
     parsed = _parse(slm_call(_SYSTEM, _build_user(query, chunks, data_cols)))
     if not isinstance(parsed, dict):
         return None

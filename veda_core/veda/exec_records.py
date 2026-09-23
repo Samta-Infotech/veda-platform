@@ -42,17 +42,41 @@ STATUSES = (PENDING, RUNNING, COMPLETED, PARTIAL, FAILED, REFUSED, SKIPPED)
 NON_CONTRIBUTING = frozenset({FAILED, REFUSED, SKIPPED})
 
 #: Status -> the sentence a user sees. Never mentions an engine, agent, driver or
-#: host. `failed` deliberately does not distinguish "down" from "misconfigured" —
-#: that difference is operational, and guessing it out loud would be misleading.
+#: host.
+#:
+#: 2026-09-23 (benchmark finding §8.2, R2 secondary): FAILED used to read "This data
+#: source could not be reached" unconditionally. That is a SPECIFIC claim about
+#: reachability, and it was false in the measured case — the source was reached, the
+#: SQL ran and failed, and DB1/DB2 executed against that same source seconds earlier
+#: in the same run. The base wording is now neutral and true for every failure, and
+#: `error_class` — which the record already carries — selects the sharper sentence
+#: when the cause is actually known. Still no engine, driver or host.
 _SAFE_STATUS_MESSAGE = {
     PENDING: "Not started",
     RUNNING: "Running",
     COMPLETED: "Completed",
     PARTIAL: "Partly completed",
-    FAILED: "This data source could not be reached",
+    FAILED: "This data source did not return a result",
     REFUSED: "This data source could not answer the question",
     SKIPPED: "Not needed for this question",
 }
+
+#: FAILED refined by `error_class`. "transient" is a genuine reachability problem;
+#: "permanent" is a source that was reached and could not answer. An unset class keeps
+#: the neutral base sentence rather than guessing.
+_SAFE_FAILED_MESSAGE_BY_CLASS = {
+    "transient": "This data source could not be reached",
+    "permanent": "This data source could not run this question",
+}
+
+
+def safe_status_message(status: str, error_class: str = "") -> str:
+    """The user-facing sentence for a status, sharpened by error_class when known."""
+    if status == FAILED and error_class:
+        return _SAFE_FAILED_MESSAGE_BY_CLASS.get(
+            str(error_class).strip().lower(), _SAFE_STATUS_MESSAGE[FAILED])
+    return _SAFE_STATUS_MESSAGE.get(status, "Completed")
+
 
 #: Internal engine name -> what the user is told the system was doing. The engine
 #: names (deterministic_sql / rag / nosql) are implementation detail and must not
@@ -126,7 +150,7 @@ class SourceExecutionRecord:
             "name": sn.display_name(self.source_id),
             "type": sn.display_type(self.source_id),
             "status": self.status,
-            "message": _SAFE_STATUS_MESSAGE.get(self.status, "Completed"),
+            "message": safe_status_message(self.status, self.error_class),
             "required": bool(self.required),
         }
         if self.duration_ms is not None:
@@ -196,7 +220,7 @@ class ExecutionRecorder:
                              source_id=rec.source_id)
             elif status in NON_CONTRIBUTING:
                 tl.warning(lc.PHASE_DATA_RETRIEVAL,
-                           f"{label}: {_SAFE_STATUS_MESSAGE.get(status, 'did not return data')}",
+                           f"{label}: {safe_status_message(status, rec.error_class)}",
                            source_id=rec.source_id)
         return rec
 

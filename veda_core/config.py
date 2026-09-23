@@ -37,6 +37,98 @@ import os as _os_src
 import json as _json_src
 import os as _o
 
+# =============================================================================
+# Typed environment readers (2026-09-23, benchmark finding §0.3.1)
+#
+# There is no generic settings bridge in this codebase — a `.env` key only takes
+# effect if some module reads that exact name. Ten keys in `.env` were read by
+# nothing: their values happened to equal the hardcoded literals here, so nothing
+# misbehaved, but the file was a lie and editing it did nothing. Worse,
+# SLM_TEMPERATURE=0 was inert while the literal 0.3 fed rag_synthesis and ir_emit,
+# so document answers and LLM SQL generation were non-deterministic.
+#
+# These helpers are the ONE place a constant reads its env key. Contract:
+#   • the value currently in this file stays the DEFAULT, so behaviour with the
+#     present .env is unchanged — this is plumbing, not tuning;
+#   • an ABSENT or EMPTY var means "use the default" (an empty string is how
+#     compose expresses "unset", and several keys rely on that);
+#   • a MALFORMED value raises ConfigError AT IMPORT TIME naming the key. It never
+#     silently falls back — a typo in .env must stop the process, not quietly run
+#     the old default while the operator believes otherwise.
+#
+# _ENV_KEYS_READ records every key consulted, so tests/test_env_wiring.py can ask
+# config what it actually reads instead of grepping for it.
+# =============================================================================
+
+
+class ConfigError(RuntimeError):
+    """A .env value could not be coerced. Raised during `import config`."""
+
+
+_ENV_KEYS_READ: "set[str]" = set()
+
+
+def _env_present(key: str):
+    """Raw string for `key`, or None when absent/empty. Records the read."""
+    _ENV_KEYS_READ.add(key)
+    raw = _os_src.environ.get(key)
+    if raw is None:
+        return None
+    raw = raw.strip()
+    return raw if raw != "" else None
+
+
+def _env_str(key: str, default: str) -> str:
+    raw = _env_present(key)
+    return default if raw is None else raw
+
+
+def _env_int(key: str, default: int) -> int:
+    raw = _env_present(key)
+    if raw is None:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ConfigError(
+            f"{key}={raw!r} is not an integer (default would be {default!r}). "
+            f"Fix it in .env — refusing to silently use the default."
+        ) from None
+
+
+def _env_float(key: str, default: float) -> float:
+    raw = _env_present(key)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ConfigError(
+            f"{key}={raw!r} is not a number (default would be {default!r}). "
+            f"Fix it in .env — refusing to silently use the default."
+        ) from None
+
+
+_ENV_TRUE = {"1", "true", "yes", "on"}
+_ENV_FALSE = {"0", "false", "no", "off"}
+
+
+def _env_bool(key: str, default: bool) -> bool:
+    raw = _env_present(key)
+    if raw is None:
+        return default
+    low = raw.lower()
+    if low in _ENV_TRUE:
+        return True
+    if low in _ENV_FALSE:
+        return False
+    raise ConfigError(
+        f"{key}={raw!r} is not a boolean (expected one of "
+        f"{sorted(_ENV_TRUE | _ENV_FALSE)}, case-insensitive; default would be "
+        f"{default!r}). Fix it in .env — refusing to silently use the default."
+    )
+
+
 # Framework-noise tables always excluded by the scanner (Django/Celery internals).
 # Client-specific exclusions live on the Source row (Source.exclude_tables) and
 # arrive via VEDA_EXCLUDE_TABLES / VEDA_SOURCE_JSON — never baked into the repo.
@@ -327,7 +419,18 @@ _RESOLVED_DEVICE = resolve_device()
 # -----------------------------------------------------------------------------
 # Query pipeline
 # -----------------------------------------------------------------------------
-TOP_K      = 15
+TOP_K      = _env_int("VEDA_TOP_K", 15)
+
+# HNSW index BUILD parameters (pgvector). These are consumed at CREATE INDEX time by
+# ingestion/{biencoder,chunk_embedder,graph_embedder}.py — i.e. when an index is first
+# built, not per query. The query-time knob is VEDA_HNSW_EF_SEARCH, read separately in
+# storage_adapters/reader.py. scripts/hnsw_parity_sweep.py:11 calls the pinned
+# ef_search "and build m/ef_construction" the shipping params, so they are settings
+# here rather than three copies of a magic number. Changing them has NO effect on an
+# index that already exists (every site uses CREATE INDEX IF NOT EXISTS); it applies
+# to the next fresh build — i.e. after a drop/re-ingest.
+HNSW_M               = _env_int("VEDA_HNSW_M", 16)
+HNSW_EF_CONSTRUCTION = _env_int("VEDA_HNSW_EF_CONSTRUCTION", 200)
 NUM_FK_RELATIONS = 10
 
 # -----------------------------------------------------------------------------
@@ -378,8 +481,19 @@ VLLM_BASE_URL        = __import__("os").environ.get("VLLM_URL", "http://vllm:800
 # vLLM serves under the HF model path (e.g. "Qwen/Qwen2.5-Coder-7B-Instruct"),
 # not the Ollama tag — set when SLM_BACKEND=vllm.
 VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or None
-SLM_TEMPERATURE      = 0.3
-SLM_TIMEOUT_SECS     = 240
+# 2026-09-23: was a hardcoded 0.3 while .env carried an inert SLM_TEMPERATURE=0.
+# This constant is passed straight into rag_synthesis (query/rag_layer.py),
+# ir_emit (query/slm_layer.py) and query/lg_nodes.py, so every document answer
+# and every LLM-generated SQL sampled at 0.3 regardless of what .env said.
+SLM_TEMPERATURE      = _env_float("SLM_TEMPERATURE", 0.3)
+# 2026-09-23 (benchmark finding §6.7): was 240 — TWICE nginx's proxy_read_timeout of
+# 120s (docker/nginx.conf:66), so a single SLM call was allowed to outlive the client
+# connection that was waiting for it. The ladder is now innermost-tightest:
+#   one SLM call 60s  <  inference request 95s  <  gunicorn worker 110s  <  nginx 120s
+# Per-site caps added alongside this (operation_classify, federated_plan,
+# federated_struct_plan, semi_join_classify, doc_data_ground, multi_summary) are 45-60s,
+# all >3x their measured latency.
+SLM_TIMEOUT_SECS     = _env_int("SLM_TIMEOUT_SECS", 60)
 # Routing is a PRE-answer decision with a safe deterministic fallback (routing_slm
 # degrades an unusable/slow answer to a clarification), so it gets its own short
 # budget instead of the shared 240s: a hung router stalls the turn before any work
@@ -412,7 +526,7 @@ DATA_GRAPH_OVERLAP_THRESHOLD = 0.70
 # -----------------------------------------------------------------------------
 # L3 prompt engineering
 # -----------------------------------------------------------------------------
-TOP_K_TO_LLM = 6
+TOP_K_TO_LLM = _env_int("VEDA_TOP_K_TO_LLM", 6)
 
 # -----------------------------------------------------------------------------
 # SQL Builder — Layer 4
@@ -493,7 +607,7 @@ QUERY_ROUTER_INTENTS = ["sql", "rag", "hybrid", "nosql"]
 QUERY_ROUTER_CONFIDENCE_THRESHOLD = 0.6
 
 # Toggle automatic routing — if False, always routes to SQL (backward compat)
-QUERY_ROUTER_ENABLED = True
+QUERY_ROUTER_ENABLED = _env_bool("VEDA_QUERY_ROUTER_ENABLED", True)
 
 # The sql-vs-rag intent is decided in classify() by a FIXED word-list regex (_DOC_REF_RE) then the SLM
 # router — neither consults the source-coordinator's retrieval evidence, so a document question that
@@ -773,6 +887,27 @@ ROUTING_PERMISSION_DENY_GAP = float(_os.environ.get("ROUTING_PERMISSION_DENY_GAP
 # consumed by query/federated_route.run_federated). Default OFF -> byte-identical.
 #
 # The problem it fixes: with MULTISOURCE_ROUTING_SHADOW on (the default) the routing policy's
+
+# Which ROUTED modes may override MULTISOURCE_ROUTING_SHADOW and actually drive the answer.
+#
+# 2026-09-23 (benchmark finding §8.2, group 3.2). veda_hybrid.py computed
+#     _effective_shadow = SHADOW and not is_multi and not is_single
+# i.e. a ROUTED/SINGLE or ROUTED/MULTI decision was authoritative REGARDLESS of SHADOW.
+# .env sets MULTISOURCE_ROUTING_SHADOW=1 with a 14-line comment recording a measured
+# regression and instructing it be left on until "a SINGLE-vs-legacy-engine regression
+# test" exists. The in-code comment claimed that test is
+# scripts/eval_cross_source_battery.py. It is NOT: that battery compares PINNED vs
+# UNPINNED and explicitly PASSES when the unpinned run returns a typed refusal
+# (verdict "typed_refusal") — which is precisely the FS1/XS1 failure the flip
+# introduced. It never runs the legacy engine, so it cannot compare SINGLE against it.
+#
+# So the override is now a flag of its own, default EMPTY = none = SHADOW means what it
+# says. Set to a comma list of modes ("single", "multi") to opt back in. .env carries the
+# value this deployment runs, chosen from measurement — see reports/VEDA_FIXES_2026-09-23.md.
+ROUTING_AUTHORITATIVE_MODES = tuple(
+    m.strip().upper() for m in _env_str("ROUTING_AUTHORITATIVE_MODES", "").split(",")
+    if m.strip()
+)
 # decision is discarded, and federation is decided solely by `should_federate(cols)` — "did the
 # RETRIEVED columns come from >=2 sources". That is a PRESENCE test, not a relevance test, and
 # there is no score floor anywhere before it. Measured over the 182-query benchmark (whose ground
@@ -1654,7 +1789,8 @@ SCHEMA_LINK_SYNONYMS = {
 # =============================================================================
 # JOIN-FREE IR + NL ANSWER
 # =============================================================================
-IR_JOIN_FREE_ENABLED = True   # SLM omits joins[]; sql_builder derives from fk_adjacency
+# SLM omits joins[]; sql_builder derives from fk_adjacency
+IR_JOIN_FREE_ENABLED = _env_bool("VEDA_IR_JOIN_FREE_ENABLED", True)
 
 NL_ANSWER_ENABLED      = True
 NL_ANSWER_MAX_ROWS     = 50
@@ -2012,7 +2148,7 @@ SUPERLATIVE_JOIN_ROUTING = False
 # score: a real, felt boost, not a wholesale override. Deliberately does NOT scale
 # apply_history_penalty's -0.60 (that one already fires today, at full strength, for every
 # intent — this only touches the three per-intent boosts that were previously unreachable).
-RETRIEVAL_INTENT_BOOST_SCALE = 0.12
+RETRIEVAL_INTENT_BOOST_SCALE = _env_float("RETRIEVAL_INTENT_BOOST_SCALE", 0.12)
 # TYPED_MULTITABLE_ROUTE (diagnostic experiment, default OFF → byte-identical prod
 # behavior). The adversarial audit (VEDA_ADVERSARIAL_FAILURE_MAP.md) proved the
 # deterministic multi-table planner (try_multitable/build_from_entities/plan_joins) is
@@ -2543,7 +2679,7 @@ RETRIEVAL_CACHE_ENABLED = False
 # Built offline by: python3 -m semantic.compile_semantic_layer
 # Fast-path SQL is still value-grounded + AST-validated before execution.
 # =============================================================================
-FAST_PATH_ENABLED = True
+FAST_PATH_ENABLED = _env_bool("VEDA_FAST_PATH_ENABLED", True)
 # Store the raw NL query text in the route log. Useful for tuning; turn OFF in
 # deployments where users may type sensitive values into questions — the log
 # then carries only route/table/latency (no query content).
@@ -2680,7 +2816,8 @@ LANGGRAPH_SHARED_PLANNER = True
 # clean SQL answer SKIPS the decomposer (zero added latency on the hot path); only a
 # non-deterministic head or a deterministic refusal triggers it. Needs Ollama; if
 # unreachable run_decomposer degrades to "single" and behaviour is exactly as today.
-QUERY_DECOMPOSE_ENABLED = False   # TEMP off: splits join queries ("X and their Y") wrongly — fix later
+# TEMP off: splits join queries ("X and their Y") wrongly — fix later
+QUERY_DECOMPOSE_ENABLED = _env_bool("VEDA_QUERY_DECOMPOSE_ENABLED", False)
 # Exception (2026-09-18): a MULTI routing decision on a compound question is decomposed
 # regardless — the coordinator already established there is no join relation between the
 # sources, so the split cannot be the "X and their Y" mistake. See veda_hybrid._COMPOUND_HANDOFF.
