@@ -48,6 +48,11 @@ class TurnEventAccumulator:
         self.summary_text: str = ""
         self.usage: dict = {}
         self.insights: dict | None = None
+        #: What the conversation layer carried into this turn — the remembered entity
+        #: and filters, the operation applied, and the text actually sent to the engine
+        #: (chatbot/nodes.py::_context_used). Absent on a turn that used no context,
+        #: which is every first question and every route that never reaches the engine.
+        self.context: dict | None = None
         #: Ordered, user-safe lifecycle events for this turn (traceability Phase 1).
         #: Accumulated from the SAME `thinking` events the SSE path streams, so the
         #: persisted timeline and what the user watched can never disagree. Only
@@ -89,6 +94,8 @@ class TurnEventAccumulator:
             self.usage = payload
         elif kind == "insights":
             self.insights = payload
+        elif kind == "context":
+            self.context = payload
 
     def metadata(self) -> dict:
         """The persisted/returned ``metadata`` block for this turn.
@@ -110,6 +117,11 @@ class TurnEventAccumulator:
             md["steps"] = self.steps
         if self.timeline:
             md["timeline"] = self.timeline
+        # Absent, not null (the envelope convention above): a turn that carried no
+        # context has nothing to show, and an empty object would render as a panel
+        # claiming an understanding that was never applied.
+        if self.context:
+            md["context"] = self.context
         trace_id = ((self.explainability or {}).get("support") or {}).get("trace_id")
         if trace_id:
             md["trace_id"] = trace_id

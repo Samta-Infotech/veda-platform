@@ -39,6 +39,12 @@ RC_INVALID_SLM = "INVALID_SLM_DECISION"
 class CandidateSource:
     source_id: str
     source_type: str = ""              # engine kind: relational|datalake|document|nosql
+    # Display name from the api tier's registry profile (apps.query.scope.source_profiles_for).
+    # Carried so the bounded SLM can match a source the QUESTION names by name ("from invoices_csv")
+    # against the candidate it actually is. The profile map holds ONLY ids this caller is already
+    # authorised for, so a name here can never disclose a source the caller was not told about.
+    # Empty when no profile was supplied (engine-side default) — every consumer must tolerate "".
+    name: str = ""
     presence_tier: str = "NONE"        # STRONG | WEAK | NONE (from source_evidence)
     top_score: float = 0.0             # the source's top relevance cosine (for co-leader checks)
     # Item-prior only (query ↔ this source's item/dataset summaries). Kept SEPARATE from top_score

@@ -22,6 +22,7 @@ import sqlglot
 from sqlglot import exp
 from veda.validation import _gate_strip
 from retrieval.query_enrichment import _singularize
+from query.ranking_parser import parse_ranking
 
 
 @dataclass
@@ -207,8 +208,14 @@ def validate_ir_equivalence(query, sql, sm, *, allowed_tables=None,
     # SELECT alias, the sort only re-orders the licensed breakdown by its own measure
     # — presentation, not semantics; it admits no rows/filters/joins. Anything else
     # (ordering by a raw column, unlicensed grouping) stays refused.
-    if ir.orderings and not _has(query, r"\b(top|highest|lowest|most|least|largest|"
-                                        r"smallest|sorted?|rank|order|first|last|recent)\b"):
+    # The ranking vocabulary is query/ranking_parser.py's, not a second copy: this rule kept its
+    # own narrower list, which omitted bottom/biggest/greatest/maximum/minimum/fewest/latest/
+    # newest/oldest/earliest — so "bottom 3 general ledger entries" had its CORRECT
+    # `ORDER BY amount ASC` refused as unrequested (measured 2026-09-23), while "top 3" passed.
+    # That duplication is the exact thing ranking_parser was written to end. The explicit-sort
+    # verbs ("sorted by price" — an ordering with no end and no count) are not ranking words
+    # either, so they live there too, as `sort_requested`; this rule names no vocabulary at all.
+    if ir.orderings and not parse_ranking(query).sort_requested:
         try:
             from config import IR_ORDERBY_GROUPED_MEASURE_OK
         except Exception:

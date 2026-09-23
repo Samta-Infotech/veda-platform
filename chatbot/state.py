@@ -52,6 +52,9 @@ class ChatState(TypedDict, total=False):
                                        # JSON-safe dict, see apps.access_management.services.
                                        # serialize_data_scope), forwarded to call_engine_node
                                        # as the X-Veda-Data-Scope header. None = no narrowing.
+    data_vocabulary: Optional[List[str]]  # words the scoped sources actually contain
+                                       # (apps.query.data_vocabulary) — used ONLY to skip
+                                       # the engine for a message that names none of them
     source_profiles: Optional[Dict[str, Any]]  # per-source routing metadata
                                        # (source_type/is_canonical/domain_tags/description, from
                                        # apps.query.scope.source_profiles_for), forwarded to
@@ -65,7 +68,6 @@ class ChatState(TypedDict, total=False):
                                        # among irrelevant tables (measured: worklists_quote vs
                                        # list_of_values_listofvalue at 0.1503 vs 0.1502, then an
                                        # "ambiguous subject" clarify). {} / None = same as before.
-
     # ── supervisor decision ─────────────────────────────────────────────────
     action: str                        # "smalltalk" | "answer" | "clarify" | "followup"
     resolved_query: str                # the query actually sent to the engine
@@ -96,6 +98,28 @@ class ChatState(TypedDict, total=False):
     frame: Dict[str, Any]              # chatbot.memory.frame.QueryFrame
     drill_stack: List[Dict[str, Any]]  # chatbot.memory.frame.DrillLevel list
     delta_type: str                    # "new_topic"|"refine"|"drill_down"|"drill_up"|"compare"|"ambiguous"
+    delta_field: Optional[str]         # replace/remove only — which remembered filter the
+                                       # delta acts on; Python binds it, the model only names it
+    delta_value: Optional[str]         # the ONE grounded word from the user's own message
+    # What the conversation layer actually carried into THIS turn, for the user to see.
+    # Built by context_resolve_node/clarify_reply_node from facts that already exist —
+    # the frame it merged and the delta it applied — and never re-derived or inferred.
+    # None on any turn that used no context at all (a first question, smalltalk, recall),
+    # which is exactly when there is nothing honest to show.
+    context_used: Optional[Dict[str, Any]]
+    pending_clarification: Dict[str, Any]  # {question, original_query, missing, turn_index} —
+                                       # set when the engine asks, consumed by the next turn
+    memory_reset: bool                 # set by memory_read_node on a "start over" match;
+                                       # classify_node ends the turn on it (nodes.py::reset_node)
+    last_result: Dict[str, Any]        # the ANSWERED result the user is currently looking at,
+                                       # kept across turns so a presentation-only follow-up can
+                                       # redraw it — engine_result is cleared every turn
+    recall_kind: Optional[str]         # "query"|"sql"|"table"|"filters"|"rows"|"trail" — set only by
+                                       # a question ABOUT the conversation (nodes.py::recall_node),
+                                       # answered from the QueryFrame without the engine
+    viz_override: Optional[str]        # "pie"|"bar"|"line"|"table"|"chart"|"csv" — set only by a
+                                       # presentation-only follow-up (nodes.py::represent_node),
+                                       # which re-renders the previous result without the engine
     # Audit fix (H1): the short capped Redis episodic buffer (MemoryStore's
     # ":episodic" key), loaded by memory_read_node and passed to
     # classify_delta() for reference-resolution ("it"/"that"/"tell me more")

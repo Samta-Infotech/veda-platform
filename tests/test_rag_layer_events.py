@@ -35,7 +35,7 @@ def test_run_rag_layer_emits_retrieve_and_synthesize_events(monkeypatch):
     rag_mod = _stub_rag_deps(monkeypatch)
     events = []
     result = rag_mod.run_rag_layer(
-        "what does the contract say", source_ids=["s1"],
+        "what does the contract say", source_ids=["1"],
         on_event=lambda phase, msg, extra: events.append((phase, msg)),
     )
     assert result.answer == "The answer is X."
@@ -52,7 +52,7 @@ def test_run_rag_layer_on_event_none_never_raises(monkeypatch):
     (or explicitly passes None) must see identical behavior to before this
     change, never a crash."""
     rag_mod = _stub_rag_deps(monkeypatch)
-    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["s1"])
+    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["1"])
     assert result.answer == "The answer is X."
 
 
@@ -64,7 +64,7 @@ def test_run_rag_layer_on_event_callback_exception_never_propagates(monkeypatch)
     def _broken(*a, **k):
         raise RuntimeError("frontend callback exploded")
 
-    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["s1"], on_event=_broken)
+    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["1"], on_event=_broken)
     assert result.answer == "The answer is X."
 
 
@@ -75,7 +75,7 @@ def test_run_hybrid_layer_emits_retrieve_and_synthesize_events(monkeypatch):
 
     events = []
     result = rag_mod.run_hybrid_layer(
-        "revenue and the contract terms", sql_columns=[], source_ids=["s1"],
+        "revenue and the contract terms", sql_columns=[], source_ids=["1"],
         on_event=lambda phase, msg, extra: events.append((phase, msg)),
     )
     assert result.answer == "Fused answer."
@@ -111,8 +111,15 @@ class _FakeNosqlConn:
 def test_run_nosql_emits_build_event(monkeypatch):
     import config as config_mod
 
-    monkeypatch.setattr(config_mod, "get_source", lambda sid: {"type": "nosql", "engine": "mongodb"})
-    monkeypatch.setattr(connectors_mod, "build_connector", lambda src: _FakeNosqlConn())
+    # PATCH WHERE IT IS BOUND, and give the source the shape a real one has.
+    # `veda_hybrid` does `from connectors.base import build_connector` at import
+    # time, so patching `connectors.base` leaves the already-bound name untouched:
+    # the REAL factory ran, and a source dict with no `id` raised KeyError inside
+    # `_run_nosql`'s per-source try — which swallowed it and moved on, so the event
+    # this test exists for was never emitted. Stale fixture, not a product defect.
+    monkeypatch.setattr(config_mod, "get_source",
+                        lambda sid: {"id": sid, "type": "nosql", "engine": "mongodb"})
+    monkeypatch.setattr(veda_hybrid, "build_connector", lambda src: _FakeNosqlConn())
     fake_nb = type("NB", (), {"error": None, "query_json": {}})()
     monkeypatch.setattr(nosql_builder_mod, "run_nosql_builder", lambda **k: fake_nb)
     # NL-answer summarization is a separate concern (already covered by
@@ -121,7 +128,7 @@ def test_run_nosql_emits_build_event(monkeypatch):
     monkeypatch.setattr(config_mod, "NL_ANSWER_ENABLED", False)
 
     events = []
-    veda_hybrid._run_nosql("find recent orders", source_ids=["s1"],
+    veda_hybrid._run_nosql("find recent orders", source_ids=["1"],
                            on_event=lambda phase, msg, extra: events.append((phase, msg)))
     assert "nosql_build" in [p for p, _ in events]
 
@@ -129,11 +136,18 @@ def test_run_nosql_emits_build_event(monkeypatch):
 def test_run_nosql_on_event_none_never_raises(monkeypatch):
     import config as config_mod
 
-    monkeypatch.setattr(config_mod, "get_source", lambda sid: {"type": "nosql", "engine": "mongodb"})
-    monkeypatch.setattr(connectors_mod, "build_connector", lambda src: _FakeNosqlConn())
+    # PATCH WHERE IT IS BOUND, and give the source the shape a real one has.
+    # `veda_hybrid` does `from connectors.base import build_connector` at import
+    # time, so patching `connectors.base` leaves the already-bound name untouched:
+    # the REAL factory ran, and a source dict with no `id` raised KeyError inside
+    # `_run_nosql`'s per-source try — which swallowed it and moved on, so the event
+    # this test exists for was never emitted. Stale fixture, not a product defect.
+    monkeypatch.setattr(config_mod, "get_source",
+                        lambda sid: {"id": sid, "type": "nosql", "engine": "mongodb"})
+    monkeypatch.setattr(veda_hybrid, "build_connector", lambda src: _FakeNosqlConn())
     fake_nb = type("NB", (), {"error": None, "query_json": {}})()
     monkeypatch.setattr(nosql_builder_mod, "run_nosql_builder", lambda **k: fake_nb)
     monkeypatch.setattr(config_mod, "NL_ANSWER_ENABLED", False)
 
     # No on_event passed at all — every existing caller must be unaffected.
-    veda_hybrid._run_nosql("find recent orders", source_ids=["s1"])
+    veda_hybrid._run_nosql("find recent orders", source_ids=["1"])

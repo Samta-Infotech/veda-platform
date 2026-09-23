@@ -12,18 +12,27 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
+import time
+import unicodedata
 
 from langchain_core.runnables import RunnableConfig
 
+from apps.query.data_vocabulary import mentions_the_data
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 from .llm import CHATBOT_CLASSIFY_MODEL, call_slm
 from .memory import frame as memory_frame
 from .memory.classify import DELTA_TYPES, classify_delta, parse_delta_response
+from .memory.context import ConversationContext
 from .memory.store import MemoryStore
 from .prompts import (
+    CAPABILITY_REPLY,
     FALLBACK_REPLY,
+    REPHRASE_REPLY,
+    SMALLTALK_FALLBACK_REPLY,
+    IDENTITY_REPLY,
     FOLLOWUP_SYSTEM_PROMPT,
     STANDALONE_CHECK_SYSTEM,
     build_followup_user_prompt,
@@ -87,6 +96,38 @@ _BARE_REFERENTIAL_RE = re.compile(
     re.IGNORECASE,
 )
 
+def _is_bare_referential(message: str) -> bool:
+    """Is this message referential with nothing of its own to stand on?
+
+    Two shapes, both requiring the caller to have already established that there is NO
+    frame — which is what makes a downgrade safe here: with nothing to resolve against,
+    a referential message cannot be a follow-up to anything.
+
+    1. the referential word is the last substantive thing ("what about that", "the
+       other one") — _BARE_REFERENTIAL_RE, anchored so it cannot fire on a determiner
+       heading a self-contained noun phrase ("this maintenance policy for asset 21").
+    2. the whole message is a handful of words built around a referential one ("more
+       details", "more info"). The anchor in (1) misses these because a contentless
+       noun trails the referential word, and enumerating those nouns would be a word
+       list that ages badly. Brevity is the structural signal instead: a message this
+       short, containing referential language and naming no data, has no self-contained
+       question in it whatever the trailing word happens to be.
+
+    Added 2026-09-22 after the supervisor's HARD RULE was rewritten. "more details" used
+    to be classified smalltalk by the model and so never reached this backstop at all —
+    the category was resting on the model's verdict, not on this guard. Once the rule
+    correctly stopped calling information requests smalltalk, "more details" came
+    through as a followup with no frame, which is exactly the ungrounded-text-to-engine
+    case this backstop exists to prevent.
+    """
+    if _DATA_QUESTION_HINTS.search(message):
+        return False
+    if _BARE_REFERENTIAL_RE.search(message):
+        return True
+    words = [w for w in re.split(r"[^A-Za-z0-9]+", message) if w]
+    return len(words) <= 3 and bool(_REFERENTIAL_HINTS.search(message))
+
+
 def _depends_on_history(message: str, history: list) -> bool:
     """Generic (non-keyword) second opinion for a "smalltalk" verdict when prior
     turns exist AND the message contains at least some referential language
@@ -138,6 +179,292 @@ _BYE_RE = re.compile(
     r"^\s*(bye|goodbye|see\s*(you|ya)( later| soon)?|take care|good\s*(night|bye))"
     r"\s*[.,!?]*\s*$", re.IGNORECASE)
 
+# "Who are you" / "what can you do" are questions about the PRODUCT, not about the
+# user's data — answerable deterministically, with no model call and no engine hop.
+# They matched none of the patterns above, so classify_node had to ask the
+# classifier; and because classify_node defaults to "answer" whenever that call
+# fails, an unreachable SLM turned every one of them into a full SQL round-trip that
+# then refused. Both are WHOLE-MESSAGE anchored with no trailing wildcard — a looser
+# first cut captured "who are you billing this month" and "can you help me find the
+# cheapest listings", which are real data questions and must reach the engine — and
+# both sit behind the same _DATA_QUESTION_HINTS guard as the greetings.
+_IDENTITY_RE = re.compile(
+    r"^\s*(?:so\s+|and\s+)?(?:"
+    r"who\s+(?:are|r)\s+(?:you|u)"
+    r"|what\s+(?:are|r)\s+(?:you|u)"
+    r"|what(?:'s|\s+is)\s+(?:veda|your\s+name)"
+    r"|who(?:'s|\s+is)\s+(?:this|veda)"
+    r"|(?:please\s+)?introduce\s+yourself"
+    r"|tell\s+me\s+about\s+yourself"
+    r")\s*[.,!?]*\s*$", re.IGNORECASE)
+_CAPABILITY_RE = re.compile(
+    r"^\s*(?:so\s+|and\s+)?(?:"
+    r"what\s+can\s+(?:you\s+do|i\s+ask(?:\s+you)?)(?:\s+for\s+me)?"
+    r"|what\s+do\s+you\s+do"
+    r"|what\s+are\s+you\s+(?:good\s+at|able\s+to\s+do|capable\s+of)"
+    r"|what\s+(?:kind|sort|type)s?\s+of\s+(?:questions?|things?)(?:\s+can\s+i\s+ask)?"
+    r"|how\s+(?:do|can)\s+(?:i|we)\s+use\s+(?:you|this)"
+    r"|how\s+do\s+you\s+work"
+    r"|can\s+you\s+help(?:\s+me)?"
+    r"|help"
+    r")\s*[.,!?]*\s*$", re.IGNORECASE)
+
+# Skip the engine for a message that names NOTHING in the scoped data. Default OFF:
+# this is the only change in this package that can withhold a message from the engine,
+# so it ships dark and is turned on deliberately. With it off, every routing decision
+# below is byte-identical to before it existed.
+#
+# WHY: classify_node defaults to "answer" whenever it is unsure (refuse-over-guess,
+# deliberately — never silence a real question). That default is correct but expensive:
+# the engine then searches 528 tables for something that is not there. Measured
+# 2026-09-17: 32.8s, then "Could you clarify what you're asking about?". A fast honest
+# answer beats a slow one.
+#
+# The check is deliberately weak — ONE matching content word is enough, sampled data
+# VALUES count, and both number forms count (see apps/query/data_vocabulary.py). A dry
+# run over 24 real questions held none of them back.
+_GROUNDING_GATE_ENABLED = os.environ.get("CHATBOT_GROUNDING_GATE_ENABLED", "0") == "1"
+# Ask the model for the WORDS of a smalltalk reply, on top of the classify call that
+# already decided it is smalltalk. Off: see smalltalk_node.
+_SMALLTALK_LLM_REPLY = os.environ.get("CHATBOT_SMALLTALK_LLM_REPLY", "0") == "1"
+
+
+def _mentions_the_data(message: str, vocabulary) -> bool:
+    """True (send to the engine) unless the message names nothing in the data. Fails
+    OPEN on any error, and on an empty/absent vocabulary — never the other way."""
+    if not vocabulary:
+        return True
+    try:
+        return mentions_the_data(message, vocabulary)
+    except Exception:
+        logger.exception("_mentions_the_data: check failed — sending to the engine")
+        return True
+
+
+# Questions about the CONVERSATION ITSELF rather than about the data — "what was my
+# last query", "what SQL did you run", "which table did you use", "how many rows did
+# that return". Every one of these is already answered by the QueryFrame the memory
+# layer stores after each successful turn (chatbot/memory/frame.py), so they need no
+# engine call, no SQL and no model call. Routed normally they went to the engine,
+# which tried to find a TABLE for "what sql did you run" — roughly 30s, then a
+# refusal, or worse an answer pulled from some unrelated table.
+#
+# In an analytics product this class matters more than ordinary chit-chat: a user who
+# asks "which table did that come from" is checking whether to trust a number. The
+# whole reasoning trail is computed every turn (business_explain, zero LLM) and until
+# now the user could not see any of it.
+#
+# The patterns are whole-message anchored and keyed on the OBJECT noun (query /
+# question / sql / table you used), which is what separates them from real data
+# questions that read almost identically: "what was my last QUERY" is recall,
+# "what was my last PAYMENT" is a question for the engine.
+_RECALL_PATTERNS = (
+    ("query", re.compile(
+        r"^\s*(?:so\s+|and\s+)?(?:what|which)\s+(?:was|is)?\s*(?:my|the)?\s*"
+        r"(?:last|previous|prior|first)\s+(?:query|question|search)"
+        r"(?:\s+again)?\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("query", re.compile(
+        r"^\s*(?:so\s+)?what\s+(?:did\s+i|have\s+i)\s+ask(?:ed)?"
+        r"(?:\s+(?:before|earlier|last|previously))?\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("query", re.compile(
+        r"^\s*(?:what|which)\s+(?:do\s+|did\s+)?we\s+(?:have|had|got)\s+in\s+"
+        r"(?:my|the|our)\s+(?:last|previous)\s+(?:query|question)"
+        r"\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("sql", re.compile(
+        r"^\s*(?:(?:show|give)\s+(?:me\s+)?(?:the\s+)?sql"
+        r"|(?:what|which)\s+sql\s+(?:did\s+you\s+)?(?:run|use|execute|write)?"
+        # "what did you just run" / "what did you run" — a near-miss of the pattern above
+        # that cost ~98s and came back "Could you clarify if 'did' is a column name or a
+        # value to filter on?" (live run, 2026-09-17). The whitelist is a closed list over
+        # an open phrasing space, so every near-miss is a slow, confusing answer.
+        r"|what\s+(?:query\s+)?did\s+you\s+(?:just\s+)?(?:run|execute)"
+        r"|what\s+(?:exactly\s+)?(?:did|do)\s+you\s+run)\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("table", re.compile(
+        r"^\s*(?:what|which)\s+tables?\s+(?:did\s+you\s+|do\s+you\s+|was\s+)?"
+        r"(?:use|used|pick|picked|choose|chose|query|queried|from)"
+        r"(?:\s+(?:that|this|it|for\s+that))?\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("filters", re.compile(
+        r"^\s*(?:what|which)\s+filters?\s+(?:did\s+you\s+apply|were\s+applied"
+        r"|are\s+applied|did\s+you\s+use)?\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("rows", re.compile(
+        r"^\s*how\s+many\s+(?:rows|records|results)"
+        r"(?:\s+(?:did\s+(?:that|it|this)\s+(?:return|come\s+back)"
+        r"|were\s+(?:there|returned)|(?:did\s+)?(?:that|it|this)\s+return))?"
+        r"\s*[.,!?]*\s*$", re.IGNORECASE)),
+    ("trail", re.compile(
+        r"^\s*(?:(?:so\s+)?what\s+did\s+you\s+do"
+        r"|how\s+did\s+you\s+(?:get|work\s+out|arrive\s+at)\s+(?:that|this|it)"
+        r"|where\s+(?:did\s+)?(?:that|this|it)\s+come\s+from"
+        r"|why\s+(?:did\s+you\s+(?:choose|pick|use)\s+)?(?:that|this)\s+table)"
+        r"\s*[.,!?]*\s*$", re.IGNORECASE)),
+)
+
+
+# A clarification answer is a VALUE, not a request. Recognised by a WHITELIST of
+# shapes, never by excluding known-bad words.
+#
+# The first cut excluded messages carrying a word from _DATA_QUESTION_HINTS and capped
+# the length at 8 words. That is a blacklist over an open set, and an independent run
+# walked straight through it: "top 5 cities by assets", "sale listings in mumbai",
+# "revenue by month", "who owns asset 21", "kitne assets hain", "nevermind", "stop",
+# "???" were all swallowed and concatenated onto the stored request, producing confident
+# answers to questions nobody asked. The mirror failure was just as bad — real answers
+# ("total revenue", "by status", "the count") were REJECTED because they contain an
+# ordinary analytic word, and the stored request was thrown away with them.
+#
+# So the deterministic path now claims only the shapes it can be sure of, and everything
+# else is left to the classifier, which is asked the semantic question directly ("is this
+# an answer to the question you just asked?") — the one judgement a model is better at
+# than a regex. Python still performs the merge.
+_CLARIFICATION_VALUE_RE = re.compile(
+    r"^\s*(?:(?:for|in|from|during|on|at|by|of)\s+)?"      # optional leading preposition
+    r"(?:the\s+)?"
+    # ONE or TWO plain words. Three or more is where genuinely ambiguous shapes start
+    # — "revenue by month" and "sale listings in mumbai" read as values AND as new
+    # questions, and which one they are depends on what was asked. Those are handed to
+    # the classifier rather than claimed here; the deterministic path keeps only what it
+    # can be certain of, which is also the common case ("2024", "by city", "Mumbai").
+    r"[\w&/'’.-]+(?:\s+[\w&/'’.-]+)?"
+    r"\s*[.,!?]*\s*$", re.IGNORECASE)
+
+# Words that make a message a REQUEST rather than a value, however short it is.
+_REQUEST_WORDS = frozenset("""
+show give list find get make take put see look want need help please display draw plot
+chart graph render export download save delete drop remove add create update run execute
+who what when where why how which whose compare explain tell describe stop cancel
+nevermind forget skip undo repeat again
+""".split())
+
+
+def _is_clarification_answer(message: str, recall_kind, presentation_kind,
+                             is_smalltalk: bool, is_shape_change: bool = False) -> bool:
+    """Is this message unmistakably a VALUE answering the question just asked?
+
+    Deliberately narrow: it returns True only for the shapes it is certain about, and
+    False for everything else — including real answers it cannot recognise. False does
+    NOT mean "throw the pending request away"; the caller leaves those to the classifier
+    (see classify_node), which can judge them semantically.
+
+    `is_shape_change` is an EXPLICIT re-shaping of the previous question ("by city
+    instead", "make it top 5" — chatbot/memory/frame.py::detect_shape_delta with
+    explicit_only). Measured 2026-09-18 on the real engine: "by city instead" and a bare
+    "top 5" both matched the value whitelist below, so with a clarification pending they
+    were glued onto the unanswered request ("show the top 20 assets by carpet area for
+    make it top 5") and the engine answered something unrelated with full confidence.
+    The engine clarifies often, so a pending slot is a COMMON state, not an edge case.
+    Only explicit re-shapings are excluded here: a clarifying question asks for a bare
+    value, so a bare "top 5" must still be allowed to answer one.
+    """
+    if is_smalltalk or recall_kind or presentation_kind or is_shape_change:
+        return False
+    text = (message or "").strip()
+    if not text:
+        return False
+    if _RESET_RE.match(text) or _DRILL_UP_RE.match(text) or _RUNTIME_CONTEXT_RE.match(text):
+        return False
+    words = [w.strip(".,!?").lower() for w in text.split()]
+    if any(w in _REQUEST_WORDS for w in words):
+        return False
+    if not any(c.isalnum() for c in text):
+        return False                       # "???", "...", punctuation only
+    return bool(_CLARIFICATION_VALUE_RE.match(text))
+
+
+def _recall_kind(message: str) -> str | None:
+    """Which remembered fact a conversation-about-itself question is asking for —
+    "query" | "sql" | "table" | "filters" | "rows" | "trail" — or None."""
+    for kind, pattern in _RECALL_PATTERNS:
+        if pattern.match(message):
+            return kind
+    return None
+
+
+# A follow-up that asks to RE-PRESENT the answer already on screen — "as a pie
+# chart", "show that as a table", "export it to csv". These carry no new data
+# question at all: the rows are already in hand from the previous turn. Sent through
+# the normal followup path they re-ran the whole SQL pipeline, which costs a full
+# engine round-trip AND can come back with a DIFFERENT result set than the one the
+# user is looking at (the data can change between turns; so can a non-deterministic
+# plan) — so "chart that" could redraw something other than "that".
+#
+# Whole-message anchored behind the same _DATA_QUESTION_HINTS guard as the greetings:
+# "show me sales as a pie chart" carries its own data question and must reach the
+# engine, while a bare "as a pie chart" must not.
+_PRESENTATION_RE = re.compile(
+    r"^\s*(?:(?:and\s+|now\s+|ok(?:ay)?[,\s]+|please\s+|just\s+)*)"
+    r"(?:can\s+you\s+|could\s+you\s+)?"
+    r"(?:show|display|draw|plot|graph|chart|render|make|turn|put|give)?\s*"
+    r"(?:me\s+|it\s+|that\s+|this\s+|them\s+|the\s+result\s+|the\s+data\s+)?"
+    r"(?:in|as|into|to)?\s*(?:a|an|the)?\s*"
+    r"(?P<kind>pie|bar|line|column|donut|doughnut|table|chart|graph|csv|excel|spreadsheet)"
+    r"\s*(?:chart|graph|plot|format|view|instead)?\s*(?:please|thanks|pls)?"
+    r"\s*[.,!?]*\s*$", re.IGNORECASE)
+
+# "export"/"download" phrasings, where the noun may be absent entirely.
+_EXPORT_RE = re.compile(
+    r"^\s*(?:(?:and\s+|now\s+|please\s+)*)(?:can\s+you\s+)?"
+    # The object may only be a PRONOUN. Allowing "the <noun>" made "export the invoices"
+    # and "download the report" re-render the previous rows instead of reaching the
+    # engine — those name data, and naming data makes it a question, not a re-render.
+    r"(?:export|download|save)\s*(?:it|that|this|them|the\s+(?:result|results|table|data|rows))?\s*"
+    r"(?:in|as|to)?\s*(?:a|an)?\s*(?P<kind>csv|excel|spreadsheet|file)?"
+    r"\s*(?:please|thanks|pls)?\s*[.,!?]*\s*$", re.IGNORECASE)
+
+# A bare charting verb with no noun at all ("plot it", "visualize that").
+_PLOT_RE = re.compile(
+    r"^\s*(?:(?:and\s+|now\s+|please\s+)*)(?:can\s+you\s+)?"
+    # An OBJECT is required. A bare "chart" or "graph" is a noun as often as a verb, and
+    # as an answer to "which one?" it would silently redraw instead of answering.
+    r"(?P<kind>plot|graph|chart|visuali[sz]e)\s+(?:it|that|this|them)"
+    r"\s*(?:please|thanks|pls)?\s*[.,!?]*\s*$", re.IGNORECASE)
+
+# Verbs, not nouns — a one-word "export" is an instruction and nothing else, unlike a
+# one-word "table" or "chart".
+_UNAMBIGUOUS_RENDER_VERBS = frozenset({"export", "download"})
+
+_CHART_KIND_ALIASES = {"column": "bar", "donut": "pie", "doughnut": "pie",
+                       "graph": "chart", "plot": "chart", "visualize": "chart",
+                       "visualise": "chart", "excel": "csv", "spreadsheet": "csv",
+                       "file": "csv"}
+
+
+def _presentation_kind(message: str) -> str | None:
+    """Which rendering a presentation-only follow-up asked for — "pie"/"bar"/"line"/
+    "table"/"chart"/"csv" — or None when this is not one.
+
+    NOTE there is deliberately no _DATA_QUESTION_HINTS guard here, unlike the
+    smalltalk patterns: "table" and "chart" are themselves in that hint list, so the
+    guard rejected the very phrasings this is for ("show that as a table"). The
+    patterns are instead anchored across the WHOLE message, which is a stronger
+    guarantee — a message carrying any real question alongside the rendering word
+    ("show me sales as a pie chart", "give me a table of all listings") simply has
+    content left over and cannot match. Guard tests cover both directions.
+    """
+    # A BARE rendering noun is not a command. "table", "pie", "chart" and "column" are
+    # nouns as often as instructions, and because this check runs before the
+    # clarification branch, answering "which one?" with "column" silently redrew the
+    # previous result instead of answering the question. Something must accompany the
+    # noun — a verb, a pronoun, an "as/into", or a trailing qualifier ("pie chart").
+    words = [w for w in re.split(r"[^\w]+", (message or "").lower()) if w]
+    if len(words) < 2 and not (words and words[0] in _UNAMBIGUOUS_RENDER_VERBS):
+        return None
+    for pattern in (_PRESENTATION_RE, _EXPORT_RE, _PLOT_RE):
+        match = pattern.match(message)
+        if match:
+            kind = (match.group("kind") or "csv").lower()
+            return _CHART_KIND_ALIASES.get(kind, kind)
+    return None
+
+
+# Hindi/Hinglish greetings — the same social intent as "hi"/"how are you", which the
+# English-only patterns above silently missed in a product whose users type both.
+_HINGLISH_SOCIAL_RE = re.compile(
+    r"^\s*(?:namaste|namaskar|salaam|salam|shukriya|dhanyavaad|dhanyawad|"
+    r"kaise\s*(?:ho|hain)|kaisa\s*hai|kya\s*haal(?:\s*(?:hai|chaal))?|"
+    r"theek\s*ho|sab\s*theek|alvida|phir\s*milenge)"
+    r"(?:\s*(?:ji|bhai|yaar|sir))?\s*[.,!?]*\s*$", re.IGNORECASE)
+
+
 # Deterministic fast path for pure runtime-value questions ("what's the current
 # date", "what time is it") — skips the classify LLM call (and its thinking event)
 # the same way the smalltalk patterns above do. Deliberately a SEPARATE, minimal
@@ -164,9 +491,32 @@ _RUNTIME_CONTEXT_RE = re.compile(
 # never wired to anything). Whole-message match, same anchored style as the
 # smalltalk patterns above, so it never misfires on a real question that
 # merely contains one of these words mid-sentence.
+# A reset is composed, not enumerated: a DISCARD VERB, optionally followed by something
+# that names the CONVERSATION'S OWN STATE. Two small closed sets, so combinations nobody
+# wrote down still work ("wipe the context", "clear this chat", "forget the history") —
+# the previous form listed whole phrases and 7 of the suite's 12 fell through it, and a
+# longer list of phrases would only move that boundary.
+#
+# What keeps it safe is the anchored WHOLE-message match plus the object set: every
+# object names the conversation itself, never data. So "clear" resets, and "clear the
+# top 5 by amount" is a question that cannot match — there is no phrasing of a data
+# question that is only a discard verb and a conversation noun.
+#
+# A reset that works only when phrased the canonical way is worse than none: the user
+# believes the context is gone, and the next answer silently carries it.
+_DISCARD_VERB = r"(?:clear|reset|forget|wipe|erase|drop|discard)"
+# "what I said" / "what I asked" name the conversation's state as much as "history"
+# does, so they belong in the object set rather than bolted on as a special case.
+_CONVERSATION_STATE = (r"(?:everything|all|it|that|this|memory|context|history|chat|"
+                       r"conversation|session|topic|what\s+i\s+(?:said|asked))")
 _RESET_RE = re.compile(
-    r"^\s*(start over|reset(?: everything)?|forget (everything|that|it)|"
-    r"clear (the )?context|new topic|let'?s start (over|fresh|again))\s*[.,!?]*\s*$",
+    r"^\s*(?:"
+    # a discard verb, alone or pointed at the conversation's own state
+    rf"{_DISCARD_VERB}(?:\s+(?:the|this|my|our)?\s*{_CONVERSATION_STATE})*"
+    # or the "begin afresh" family, which names no object at all
+    r"|(?:let'?s\s+)?(?:start|begin)\s+(?:over|again|afresh|fresh)"
+    rf"|(?:start|begin)?\s*(?:a\s+)?new\s+{_CONVERSATION_STATE}"
+    r")\s*[.,!?]*\s*$",
     re.IGNORECASE,
 )
 
@@ -194,20 +544,189 @@ _DRILL_UP_RE = re.compile(
 )
 
 
-def _canned_smalltalk_reply(message: str) -> str | None:
+# ── Turn Entry Gate ──────────────────────────────────────────────────────────
+#
+# The gate answers ONE question — does this turn need VEDA, and does it need
+# conversational context? — and it is NOT a new classifier. classify_node already
+# makes exactly that decision: its seven deterministic fast paths are the L0 tier, its
+# single SLM call is the model tier, and _route_after_classify already sends the result
+# to the engine or away from it. A second classifier in front would have to re-derive
+# the same verdict from the same message, and two classifiers that can disagree is the
+# failure this package has spent its whole history removing (see the overrides in this
+# file, every one of which exists because one layer overruled another).
+#
+# So the gate is DERIVED from the action classify_node already chose, and the only new
+# behaviour is the normalisation below.
+_ENTRY_DIRECT = frozenset({"smalltalk"})                      # no VEDA, no context
+_ENTRY_CONTEXT_ONLY = frozenset({"recall", "represent", "reset", "no_match"})
+
+
+def entry_decision(action: str, has_history: bool) -> dict:
+    """{requires_veda, requires_context} for a turn classify_node has already judged.
+
+    `requires_context` mirrors the ROUTING rule, not the action label: a turn reaches
+    context_resolve_node when history exists (chatbot/graph.py::_route_after_classify),
+    because whether the message needs the previous turn is decided from checkpointed
+    state, not from the model calling it "followup" rather than "answer". Keeping the
+    two in step here is deliberate — a gate that disagreed with the router would report
+    a path the turn did not take.
+
+    Fails toward MORE processing: an action this function does not recognise is treated
+    as needing the engine, never as a direct answer.
+    """
+    if action in _ENTRY_DIRECT:
+        return {"requires_veda": False, "requires_context": False}
+    if action in _ENTRY_CONTEXT_ONLY:
+        # Answered from the QueryFrame the memory layer already loaded and authorised —
+        # never from the engine, and never from anything this gate invented.
+        return {"requires_veda": False, "requires_context": True}
+    if action == "runtime_context":
+        # A current-date question: self-contained by construction, so it skips
+        # context_resolve_node however much history exists.
+        return {"requires_veda": True, "requires_context": False}
+    return {"requires_veda": True, "requires_context": bool(has_history)}
+
+
+# Runs of THREE OR MORE of the same letter, and a trailing tail of punctuation,
+# whitespace and symbols. Three, not two, so a word that legitimately doubles a letter
+# ("hello", "morning") is never touched.
+_L0_REPEAT_RE = re.compile(r"(.)\1{2,}")
+_L0_TAIL_RE = re.compile(r"[\s\W_]+$", re.UNICODE)
+_L0_NORMALISE = os.environ.get("CHATBOT_ENTRY_GATE_NORMALISE", "1") == "1"
+
+
+def _normalise_for_l0(message: str) -> str | None:
+    """A conservative spelling of `message` to retry the EXISTING canned matcher with,
+    or None when normalising changes nothing.
+
+    This is the one piece of new behaviour in the gate, and it is deliberately NOT a
+    greeting dictionary — it adds no word. It only collapses the two things people do
+    to words they are not really typing: hold a key down, and end with punctuation or
+    an emoji. Measured 2026-09-21 against the 346-message suite: "heeeey 😂" and
+    "good morninggg" were the two of the brief's own L0 examples the canned path
+    missed, and both are exactly this shape.
+
+    A misspelling is NOT normalised ("helo", "hlo", "gud morning"): guessing at
+    intended letters is where a conservative gate stops and the model starts.
+    """
+    if not _L0_NORMALISE or not message:
+        return None
+    text = _L0_TAIL_RE.sub("", message.strip())
+    text = _L0_REPEAT_RE.sub(r"\1", text)
+    text = " ".join(text.split())
+    return text if text and text != message.strip() else None
+
+
+def _is_punctuation_only(message: str) -> bool:
+    """Is this message nothing but punctuation — "???", "...", "!!!" ?
+
+    Unicode CATEGORY, not a character list: every non-space character must be in a
+    punctuation class (Unicode "P*"). That is what keeps an emoji out — "👍" is category
+    So (Symbol, other), not punctuation, and it is an acknowledgement rather than
+    gibberish. A message with any letter or digit is never caught here, so "okay",
+    "hola" and "helo" are untouched, and this can never swallow a real question.
+
+    This is the one unintelligible shape that can be recognised with no dictionary and
+    no model: a message containing no word at all is not asking anything.
+    """
+    text = (message or "").strip()
+    if not text:
+        return False
+    return all(unicodedata.category(ch).startswith("P") for ch in text if not ch.isspace())
+
+
+def _canned_smalltalk_reply(message: str, _depth: int = 0) -> str | None:
     """Instant reply for the fast-path patterns above — None means "not a fast
     match, fall back to the LLM" (used by both classify_node and smalltalk_node
     so the two stay in lockstep on what counts as trivial smalltalk)."""
     if _DATA_QUESTION_HINTS.search(message):
         return None
+    if _is_punctuation_only(message):
+        # Measured 2026-09-21: "???" was classified as a data question and spent a full
+        # engine round-trip. It names nothing and asks nothing; the engine has no more
+        # chance of answering it than this line does.
+        return REPHRASE_REPLY
     if _GREETING_RE.match(message):
         return FALLBACK_REPLY
     if _THANKS_RE.match(message):
         return "You're welcome! Let me know if you have any other data questions."
     if _BYE_RE.match(message):
         return "Goodbye! Come back anytime you have data questions."
+    if _IDENTITY_RE.match(message):
+        return IDENTITY_REPLY
+    if _CAPABILITY_RE.match(message):
+        return CAPABILITY_REPLY
+    if _HINGLISH_SOCIAL_RE.match(message):
+        return FALLBACK_REPLY
+    # Second and last attempt, on a conservatively normalised spelling of the SAME
+    # message against the SAME patterns above — no extra words, no extra patterns.
+    # `_depth` stops the retry recursing: the normalised form is tried once.
+    if _depth == 0:
+        normalised = _normalise_for_l0(message)
+        if normalised:
+            return _canned_smalltalk_reply(normalised, _depth=1)
     return None
 
+
+
+def _mentions_frame_subject(message: str, frame: dict) -> bool:
+    """Does this message actually NAME something the active frame is about?
+
+    The positive half of the "the model said smalltalk, should we believe it?" question.
+    The negative half — "is this a greeting?" — was tried first and cannot work: the set
+    of things a person types after reading an answer is open ("okay", "hmm", "acha",
+    "thik hai", "makes sense"), so every word missing from the list became a turn sent to
+    the SQL engine as data. Measured 2026-09-19: 7 of 8 plain acknowledgements reached
+    the engine, "okay" and "ok" among them — the two most common things anyone types.
+
+    So the test is inverted. The frame is executed-SQL evidence of what the session is
+    about: its entity, the fields and values it filtered on, what it grouped and
+    measured. A message that shares a word with ANY of those is talking about the data;
+    one that shares none cannot be, whatever it is made of. Nothing to maintain, and a
+    filler word nobody has thought of yet is handled by default.
+    """
+    words = _content_words(message)
+    if not words:
+        return False
+    subject: set = set()
+    for value in (frame.get("entity"), frame.get("entity_display")):
+        subject |= _content_words(value)
+    for f in (frame.get("filters") or []):
+        subject |= _content_words(f.get("field"))
+        subject |= _content_words(f.get("value"))
+    for group in (frame.get("group_by") or []):
+        subject |= _content_words(group)
+    for measure in (frame.get("measures") or []):
+        subject |= _content_words(measure)
+    for order in (frame.get("order_by") or []):
+        subject |= _content_words((order or {}).get("field"))
+    return bool(words & subject)
+
+
+_WORD_SPLIT_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _content_words(text) -> set:
+    """Words of a message or a frame fact, folded to a comparable form.
+
+    Splits on separators AND camelCase, drops tokens under three characters (they
+    collide with everything), and folds a trailing "s" so a question's "transactions"
+    matches a frame's "transaction". The same crude-on-purpose folding
+    apps/query/data_vocabulary.py uses — a real stemmer would also fold unrelated words
+    together, which here would mean overriding the model on a message that shares
+    nothing with the data.
+    """
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", str(text or ""))
+    out = set()
+    for token in _WORD_SPLIT_RE.split(spaced.lower()):
+        if len(token) < 3:
+            continue
+        out.add(token)
+        if token.endswith("s") and len(token) > 3:
+            out.add(token[:-1])
+        else:
+            out.add(token + "s")
+    return out
 
 
 def _is_social(message: str) -> bool:
@@ -229,7 +748,8 @@ def _is_social(message: str) -> bool:
     # A canned pattern matching the WHOLE message is unambiguous — check it before
     # the referential guard, or "how's it going" is rejected over the "it" in it.
     if (_GREETING_RE.match(message) or _THANKS_RE.match(message)
-            or _BYE_RE.match(message)):
+            or _BYE_RE.match(message) or _IDENTITY_RE.match(message)
+            or _CAPABILITY_RE.match(message) or _HINGLISH_SOCIAL_RE.match(message)):
         return True
     # Only the LOOSER opener match needs the referential guard: "hi" at the front
     # does not make "hi, what about the other one" social.
@@ -292,8 +812,129 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     message = state["message"]
     history = state.get("history", [])
     frame = state.get("frame") or {}
+    if state.get("memory_reset"):
+        logger.info("classify_node: memory was reset this turn — acknowledging without "
+                    "sending %r to the engine", message)
+        return {"action": "reset", "resolved_query": None, "sql": None, "rows": None,
+                "status": None, "engine_result": {}, "last_result": {},
+                "needs_clarification": False, "clarification_question": None,
+                "engine_unavailable": False, "delta_type": None, "context_used": None}
+
+    # Re-present the answer already on screen — no engine call, no SQL, no model.
+    # Requires a PREVIOUS answered result to re-present: without one there is
+    # nothing to chart, so "as a pie chart" falls through to the normal path and the
+    # engine's own refuse/clarify handles it, rather than replying about nothing.
+    # A question about the conversation itself, answerable from the QueryFrame the
+    # memory layer already stored. Requires a frame with an entity — without one there
+    # is no "last query" to describe, so it falls through to the normal path.
+    recall_kind = _recall_kind(message)
+    if recall_kind and not frame.get("entity"):
+        # Nothing to recall — but "what sql did you run" still has an honest, instant
+        # answer, and the engine has none. Measured twice: 62s after a "start over", and
+        # 101s as the FIRST message of a session, both returning "Could you clarify if
+        # 'did' is a column name". The first-message case used to be excluded on the
+        # theory that it might be a real question; it is not — there is no reading of
+        # "what SQL did you run" that the SQL engine can answer.
+        logger.info("classify_node: recall question with no frame to recall from — "
+                    "answering without the engine: %r", message)
+        return {"action": "recall", "resolved_query": None, "recall_kind": "nothing",
+                "needs_clarification": False, "clarification_question": None,
+                "engine_unavailable": False, "pending_clarification": {},
+                "engine_result": {}, "sql": None, "rows": None, "status": None,
+                "context_used": None}
+    if recall_kind and frame.get("entity"):
+        logger.info("classify_node: recall question (%s) — answering from the frame, "
+                    "engine not called: %r", recall_kind, message)
+        # Partial update, same reason as the presentation path below: the reset at the
+        # end of this function would clear engine_result, and the "trail" answer reads
+        # the previous turn's explain block out of it.
+        # engine_result CLEARED, unlike the presentation path below. recall_node answers
+        # from the FRAME alone and never reads engine_result — but apps/chat/services.py
+        # renders a markdown table and charts from whatever `res0` carries, so letting the
+        # previous turn's result survive made "what SQL did you run" re-emit that entire
+        # table and its charts alongside the one-line answer.
+        return {"action": "recall", "resolved_query": None,
+                "needs_clarification": False, "clarification_question": None,
+                "engine_unavailable": False, "recall_kind": recall_kind,
+                "pending_clarification": {},
+                "engine_result": {}, "sql": None, "rows": None, "status": None,
+                "context_used": None}
+    presentation_kind = _presentation_kind(message)
+    # `last_result` (written by memory_write_node, and never cleared by the reset at the
+    # end of this function) rather than `engine_result`: any turn in between wipes
+    # engine_result, so "show me X" → "thanks" → "as a pie chart" fell through to the
+    # engine and re-ran the SQL. engine_result stays as the fallback for the case where
+    # the previous turn IS the answered one.
+    previous_result = state.get("last_result") or state.get("engine_result") or {}
+    if presentation_kind and previous_result.get("rows"):
+        logger.info("classify_node: presentation-only follow-up (%s) — reusing the "
+                    "previous result, engine not called: %r", presentation_kind, message)
+        # Deliberately a PARTIAL update: every key the normal reset below clears
+        # (engine_result/sql/rows/status) is OMITTED here, so LangGraph leaves the
+        # checkpointed values from the answered turn in place for represent_node.
+        return {"action": "represent", "resolved_query": None,
+                "needs_clarification": False, "clarification_question": None,
+                "engine_unavailable": False, "viz_override": presentation_kind,
+                "pending_clarification": {}, "context_used": None}
     deterministic_smalltalk = _canned_smalltalk_reply(message) is not None
     delta_type = None          # None = "not computed this turn", see context_resolve_node
+    delta_field = ""           # replace/remove only — which remembered filter it acts on
+    delta_value = ""           # the grounded word from the user's own message
+
+    # A pending clarification is consumed ONLY by a message that actually reads as an
+    # ANSWER to it — checked AFTER every deterministic fast path above, and never for a
+    # message carrying a data question of its own.
+    #
+    # The first cut ran this branch second, on nothing but "a slot exists", and a live
+    # 33-turn run (2026-09-17) showed what that costs. 12 of 21 engine turns came back
+    # something other than "answered", so the slot was armed most of the time, and every
+    # following message — greetings included — was concatenated onto the stored request
+    # and re-armed, compounding without bound:
+    #   "show me the top 5 cities by number of assets for hi for as a pie chart for
+    #    what sql did you run for only the top 3"
+    #   -> 'Could you clarify if "chart" is a column name or a value to filter on?'
+    # The engine read `hi`, `back`, `chart`, `did` and `pie` as data — every one a
+    # conversation-layer token the user never meant as one. ~1,100s of engine time in
+    # that sample alone.
+    #
+    # A message that does NOT qualify does not merely skip this branch: it CLEARS the
+    # slot. Leaving it armed is what turned one unanswered turn into a poisoned session.
+    # An EXPLICIT re-shaping of the previous question ("by city instead", "make it top
+    # 5"). Computed here, before the pending-clarification branch, because it outranks
+    # one: see _is_clarification_answer. Requires the frame to actually hold the slot, so
+    # it can never fire on a session with nothing to re-shape.
+    shape_change = memory_frame.detect_shape_delta(frame, message, explicit_only=True)
+
+    _pending_raw = state.get("pending_clarification")
+    pending = (_pending_raw.get("original_query")
+               if isinstance(_pending_raw, dict) else None)
+    is_smalltalk_or_fast_path = bool(
+        deterministic_smalltalk or recall_kind or presentation_kind or shape_change
+        or _RESET_RE.match(message) or _DRILL_UP_RE.match(message)
+        or _RUNTIME_CONTEXT_RE.match(message))
+    if pending:
+        if _is_clarification_answer(message, recall_kind, presentation_kind,
+                                    deterministic_smalltalk, bool(shape_change)):
+            logger.info("classify_node: a clarification is pending and this message "
+                        "answers it: %r", message)
+            return {"action": "clarify_reply", "resolved_query": None, "sql": None,
+                    "rows": None, "status": None, "engine_result": {},
+                    "needs_clarification": False, "clarification_question": None,
+                    "engine_unavailable": False, "delta_type": None,
+                    "delta_field": "", "delta_value": "", "context_used": None}
+        if is_smalltalk_or_fast_path:
+            # Unambiguously not an answer — the user moved on. Drop the request rather
+            # than leave it armed to swallow the turn after this one.
+            logger.info("classify_node: a clarification was pending but %r took a "
+                        "deterministic path — dropping the pending request", message)
+            state = {**state, "pending_clarification": {}}
+        else:
+            # Genuinely ambiguous. Leave the slot ARMED and let the classifier below
+            # decide: if it returns "clarify_reply" the graph completes the pending
+            # request, otherwise the turn is handled on its own and the normal return
+            # clears the slot. Neither guessing nor discarding.
+            logger.info("classify_node: a clarification is pending and %r is not an "
+                        "obvious value — deferring to the classifier", message)
 
     if deterministic_smalltalk:
         # Deterministic fast path: a bare "hi"/"thanks"/"bye" needs no LLM call
@@ -310,6 +951,58 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # self-contained regardless of history.
         action = "runtime_context"
         logger.info("classify_node: deterministic runtime-context match, message=%r", message)
+    elif (presentation_kind and memory_frame.is_document_frame(frame)
+            and not previous_result.get("rows")):
+        # "as a pie chart" asked of a DOCUMENT answer. The represent fast path above
+        # requires the previous result to carry rows, and a retrieval answer never
+        # does, so this used to fall through to the model and then to the engine —
+        # measured 2026-09-22 on the real docs_contracts source, it came back with the
+        # generic "I'm here for questions about your data", which tells the user
+        # nothing about why their chart did not appear.
+        #
+        # Same reasoning as the shape and drill_up branches below: prose from a PDF has
+        # nothing to plot, permanently, so it is settled here from memory at no cost
+        # rather than spending an engine round-trip to be told so.
+        logger.info("classify_node: a presentation change asked of a document answer — "
+                    "answering from memory, engine not called: %r", message)
+        return {"action": "recall", "resolved_query": None,
+                "recall_kind": "presentation_not_applicable", "needs_clarification": False,
+                "clarification_question": None, "engine_unavailable": False,
+                "pending_clarification": {}, "engine_result": {}, "sql": None,
+                "rows": None, "status": None, "context_used": None}
+    elif (memory_frame.is_document_frame(frame)
+            and memory_frame.matches_shape_phrase(message)):
+        # "make it top 10" / "by month instead" / "don't sort by amount" asked of a
+        # DOCUMENT. There is nothing to reshape: a retrieval answer has no row limit,
+        # no grouping and no ordering, and never will. Measured 2026-09-21 on the real
+        # docs_contracts source: this reached the engine, cost 19 seconds, and came
+        # back "The provided context does not contain information about a 'top 10'
+        # list" — the same failure shape as "go back" on the same path.
+        logger.info("classify_node: a shape change asked of a document answer — "
+                    "answering from memory, engine not called: %r", message)
+        return {"action": "recall", "resolved_query": None,
+                "recall_kind": "shape_not_applicable", "needs_clarification": False,
+                "clarification_question": None, "engine_unavailable": False,
+                "pending_clarification": {}, "engine_result": {}, "sql": None,
+                "rows": None, "status": None, "context_used": None}
+    elif _DRILL_UP_RE.match(message) and not state.get("drill_stack"):
+        # "go back" with nothing to go back FROM. Previously this fell through to the
+        # model and then to the ENGINE: measured 2026-09-21 on the document source,
+        # "go back" cost 27 seconds and came back "The provided context does not
+        # contain the answer to the question 'go back'" — the retrieval pipeline was
+        # asked to find a navigation word in a PDF.
+        #
+        # It is especially wrong on a document conversation, where a drill stack is
+        # never built at all, so this is the PERMANENT state there rather than an edge
+        # case. The honest answer costs nothing and needs no model: there is nothing to
+        # go back to.
+        logger.info("classify_node: drill-up with an empty stack — answering from "
+                    "memory, engine not called: %r", message)
+        return {"action": "recall", "resolved_query": None,
+                "recall_kind": "drill_up_empty", "needs_clarification": False,
+                "clarification_question": None, "engine_unavailable": False,
+                "pending_clarification": {}, "engine_result": {}, "sql": None,
+                "rows": None, "status": None, "context_used": None}
     elif frame.get("entity") and state.get("drill_stack") and _DRILL_UP_RE.match(message):
         # Deterministic fast path: "go back" navigation, only when there's an
         # actual drill level to pop (see _DRILL_UP_RE's docstring for why).
@@ -345,8 +1038,10 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                 # shares classify_delta's exact vocabulary/confidence gates via
                 # parse_delta_response, so a merged response is held to the
                 # identical bar as the standalone fallback call.
-                dt, _slots = parse_delta_response(raw, message)
+                dt, _slots, _dfield = parse_delta_response(raw, message)
                 if dt in DELTA_TYPES:
+                    delta_field = _dfield
+                    delta_value = _slots[0] if _slots else ""
                     delta_type = dt
 
     # Deliberately does NOT run _depends_on_history for every "smalltalk"
@@ -382,25 +1077,34 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         )
         action = "answer"
     elif (action == "smalltalk" and frame.get("entity")
-            and not _is_social(message)):
-        # _DATA_QUESTION_HINTS is schema-agnostic action-words only (count/how
-        # many/show me/...) — it never catches a bare entity mention like
-        # "tell me something about transaction" (no table/column names
-        # hardcoded there by design). But a QueryFrame from a prior successful
-        # query IS a grounded, deterministic signal that the session already
-        # has an active analytical topic: a message that isn't a genuine
-        # greeting/thanks/bye can't really be smalltalk right after that,
-        # regardless of whether the LLM recognized the entity noun. Same
-        # refuse-over-guess principle as the two overrides above.
+            and not _is_social(message)
+            and _mentions_frame_subject(message, frame)):
+        # _DATA_QUESTION_HINTS is schema-agnostic action-words only (count/how many/
+        # show me/...) — it never catches a bare entity mention like "tell me something
+        # about transaction" (no table/column names hardcoded there by design), which is
+        # the case this override exists for.
+        #
+        # It used to fire on "an active frame exists AND this isn't a greeting", and that
+        # second half is an open set: measured 2026-09-19, "okay", "ok", "hmm", "got it",
+        # "cool", "i see" and "makes sense" were all overridden into follow-ups and sent
+        # to the SQL engine as data — 7 of 8 tried. The model had said smalltalk for every
+        # one of them, correctly, and was overruled by a word list.
+        #
+        # Now it takes POSITIVE evidence instead: the message must actually name something
+        # the frame is about (_mentions_frame_subject). "tell me something about
+        # transaction" still fires; "okay" cannot, and neither can any filler nobody has
+        # thought of yet. When no signal fires the model's own verdict stands — its prompt
+        # already carries the HARD RULE that anything naming a data entity is never
+        # smalltalk, so trusting it here is not the same as having no guard.
         logger.warning(
-            "classify_node: LLM said smalltalk but an active QueryFrame exists "
-            "(entity=%r) and message isn't a genuine greeting/thanks/bye, "
-            "overriding to 'followup': %r", frame.get("entity"), message,
+            "classify_node: LLM said smalltalk but the message names the active frame's "
+            "subject (entity=%r), overriding to 'followup': %r",
+            frame.get("entity"), message,
         )
         action = "followup"
 
     if (action in ("followup", "answer") and not frame.get("entity")
-            and _BARE_REFERENTIAL_RE.search(message) and not _DATA_QUESTION_HINTS.search(message)):
+            and _is_bare_referential(message)):
         # Universal backstop, independent of HOW `action` got here (the LLM's
         # own direct verdict, OR any override above): a message that is
         # PURELY referential ("other", "that", "it", ...) with no data-
@@ -421,6 +1125,73 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             "than forward ungrounded text to the engine: %r", action, message,
         )
         action = "smalltalk"
+
+    # LAST gate before the engine, after every override above has had its say. Four
+    # conditions, all required — each one exists to stop this from ever withholding a
+    # real question:
+    #   · the flag is on (default OFF);
+    #   · the turn was heading to the engine at all;
+    #   · there is NO active frame — a follow-up like "only the ones in Nagpur" names
+    #     no schema word of its own and is grounded by the frame, not by its text.
+    #     Gating those would break every refinement in the product;
+    #   · the message names nothing in the data (vocabulary missing → never gates).
+    # `message_mentions_data` is the api tier's precomputed answer (one bool); the
+    # vocabulary list is the older, more expensive way of asking the same question and
+    # is still honoured for callers that pass it. None from BOTH means the check could
+    # not be made, and an unanswerable check must never gate.
+    _mentions = state.get("message_mentions_data")
+    if _mentions is None:
+        _vocab = state.get("data_vocabulary")
+        _mentions = _mentions_the_data(message, _vocab) if _vocab else None
+    # TWO cases, with different costs, so they are gated differently.
+    #
+    # (1) A FOLLOW-UP WITH NO FRAME. The model called this a continuation, yet there is
+    #     nothing to continue — incoherent by construction, whatever the wording — AND
+    #     the message names nothing in the scoped data, so the engine has nothing to
+    #     work from either. Measured 2026-09-21 over the 282 real data questions in
+    #     corpus_real.jsonl: ZERO of them are classified "followup", so this withholds
+    #     nothing real. Always on. It closes the case this exists for: ungrounded
+    #     referential text ("the other ones") once reached the engine, matched an
+    #     unrelated table, and returned a real person's name and email address.
+    #
+    # (2) A NEW QUESTION that names nothing in the data ("what is the meaning of life").
+    #     Same evidence, higher cost: the same measurement withholds 6 of 282 real
+    #     questions (2.1% — all "rows in the catalog", where "catalog" lives in a source
+    #     outside the tested scope). Stays behind the flag, default OFF, unchanged.
+    # `last_result`, NOT just the frame. Measured 2026-09-21 against the real document
+    # source (docs_contracts, 179 chunks): a RAG answer produces no frame at all —
+    # harvest_frame needs a table and an explain.data_used block, and a retrieval
+    # result has neither — so "no frame" is the PERMANENT state there, and this gate
+    # withheld "what about for a full time employee" right after it had correctly
+    # answered "what is the notice period" from the employee handbook. A legitimate
+    # follow-up, refused.
+    #
+    # "Nothing has been answered yet" is the condition actually wanted, and
+    # `last_result` is exactly that: memory_write_node sets it on an answered turn even
+    # when the harvest produces no frame. So a document conversation keeps its
+    # follow-ups, and "the other ones" typed into a session that has answered nothing
+    # is still caught.
+    _answered_before = bool(state.get("last_result") or state.get("engine_result"))
+    if (action == "followup" and not frame.get("entity")
+            and not _answered_before and _mentions is False):
+        logger.info("classify_node: a follow-up in a session that has answered nothing, "
+                    "naming nothing in the scoped data — answering without the engine: "
+                    "%r", message)
+        action = "no_match"
+    elif (_GROUNDING_GATE_ENABLED and action == "answer"
+            and not frame.get("entity")
+            and _mentions is False):
+        logger.info("classify_node: message names nothing in the scoped data — "
+                    "answering without the engine: %r", message)
+        action = "no_match"
+
+    if action == "clarify_reply" and not pending:
+        # The classifier can emit this label on any turn. With nothing pending there is
+        # no request to complete, and clarify_reply_node would pass the raw message to
+        # the engine ungrounded — so treat it as the ordinary follow-up it is.
+        logger.info("classify_node: classifier said clarify_reply but nothing is "
+                    "pending — handling %r as a followup", message)
+        action = "followup"
 
     logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state
@@ -449,6 +1220,16 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         "clarification_question": None,
         "engine_unavailable": False,
         "delta_type": delta_type,
+        "delta_field": delta_field,
+        "delta_value": delta_value,
+        # Same per-turn reset reasoning as `resolved_query` above: only
+        # context_resolve_node/clarify_reply_node set this, and every route that skips
+        # them would otherwise report the PREVIOUS turn's understanding as this one's.
+        "context_used": None,
+        # Cleared unless the branch above handed the turn to clarify_reply. A slot that
+        # survives a turn it did not answer is what compounded.
+        "pending_clarification": (state.get("pending_clarification") or {})
+        if action == "clarify_reply" else {},
     }
 
 
@@ -456,10 +1237,13 @@ def smalltalk_node(state: ChatState) -> dict:
     """Direct reply for greetings/thanks/chit-chat — engine bypassed entirely."""
     message = state["message"]
     reply = _canned_smalltalk_reply(message)
-    if reply is None:
-        # classify_node routed here via the LLM (not the deterministic fast
-        # path above) — some smalltalk beyond a bare greeting/thanks/bye, so
-        # this is the one case that still needs its own LLM call.
+    if reply is None and _SMALLTALK_LLM_REPLY:
+        # Off by default since 2026-09-21. classify_node has ALREADY established that
+        # this turn is smalltalk; a second call only chooses the WORDS, and it was
+        # measured costing 5-20s of the 12.3s a typo'd greeting took end to end — on a
+        # turn whose whole point is that it needs no work. It also drifted: "hola" came
+        # back as "¡Hola! ... preguntas sobre数据分析", Spanish and Chinese mixed.
+        # Set CHATBOT_SMALLTALK_LLM_REPLY=1 to restore it.
         reply = call_slm(
             build_smalltalk_system_prompt(),   # built fresh each call so "today" is always current
             message,
@@ -468,7 +1252,9 @@ def smalltalk_node(state: ChatState) -> dict:
             purpose="smalltalk",
         )
     if not reply:
-        reply = FALLBACK_REPLY
+        # Tone-neutral, because this is reached by "okay" and "thnks" as well as by a
+        # greeting the patterns could not spell-match.
+        reply = SMALLTALK_FALLBACK_REPLY
     return {
         "reply_text": reply,
         "needs_clarification": False,
@@ -476,6 +1262,298 @@ def smalltalk_node(state: ChatState) -> dict:
         "engine_unavailable": False,
         "history": _turn_delta(state, reply),
     }
+
+
+def classify_with_entry_gate(state: ChatState, config: RunnableConfig) -> dict:
+    """classify_node plus the Turn Entry Gate's reporting. Registered as the graph's
+    "classify" node so the gate observes EVERY path without classify_node's six early
+    returns each having to remember to carry the fields.
+
+    It adds no decision of its own — `entry_decision` reads the action classify_node
+    already chose. The only reason this wrapper exists is that the gate must be
+    observable (which tier settled the turn, and what it cost) and classify_node
+    returns from six different places.
+    """
+    started = time.perf_counter()
+    result = classify_node(state, config)
+    elapsed_ms = (time.perf_counter() - started) * 1000.0
+
+    action = result.get("action") or ""
+    decision = entry_decision(action, bool(state.get("history")))
+    # Which tier settled it. Under ~2ms nothing reached the network, so the turn was
+    # decided by L0 — measured rather than inferred from which branch ran, which would
+    # have to be threaded out of all seven of them.
+    if elapsed_ms < 2.0:
+        path = "L0_DIRECT" if action == "smalltalk" else "L0_FASTPATH"
+    else:
+        path = "SLM_GATE"
+
+    logger.info("entry_gate: path=%s requires_context=%s requires_veda=%s "
+                "classification_latency_ms=%.1f action=%s",
+                path, decision["requires_context"], decision["requires_veda"],
+                elapsed_ms, action or "?")
+    return {**result, "entry_path": path,
+            "classification_latency_ms": round(elapsed_ms, 2), **decision}
+
+
+def _fmt_filters(frame: dict) -> str:
+    parts = [f"{f['field']} {f.get('operator', 'equals')} {f['value']}"
+             for f in (frame.get("filters") or [])
+             if f.get("field") and f.get("value") is not None]
+    return ", ".join(parts)
+
+
+def _fmt_ranking(frame: dict) -> str:
+    bits = []
+    for order in (frame.get("order_by") or []):
+        if order.get("field"):
+            bits.append(f"sorted by {order['field']} "
+                        f"({'highest' if order.get('desc') else 'lowest'} first)")
+    if frame.get("limit"):
+        bits.append(f"limited to {frame['limit']} rows")
+    return ", ".join(bits)
+
+
+def _source_name(state: ChatState, frame: dict) -> str:
+    """Display name for the source the last answer came from — the api tier resolved
+    it once, per request, for sources the caller is authorised for (apps/query/
+    scope.py::source_profiles_for). Falls back to nothing rather than to a bare id."""
+    profile = (state.get("source_profiles") or {}).get(str(frame.get("source_id")))
+    return (profile or {}).get("name") or ""
+
+
+def no_match_node(state: ChatState) -> dict:
+    """The message names nothing in the scoped data — say so at once, and say what CAN
+    be answered, instead of spending a full engine round-trip on a refusal.
+
+    Names the real connected sources and what they hold (source_profiles, already
+    resolved per request for sources the caller is authorised for) so the reply is a
+    route rather than a dead end. States no fact about the data itself."""
+    profiles = state.get("source_profiles") or {}
+    described = []
+    for profile in profiles.values():
+        name = (profile or {}).get("name")
+        if not name:
+            continue
+        tags = [t for t in ((profile or {}).get("domain_tags") or []) if t]
+        described.append(f"{name} ({', '.join(tags)})" if tags else name)
+
+    if described:
+        reply = ("I can only answer questions about your connected data, and I can't see "
+                 "anything in that message that matches it. You're connected to "
+                 + ", ".join(described)
+                 + " — ask me something about it and I'll go and look.")
+    else:
+        reply = ("I can only answer questions about your connected data, and I can't see "
+                 "anything in that message that matches it. Try naming what you want to "
+                 "know about — a total, a count, a list, or a trend over time.")
+    return {
+        "reply_text": reply,
+        "status": "no_match",
+        "needs_clarification": False,
+        "engine_unavailable": False,
+        "history": _turn_delta(state, reply),
+    }
+
+
+def recall_node(state: ChatState) -> dict:
+    """Answer a question about the CONVERSATION rather than about the data — no engine
+    call, no SQL, no model call.
+
+    Every fact here was harvested from an already-executed, already-validated result
+    (chatbot/memory/frame.py::harvest_frame) and is quoted back verbatim. Nothing is
+    re-derived and nothing is generated, so this can neither invent a number nor
+    disagree with the answer the user is looking at. Memory is not written: nothing was
+    executed this turn, so there is no new evidence and the frame must not advance
+    (memory_write_node's evidence-only rule) — the graph routes this node to
+    format_reply directly."""
+    kind = state.get("recall_kind") or "trail"
+    frame = state.get("frame") or {}
+    if kind == "presentation_not_applicable":
+        _what = frame.get("entity_display") or frame.get("entity") or "a document"
+        _reply = (f"There's nothing to chart here — this answer came from {_what}, "
+                  f"which is written text rather than rows and figures. Ask me "
+                  f"something else about it and I'll look it up.")
+        return {"reply_text": _reply, "needs_clarification": False,
+                "resolved_query": "", "engine_unavailable": False,
+                "history": _turn_delta(state, _reply)}
+    if kind == "shape_not_applicable":
+        _what = frame.get("entity_display") or frame.get("entity") or "a document"
+        _reply = (f"That one doesn't apply here — this answer came from {_what}, "
+                  f"not a table of rows, so there's no ordering or row count to change. "
+                  f"Ask me something else about it and I'll look it up.")
+        return {"reply_text": _reply, "needs_clarification": False,
+                "resolved_query": "", "engine_unavailable": False,
+                "history": _turn_delta(state, _reply)}
+    if kind == "drill_up_empty":
+        # Reached with or without a frame: nothing has been narrowed, so there is no
+        # level to return to either way.
+        return {
+            "reply_text": ("There's nothing to go back to — nothing has been narrowed "
+                           "down yet in this conversation."),
+            "needs_clarification": False, "resolved_query": "",
+            "engine_unavailable": False,
+            "history": _turn_delta(state, "There's nothing to go back to — nothing has "
+                                          "been narrowed down yet in this conversation."),
+        }
+    if kind == "nothing" or not frame.get("entity"):
+        reply = ("I don't have an earlier question to describe — nothing has been run "
+                 "in this conversation yet. Ask me something about your data and I'll "
+                 "be able to show you exactly how I answered it.")
+        return {"reply_text": reply, "status": "answered", "needs_clarification": False,
+                "engine_unavailable": False, "history": _turn_delta(state, reply)}
+    entity, display = frame.get("entity"), frame.get("entity_display")
+    # "Assets (assets_asset)" — the business name plus the raw table it came from, so a
+    # reader can tie the answer to the schema. A DOCUMENT frame has no raw table: the
+    # dataset IS the entity, and printing both gave "Samta-Employee Handbook April 2026
+    # (Samta-Employee Handbook April 2026)".
+    if display and entity and display != entity:
+        dataset = f"{display} ({entity})"
+    else:
+        dataset = display or entity or ""
+    source = _source_name(state, frame)
+    in_source = f" in {source}" if source else ""
+    filters, ranking = _fmt_filters(frame), _fmt_ranking(frame)
+    rows = frame.get("last_row_count")
+
+    if kind == "query":
+        understanding = frame.get("understanding")
+        if memory_frame.is_document_frame(frame):
+            # `understanding` means two different things depending on the head that
+            # produced it. On a SQL answer it restates the QUESTION ("Find the 100
+            # cheapest sale listings"), which is exactly what this recall wants. On a
+            # retrieval answer it describes the ANSWERING PROCESS — measured
+            # 2026-09-21, "what did i ask earlier" replied "Your last question was:
+            # Answered from Samta-Employee Handbook April 2026 using 5 relevant
+            # passages", which is not a question and not what the user asked.
+            #
+            # The user's own words are already kept, verbatim, in the episodic buffer
+            # (chatbot/memory/store.py, written by memory_write_node on answered turns
+            # only) — so quote those instead of paraphrasing an answer back as a
+            # question. Falls back to the dataset line when the buffer is empty.
+            asked = [t.get("content") for t in (state.get("episodic") or [])
+                     if t.get("role") == "user" and t.get("content")]
+            reply = (f"You asked: {asked[-1]}" if asked
+                     else f"Your last question read {dataset}{in_source}.")
+        else:
+            reply = (f"Your last question was: {understanding}" if understanding
+                     else f"Your last question read {dataset}{in_source}.")
+    elif kind == "sql":
+        sql = frame.get("last_sql")
+        if sql:
+            reply = f"This is the SQL I ran:\n\n```sql\n{sql}\n```"
+        elif memory_frame.is_document_frame(frame):
+            # There is no SQL because none was run. Saying so and naming what WAS read
+            # is the honest answer; "it came back without one" reads like a fault.
+            reply = (f"I didn't run any SQL for that — the answer came from "
+                     f"{dataset}{in_source}.")
+        else:
+            reply = "I don't have the SQL for the last answer — it came back without one."
+    elif kind == "table":
+        if dataset and memory_frame.is_document_frame(frame):
+            reply = f"I read {dataset}{in_source} — a document, not a table."
+        else:
+            reply = f"I read {dataset}{in_source}." if dataset else (
+                "I don't have a table recorded for the last answer.")
+    elif kind == "filters":
+        reply = f"Filters applied: {filters}." if filters else (
+            "No filters were applied — the last answer covered every row.")
+    elif kind == "rows":
+        reply = (f"That returned {rows} row(s)." if rows is not None
+                 else "I don't have a row count for the last answer.")
+    else:                                        # "trail"
+        steps = [f"read {dataset}{in_source}"] if dataset else []
+        if filters:
+            steps.append(f"applied {filters}")
+        if ranking:
+            steps.append(ranking)
+        if rows is not None:
+            steps.append(f"returned {rows} row(s)")
+        reply = ("For that answer I " + ", ".join(steps) + "."
+                 if steps else "I don't have the details of the last answer recorded.")
+
+    return {
+        "reply_text": reply,
+        "status": "answered",
+        "needs_clarification": False,
+        "engine_unavailable": False,
+        "history": _turn_delta(state, reply),
+    }
+
+
+def represent_node(state: ChatState) -> dict:
+    """Re-render the PREVIOUS turn's result in the format just asked for — no engine
+    call, no SQL, no model call.
+
+    The rows are already in hand: re-running the pipeline to redraw them costs a full
+    round-trip and, worse, can return a DIFFERENT result set than the one on screen
+    (the underlying data can change between turns, and a non-deterministic plan can
+    too), so "chart that" could redraw something other than "that". Memory is
+    deliberately NOT written here — nothing new was executed, so there is no new
+    evidence and the QueryFrame must not advance a turn (see memory_write_node's
+    evidence-only rule); the graph routes this node straight to format_reply.
+
+    `viz_override` rides along on the result dict so the api tier renders the format
+    the user named instead of its own recommendation (apps/chat/services.py)."""
+    kind = state.get("viz_override") or "chart"
+    previous = dict(state.get("last_result") or state.get("engine_result") or {})
+    previous["viz_override"] = kind
+    row_count = len(previous.get("rows") or [])
+    reply = {
+        "table": f"Here are the same {row_count} row(s) as a table.",
+        "csv": f"Here are the same {row_count} row(s) — use the table's own export "
+               "to download them.",
+    }.get(kind, f"Here are the same {row_count} row(s), drawn as a {kind}.")
+    return {
+        "engine_result": previous,
+        "status": "answered",
+        "reply_text": reply,
+        "needs_clarification": False,
+        "engine_unavailable": False,
+        "history": _turn_delta(state, reply),
+    }
+
+
+def _frame_still_authorised(frame: dict, state: ChatState) -> bool:
+    """Is the source this frame was harvested from still granted to the caller THIS turn?
+
+    RBAC is already resolved fresh on every turn (apps/chat/views.py computes
+    permitted_source_ids / resolve_query_scope / compute_data_scope before the service is
+    built), and every engine-bound turn carries the resulting data_scope. But the frame is
+    not metadata — it holds filter VALUES read out of the customer's data, the executed
+    SQL, the row count, and (for a re-render) the result rows. Three paths answer from it
+    without reaching the engine at all, so `data_scope` is never applied to them:
+    recall_node, represent_node and context_resolve_node.
+
+    Without this check, a grant revoked between turns left "what SQL did you run" and
+    "show that as a table" serving content from the withdrawn source for as long as the
+    memory lived — seven days. Authorisation from a previous turn is not authorisation.
+
+    Fails OPEN only where there is nothing to decide: a frame with no recorded source
+    (written before source pinning existed, or by a path that carries none) and a turn
+    with no resolved scope (a non-HTTP caller, e.g. the CLI) both pass, because neither
+    supplies a fact to compare. A frame WITH a source and a turn WITH a scope must match.
+    """
+    source_id = frame.get("source_id")
+    if source_id is None:
+        return True
+    authorised = state.get("source_ids")
+    if authorised is None:
+        return True                    # no scope resolved at all (CLI / non-HTTP caller)
+    if not authorised:
+        # An EMPTY scope is a decision, not an absence: the view resolved the caller's
+        # grants and found none. Treating it like "no scope supplied" let the single most
+        # likely revocation shape — the last grant withdrawn — sail straight through the
+        # guard and keep serving a seven-day-old frame.
+        logger.warning("_frame_still_authorised: the caller has an EMPTY authorised "
+                       "scope — discarding remembered source_id=%r", source_id)
+        return False
+    try:
+        return int(source_id) in {int(s) for s in authorised}
+    except (TypeError, ValueError):
+        logger.warning("_frame_still_authorised: unreadable source ids "
+                       "(frame=%r, scope=%r) — discarding the frame", source_id, authorised)
+        return False
 
 
 def memory_read_node(state: ChatState) -> dict:
@@ -498,12 +1576,108 @@ def memory_read_node(state: ChatState) -> dict:
     if _RESET_RE.match(message):
         MemoryStore.reset(tenant, session_id)
         logger.info("memory_read_node: deterministic reset match, message=%r", message)
-        return {"frame": {}, "drill_stack": [], "episodic": []}
+        # `memory_reset` ends the turn here (classify_node reads it first). Without it
+        # the wipe was undone by its own turn: "start over" carried on to the engine,
+        # which searched for a table named by those words, answered something, and
+        # memory_write_node then wrote a BRAND NEW frame — measured, the frame came
+        # back at version 1 with an entity in it, so the reset had no lasting effect.
+        # Sending "start over" to a SQL engine was never meaningful anyway.
+        return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": True,
+                "pending_clarification": {}, "last_result": {}, "comparison": {}}
 
-    frame = MemoryStore.read_frame(tenant, session_id) or {}
-    stack = MemoryStore.read_stack(tenant, session_id) or []
-    episodic = MemoryStore.read_episodic(tenant, session_id) or []
-    return {"frame": frame, "drill_stack": stack, "episodic": episodic}
+    # Type-guarded, not just falsiness-guarded: a Redis key holding a JSON string or
+    # list (a bad write, a manual edit, a format change) previously raised
+    # AttributeError out of this node and surfaced as HTTP 500. Memory is an
+    # optimisation; unreadable memory means "no memory", never a failed turn.
+    # Per-source memory (2026-09-18). The frame belongs to the source it was harvested
+    # from, so a turn scoped to source B reads B's topic and leaves A's alone — before
+    # this, one session-wide frame meant the newer source silently erased the older one.
+    # A turn that names no source reads whichever source answered last (the store's
+    # active pointer), which is what a single-source deployment and the CLI both get.
+    source_id = state.get("source_id")
+    frame = MemoryStore.read_frame(tenant, session_id, source_id)
+    frame = frame if isinstance(frame, dict) else {}
+    if not isinstance(frame.get("filters"), list):
+        frame = {**frame, "filters": []}
+    stack = MemoryStore.read_stack(tenant, session_id, source_id)
+    stack = stack if isinstance(stack, list) else []
+    # Scoped to THIS turn's grants. The buffer is session-wide by design (one
+    # conversation, one thread), but each entry records the source that produced it, so a
+    # revoked grant drops its own entries without discarding the rest of the thread —
+    # the same precision _frame_still_authorised gives the frame.
+    episodic = MemoryStore.read_episodic(tenant, session_id,
+                                         authorised_source_ids=state.get("source_ids"))
+    comparison = MemoryStore.read_comparison(tenant, session_id) or {}
+    episodic = episodic if isinstance(episodic, list) else []
+
+    if not _frame_still_authorised(frame, state):
+        # The remembered source is no longer in THIS turn's authorised scope. Everything
+        # derived from it goes with it — see _frame_still_authorised for why the frame is
+        # data, not metadata. Handled here, once, because every downstream path
+        # (recall_node, represent_node, context_resolve_node) reads what this node
+        # returns; guarding them individually would leave the next one to be added
+        # unguarded by default.
+        _revoked = frame.get("source_id")
+        logger.warning(
+            "memory_read_node: remembered source_id=%r is outside this turn's authorised "
+            "scope %r — discarding that source's analytical memory",
+            _revoked, state.get("source_ids"))
+        # Scoped to the revoked source, not the whole session (2026-09-18). Losing the
+        # grant on one source is not a reason to throw away the user's work on another,
+        # and per-source keys make that distinction expressible. The guard itself is
+        # unchanged and still runs on every turn through this node — it got NARROWER in
+        # what it destroys, never in what it catches. A frame with no recorded source has
+        # no scoped key to delete, so that case still wipes the session.
+        MemoryStore.reset(tenant, session_id, source_id=_revoked)
+        # engine_result too. classify_node's presentation check reads
+        # `last_result or engine_result`, so clearing only the first left the PREVIOUS
+        # turn's checkpointed rows to resurrect: recall correctly refused after a
+        # revocation while "show that as a table" still redrew the withdrawn source's
+        # data. Everything the revoked source produced goes together or the guard has a
+        # hole in it.
+        return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": False,
+                "last_result": {}, "pending_clarification": {},
+                "engine_result": {}, "sql": None, "rows": None, "status": None}
+    # Cleared EXPLICITLY on every non-reset turn. The checkpointer persists the whole
+    # state across turns, so a flag only ever set True stays True: live test
+    # 2026-09-17, the turn after "start over" was itself answered as a reset, and so
+    # would every turn after that until the session ended.
+    return {"frame": frame, "drill_stack": stack, "episodic": episodic,
+            "comparison": comparison, "memory_reset": False}
+
+
+def _context_used(frame: dict, delta_type: str, delta_field: str, delta_value: str,
+                  resolved: str, message: str) -> Optional[dict]:
+    """What the conversation layer carried into this turn, for the user to see.
+
+    Every field is something the turn ALREADY produced — the frame it merged and the
+    delta it applied. Nothing here is re-derived, inferred or asked of a model, so it
+    cannot claim an understanding the turn did not actually act on. That is the whole
+    point: when a follow-up carries the wrong context, this is the only place the user
+    could notice before reading the answer and believing it.
+
+    Returns None when nothing was carried — a first question, or a turn whose resolved
+    query is just the message. Showing "we understood: <your own words>" would be noise.
+    """
+    if not frame or not frame.get("entity"):
+        return None
+    if not resolved or resolved.strip() == (message or "").strip():
+        return None
+    carried = {
+        "entity": frame.get("entity_display") or frame.get("entity"),
+        "filters": [f"{f.get('field')} {f.get('operator', 'equals')} {f.get('value')}"
+                    for f in (frame.get("filters") or [])
+                    if f.get("field") and f.get("value") is not None],
+        "source_id": frame.get("source_id"),
+    }
+    changed = None
+    if delta_type in ("replace", "remove") and delta_field:
+        changed = {"operation": delta_type, "field": delta_field}
+        if delta_value:
+            changed["value"] = delta_value
+    elif delta_type in ("refine", "drill_down", "drill_up", "compare"):
+        changed = {"operation": delta_type}
+    return {"carried": carried, "changed": changed, "resolved_query": resolved}
 
 
 def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
@@ -538,23 +1712,29 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
     history = state.get("history", [])
     frame = state.get("frame") or {}
     drill_stack = state.get("drill_stack") or []
+    delta_field = state.get("delta_field") or ""
+    delta_value = state.get("delta_value") or ""
 
     if not frame.get("entity"):
-        # No prior frame at all — classify_node's merged prompt never asked
-        # for a delta_type in this case (no addendum without a frame), so
-        # this is genuinely the first SLM round-trip for this node, not a
-        # second one. Unchanged free-text rewrite, exactly as before.
-        rewritten = call_slm(
-            FOLLOWUP_SYSTEM_PROMPT,
-            build_followup_user_prompt(message, history),
-            max_tokens=80,
-            model=CHATBOT_CLASSIFY_MODEL,
-            purpose="followup",
-        )
-        resolved = (rewritten or message).strip().strip('"')
-        logger.info("context_resolve_node: no frame yet, fallback rewrite %r -> %r",
-                    message, resolved)
-        return {"resolved_query": resolved, "delta_type": "new_topic"}
+        # NO FRAME AT ALL — the session has never had an answered analytical turn, so
+        # there is no context to resolve this message against. It goes to the engine
+        # exactly as the user wrote it.
+        #
+        # This used to spend a model call asking FOLLOWUP_SYSTEM_PROMPT to rewrite the
+        # message into a self-contained question. Measured 2026-09-21: a first-turn
+        # question cost TWO calls (classify, then this) — and the second one had
+        # nothing to add, because a turn with no prior analytical context is
+        # self-contained by definition. The rewrite could only paraphrase, and a
+        # paraphrase of "how many assets are there" is a new chance to lose a word the
+        # engine parses as data.
+        #
+        # The genuinely referential case ("what about the other one" with no frame) is
+        # NOT handled here and must not be: classify_node's own backstop downgrades it
+        # to smalltalk before it ever reaches this node, precisely so ungrounded text
+        # cannot be forwarded to the engine.
+        logger.info("context_resolve_node: no frame yet — passing %r through unchanged "
+                    "(no rewrite call)", message)
+        return {"resolved_query": message, "delta_type": "new_topic"}
 
     delta_type = state.get("delta_type")
     if delta_type in DELTA_TYPES:
@@ -567,7 +1747,9 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         # (failed/timed out/unparseable, or this session never went through
         # a frame-aware classify at all) — fall back to one standalone call.
         episodic = state.get("episodic") or []
-        delta_type, _slot_candidates = classify_delta(frame, message, episodic)
+        delta_type, _slot_candidates, _dfield = classify_delta(frame, message, episodic)
+        delta_field = _dfield or delta_field
+        delta_value = delta_value or (_slot_candidates[0] if _slot_candidates else "")
         # _slot_candidates itself is intentionally not threaded into the merge
         # (render_frame_as_query only ever uses `frame` + the verbatim
         # `message`, never a partially-extracted slot value — nothing gets
@@ -579,16 +1761,176 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         drill_stack = memory_frame.pop_drill(drill_stack)
         frame = memory_frame.rebuild_frame_from_stack(frame, drill_stack)
 
+    # REPLACE / REMOVE happen HERE, in Python, on the structured frame — before any text
+    # is rendered. The model contributed three small strings (delta_type, delta_field,
+    # one grounded value); the mutation itself is a dict operation that cannot drift the
+    # way a 7B model restating the whole context would. apply_context_delta refuses any
+    # delta it cannot bind to a filter the frame actually holds, so a wrong or invented
+    # classification degrades to "carry the context unchanged", never to a wrong filter.
+    # A shape change ("make it top 10", "by month instead", "don't sort by amount") is
+    # decided deterministically, from the message itself — see
+    # chatbot/memory/frame.py::detect_shape_delta for why this is not a model call.
+    # Asked ONLY when the model did not already produce a usable replace/remove, and
+    # never when it called the turn a new topic, a comparison or a drill: correcting a
+    # known operation bias is not the same as overruling a topic decision.
+    # A measure ADDITION ("also include profit"). Deterministic and grounded against the
+    # table's own measure columns — the closed delta set has no "add", and the model is
+    # never asked for one, so this cannot put an invented column into memory. Tried
+    # before the shape delta because "also include profit" is an addition, not a
+    # re-shaping, and detect_shape_delta would not claim it either way.
+    #
+    # This updates MEMORY only. Measures are deliberately not rendered into the resolved
+    # query (see frame.py::_describe_frame), so the engine learns about "profit" from the
+    # user's own words, which pass through verbatim; what the frame gains is knowing the
+    # question now has two measures when the NEXT turn re-shapes it.
+    # `refine` only. Its definition in the prompt IS addition ("ADDS a filter/grouping,
+    # keeps everything in the frame"), so the model has already drawn the add-vs-replace
+    # line — "what about profit" comes back `replace` and never reaches here. `ambiguous`
+    # is excluded deliberately: it means the classify call failed or was unsure, which is
+    # not evidence of an addition.
+    if delta_type == "refine":
+        _added_measure = memory_frame.detect_measure_addition(frame, message)
+        if _added_measure:
+            frame = memory_frame.add_measure(frame, _added_measure)
+            logger.info("context_resolve_node: measure addition — %r grounded against "
+                        "the table's own measures (no SLM call): %r",
+                        _added_measure, message)
+
+    shape_delta = False
+    if delta_type in ("refine", "ambiguous"):
+        _shape = memory_frame.detect_shape_delta(frame, message)
+        if _shape:
+            delta_type, delta_field, delta_value = _shape
+            shape_delta = True
+            logger.info("context_resolve_node: deterministic shape delta — %s %s=%r "
+                        "(no SLM call): %r", delta_type, delta_field, delta_value, message)
+
+    if delta_type in ("replace", "remove"):
+        _before = frame
+        frame = memory_frame.apply_context_delta(
+            frame, delta_type, field=delta_field, value=delta_value, message=message)
+        # apply_context_delta returns the CALLER'S OWN object when it declines a delta
+        # and a new dict whenever it acts, so identity is an exact did-anything-change
+        # signal. It replaced a filters-length comparison, which could only see the one
+        # slot: a shape delta ("don't sort by amount" -> order_by) leaves the filter
+        # count untouched and was therefore reported as having matched nothing.
+        _applied = frame is not _before
+        logger.info("context_resolve_node: %s field=%r value=%r — %s",
+                    delta_type, delta_field, delta_value,
+                    "applied" if _applied else "declined, context carried unchanged")
+        if delta_type == "remove" and not _applied:
+            shape_delta = False
+            # Nothing was actually removed — the named field/slot is not one the frame holds.
+            # `remove` renders context-ONLY (the user's words are a navigation trigger,
+            # not data), so leaving it as `remove` here threw the request away and
+            # re-ran the previous query verbatim: the user asked for a change, got the
+            # same answer back, and nothing said their request had been ignored.
+            # Downgrade to a plain refinement so their own words still reach the engine.
+            logger.info("context_resolve_node: remove field=%r matched nothing in the "
+                        "frame — keeping the user's message instead of re-running the "
+                        "previous query", delta_field)
+            delta_type = "refine"
+
     # "new_topic"/"refine"/"drill_down"/"drill_up"/"compare" all merge
     # deterministically; "ambiguous" (judgment OR timeout) passes the message
     # through untouched — no second SLM call, see docstring above.
-    resolved = (memory_frame.render_frame_as_query(frame, message, delta_type)
-                if delta_type != "ambiguous" else message)
+    # classify_node's own action label, reused — no extra model call. It is the only
+    # continuation signal that works on a DOCUMENT frame, where delta_type is measurably
+    # not one (see frame.py::_render_document_query). Routing into this node is
+    # history-based rather than label-based (chatbot/graph.py::_route_after_classify),
+    # so `action` still carries its real value here: an ordinary self-contained question
+    # arrives as "answer" and is left unanchored.
+    referential = state.get("action") == "followup"
+    _comparison = state.get("comparison") or {}
+    if _comparison and delta_type not in ("new_topic",) and not shape_delta:
+        # A comparison is active and this turn continues it. Both sides go into the
+        # resolved query — collapsing to one of them is the specific failure this
+        # structure exists to prevent, and it is what happened before it existed:
+        # "compare with 2024" rendered as an ordinary refinement of the 2025 frame, so
+        # the comparand had nowhere to live and the next turn saw a single context.
+        resolved = memory_frame.render_comparison_as_query(_comparison, message)
+        logger.info("context_resolve_node: comparison active (%s) — both sides carried: "
+                    "%r -> %r", _comparison.get("dimension"), message, resolved)
+    elif delta_type == "compare" and (delta_value or memory_frame.detect_comparison_target(message)):
+        # `delta_value` is the model's own grounded slot; measured 2026-09-22 that it
+        # comes back empty on real "compare" classifications more often than not, so the
+        # deterministic extractor (frame.py::detect_comparison_target) is the fallback,
+        # never the other way — a value the model DID ground and verify is trusted first.
+        delta_value = delta_value or memory_frame.detect_comparison_target(message)
+        # FIRST turn of a comparison — no ComparisonContext exists yet (that is built in
+        # memory_write_node, AFTER the engine answers). render_frame_as_query has no
+        # branch for "compare" and falls through to its generic tail, which sent the
+        # comparison INSTRUCTION itself to the engine:
+        #   "compare that with Mumbai (for Assets (assets_asset), pune)"
+        # — "compare" read as a possible column name (the engine asked "is 'compare' a
+        # column name?"), the turn was refused, memory_write_node never runs on a refused
+        # turn, and no comparison was ever built. Measured 2026-09-22: a full 5-turn live
+        # attempt built nothing, and this is why.
+        #
+        # `delta_value` is the comparand ("Mumbai") — already grounded VERBATIM against
+        # the user's message by the same gate replace/refine use
+        # (memory/classify.py:94 includes "compare" in that check). Rendered against the
+        # entity ALONE, filters cleared: this is exactly the shape a plain "what about
+        # Mumbai" replace already renders and is proven to work — one value, not two
+        # (the old Pune filter is deliberately dropped here, or the query would ask about
+        # Pune AND Mumbai on the same field at once). The PRIMARY side (Pune) is not
+        # lost — it is still sitting in `frame`, and memory_write_node builds the
+        # comparison from that prev_frame plus whatever this turn's answer harvests.
+        _entity_only = {**frame, "filters": []}
+        resolved = memory_frame.render_frame_as_query(_entity_only, delta_value, "refine")
+        logger.info("context_resolve_node: comparison turn (no context yet) — comparand "
+                    "%r rendered alone: %r -> %r", delta_value, message, resolved)
+    else:
+        # THE BOUNDARY. What reaches the engine as the QUERY is only ever text the user
+        # actually typed — this turn's message, or (for the two navigation deltas below)
+        # their own pre-drill question, recorded verbatim when they asked it. The
+        # remembered state travels beside it as ConversationContext, structured.
+        #
+        # This replaced `render_frame_as_query`, which glued the frame's description onto
+        # the message: "only the debit ones (for Single Financial Transactions
+        # (accounts_generalledger))". `Single Financial Transactions` is the engine's own
+        # display label for the table, and veda/validation.py::qualifier_completeness —
+        # whose stated contract is "every content token THE USER NAMED must appear in the
+        # SQL" — had no way to know the user never said it, so it refused on `financial`
+        # (which substring-matches the real column financial_year_id) while the user's
+        # own word `debit` was a real value with 476 rows behind it.
+        #
+        # `remove` and `drill_up` carry no data of their own: their words name what to
+        # STOP doing ("remove the year filter", "go back"), and the engine parses every
+        # word of a query as data. They therefore replay the user's OWN earlier question
+        # rather than this turn's trigger words — still never text this layer invented.
+        if memory_frame.is_document_frame(frame):
+            # DOCUMENT frames keep the existing rendering. The contamination this change
+            # removes is a SQL-path problem — qualifier_completeness, the anchor and the
+            # value arbiter all live there, and the structured context has no meaning for
+            # a RAG answer (its "entity" is a document name, not a table). The document
+            # anchoring in _render_document_query was built and live-verified separately;
+            # bypassing it here would trade one measured bug for another. Recorded as a
+            # known remaining gap rather than silently changed.
+            resolved = memory_frame.render_frame_as_query(
+                frame, message, delta_type, shape_delta=shape_delta, referential=referential)
+        elif delta_type in ("remove", "drill_up") and not shape_delta:
+            resolved = (frame.get("base_query") or "").strip() or message
+        else:
+            resolved = message
 
-    logger.info("context_resolve_node: delta_type=%s frame-merge %r -> %r",
-                delta_type, message, resolved)
+    conv_ctx = ConversationContext.from_frame(
+        frame, resolved,
+        # A new topic is self-contained by definition and an `ambiguous` turn is one the
+        # classifier could not place — neither may drag remembered state along. This is
+        # the same rule the previous rendering applied when it returned the message
+        # unchanged for both.
+        carry_state=(delta_type not in ("new_topic", "ambiguous") or referential),
+    )
+
+    logger.info("context_resolve_node: delta_type=%s query=%r context=%s",
+                delta_type, resolved,
+                "none" if conv_ctx.is_empty() else conv_ctx.to_payload())
     return {"resolved_query": resolved, "delta_type": delta_type,
-            "frame": frame, "drill_stack": drill_stack}
+            "frame": frame, "drill_stack": drill_stack,
+            "conversation_context": conv_ctx.to_payload(),
+            "context_used": _context_used(frame, delta_type, delta_field, delta_value,
+                                          resolved, message)}
 
 
 def _extract_engine_result(payload: dict) -> tuple[dict, str]:
@@ -650,6 +1992,15 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
         # when res0 has none of its own — the docstring above still holds for
         # every route that DOES set one.
         status = "answered" if item0.get("status") == "ok" else "error"
+        # Written BACK onto res0, not merely returned. Measured 2026-09-21 against the
+        # real docs_contracts source: a document conversation had NO memory at all —
+        # memory_write_node checks state["status"] == "answered" and proceeds, then
+        # harvest_frame RE-CHECKS engine_result["status"], finds the key absent, and
+        # returns None. Nothing was ever stored, so recall, re-present, drill and every
+        # other frame-based feature were dead on the one source that answers reliably.
+        # Normalising the derived status here, where res0 is assembled, is exactly what
+        # this function already does for `cols`.
+        res0["status"] = status
     return res0, status
 
 
@@ -676,9 +2027,18 @@ def call_engine_node(state: ChatState, config: RunnableConfig) -> dict:
     res0: dict = {}
     status = "error"
 
+    # The remembered state travels BESIDE the query, never inside it (see
+    # context_resolve_node). `flags` is the request's existing extension point — it was
+    # already accepted by inference/routes/hybrid.py and dropped there; it now carries
+    # this. Absent/empty = exactly the previous behaviour, so every caller that builds no
+    # context (clarify_reply, first turns, smalltalk) is unaffected.
+    _conv_ctx = state.get("conversation_context") or None
+    _flags = {"conversation_context": _conv_ctx} if _conv_ctx else None
+
     try:
         for kind, data in client.stream_hybrid_query(
             query,
+            flags=_flags,
             source_id=state.get("source_id"),
             source_ids=state.get("source_ids"),
             tenant=state.get("tenant"),
@@ -734,16 +2094,74 @@ def memory_write_node(state: ChatState) -> dict:
     session_id = state.get("session_id") or ""
     engine_result = state.get("engine_result") or {}
 
+    # Recorded FIRST, before the harvest can bail out. harvest_frame returns None when
+    # the result carries no explain block (a federated answer, or a server-side
+    # business_explain failure), and the early return below then left `last_result`
+    # holding an OLDER turn's rows — so a later "as a pie chart" charted data the user
+    # was no longer looking at. The hazard is staleness, not failure: this node only
+    # runs on an answered turn either way.
+    _last_result = engine_result
+
     harvested = memory_frame.harvest_frame(engine_result)
+    if harvested:
+        # WHICH SOURCE ANSWERED — not which source the request happened to be pinned
+        # to. Those used to be treated as the same fact; they are not.
+        #
+        # apps/chat/views.py resolves the request's nominal `source_id` as
+        # `source_ids[0]` — the caller's FIRST authorised source, fixed for the whole
+        # turn, regardless of which source in that scope actually produced the answer.
+        # For a single-source deployment (or the CLI, which pins one explicitly) that
+        # is harmless: source_ids[0] IS the only source. It stops being true the moment
+        # a session is authorised for more than one source and a turn answers from
+        # any source other than the first — measured 2026-09-22 live, through the real
+        # API with no source pinned: a document answer (from docs_contracts) was
+        # recorded under source_ids[0]'s key (homzhub), and a later SQL answer from the
+        # SAME key would have silently overwritten it — reintroducing, via source
+        # mislabeling, the exact "one frame erases another" failure per-source scoping
+        # was built to prevent.
+        #
+        # The engine already knows better: `explain.sources` (business_explain.py's v2
+        # extension, gated on EXPLAIN_V2_ENABLED) is built from `build_data_sources`,
+        # which names a source ONLY with proof of participation — execution records
+        # first, federation second, the routing decision only when it actually chose
+        # (never under shadow-mode observation), never a candidate that was merely
+        # considered. That is real evidence; state["source_id"] is a request-level
+        # default.
+        #
+        # Used only when it is UNAMBIGUOUS — exactly one source named. Two or more
+        # means a genuinely federated answer, which this architecture does not yet
+        # have a multi-source frame to own (see PM_LOG/memory audit — reported as a
+        # boundary, not worked around here); falling back to the old behavior there is
+        # not a regression, since a federated turn already writes no entity (a route
+        # name is not a business entity) and this line only decides which key it is
+        # filed under. Zero named sources (v2 off, or nothing yet resolved) falls back
+        # identically, so an environment without the extension behaves exactly as
+        # before this change.
+        _engine_sources = ((engine_result.get("explain") or {}).get("sources") or [])
+        _engine_source_ids = {str(s.get("id")) for s in _engine_sources
+                              if isinstance(s, dict) and s.get("id")}
+        if len(_engine_source_ids) == 1:
+            harvested["source_id"] = next(iter(_engine_source_ids))
+        else:
+            harvested["source_id"] = state.get("source_id")
     if not harvested:
         # business_explain failed server-side (already logged there) or the
         # result had no explain block — skip the write, the user's answer is
-        # unaffected, memory just doesn't advance this turn.
-        return {}
+        # unaffected, memory just doesn't advance this turn — but the result the user
+        # IS looking at is still recorded, or a presentation follow-up would redraw an
+        # older one.
+        return {"last_result": _last_result}
 
     prev_frame = state.get("frame") or {}
     prev_stack = state.get("drill_stack") or []
     delta_type = state.get("delta_type") or "new_topic"
+
+    # Same continuation signal context_resolve_node anchors on, for the same reason:
+    # delta_type is not informative on a document frame. A follow-up that still drew on
+    # the document being discussed keeps it, rather than moving to whichever document
+    # the engine happened to list first.
+    harvested = memory_frame.stabilise_document_entity(
+        prev_frame, harvested, referential=state.get("action") == "followup")
 
     new_frame = memory_frame.merge_frame_post_execution(
         prev_frame, harvested, delta_type, tenant, session_id)
@@ -760,16 +2178,95 @@ def memory_write_node(state: ChatState) -> dict:
         # Repair ones" — so drill_up had nothing to pop. Deterministic and evidence-based: it
         # reads the filters the SQL actually ran, never the classifier's label.
         _added = memory_frame.newly_added_filter(prev_frame, harvested)
-        new_stack = (memory_frame.push_drill_level(prev_stack, _added)
-                     if _added is not None else prev_stack)
+        if _added is not None:
+            new_stack = memory_frame.push_drill_level(prev_stack, _added)
+        else:
+            # No NEW field was constrained, but an existing one may now hold a different
+            # value ("what about Mumbai" after Pune). Re-point that level instead of
+            # deepening the path: the stack records how far in the user has drilled, and
+            # a replacement does not change that. Leaving it stale mattered — drill_up
+            # rebuilds the frame FROM the stack, so the old value came back as if the
+            # replacement had never happened.
+            new_stack = prev_stack
+            for _f in (new_frame.get("filters") or []):
+                _prev_val = next((p.get("value") for p in (prev_frame.get("filters") or [])
+                                  if memory_frame._same_field(p.get("field"), _f.get("field"))),
+                                 None)
+                if _prev_val is not None and str(_prev_val) != str(_f.get("value")):
+                    new_stack = memory_frame.update_drill_level(
+                        new_stack, _f.get("field"), _f.get("value"))
+    # A filter the user REMOVED must leave the drill stack with it. rebuild_frame_from_stack
+    # derives filters FROM the stack on the next "go back", so a stale level put the
+    # removed filter straight back: remove City -> "go back" -> City=Pune returns.
+    new_stack = [lvl for lvl in new_stack
+                 if any(memory_frame._same_field(lvl.get("dimension"), f.get("field"))
+                        for f in (new_frame.get("filters") or []))]
 
+    # The question the user asked BEFORE any narrowing, kept so "go back" can replay it
+    # when it pops the last drill level. Recorded on any answered turn that carries no
+    # filters — that IS the drill root — and never on a drill_up itself, whose message
+    # ("go back") is a navigation trigger, not a question. Carried forward otherwise so
+    # drilling in does not erase it.
+    if not (new_frame.get("filters") or []) and delta_type != "drill_up":
+        new_frame["base_query"] = state.get("message") or ""
+    elif prev_frame.get("base_query") and not new_frame.get("base_query"):
+        new_frame["base_query"] = prev_frame["base_query"]
+
+    # COMPARISON. Built when the classifier called this turn a comparison and the
+    # previous turn left a frame to compare against — both sides come from frames the
+    # ENGINE produced, never from the model's prose. Dropped when the conversation moves
+    # to an entity neither side is about, so a stale comparison cannot keep injecting two
+    # contexts into an unrelated question.
+    _prev_comparison = state.get("comparison") or {}
+    _comparison = _prev_comparison
+    if delta_type == "compare" and prev_frame.get("entity"):
+        _built = memory_frame.build_comparison(prev_frame, new_frame,
+                                               turn_index=new_frame.get("turn_index", 0))
+        if _built:
+            _comparison = _built
+            logger.info("memory_write_node: comparison recorded — %s vs %s (dimension=%s)",
+                        _built["primary"].get("label"), _built["comparison"].get("label"),
+                        _built["dimension"])
+    elif memory_frame.comparison_is_stale(_prev_comparison, new_frame):
+        logger.info("memory_write_node: comparison dropped — the conversation moved to "
+                    "%r, which neither side is about", new_frame.get("entity"))
+        _comparison = {}
+    if _comparison is not _prev_comparison:
+        MemoryStore.write_comparison(tenant, session_id, _comparison or None)
+
+    # The SAME resolved value the harvest above just decided — new_frame carries it
+    # via `harvested["source_id"]` (merge_frame_post_execution folds harvested's fields
+    # in). Re-reading state.get("source_id") here directly would undo that fix: the
+    # FRAME's own source_id field would say the answer came from source 3 while the
+    # Redis KEY it gets filed under still said source 2 — content and location
+    # disagreeing, which is worse than the original bug, not better. One resolved
+    # value, used for the key AND the field, every write below (frame, stack, and the
+    # episodic entry this turn contributes) is filed under and stamped with it.
+    _source_id = new_frame.get("source_id") or state.get("source_id")
     MemoryStore.write_frame(tenant, session_id, new_frame,
-                            expected_version=prev_frame.get("version") if prev_frame else None)
-    MemoryStore.write_stack(tenant, session_id, new_stack)
+                            expected_version=prev_frame.get("version") if prev_frame else None,
+                            source_id=_source_id)
+    MemoryStore.write_stack(tenant, session_id, new_stack, source_id=_source_id)
     MemoryStore.push_episodic_turn(tenant, session_id, state.get("message", ""),
-                                   _templated_gist(engine_result))
+                                   _templated_gist(engine_result), source_id=_source_id)
 
-    return {"frame": new_frame, "drill_stack": new_stack}
+    # An answered turn resolves whatever was pending — nothing is left to complete.
+    return {"frame": new_frame, "drill_stack": new_stack, "last_result": _last_result,
+            "comparison": _comparison,
+            "pending_clarification": {}}
+
+
+def reset_node(state: ChatState) -> dict:
+    """"Start over" — the session's analytical memory was wiped by memory_read_node and
+    the turn ends here. It never reaches the engine: those words name no data, and
+    sending them there previously produced an answer whose frame overwrote the very
+    memory the user had just asked to clear."""
+    reply = ("Cleared — I've forgotten the earlier context. Ask me anything about your "
+             "data and we'll start fresh.")
+    return {"reply_text": reply, "status": "answered", "needs_clarification": False,
+            "engine_unavailable": False, "frame": {}, "drill_stack": [],
+            "last_result": {}, "pending_clarification": {},
+            "history": _turn_delta(state, reply)}
 
 
 def ask_clarification_node(state: ChatState) -> dict:
@@ -863,10 +2360,91 @@ def ask_clarification_node(state: ChatState) -> dict:
         "needs_clarification": not _no_clarify,
         "clarification_question": None if _no_clarify else question,
         "engine_unavailable": unavailable,
+        # PENDING CLARIFICATION. A clarifying turn is not "answered", so
+        # memory_write_node returns early and no frame is written — which left the
+        # user's reply ("2024") with nothing structured to attach to, and it reached the
+        # engine as that bare string. Recorded here instead, on the ONE node that knows
+        # a question was asked. Carries the UNRESOLVED request verbatim so the next turn
+        # can rebuild the whole question rather than send the answer alone.
+        #
+        # Cleared on: consumption (clarify_reply_node), any answered turn
+        # (memory_write_node), and reset (reset_node / memory_read_node).
+        "pending_clarification": {} if _no_clarify else {
+            "question": question,
+            # Keep the ORIGINAL request across repeated clarifications. Re-arming from
+            # this turn's resolved_query let each round append to the last, so the
+            # stored request grew one clause per turn until the engine choked on it.
+            "original_query": ((state.get("pending_clarification") or {}).get("original_query")
+                               or state.get("resolved_query") or state.get("message", "")),
+            "missing": ((res0.get("feedback") or {}).get("missing")
+                        or res0.get("missing") or ""),
+            "turn_index": (state.get("frame") or {}).get("turn_index", 0),
+        },
     }
     if not unavailable:
         update["history"] = _turn_delta(state, question)
     return update
+
+
+def clarify_reply_node(state: ChatState) -> dict:
+    """TASK 6 — consume a pending clarification and rebuild the ORIGINAL request.
+
+    Deterministic: the stored request is quoted verbatim and the user's answer is quoted
+    verbatim; nothing is generated. Sending only the answer ("2024") was the previous
+    behaviour and gave the engine a string with no subject at all.
+
+    This node does not call the engine itself — it produces the resolved query and the
+    graph carries on to call_engine_node exactly as an ordinary turn would, so routing,
+    agents, execution and RBAC are untouched."""
+    pending = state.get("pending_clarification")
+    pending = pending if isinstance(pending, dict) else {}
+    answer = str(state.get("message") or "").strip().rstrip(".")
+    original = str(pending.get("original_query") or "").strip().rstrip(".")
+    if not original:
+        # Nothing to attach to — treat the message as the question it is. Never silently
+        # bind an answer-shaped message to an unrelated earlier request.
+        logger.info("clarify_reply_node: no pending request to complete — passing %r "
+                    "through unchanged", state.get("message"))
+        return {"resolved_query": state.get("message"), "pending_clarification": {},
+                "needs_clarification": False, "clarification_question": None}
+    # ANSWER ALREADY RESTATES THE QUESTION — do not glue. Measured live, 2026-09-22: the
+    # engine's own clarification was generic ("Could you clarify what you're asking
+    # about?", `missing` empty), so the user did the natural thing and retyped their
+    # exact original question ("top 5 debit transaction") as the "answer". Gluing
+    # produced "top 5 debit transaction for top 5 debit transaction" — a self-duplicated
+    # query the engine understandably could not answer, and since pending_clarification
+    # is deliberately kept armed (see below) until an ANSWERED turn, retyping the same
+    # question again repeats the identical corruption — an invisible infinite loop from
+    # the user's side, who is doing nothing wrong.
+    #
+    # `_content_words`, the same word-level comparator this module already uses for
+    # frame/message grounding: when every content word of the ORIGINAL already appears
+    # in the ANSWER, the answer is not a missing value — it already IS a self-contained
+    # restatement (verbatim or extended) of the request. Gluing adds nothing but a
+    # duplicated fragment; the answer alone is what should reach the engine.
+    _orig_words, _ans_words = _content_words(original), _content_words(answer)
+    if _orig_words and _orig_words <= _ans_words:
+        logger.info("clarify_reply_node: answer %r already restates the pending "
+                    "question %r — using it alone rather than gluing", answer, original)
+        resolved = answer
+    else:
+        joiner = "" if re.match(r"^\s*(for|in|from|during|between|on|at|by)\b", answer, re.I) else "for "
+        resolved = f"{original} {joiner}{answer}".strip()
+    logger.info("clarify_reply_node: completed the pending request -> %r", resolved)
+    # The user typed only an answer ("2024"); what actually reaches the engine is their
+    # earlier question with that answer attached. Reported for the same reason as
+    # context_resolve_node's: a clarification bound to the WRONG earlier request is
+    # otherwise invisible until the answer itself looks wrong.
+    _used = {"carried": {"completing": original}, "changed": {"operation": "clarify_reply"},
+             "resolved_query": resolved}
+    # pending_clarification is deliberately NOT cleared here. Clearing it before the
+    # engine runs meant ask_clarification_node saw an empty slot on the next round and
+    # fell back to this turn's resolved_query — which is the already-concatenated
+    # string — so the anti-compounding guard never executed and the chain grew exactly
+    # as before ("show me the breakdown by city for 2024 for only the top 3").
+    # memory_write_node clears it on the answered turn that actually resolves it.
+    return {"resolved_query": resolved, "context_used": _used,
+            "needs_clarification": False, "clarification_question": None}
 
 
 def format_reply_node(state: ChatState) -> dict:

@@ -778,6 +778,12 @@ class ThinkingStepTracker:
                     continue
                 entry = {"type": kind, "label": str(label)[:160],
                          "state": row.get("state") or STATE_COMPLETED}
+                # A MEASURED duration travels with its row. Sub-checks already carry
+                # one; the phase rows added for "what actually ran" were losing
+                # theirs here, so the panel knew a step took 13 seconds and could not
+                # say which part of it did.
+                if isinstance(row.get("duration_ms"), int):
+                    entry["duration_ms"] = row["duration_ms"]
                 if entry not in _kept and entry not in _new:
                     _new.append(entry)
             replaced = _kept + _new
@@ -794,6 +800,8 @@ class ThinkingStepTracker:
                 continue
             entry = {"type": kind, "label": str(label)[:160],
                      "state": row.get("state") or STATE_COMPLETED}
+            if isinstance(row.get("duration_ms"), int):
+                entry["duration_ms"] = row["duration_ms"]
             if row.get("_generic"):
                 entry["_generic"] = True
             elif any(e.get("_generic") and e["type"] == kind for e in st.details):
@@ -804,8 +812,21 @@ class ThinkingStepTracker:
                 st.details = [e for e in st.details
                               if not (e.get("_generic") and e["type"] == kind)]
                 changed = True
-            if entry not in st.details:
+            # IDENTITY IS (type, label), NOT the whole entry. A phase that reports
+            # twice — `validation` emits `completed` and then `warning` on the same
+            # turn — produces the same row with a DIFFERENT `duration_ms`, and
+            # comparing whole entries let both through: the reader saw "Checking the
+            # query" twice. Measured on a zero-row turn after `duration_ms` became
+            # part of the row. The later report replaces the earlier one, because it
+            # is the more complete measurement of the same piece of work.
+            _key = (entry["type"], entry["label"])
+            _at = next((i for i, e in enumerate(st.details)
+                        if (e.get("type"), e.get("label")) == _key), None)
+            if _at is None:
                 st.details.append(entry)
+                changed = True
+            elif st.details[_at] != entry:
+                st.details[_at] = entry
                 changed = True
         return changed
 

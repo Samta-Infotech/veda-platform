@@ -16,7 +16,10 @@ from .delta_classify import (
     build_delta_classify_user_prompt,
 )
 from .followup import FOLLOWUP_SYSTEM_PROMPT, build_followup_user_prompt
-from .smalltalk import FALLBACK_REPLY, build_smalltalk_system_prompt
+from .smalltalk import (CAPABILITY_REPLY, FALLBACK_REPLY, IDENTITY_REPLY,
+                        REPHRASE_REPLY,
+                        SMALLTALK_FALLBACK_REPLY,
+                        build_smalltalk_system_prompt)
 from .standalone_check import STANDALONE_CHECK_SYSTEM, build_standalone_check_user_prompt
 from .supervisor import build_supervisor_system_prompt, build_supervisor_user_prompt
 
@@ -26,6 +29,10 @@ __all__ = [
     "build_supervisor_user_prompt",
     "build_smalltalk_system_prompt",
     "FALLBACK_REPLY",
+    "SMALLTALK_FALLBACK_REPLY",
+    "REPHRASE_REPLY",
+    "IDENTITY_REPLY",
+    "CAPABILITY_REPLY",
     "FOLLOWUP_SYSTEM_PROMPT",
     "build_followup_user_prompt",
     "STANDALONE_CHECK_SYSTEM",

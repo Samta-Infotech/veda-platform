@@ -149,7 +149,7 @@ class ThinkingContext:
                  "no_answer", "found_nothing", "from_cache", "failed_sources",
                  "warning_messages", "checks", "filters", "datasets",
                  "contributions", "chart_reason", "guidance", "combined_sources",
-                 "match_summary",
+                 "match_summary", "phase_runs",
                  "source_names", "passages", "execution_type")
 
     def __init__(self):
@@ -200,6 +200,13 @@ class ThinkingContext:
         self.combined_sources: list = []
         #: The authored sentence about how well the records matched across sources.
         self.match_summary: str | None = None
+        #: {phase: [title, start_ms, end_ms]} — the WORK THAT ACTUALLY RAN, by the
+        #: authored title the engine already ships on every event, with the elapsed
+        #: window it occupied. The panel was collapsing twelve real phases into four
+        #: steps and showing none of them, so the longest stretch of a turn
+        #: ("Checking available data", measured at 13.2s of a 26s turn) had nothing
+        #: on screen at all. The phase KEY stays internal; only the title is shown.
+        self.phase_runs: dict = {}
         #: True when the answer replayed SQL from the verified-query cache.
         self.from_cache: bool = False
         #: Display names of the sources that took part. A name beats a count:
@@ -233,6 +240,16 @@ class ThinkingContext:
             d = (payload or {}).get("details") or {}
             phase = (payload or {}).get("phase")
             status = (payload or {}).get("status")
+            _title = (payload or {}).get("title")
+            _el = (payload or {}).get("elapsed_ms")
+            if phase and _title and isinstance(_el, (int, float)):
+                _run = self.phase_runs.setdefault(phase, [str(_title), None, None])
+                if status == "started" and _run[1] is None:
+                    _run[1] = float(_el)
+                elif status in ("completed", "warning", "failed"):
+                    _run[2] = float(_el)
+                    if _run[1] is None:
+                        _run[1] = float(_el)
 
             if d.get("intent"):
                 self.intent = str(d["intent"])[:32]
@@ -322,6 +339,19 @@ class ThinkingContext:
                     else:
                         if "sort" in kinds and "limit" in kinds:
                             self.intent = "ranking"
+                        elif isinstance(self.row_count, int) and self.row_count > 1:
+                            # A plain retrieval. `_INTENT_NOUN` has carried "a list"
+                            # all along and nothing ever set it, so "list 5 assets" —
+                            # the commonest shape there is — fell through to the
+                            # generic "Working out what you're asking for." on the
+                            # step that takes the longest.
+                            #
+                            # Keyed on the ROWS, not on an operation type: measured,
+                            # a list query emits only `limit` ("Return top 100") and
+                            # no `select` at all, so matching operation names found
+                            # nothing. More than one record coming back is what makes
+                            # an answer a list, and it is read above this block.
+                            self.intent = "list"
                 if "group" in {str(o.get("type")) for o in ops if isinstance(o, dict)}:
                     self.grouped = True
             if ex.get("visualization"):
@@ -475,6 +505,42 @@ class ThinkingContext:
             row["_generic"] = True
         return row
 
+    #: Phases whose title says nothing a reader can use, or that the panel already
+    #: represents better elsewhere. `access_check` is a timed sub-check with its own
+    #: outcome copy; `received`/`completed` are turn boundaries, not work.
+    _PHASE_ROW_SKIP = frozenset({"received", "completed", "access_check",
+                                 "understanding"})
+
+    def _phase_rows(self, step_key: str) -> list:
+        """The work that actually ran inside this step, by its authored title.
+
+        The engine ships `title` and `elapsed_ms` on every progress event and the
+        panel was discarding both, folding twelve real phases into four steps. The
+        result was that the longest stretch of a turn had nothing on screen: on a
+        measured 26-second turn, "Checking available data" occupied 13.2s of it and
+        the Finding step showed only the source name.
+
+        A duration is attached only when the phase reported BOTH a start and an end,
+        because a single timestamp is a moment, not a measurement.
+        """
+        rows = []
+        for phase, (title, t0, t1) in self.phase_runs.items():
+            if phase in self._PHASE_ROW_SKIP:
+                continue
+            # The engine's titles are authored per PHASE, not per route, so the
+            # document head's `data_retrieval` arrives titled "Running the query" —
+            # and no query ran; passages were retrieved. "Synthesized the retrieved
+            # information" already says what happened on that path.
+            if phase == "data_retrieval" and self.execution_type == ts.EXEC_DOCUMENTS:
+                continue
+            if ts.PHASE_TO_STEP.get(phase) != step_key:
+                continue
+            row = self._row(ts.DETAIL_OPERATION, title)
+            if t0 is not None and t1 is not None and t1 >= t0:
+                row["duration_ms"] = int(t1 - t0)
+            rows.append(row)
+        return rows
+
     def _understanding_details(self) -> list:
         rows = []
         if self.intent and _INTENT_NOUN.get(self.intent):
@@ -493,7 +559,8 @@ class ThinkingContext:
         return rows
 
     def _finding_details(self) -> list:
-        rows = []
+        # The search runs BEFORE it finds anything, so its row leads.
+        rows = self._phase_rows(ts.STEP_FINDING)
         # Named sources beat a bare count: "Samta Employee Handbook" tells the reader
         # something a "1" cannot. The count is the fallback when no name is known.
         if self.source_names:
@@ -652,9 +719,26 @@ class ThinkingContext:
         # The checks BY NAME, replacing the single line that said only that
         # checking had occurred. A failed check is named too — that is the case
         # where knowing WHICH one matters most.
-        for label, passed in self.checks[:6]:
-            rows.append(self._row(ts.DETAIL_VALIDATION, label,
-                                  ts.STATE_COMPLETED if passed else ts.STATE_WARNING))
+        # THE CHECKS. Naming all five on every turn was measured to be 5 of the 6
+        # rows in this step, identical on every SQL answer — which trains the reader
+        # to skip the step that also carries the one row that varies. They collapse
+        # to a single line while they all pass, and the count is the fact that
+        # matters there ("we ran five, all passed").
+        #
+        # The moment one does NOT pass, that is no longer noise: the failing checks
+        # are named individually, because WHICH one failed is the whole point. The
+        # full list stays in `explainability.validation.checks` either way, so
+        # nothing is lost to a reader who wants it.
+        rows.extend(self._phase_rows(ts.STEP_ANALYZING))
+        _failed = [l for l, ok in self.checks if not ok]
+        if _failed:
+            for label in _failed[:6]:
+                rows.append(self._row(ts.DETAIL_VALIDATION, label, ts.STATE_WARNING))
+        elif self.checks:
+            _n = len(self.checks)
+            rows.append(self._row(
+                ts.DETAIL_VALIDATION,
+                f"{_n} safety check{'' if _n == 1 else 's'} passed"))
         return rows
 
     def _preparing_details(self) -> list:

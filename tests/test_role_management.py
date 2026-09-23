@@ -39,7 +39,7 @@ from django.contrib.auth import get_user_model  # noqa: E402
 from django.db import IntegrityError, transaction  # noqa: E402
 from django.test import Client, override_settings  # noqa: E402
 
-from apps.access_management.models import Permission, Role, RolePermission, UserRole  # noqa: E402
+from apps.access_management.models import Effect, Permission, Role, RolePermission, UserRole  # noqa: E402
 from apps.access_management.services import (  # noqa: E402
     ADMIN_ROLE_NAME,
     CODE_ADMIN_ROLE_PROTECTED,
@@ -497,6 +497,57 @@ def test_list_connected_sources_reflects_grants(admin_client):
               if r["role_id"] == role.pk)
 
     assert row["connected_sources"] == ["Database", "Datalake"]
+
+
+def test_list_connected_sources_excludes_denied_sources(admin_client):
+    """A DENY is a restriction, not a connection.
+
+    Reported live: a source the role DENIES still appeared in the role grid's
+    `connected_sources`, because the stats query read every RolePermission row and
+    never looked at `effect`.
+    """
+    role = Role.objects.create(name="Data Analyst")
+    permission = Permission.objects.get(code="data.read")
+    RolePermission.objects.create(
+        role=role, permission=permission, resource_path="db:crm_postgres:employee")
+    RolePermission.objects.create(
+        role=role, permission=permission, resource_path="lake:events:raw",
+        effect=Effect.DENY)
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["connected_sources"] == ["Database"]
+
+
+def test_list_connected_sources_is_empty_for_a_deny_only_role(admin_client):
+    """A role that only denies is connected to nothing — it grants no reach at all."""
+    role = Role.objects.create(name="Restricted")
+    RolePermission.objects.create(
+        role=role, permission=Permission.objects.get(code="data.read"),
+        resource_path="db:crm_postgres", effect=Effect.DENY)
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["connected_sources"] == []
+
+
+def test_list_connected_sources_keeps_a_kind_allowed_elsewhere(admin_client):
+    """A DENY on one path must not remove a kind the role still ALLOWS on another —
+    the exclusion is per row, not per kind."""
+    role = Role.objects.create(name="Mixed")
+    permission = Permission.objects.get(code="data.read")
+    RolePermission.objects.create(
+        role=role, permission=permission, resource_path="db:crm_postgres")
+    RolePermission.objects.create(
+        role=role, permission=permission, resource_path="db:hr_postgres",
+        effect=Effect.DENY)
+
+    row = next(r for r in _list(admin_client, page_size=100).json()["data"]["roles"]
+              if r["role_id"] == role.pk)
+
+    assert row["connected_sources"] == ["Database"]
 
 
 def test_list_connected_sources_ignores_global_grants(admin_client):

@@ -45,6 +45,89 @@ def should_federate(selected_columns) -> bool:
     return len(selected_source_ids(selected_columns)) >= 2
 
 
+# Bound into this module's namespace so the qualification gate below calls it as a module
+# global — that is what makes the evidence layer substitutable (the guard test swaps it, and
+# nothing here has to reach across into query.source_evidence at call time).
+from query.source_evidence import group_evidence_by_source   # noqa: E402
+
+
+def _clean_source_scores(query: str, source_ids) -> Dict[str, float]:
+    """Each source's best CLEAN per-source column cosine, as the ROUTING layer computes it.
+
+    Deliberately NOT `select_retrieval`'s column score: that field is reranked and collapses
+    (a homzhub column whose true cosine is ~0.5 reads ~0.07), so qualifying on it would drop
+    the CORRECT source. `source_coordinator._default_evidence_provider` already bypasses the
+    reranker for exactly this reason, so the gate reuses it rather than keeping a second
+    notion of "how relevant is this source". Returns {} on any failure — the caller then
+    qualifies nothing, which is the existing behaviour.
+    """
+    try:
+        from query import source_coordinator as SC
+        cols, chunks = SC._default_evidence_provider(query, list(source_ids))
+        ev = group_evidence_by_source(cols, chunks) or {}
+        SC._apply_item_prior(query, list(source_ids), ev)
+        SC._dominance_retier(ev)
+    except Exception:
+        return {}
+    out: Dict[str, float] = {}
+    for sid, e in (ev or {}).items():
+        try:
+            out[str(sid)] = float(getattr(e, "top_column_score", 0.0) or 0.0)
+        except Exception:
+            out[str(sid)] = 0.0
+    return out
+
+
+def qualified_source_ids(query: str, source_ids) -> Optional[set]:
+    """The sources genuinely COMPETING to answer `query`, or None when the question does not
+    arise (gate off, fewer than two sources in scope, or no usable signal).
+
+    `should_federate` asks only whether the selected columns came from ≥2 sources — a PRESENCE
+    test with no score floor anywhere before it. Measured over the 182-query benchmark, whose
+    ground truth is homzhub-only for all 182: 182/182 federated, because a 4-column datalake
+    source (amenities_catalog) landed in EVERY selected column set at cosines of 0.28-0.36
+    against a homzhub top of ~0.63 — never competitive, merely present. That is how "top 5
+    general ledger entries" came to be answered by COUNT(*) over amenity names.
+
+    The margin is ROUTING_COMPETE_WINDOW — no new threshold. Its documented meaning is already
+    exactly this: how close a runner-up must be to count as genuine competition. A source whose
+    best clean cosine falls further than that below the top is not competing, it is present.
+    """
+    try:
+        from config import FEDERATION_SOURCE_QUALIFICATION_ENABLED as _on
+    except Exception:
+        _on = False
+    sids = [str(s) for s in (source_ids or [])]
+    if not _on or len(sids) < 2:
+        return None
+    scores = _clean_source_scores(query, sids)
+    top = max(scores.values()) if scores else 0.0
+    if top <= 0.0:
+        return None                      # no usable signal — never guess
+    try:
+        from config import ROUTING_COMPETE_WINDOW as _win
+    except Exception:
+        _win = 0.08
+    return {sid for sid, sc in scores.items() if sc >= top - float(_win)}
+
+
+def qualify_columns(query: str, source_ids, selected_columns):
+    """`selected_columns` with the non-competing sources' columns removed.
+
+    Returns the SAME object whenever there is nothing to do — gate off, no qualified set, every
+    present source qualifying, or a filter that would empty the plan (a qualified set matching
+    no selected column must never turn a real plan into no plan).
+    """
+    qual = qualified_source_ids(query, source_ids)
+    if qual is None:
+        return selected_columns
+    kept = [c for c in (selected_columns or [])
+            if str(getattr(c, "source_id", "") or "") in qual]
+    if not kept or len(kept) == len(selected_columns or []):
+        return selected_columns
+    return kept
+
+
 def partition_subgraph(selected_columns, selected_chunks) -> Dict:
     """Split the PPR-selected subgraph into the SQL half (tabular columns grouped by
     source) and the evidence half (chunk nodes). Returns

@@ -762,13 +762,22 @@ def test_sync_scales_linearly(flags_on):
             r.close(r.open(str(i)), er.COMPLETED, rows=1)
         return (time.perf_counter() - t0), len(tr.sections[er.TRACE_SECTION]["records"])
 
-    def cost(n, k=5):
-        once(n)                                  # warm up, discard
-        runs = [once(n) for _ in range(k)]
-        return min(t for t, _ in runs), runs[-1][1]
+    # INTERLEAVED, and min-of-k. Two separate measurement phases are two different
+    # samples of machine load: running all the 50s and then all the 200s lets load
+    # DRIFT between them, and any rise lands entirely on the second, inflating the
+    # ratio. That is how this still failed at load average 7.4 on 8 cores after
+    # min-of-5 alone. Alternating them puts both sizes under the same conditions,
+    # and the minimum then discards whatever preemption each one suffered.
+    def costs(k=7):
+        once(50); once(200)                      # warm up, discard
+        a, b = [], []
+        for _ in range(k):
+            a.append(once(50)[0])
+            b.append(once(200)[0])
+        return min(a), min(b)
 
-    t50, n50 = cost(50)
-    t200, n200 = cost(200)
+    t50, t200 = costs()
+    n50, n200 = once(50)[1], once(200)[1]
     assert (n50, n200) == (50, 200)
     ratio = t200 / max(t50, 1e-6)
     assert ratio < 8, (
