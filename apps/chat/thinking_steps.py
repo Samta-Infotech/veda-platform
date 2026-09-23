@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import json
 
+import json
+
 import time
 
 # ── the four fixed steps ─────────────────────────────────────────────────────
@@ -778,12 +780,6 @@ class ThinkingStepTracker:
                     continue
                 entry = {"type": kind, "label": str(label)[:160],
                          "state": row.get("state") or STATE_COMPLETED}
-                # A MEASURED duration travels with its row. Sub-checks already carry
-                # one; the phase rows added for "what actually ran" were losing
-                # theirs here, so the panel knew a step took 13 seconds and could not
-                # say which part of it did.
-                if isinstance(row.get("duration_ms"), int):
-                    entry["duration_ms"] = row["duration_ms"]
                 if entry not in _kept and entry not in _new:
                     _new.append(entry)
             replaced = _kept + _new

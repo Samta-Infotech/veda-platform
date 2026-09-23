@@ -8,6 +8,15 @@ Production Django platform for the VEDA **NL → SQL** engine, migrated from the
 > → MultiResult` stays behaviourally identical. The migration only re-homes where
 > the ingestion substrate is *stored* and how it is *loaded/served* at query time.
 
+## Deploying
+
+- [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md) — single VM + Docker Compose, from bare host to smoke test.
+- [`docs/MULTI_SOURCE_DEPLOYMENT.md`](docs/MULTI_SOURCE_DEPLOYMENT.md) — **read before onboarding a
+  second data source.** Routing to the right source, and refusing a source the asker has no
+  permission for, depend on flags whose code defaults are wrong for it; every failure mode there
+  is silent (a plausible answer from the wrong source).
+- [`docs/OPERATIONS.md`](docs/OPERATIONS.md) — running it once it is up.
+
 ## Layout
 
 ```

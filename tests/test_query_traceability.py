@@ -99,6 +99,14 @@ def test_the_intended_default_flag_state(flags_on=None):
             "the generated SQL is what lets a user VERIFY the answer rather than "
             "trust it; restored ON at the user's explicit request (supersedes D2). "
             "An operator can still hide it with EXPLAIN_EXPOSE_SQL=0",
+        # Moved from the OFF list on 2026-09-11. D2 had flipped this default off;
+        # the user then explicitly asked for the SQL back in explainability, "like
+        # it used to come". The SQL is the one part of the explanation a reader can
+        # verify instead of trust, and that is worth the identifiers it exposes.
+        "EXPLAIN_EXPOSE_SQL":
+            "the generated SQL is what lets a user VERIFY the answer rather than "
+            "trust it; restored ON at the user's explicit request (supersedes D2). "
+            "An operator can still hide it with EXPLAIN_EXPOSE_SQL=0",
     }
     for name, why in on.items():
         assert getattr(config, name) is True, f"{name} should ship ON — {why}"
