@@ -111,3 +111,28 @@ def test_plain_query_with_incidental_number_not_a_count():
     r = parse_ranking("show orders placed after invoice 10")
     assert r.top_n is None
     assert r.ranked is False
+
+
+def test_sort_requested_covers_bare_sort_verbs():
+    """`sort_requested` is the signal veda/ir_equivalence.py's unrequested-ordering rule uses.
+    It must be True for a bare sort verb that names no end and no count — that rule used to
+    keep its own narrower word list, which is what this field exists to replace."""
+    assert parse_ranking("assets sorted by price").sort_requested is True
+    assert parse_ranking("rank vendors").sort_requested is True
+    assert parse_ranking("order assets by carpet area").sort_requested is True
+
+
+def test_sort_requested_is_true_for_every_ranking_word():
+    """Every ranking word implies an ordering — including the ones the old duplicated list in
+    ir_equivalence omitted (bottom/biggest/greatest/maximum/minimum/fewest/latest/newest/
+    oldest/earliest), which is why a correct `ORDER BY amount ASC` for "bottom 3" was refused."""
+    for word in ("bottom", "biggest", "greatest", "maximum", "minimum", "fewest",
+                 "latest", "newest", "oldest", "earliest", "top", "lowest"):
+        spec = parse_ranking(f"{word} 3 general ledger entries")
+        assert spec.ranked is True, word
+        assert spec.sort_requested is True, word
+
+
+def test_sort_requested_false_when_nothing_asks_for_order():
+    for q in ("list all assets", "how many assets are there", "assets in Pune"):
+        assert parse_ranking(q).sort_requested is False, q

@@ -3,21 +3,35 @@
 
 Generic (non-keyword) sanity check run only when the supervisor prompt
 (supervisor.py) already said "smalltalk" and prior turns exist: asks the LLM
-directly whether the message depends on the earlier conversation to mean
-anything concrete, instead of pattern-matching specific phrasings — no fixed
-word list generalizes to real production traffic.
+directly, instead of pattern-matching specific phrasings — no fixed word list
+generalizes to real production traffic.
+
+WHAT IT ASKS MATTERS. The first version asked "does understanding this message
+depend on the earlier turns?" — and a 'dependent' answer was treated as "this is
+a follow-up question". Those are not the same thing, and the gap was measured on
+2026-09-19: for "got it" the model correctly answered 'dependent' (the phrase
+means nothing without the previous turn), the node read that as a data question,
+and the literal words "got it" were sent to the SQL engine. The model was right;
+the question was wrong. It now asks the thing the caller actually needs to know —
+is the user REQUESTING something — which an acknowledgement answers 'no' to while
+still being entirely context-dependent.
 """
 from __future__ import annotations
 
 STANDALONE_CHECK_SYSTEM = (
     "A chatbot classifier just labeled a user's message as pure smalltalk "
-    "(no data question at all). Before trusting that, sanity-check it: could "
-    "this exact message mean something different, or refer back to something, "
-    "if you also saw the conversation before it — i.e. does understanding it "
-    "fully depend on the earlier turns? Answer with EXACTLY one word: "
-    "'dependent' if it relies on the earlier conversation to mean anything "
-    "concrete (regardless of the specific words used), or 'standalone' if it "
-    "truly stands alone with no such dependency. Output only that one word."
+    "(no data question at all). Before trusting that, sanity-check ONE thing: "
+    "is the user ASKING FOR SOMETHING in this message — more data, a different "
+    "cut of it, a change to what they were just shown — where the earlier turns "
+    "are needed to know what they mean? "
+    "Answer 'dependent' ONLY for a request of that kind, however it is phrased "
+    "(\"what about the other one\", \"tell me more\", \"and last year?\", "
+    "\"aur bata\"). "
+    "Answer 'standalone' for everything else — including a message that is "
+    "context-dependent but asks for NOTHING: acknowledging or reacting to the "
+    "answer they just read (\"okay\", \"got it\", \"hmm\", \"makes sense\", "
+    "\"acha\"), or a remark that stands on its own. "
+    "Output EXACTLY one word: dependent or standalone."
 )
 
 

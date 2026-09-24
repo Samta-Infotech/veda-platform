@@ -378,7 +378,23 @@ VLLM_BASE_URL        = __import__("os").environ.get("VLLM_URL", "http://vllm:800
 # vLLM serves under the HF model path (e.g. "Qwen/Qwen2.5-Coder-7B-Instruct"),
 # not the Ollama tag — set when SLM_BACKEND=vllm.
 VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or None
-SLM_TEMPERATURE      = 0.3
+# Sampling temperature for the call sites that pass it explicitly: query/slm_layer.py's
+# purpose="ir_emit" (Tier-1 intent/IR emission — this is what shapes the SQL), rag_layer.py's
+# purpose="rag_synthesis", and lg_nodes.py's purpose="lg_node". Every OTHER engine call (source
+# routing, the operation classifier, the semi-join planner, the federated planner) goes through
+# slm/_call_slm.py::call_slm, whose own default is already 0.0 — those were never affected.
+#
+# Made env-readable and defaulted to 0 (2026-09-23). It had been a bare literal 0.3, which meant
+# two things at once: identical inputs could emit a different intent on different runs (a known
+# cross-session-instability contributor, since ir_emit decides the SQL shape), and the
+# `SLM_TEMPERATURE=0` line CLAUDE.md documents as required in `.env` was INERT — nothing read it.
+# Prefer changing the value here, not in `.env`: this file travels with the repo, `.env` does not.
+# Raising it again is one env var (`SLM_TEMPERATURE=0.3`) if document prose from rag_synthesis
+# turns out to read better with sampling on — that is the one call site where 0.3 was arguably
+# deliberate, and the one worth re-measuring before settling.
+# `or "0"` guards the EMPTY value too: a bare `SLM_TEMPERATURE=` line in .env yields "", and
+# float("") raises at import — taking the whole engine down on a one-character typo.
+SLM_TEMPERATURE      = float(__import__("os").environ.get("SLM_TEMPERATURE", "0") or "0")
 SLM_TIMEOUT_SECS     = 240
 SLM_MAX_RETRIES      = 2
 SLM_MAX_TOKENS       = 2048
@@ -939,7 +955,17 @@ CAPABILITY_PLANNING_SHADOW_ENABLED = _os.environ.get("CAPABILITY_PLANNING_SHADOW
 # function returns the SAME candidate list object, unfiltered). See
 # docs/architecture/VEDA_PHASE_C1_UNBLOCKED_BENCHMARK.md for the real-query evidence behind this
 # narrow scope (🟡 LIMITED GO — aggregation-only, not general filtering).
-CAPABILITY_FILTERING_ENABLED = _os.environ.get("CAPABILITY_FILTERING_ENABLED", "0") == "1"
+#
+# Default flipped 0 -> 1 (2026-09-23). It was ALREADY on in every running container, but only via a
+# `CAPABILITY_FILTERING_ENABLED=1` line in `.env` — and `.env` is gitignored, so that override could
+# not travel to the server: a deployment would have pulled this file, read the "0" default, and run
+# with the filtering OFF while this machine ran it ON. The A/B behind it (187 queries, OFF vs ON,
+# docs/architecture/VEDA_PHASE_C2_AB_BENCHMARK.md) measured 0 regressions and one real narrow
+# improvement, so the measured state is ON; carrying it here is what makes both sides agree. Remove
+# the `.env` line — an env override of a flag whose default is already correct is pure divergence
+# risk. NOTE: query/capability_filter.py must be committed for this default to be safe; with the
+# flag on and the module absent, plan_route's import of it fails.
+CAPABILITY_FILTERING_ENABLED = _os.environ.get("CAPABILITY_FILTERING_ENABLED", "1") == "1"
 
 # Source-description prior (routing, default OFF). The item-prior tiers a source on the MAX cosine over
 # its per-item summaries (source_item_embeddings) — which gives a large source (homzhub: 178 item
@@ -2437,11 +2463,24 @@ QUERY_ENHANCEMENT_LLM_FOLLOWUP = False
 
 # Failure feedback (veda/feedback.py): on a refusal/error, emit a plain-language WHY +
 # WHAT's-needed + concrete suggestions (valid column values, closest tables) instead of a
-# terse rejection. Deterministic + always-on. FEEDBACK_LLM_POLISH (default OFF) optionally
-# routes the structured facts through the SLM to rephrase them — rephrase-only, never
-# invent; the deterministic text is the guaranteed fallback.
+# terse rejection. Deterministic + always-on.
 FEEDBACK_ENABLED = True
-FEEDBACK_LLM_POLISH = True
+
+# FEEDBACK_LLM_POLISH optionally routes those structured facts through the SLM to
+# rephrase them — rephrase-only, never invent; the deterministic text is the
+# guaranteed fallback.
+#
+# DEFAULT OFF, AND NOW ACTUALLY OFF. The comment here claimed "(default OFF)" while
+# the line below read `= True` with no env override, so it was on everywhere. It is
+# a SYNCHRONOUS SLM call on the path that produces the terminal answer, and it was
+# measured firing on 1,039 of 6,645 traced turns — 15.6% — at a median of 2,634 ms
+# and a maximum of 16,028 ms, up to 13% of a whole turn. That breaks the standing
+# rule that no explainability operation may delay a terminal answer.
+#
+# Turning it on is a deliberate choice to trade answer latency for nicer refusal
+# wording. `_polish` is bounded by a wall-clock deadline (see veda/feedback.py) so
+# even when on it cannot stall a turn the way it used to.
+FEEDBACK_LLM_POLISH = _os.environ.get("FEEDBACK_LLM_POLISH", "0") == "1"
 
 
 # Signal 2: BM25 keyword
@@ -2719,3 +2758,23 @@ UNIFIED_GRAPH_FILE = artifact_path("veda_unified_graph.json")
 # graph_expand() in retrieval_v2 is ADDITIVE + flag-guarded — OFF keeps retrieval byte-identical.
 GRAPH_EXPAND_ENABLED = True
 GRAPH_EXPAND_MAX     = 12   # cap columns added per query (token/latency bound; reranker still cuts)
+
+
+# Source NAME in the bounded routing-SLM candidate list (query/routing_slm._build_user_message).
+# Default OFF -> the prompt is byte-identical and every routing decision is unchanged.
+#
+# The bug it fixes: the candidate block names each source only by its numeric id
+# ("- source_id=2 type=relational domains=[...]"), so when the QUESTION itself names a source
+# ("From the homzhub database, how many projects are there?") the model finds no candidate
+# carrying that name and answers decision=NONE -> RC_NO_EVIDENCE, i.e. naming the right source
+# makes an otherwise-answerable question refuse. Measured on 4 plain/named query pairs (2 runs,
+# fully reproducible): 2 of 4 regressed from a correct SINGLE to NONE. Retrieval is NOT the cause
+# — the evidence cosines are slightly HIGHER with the mention (src2 col 0.430 -> 0.473); only the
+# prompt is blind to the name.
+#
+# No new data is fetched: `name` already reaches the coordinator in the api tier's profile map
+# (apps.query.scope.source_profiles_for -> X-Veda-Source-Profiles -> current_source_profiles),
+# and that map holds ONLY the ids this caller is already authorised for — so a name emitted here
+# can never disclose a source the caller was not told about. build_candidates simply stopped
+# carrying it into CandidateSource; this flag turns the pass-through back on at the prompt.
+ROUTING_SLM_SOURCE_NAMES_ENABLED = _os.environ.get("ROUTING_SLM_SOURCE_NAMES_ENABLED", "0") == "1"

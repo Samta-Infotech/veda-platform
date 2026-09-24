@@ -212,12 +212,18 @@ def test_total_duration_spans_the_whole_turn():
     assert t.total_duration_ms() >= 5200
 
 
-def test_narration_never_touches_a_timestamp():
+def test_narration_never_touches_a_timestamp(monkeypatch):
     """SLM latency must not land inside any step duration — narration only ever
-    replaces TEXT."""
+    replaces TEXT.
+
+    The clock is frozen for both snapshots. A STILL-RUNNING step computes its duration
+    from `time.time()` at snapshot time, so without this the two snapshots differed by
+    however long the machine took between them and the test failed under load — a real,
+    intermittent failure that had nothing to do with what it is asserting."""
     t = ts.ThinkingStepTracker()
     t.consume(ev("received", status="completed", ts_ms=2_000_000))
     t.consume(ev("sql_planning", ts_ms=2_001_000))
+    monkeypatch.setattr(ts, "_now_ms", lambda: 2_002_000)
     before = [s["duration_ms"] for s in t.snapshot()]
     t.set_context("analyzing", "Comparing values across months.", from_narrator=True)
     after = [s["duration_ms"] for s in t.snapshot()]
@@ -1868,11 +1874,32 @@ class TestThePayloadIsActuallyRead:
     def _labels(self, c, step):
         return [r["label"] for r in c.details(step)]
 
-    def test_the_safety_checks_are_named(self):
+    def test_passing_checks_collapse_to_their_count(self):
+        """CHANGED 2026-09-21. Naming all five on every turn was 5 of the 6 rows in
+        this step, identical on every SQL answer — which trains the reader to skip
+        the step that also carries the one row that varies. While they all pass the
+        count is the fact that matters; the names stay in
+        `explainability.validation.checks` for anyone who wants them."""
         c = self._ctx({"validation": {"passed": True, "checks": [
             {"label": "Read-only query", "passed": True},
             {"label": "Duplicate-safe (no double-counting)", "passed": True}]}})
-        assert "Read-only query" in self._labels(c, "analyzing")
+        labels = self._labels(c, "analyzing")
+        assert "2 safety checks passed" in labels
+        assert "Read-only query" not in labels
+
+    def test_a_single_check_is_not_pluralised(self):
+        c = self._ctx({"validation": {"checks": [
+            {"label": "Read-only query", "passed": True}]}})
+        assert "1 safety check passed" in self._labels(c, "analyzing")
+
+    def test_a_failing_check_is_named_because_WHICH_one_is_the_point(self):
+        c = self._ctx({"validation": {"checks": [
+            {"label": "Read-only query", "passed": True},
+            {"label": "No requested filters were ignored", "passed": False}]}})
+        labels = self._labels(c, "analyzing")
+        assert "No requested filters were ignored" in labels
+        assert not any("safety check" in l for l in labels), (
+            "once something failed, the reassuring count is not the story")
 
     def test_a_failed_check_is_named_and_flagged(self):
         """Knowing WHICH check failed is the case where the name matters most."""
@@ -2387,3 +2414,265 @@ def test_a_SQL_turn_that_produced_nothing_keeps_its_failure():
     checks = [c for s in t.steps.values() for c in s.sub_checks
               if c["kind"] == "validation"]
     assert len(checks) == 1 and checks[0]["state"] == ts.STATE_FAILED
+
+
+def test_a_plain_retrieval_is_recognised_as_a_list():
+    """`_INTENT_NOUN` has carried "a list" all along and nothing ever set it, so
+    "list 5 assets" — the commonest shape there is — fell through to the generic
+    "Working out what you're asking for." on the step that takes the longest."""
+    from apps.chat.thinking_context import ThinkingContext
+    c = ThinkingContext()
+    c.absorb_explain({"result": {"row_count": 100},
+                      "operations": [{"type": "limit", "summary": "Return top 100"}]})
+    assert c.intent == "list"
+    assert c.sentence("understanding") == "You're asking for a list."
+
+
+def test_a_ranking_still_wins_over_a_plain_retrieval():
+    from apps.chat.thinking_context import ThinkingContext
+    c = ThinkingContext()
+    c.absorb_explain({"result": {"row_count": 5},
+                      "operations": [{"type": "sort", "summary": "y"},
+                                     {"type": "limit", "summary": "z"}]})
+    assert c.intent == "ranking"
+
+
+def test_an_aggregate_still_wins_over_both():
+    from apps.chat.thinking_context import ThinkingContext
+    c = ThinkingContext()
+    c.absorb_explain({"result": {"row_count": 1},
+                      "operations": [{"type": "count", "summary": "x"}]})
+    assert c.intent == "count"
+
+
+def test_a_single_row_answer_is_not_called_a_list():
+    """One record back is a figure, not a list."""
+    from apps.chat.thinking_context import ThinkingContext
+    c = ThinkingContext()
+    c.absorb_explain({"result": {"row_count": 1},
+                      "operations": [{"type": "limit", "summary": "Return top 100"}]})
+    assert c.intent is None
+
+
+class TestThePanelShowsWhatActuallyRan:
+    """The engine ships an authored `title` and an `elapsed_ms` on every progress
+    event and the panel discarded both, folding twelve real phases into four steps.
+    On a measured 26-second turn "Checking available data" occupied 13.2s of it and
+    the Finding step showed only the source name."""
+
+    def _ctx(self, events, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        for k, v in kw.items():
+            setattr(c, k, v)
+        for e in events:
+            c.absorb(e)
+        return c
+
+    _SEARCH = [{"phase": "source_selection", "title": "Checking available data",
+                "status": "started", "elapsed_ms": 966.2},
+               {"phase": "source_selection", "title": "Checking available data",
+                "status": "completed", "elapsed_ms": 14141.9}]
+
+    def test_the_phase_appears_by_its_authored_title(self):
+        rows = self._ctx(self._SEARCH).details("finding")
+        assert "Checking available data" in [r["label"] for r in rows]
+
+    def test_the_measured_duration_travels_with_it(self):
+        row = [r for r in self._ctx(self._SEARCH).details("finding")
+               if r["label"] == "Checking available data"][0]
+        assert row["duration_ms"] == 13175
+
+    def test_a_phase_with_only_a_start_carries_no_duration(self):
+        """A single timestamp is a moment, not a measurement."""
+        rows = self._ctx(self._SEARCH[:1]).details("finding")
+        row = [r for r in rows if r["label"] == "Checking available data"][0]
+        assert "duration_ms" not in row
+
+    def test_the_search_row_leads_what_it_found(self):
+        c = self._ctx(self._SEARCH)
+        c.source_names = ["homzhub"]
+        labels = [r["label"] for r in c.details("finding")]
+        assert labels.index("Checking available data") < labels.index("homzhub")
+
+    def test_a_document_turn_is_never_told_a_query_ran(self):
+        """The titles are authored per PHASE, not per route, so the document head's
+        `data_retrieval` arrives titled "Running the query" — and none ran."""
+        ev = [{"phase": "data_retrieval", "title": "Running the query",
+               "status": "started", "elapsed_ms": 10.0},
+              {"phase": "data_retrieval", "title": "Running the query",
+               "status": "completed", "elapsed_ms": 900.0}]
+        c = self._ctx(ev, execution_type=ts.EXEC_DOCUMENTS)
+        assert "Running the query" not in [r["label"] for r in c.details("analyzing")]
+
+    def test_a_sql_turn_still_reports_the_query_running(self):
+        ev = [{"phase": "data_retrieval", "title": "Running the query",
+               "status": "started", "elapsed_ms": 10.0},
+              {"phase": "data_retrieval", "title": "Running the query",
+               "status": "completed", "elapsed_ms": 900.0}]
+        c = self._ctx(ev, execution_type=ts.EXEC_SQL)
+        assert "Running the query" in [r["label"] for r in c.details("analyzing")]
+
+    def test_turn_boundaries_and_the_timed_access_check_are_not_repeated(self):
+        """`received`/`completed` are boundaries, not work, and `access_check`
+        already has its own timed sub-check with outcome copy."""
+        ev = [{"phase": p, "title": t, "status": "completed", "elapsed_ms": 5.0}
+              for p, t in (("received", "Received your question"),
+                           ("completed", "Done"),
+                           ("access_check", "Checking data access"))]
+        c = self._ctx(ev)
+        labels = sum(([r["label"] for r in c.details(s)]
+                      for s in ("understanding", "finding", "analyzing", "preparing")), [])
+        for unwanted in ("Received your question", "Done", "Checking data access"):
+            assert unwanted not in labels
+
+
+class TestARowIsNotRepeatedWhenItsMeasurementChanges:
+    """`validation` reports twice on some turns — `completed`, then `warning` — and
+    once `duration_ms` became part of a detail row, whole-entry comparison let both
+    through: the reader saw "Checking the query" twice in one step. Measured on a
+    zero-row turn."""
+
+    def _row(self, label, dur, state=None):
+        return {"type": ts.DETAIL_OPERATION, "label": label,
+                "state": state or ts.STATE_COMPLETED, "duration_ms": dur}
+
+    def test_the_same_row_with_a_new_duration_replaces_the_old_one(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("sql_planning", "…"))
+        t.set_details("analyzing", [self._row("Checking the query", 2704)])
+        t.set_details("analyzing", [self._row("Checking the query", 2710)])
+        rows = [r for r in t.steps["analyzing"].details
+                if r["label"] == "Checking the query"]
+        assert len(rows) == 1, f"the row was repeated: {rows}"
+        assert rows[0]["duration_ms"] == 2710, "the later measurement should win"
+
+    def test_two_genuinely_different_rows_both_survive(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("sql_planning", "…"))
+        t.set_details("analyzing", [self._row("Checking the query", 10),
+                                    self._row("Running the query", 20)])
+        assert len([r for r in t.steps["analyzing"].details]) == 2
+
+    def test_a_state_change_on_the_same_row_updates_it_in_place(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("sql_planning", "…"))
+        t.set_details("analyzing", [self._row("Checking the query", 10)])
+        t.set_details("analyzing", [self._row("Checking the query", 10,
+                                              ts.STATE_WARNING)])
+        rows = [r for r in t.steps["analyzing"].details]
+        assert len(rows) == 1 and rows[0]["state"] == ts.STATE_WARNING
+
+
+# ─────────────────────────── phase rows carry their own real state + reason
+class TestAPhaseRowShowsWhyItsStepIsAWarning:
+    """`_phase_rows` used to hardcode every row's state to STATE_COMPLETED
+    regardless of what the engine actually reported. Measured live on a Tier-1 ->
+    Tier-2 fallback turn: the parent step read `!` (warning) while every row inside
+    it showed a plain green tick — the reader had no way to tell which part of the
+    step was the problem, or why the step was flagged at all."""
+
+    def _ctx(self, events, **kw):
+        from apps.chat.thinking_context import ThinkingContext
+        c = ThinkingContext()
+        for k, v in kw.items():
+            setattr(c, k, v)
+        for e in events:
+            c.absorb(e)
+        return c
+
+    def test_a_warning_status_makes_the_row_a_warning(self):
+        c = self._ctx([{"phase": "data_retrieval", "title": "Running the query",
+                        "status": "warning", "elapsed_ms": 900.0,
+                        "message": "The primary method could not answer this, so "
+                                   "an alternate method was used."}])
+        row = [r for r in c.details("analyzing")
+               if r["label"] == "Running the query"][0]
+        assert row["state"] == ts.STATE_WARNING
+        assert row["message"] == ("The primary method could not answer this, so "
+                                  "an alternate method was used.")
+
+    def test_a_failed_status_makes_the_row_failed(self):
+        c = self._ctx([{"phase": "data_retrieval", "title": "Running the query",
+                        "status": "failed", "elapsed_ms": 5.0}])
+        row = [r for r in c.details("analyzing")
+               if r["label"] == "Running the query"][0]
+        assert row["state"] == ts.STATE_FAILED
+
+    def test_a_plain_completion_stays_a_tick_with_no_message(self):
+        """A success carries a message too ("Safety checks passed", "homzhub
+        completed") and showing it turned a clean run noisy — a row that already
+        says "5 safety checks passed" gained a second, redundant echo of the same
+        fact. On a plain success the checkmark already says everything needed."""
+        c = self._ctx([{"phase": "data_retrieval", "title": "Running the query",
+                        "status": "completed", "elapsed_ms": 5.0,
+                        "message": "homzhub completed"}])
+        row = [r for r in c.details("analyzing")
+               if r["label"] == "Running the query"][0]
+        assert row["state"] == ts.STATE_COMPLETED
+        assert "message" not in row
+
+    def test_a_status_that_downgrades_cannot_soften_an_earlier_problem(self):
+        """The same ratchet already used for sub-check severity: `result_preparation`
+        was measured firing `warning` then `completed` for ONE piece of work, and a
+        later `completed` must never make an already-reported problem disappear."""
+        c = self._ctx([
+            {"phase": "result_preparation", "title": "Preparing your answer",
+             "status": "warning", "elapsed_ms": 10.0, "message": "x"},
+            {"phase": "result_preparation", "title": "Preparing your answer",
+             "status": "completed", "elapsed_ms": 20.0}])
+        row = [r for r in c.details("preparing")
+               if r["label"] == "Preparing your answer"][0]
+        assert row["state"] == ts.STATE_WARNING
+
+    def test_a_row_that_only_echoes_its_own_step_title_is_dropped_while_clean(self):
+        """`result_preparation`'s authored title IS, verbatim, "Preparing your
+        answer" — the same string the step header already shows. Repeating it as a
+        detail row said nothing new on every ordinary turn."""
+        c = self._ctx([{"phase": "result_preparation", "title": "Preparing your answer",
+                        "status": "completed", "elapsed_ms": 5.0}])
+        assert c.details("preparing") == []
+
+    def test_the_same_echoing_row_survives_when_it_is_actually_a_problem(self):
+        """The colour on the row IS the fact once something is wrong — dropping it
+        here would leave "Preparing" reading `!` with nothing at all inside it."""
+        c = self._ctx([{"phase": "result_preparation", "title": "Preparing your answer",
+                        "status": "warning", "elapsed_ms": 5.0, "message": "m"}])
+        rows = c.details("preparing")
+        assert len(rows) == 1 and rows[0]["state"] == ts.STATE_WARNING
+
+
+class TestSetDetailsCarriesDurationAndMessageOnBothPaths:
+    """The TERMINAL branch of `set_details` — the one that builds the frame a
+    client actually renders last — dropped `duration_ms` AND `message` entirely.
+    Measured live: a turn's mid-flight frames carried real per-phase timing, and
+    the terminal frame had none of it."""
+
+    def _row(self, label, **extra):
+        return {"type": ts.DETAIL_OPERATION, "label": label,
+                "state": ts.STATE_WARNING, **extra}
+
+    def test_duration_survives_the_terminal_replace(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("sql_planning", "…"))
+        t.set_details("analyzing",
+                      [self._row("Running the query", duration_ms=5700)],
+                      terminal=True)
+        row = t.steps["analyzing"].details[0]
+        assert row["duration_ms"] == 5700
+
+    def test_message_survives_the_terminal_replace(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("sql_planning", "…"))
+        t.set_details("analyzing",
+                      [self._row("Running the query", message="alternate method used")],
+                      terminal=True)
+        row = t.steps["analyzing"].details[0]
+        assert row["message"] == "alternate method used"
+
+    def test_message_also_survives_the_non_terminal_merge(self):
+        t = ts.ThinkingStepTracker()
+        t.consume(ev("sql_planning", "…"))
+        t.set_details("analyzing", [self._row("Running the query", message="m")])
+        row = t.steps["analyzing"].details[0]
+        assert row["message"] == "m"

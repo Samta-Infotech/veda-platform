@@ -45,6 +45,8 @@ from __future__ import annotations
 
 import json
 
+import json
+
 import time
 
 # ── the four fixed steps ─────────────────────────────────────────────────────
@@ -778,6 +780,14 @@ class ThinkingStepTracker:
                     continue
                 entry = {"type": kind, "label": str(label)[:160],
                          "state": row.get("state") or STATE_COMPLETED}
+                # Both were being DROPPED here, on the one path that produces the
+                # frame a client actually renders last. Measured live: a turn's
+                # mid-flight frames carried real per-phase durations, and the
+                # terminal frame — built through this branch — had none of them.
+                if isinstance(row.get("duration_ms"), int):
+                    entry["duration_ms"] = row["duration_ms"]
+                if row.get("message"):
+                    entry["message"] = row["message"]
                 if entry not in _kept and entry not in _new:
                     _new.append(entry)
             replaced = _kept + _new
@@ -794,6 +804,10 @@ class ThinkingStepTracker:
                 continue
             entry = {"type": kind, "label": str(label)[:160],
                      "state": row.get("state") or STATE_COMPLETED}
+            if isinstance(row.get("duration_ms"), int):
+                entry["duration_ms"] = row["duration_ms"]
+            if row.get("message"):
+                entry["message"] = row["message"]
             if row.get("_generic"):
                 entry["_generic"] = True
             elif any(e.get("_generic") and e["type"] == kind for e in st.details):
@@ -804,8 +818,21 @@ class ThinkingStepTracker:
                 st.details = [e for e in st.details
                               if not (e.get("_generic") and e["type"] == kind)]
                 changed = True
-            if entry not in st.details:
+            # IDENTITY IS (type, label), NOT the whole entry. A phase that reports
+            # twice — `validation` emits `completed` and then `warning` on the same
+            # turn — produces the same row with a DIFFERENT `duration_ms`, and
+            # comparing whole entries let both through: the reader saw "Checking the
+            # query" twice. Measured on a zero-row turn after `duration_ms` became
+            # part of the row. The later report replaces the earlier one, because it
+            # is the more complete measurement of the same piece of work.
+            _key = (entry["type"], entry["label"])
+            _at = next((i for i, e in enumerate(st.details)
+                        if (e.get("type"), e.get("label")) == _key), None)
+            if _at is None:
                 st.details.append(entry)
+                changed = True
+            elif st.details[_at] != entry:
+                st.details[_at] = entry
                 changed = True
         return changed
 

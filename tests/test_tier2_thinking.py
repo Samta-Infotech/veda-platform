@@ -10,9 +10,15 @@ Run from the repo root: ``pytest tests/test_tier2_thinking.py``"""
 import os
 import sys
 
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
-                                "veda_core"))
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+# ORDER MATTERS, AND IT WAS BACKWARDS. Both inserts used index 0, so the repo root
+# ended up FIRST and `config` resolved to the Django `config/` PACKAGE instead of
+# `veda_core/config.py`. `query.lg_nodes` does `from config import
+# SLM_OLLAMA_BASE_URL`, which the Django package does not define — so this whole
+# file raised ImportError at collection and the entire Tier-2 thinking surface went
+# unverified. veda_core goes first; the repo root follows it.
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, os.path.join(_ROOT, "veda_core"))
+sys.path.insert(1, _ROOT)
 from query.lg_nodes import _emit_step
 import query.lg_nodes as ln
 

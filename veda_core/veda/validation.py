@@ -5,6 +5,7 @@ import sqlglot
 from sqlglot import exp
 import time as _time
 from retrieval.query_enrichment import _singularize
+from query.ranking_parser import parse_ranking
 
 
 def validate_and_parameterize(sql, allowed_tables, allowed_columns,
@@ -169,8 +170,23 @@ def validate_and_parameterize(sql, allowed_tables, allowed_columns,
     # (e.g. embedded in a composite literal) — never execute that.
     if "__P" in param_sql:
         return None, None, "could not safely parameterize a literal"
-    if "limit" not in param_sql.lower():
-        param_sql += " LIMIT 100"
+    # NO silent LIMIT. This used to append "LIMIT 100" to any SQL that carried none,
+    # at the last step before execution — so a question that named no row count was
+    # answered from 100 rows whatever the planner had decided, and removing the
+    # planner's own default (veda/generation.py) changed nothing because this put it
+    # straight back.
+    #
+    # It was not a display cap. Everything the user is told is derived from the rows
+    # that come back, so the page silently became the population: measured 2026-09-22
+    # on assets_asset (7,814 rows), capped runs reported "There are 904 assets listed"
+    # and "The average carpet area is 1628.46 square meters" as facts about the data,
+    # and the share fabrications this was first traced from ("86% of the assets listed
+    # are in Pune", on a query already filtered to Pune) are the same defect.
+    #
+    # A limit the user actually asked for ("top 5") is untouched — it is already in the
+    # SQL by this point. Execution still bounds the result independently
+    # (veda_hybrid.py passes row_limit=SQL_DEFAULT_LIMIT with timeout_sec=30), so this
+    # removes an invented answer-changing cap, not the last line of defence.
     return param_sql, params, None
 
 
@@ -386,7 +402,7 @@ def _domain_synonyms() -> dict:
     return _DS_SYN_CACHE["v"]
 
 
-def qualifier_completeness(query, sql, sm=None, strict=False):
+def qualifier_completeness(query, sql, sm=None, strict=False, user_message=None):
     """Unified correctness gate (all paths): every CONTENT token the user named must
     appear somewhere in the generated SQL — as a table, column, string literal, or
     SELECT alias (or as a descriptor in a referenced table's business purpose). A named
@@ -395,11 +411,27 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
     would answer a broader question. We refuse rather than silently mislead. Substring
     matching (≥4 chars) absorbs morphology (flagged↔flag, active↔is_active); the table
     business-purpose absorbs NL descriptors (workflow↔state) — neither admits a dropped
-    proper-noun value, which is the dangerous case. Returns (ok, missing|None)."""
+    proper-noun value, which is the dangerous case. Returns (ok, missing|None).
+
+    `user_message` — WHOSE WORDS THIS GATE IS ABOUT. The sentence above says "every
+    CONTENT token the user named", and for most callers `query` IS what the user named,
+    so it stays the default. But a chat follow-up used to arrive here already rewritten,
+    with the conversation layer's own description of the remembered table glued on:
+
+        only the debit ones (for Single Financial Transactions (accounts_generalledger))
+
+    and this gate then refused on `financial` — a word from the engine's own display
+    label for the table, which the user never typed, and which substring-matches the real
+    column `financial_year_id`. The user's own word (`debit`) was answerable. Passing the
+    user's message explicitly makes the contract in the first paragraph literally true
+    instead of merely intended; the gate itself is unchanged and is not weakened, because
+    every token the user DID name is still required to appear in the SQL.
+    """
     global _GATE_STRIP
     if _GATE_STRIP is None:
         _GATE_STRIP = _gate_strip()
-    content = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower())
+    _user_words = user_message if isinstance(user_message, str) and user_message.strip() else query
+    content = {_singularize(w) for w in re.findall(r"[a-z]+", (_user_words or "").lower())
                if len(w) > 2 and w not in _GATE_STRIP and _singularize(w) not in _GATE_STRIP}
     if not content:
         return True, None
@@ -540,6 +572,57 @@ def grouped_shape_ok(query, sql):
     if tree.find(exp.Where) is not None:
         return True                                  # a filter ("by <person>") → not a group mismatch
     return False                                     # grouped intent, pure projection → refuse
+
+
+def ranked_shape_ok(query, sql):
+    """Ranking-intent shape guard. A query that explicitly asks for N RANKED rows ("top 5 debit
+    transaction", "latest 10 entries", "bottom 3 assets") must be answered by SQL that actually
+    ORDERS. When it is answered by an unordered projection with a bare LIMIT, the rows that come
+    back are an ARBITRARY N, and the NL summariser presents them as the ranked ones — measured
+    2026-09-23 on "top 5 debit transaction", whose answer named invoice IDs 102/139/145/128/155
+    that are simply the first five rows the table happened to return, while the real top five
+    debit amounts are 2,500,000 / 650,000 / 500,000 / 400,000 / 345,000.
+
+    Two independent producers hit this. The deterministic branch builds its ORDER BY from
+    `_rank_sort_column`, which resolves a metric ranking only when the anchor names EXACTLY ONE
+    candidate measure — `accounts_paymenttransaction` names two (expected_amount, paid_amount), so
+    the ranking was silently dropped and only the LIMIT survived. The verified cache separately
+    replayed an entry whose SQL carried `LIMIT 10` and no ORDER BY at all.
+
+    Gated on an EXPLICIT count (`rank.top_n is not None`), not on ranking language alone: "first
+    name", "most common" and "highest amount" carry a ranking word with no count, and an aggregate
+    or a plain projection answers them legitimately. Passes when the SQL orders, or when an
+    aggregate already expresses the extreme (MAX/MIN/…), so only the real mismatch — N requested,
+    nothing ordered — is refused. Returns (ok, reason|None); True on any parse issue."""
+    if not sql:
+        return True, None
+    rank = parse_ranking(query or "")
+    if rank.top_n is None or rank.basis is None:
+        return True, None                            # no explicit "N ranked rows" request
+    try:
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return True, None                            # don't block on a parse issue
+    if tree.find(exp.Order) is not None:
+        return True, None                            # ordered → the ranking is real
+    # A SCALAR aggregate (no GROUP BY) returns ONE row, so it is not an N-row ranking at all and
+    # this guard has no business adjudicating it — "SELECT MAX(amount)" answers a superlative
+    # directly. A GROUPED aggregate is the opposite: it returns many rows, and without an ORDER BY
+    # they are in no order, which is exactly what this guard exists for. The first version tested
+    # `exp.AggFunc` alone and so waved through `SELECT name, COUNT(*) … GROUP BY name` carrying
+    # neither ORDER BY nor LIMIT — measured 2026-09-23, where "top 5 general ledger entries"
+    # returned SEVEN rows, every count 1, and the summariser called them the top five.
+    if tree.find(exp.Group) is None and tree.find(exp.AggFunc) is not None:
+        return True, None                            # scalar aggregate → one row, not a ranking
+    if rank.basis == "metric":
+        asked = f"the {'top' if rank.direction == 'desc' else 'bottom'} {rank.top_n} by value"
+    else:
+        asked = f"the {'latest' if rank.direction == 'desc' else 'earliest'} {rank.top_n} by date"
+    # Deliberately does not state a row COUNT: the statement being judged may return a different
+    # number than was asked for (the federated path returned seven for a "top 5", and a cached
+    # replay carried LIMIT 10), and a reason that misstates what happened is its own small lie.
+    return False, (f"you asked for {asked}, but the query I built returns the rows "
+                   f"in no particular order")
 
 
 def distinct_shape_ok(query, sql):

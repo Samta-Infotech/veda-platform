@@ -149,7 +149,7 @@ class ThinkingContext:
                  "no_answer", "found_nothing", "from_cache", "failed_sources",
                  "warning_messages", "checks", "filters", "datasets",
                  "contributions", "chart_reason", "guidance", "combined_sources",
-                 "match_summary",
+                 "match_summary", "phase_runs",
                  "source_names", "passages", "execution_type")
 
     def __init__(self):
@@ -200,6 +200,13 @@ class ThinkingContext:
         self.combined_sources: list = []
         #: The authored sentence about how well the records matched across sources.
         self.match_summary: str | None = None
+        #: {phase: [title, start_ms, end_ms]} — the WORK THAT ACTUALLY RAN, by the
+        #: authored title the engine already ships on every event, with the elapsed
+        #: window it occupied. The panel was collapsing twelve real phases into four
+        #: steps and showing none of them, so the longest stretch of a turn
+        #: ("Checking available data", measured at 13.2s of a 26s turn) had nothing
+        #: on screen at all. The phase KEY stays internal; only the title is shown.
+        self.phase_runs: dict = {}
         #: True when the answer replayed SQL from the verified-query cache.
         self.from_cache: bool = False
         #: Display names of the sources that took part. A name beats a count:
@@ -233,6 +240,37 @@ class ThinkingContext:
             d = (payload or {}).get("details") or {}
             phase = (payload or {}).get("phase")
             status = (payload or {}).get("status")
+            _title = (payload or {}).get("title")
+            _el = (payload or {}).get("elapsed_ms")
+            if phase and _title and isinstance(_el, (int, float)):
+                # [title, start_ms, end_ms, worst_status, message]. `worst_status` is
+                # a RATCHET, the same pattern already used for sub-check severity: a
+                # phase can report `warning` and then `completed` for the SAME piece
+                # of work (measured live — `result_preparation` did exactly this,
+                # warning then completed, both for one truncated result), and a later
+                # `completed` must never soften an already-reported problem. Without
+                # this the row rendered as a plain green tick while its OWN parent
+                # step was `warning`, with nothing on screen explaining why.
+                _run = self.phase_runs.setdefault(phase, [str(_title), None, None,
+                                                          None, None])
+                if status == "started" and _run[1] is None:
+                    _run[1] = float(_el)
+                elif status in ("completed", "warning", "failed"):
+                    _run[2] = float(_el)
+                    if _run[1] is None:
+                        _run[1] = float(_el)
+                    _sev = {"completed": 1, "warning": 2, "failed": 3}.get(status, 0)
+                    _was = {"completed": 1, "warning": 2, "failed": 3}.get(_run[3], 0)
+                    if _sev >= _was:
+                        _run[3] = status
+                        _msg = (payload or {}).get("message")
+                        # Only keep a message that says something the row's own
+                        # LABEL does not already say. The engine's `source_selection`
+                        # warning ships `message: "Checking available data"` — the
+                        # phase's own title, verbatim, so surfacing it would just
+                        # repeat the label as if it were an explanation.
+                        if _msg and str(_msg).strip().lower() != str(_title).strip().lower():
+                            _run[4] = str(_msg).strip()
 
             if d.get("intent"):
                 self.intent = str(d["intent"])[:32]
@@ -322,6 +360,19 @@ class ThinkingContext:
                     else:
                         if "sort" in kinds and "limit" in kinds:
                             self.intent = "ranking"
+                        elif isinstance(self.row_count, int) and self.row_count > 1:
+                            # A plain retrieval. `_INTENT_NOUN` has carried "a list"
+                            # all along and nothing ever set it, so "list 5 assets" —
+                            # the commonest shape there is — fell through to the
+                            # generic "Working out what you're asking for." on the
+                            # step that takes the longest.
+                            #
+                            # Keyed on the ROWS, not on an operation type: measured,
+                            # a list query emits only `limit` ("Return top 100") and
+                            # no `select` at all, so matching operation names found
+                            # nothing. More than one record coming back is what makes
+                            # an answer a list, and it is read above this block.
+                            self.intent = "list"
                 if "group" in {str(o.get("type")) for o in ops if isinstance(o, dict)}:
                     self.grouped = True
             if ex.get("visualization"):
@@ -475,6 +526,69 @@ class ThinkingContext:
             row["_generic"] = True
         return row
 
+    #: Phases whose title says nothing a reader can use, or that the panel already
+    #: represents better elsewhere. `access_check` is a timed sub-check with its own
+    #: outcome copy; `received`/`completed` are turn boundaries, not work.
+    _PHASE_ROW_SKIP = frozenset({"received", "completed", "access_check",
+                                 "understanding"})
+
+    def _phase_rows(self, step_key: str) -> list:
+        """The work that actually ran inside this step, by its authored title.
+
+        The engine ships `title` and `elapsed_ms` on every progress event and the
+        panel was discarding both, folding twelve real phases into four steps. The
+        result was that the longest stretch of a turn had nothing on screen: on a
+        measured 26-second turn, "Checking available data" occupied 13.2s of it and
+        the Finding step showed only the source name.
+
+        A duration is attached only when the phase reported BOTH a start and an end,
+        because a single timestamp is a moment, not a measurement.
+        """
+        rows = []
+        for phase, (title, t0, t1, status, message) in self.phase_runs.items():
+            if phase in self._PHASE_ROW_SKIP:
+                continue
+            # The engine's titles are authored per PHASE, not per route, so the
+            # document head's `data_retrieval` arrives titled "Running the query" —
+            # and no query ran; passages were retrieved. "Synthesized the retrieved
+            # information" already says what happened on that path.
+            if phase == "data_retrieval" and self.execution_type == ts.EXEC_DOCUMENTS:
+                continue
+            if ts.PHASE_TO_STEP.get(phase) != step_key:
+                continue
+            # THE ROW'S STATE FOLLOWS THE PHASE'S OWN REPORTED OUTCOME. This used to
+            # be hardcoded to `completed` regardless of what the engine actually
+            # said, which is how a step read `!` (warning) while every row inside it
+            # showed a plain green tick — measured live on a federated fallback: the
+            # reader had no way to tell WHICH part of "Analyzing" was the problem.
+            _state = {"warning": ts.STATE_WARNING,
+                      "failed": ts.STATE_FAILED}.get(status, ts.STATE_COMPLETED)
+            # A row that just ECHOES the step's own title adds nothing while it is
+            # a plain success — `result_preparation`'s authored title IS, verbatim,
+            # "Preparing your answer", the exact string `Preparing` already shows as
+            # its own header. It is kept when the state is NOT a plain success,
+            # because then the colour on the row is itself the fact: it is how a
+            # reader sees WHICH part of a `!` step is the part with a problem, even
+            # before any message is attached.
+            if title == ts.STEP_TITLES.get(step_key) and _state == ts.STATE_COMPLETED:
+                continue
+            row = self._row(ts.DETAIL_OPERATION, title, _state)
+            if t0 is not None and t1 is not None and t1 >= t0:
+                row["duration_ms"] = int(t1 - t0)
+            # The message that came WITH a WARNING/FAILURE, and only then. A plain
+            # success carries a message too — "Safety checks passed", "homzhub
+            # completed" — and showing it turned a clean run noisy: "Checking the
+            # query" gained "— Safety checks passed" sitting directly above a row
+            # that already says "5 safety checks passed", the same fact twice on a
+            # turn with nothing wrong to explain. On a real problem the message is
+            # the one thing worth reading; on a success the checkmark already says
+            # everything the reader needs. Still deduped against a warning already
+            # surfaced elsewhere (Preparing's own warning_messages loop).
+            if _state != ts.STATE_COMPLETED and message and message not in self.warning_messages:
+                row["message"] = message
+            rows.append(row)
+        return rows
+
     def _understanding_details(self) -> list:
         rows = []
         if self.intent and _INTENT_NOUN.get(self.intent):
@@ -493,7 +607,8 @@ class ThinkingContext:
         return rows
 
     def _finding_details(self) -> list:
-        rows = []
+        # The search runs BEFORE it finds anything, so its row leads.
+        rows = self._phase_rows(ts.STEP_FINDING)
         # Named sources beat a bare count: "Samta Employee Handbook" tells the reader
         # something a "1" cannot. The count is the fallback when no name is known.
         if self.source_names:
@@ -652,9 +767,26 @@ class ThinkingContext:
         # The checks BY NAME, replacing the single line that said only that
         # checking had occurred. A failed check is named too — that is the case
         # where knowing WHICH one matters most.
-        for label, passed in self.checks[:6]:
-            rows.append(self._row(ts.DETAIL_VALIDATION, label,
-                                  ts.STATE_COMPLETED if passed else ts.STATE_WARNING))
+        # THE CHECKS. Naming all five on every turn was measured to be 5 of the 6
+        # rows in this step, identical on every SQL answer — which trains the reader
+        # to skip the step that also carries the one row that varies. They collapse
+        # to a single line while they all pass, and the count is the fact that
+        # matters there ("we ran five, all passed").
+        #
+        # The moment one does NOT pass, that is no longer noise: the failing checks
+        # are named individually, because WHICH one failed is the whole point. The
+        # full list stays in `explainability.validation.checks` either way, so
+        # nothing is lost to a reader who wants it.
+        rows.extend(self._phase_rows(ts.STEP_ANALYZING))
+        _failed = [l for l, ok in self.checks if not ok]
+        if _failed:
+            for label in _failed[:6]:
+                rows.append(self._row(ts.DETAIL_VALIDATION, label, ts.STATE_WARNING))
+        elif self.checks:
+            _n = len(self.checks)
+            rows.append(self._row(
+                ts.DETAIL_VALIDATION,
+                f"{_n} safety check{'' if _n == 1 else 's'} passed"))
         return rows
 
     def _preparing_details(self) -> list:
@@ -677,7 +809,13 @@ class ThinkingContext:
                 for g in self.guidance[:3]:
                     rows.append(self._row(ts.DETAIL_OUTPUT, g, ts.STATE_WARNING))
             return rows
-        rows = []
+        # What actually ran in THIS step, for the same reason Finding and Analyzing
+        # already do this: a step reading `!` with nothing inside explaining why is
+        # a legibility bug, not a subtlety — the reader cannot tell WHICH part of
+        # "Preparing" had a problem. `_phase_rows` already dedupes its message
+        # against `self.warning_messages`, so this never restates a caveat already
+        # shown by the loop further down.
+        rows = self._phase_rows(ts.STEP_PREPARING)
         if self.output in ("chart", "chart+summary"):
             # WHY THIS CHART. `_CHART_REASON_TEMPLATES` is deterministic authored
             # copy, never the model's prose — and it was being read as a boolean and

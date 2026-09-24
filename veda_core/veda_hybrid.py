@@ -54,9 +54,11 @@ from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
 from slm._call_slm import collect_usage as _collect_usage_dc, usage_totals as _usage_totals_dc
 from concurrent.futures import ThreadPoolExecutor
 from veda_core.context import set_context as _set_ctx, try_current as _try_ctx
+from veda_core.context import (current_conversation_context as _cur_conv,
+                               set_conversation_context as _set_conv)
 from veda.explain import (current_trace as _cur_trace, bind_trace as _bind_trace,
                           record_result_stages, render_trace)
-from veda.validation import value_grounding, qualifier_completeness
+from veda.validation import value_grounding, qualifier_completeness, ranked_shape_ok as _ranked_ok
 from veda.ir_equivalence import validate_ir_equivalence
 import sqlglot
 from sqlglot import exp
@@ -253,6 +255,32 @@ def classify(query, verbose=False):
     # question over a scope that actually has doc chunks routes to the RAG lane (pure doc ask)
     # or the HYBRID lane (doc + a DB clause), never the SQL head that would ignore the doc.
     q = query or ""
+
+    # CONVERSATION LANE CONTINUITY. A follow-up now reaches the engine as the user's own
+    # words alone ("only the ones in Pune"), with the remembered state travelling beside
+    # it — which is the point, but it leaves the ROUTER looking at a fragment that names
+    # no entity. Measured 2026-09-23, immediately after that change: every relational
+    # follow-up was routed to RAG and answered "The provided context does not contain any
+    # information related to properties in Pune. Sources: (Samta-Employee Handbook…)".
+    #
+    # The conversation already knows which lane it is in. When the previous answered turn
+    # came from a SQL head AND named a table, this turn continues that lane. This is the
+    # pinning the frame has always held (`route`, `entity`); it was previously carried by
+    # accident, inside the rewritten query text.
+    #
+    # Deliberately narrow: a DOCUMENT frame (route "rag"/"hybrid") is left alone, so a
+    # genuine document conversation keeps its own continuity, and a turn with no
+    # conversation context at all is byte-identical to before.
+    try:
+        _conv = _cur_conv() or {}
+    except Exception:
+        _conv = {}
+    if _conv.get("entity_table") and str(_conv.get("route") or "") not in ("rag", "hybrid"):
+        if verbose:
+            print(f"  [router] continuing the conversation's SQL lane "
+                  f"(remembered table {_conv['entity_table']})")
+        return "sql", None
+
     if _DOC_REF_RE.search(q) and _scope_has_doc_source():
         # Prefer the fast RAG lane (retrieve chunks + one synthesis call, ~6-8s). Only take
         # the heavier HYBRID lane (RAG ⊕ deterministic SQL head) when the utterance clearly
@@ -757,6 +785,21 @@ def _run_coordinator(query, verbose=False, on_event=None):
             except Exception:
                 pass
 
+        # OPEN the phase before the work, not only after it. `plan_route` is the
+        # single longest silent stretch in a normal turn — measured at 5.85s of a
+        # 16.5s turn with NO lifecycle event anywhere inside it — and because only
+        # its COMPLETION was emitted, every second of it was charged to whichever
+        # step was still open. The reader watched "Understanding your request" sit
+        # there for the whole of it, which is both wrong and the longest the panel
+        # ever goes without changing.
+        #
+        # An existing phase from the closed vocabulary, so no new terminology
+        # reaches the UI, and purely additive: the completion below is unchanged.
+        try:
+            from veda import lifecycle as _lc3s
+            _lc3s.current_timeline().started(_lc3s.PHASE_SOURCE_SELECTION)
+        except Exception:
+            pass
         decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
         try:  # user-safe source-selection event, from the decision the router made
             from veda import lifecycle as _lc3
@@ -943,6 +986,21 @@ def _maybe_federated(query, verbose=False, strict=False):
         plan = payload.get("plan") or {}
         metric_sqls = [m.get("sql") for m in (plan.get("metrics") or []) if m.get("sql")]
         sql = payload.get("sql") or "\n\n".join(metric_sqls) or ""
+        # Ranking-intent shape guard, the SAME one veda/pipeline.py applies to every single-source
+        # statement. It lived only there, so a cross-source answer — which never passes through
+        # run_query — was exempt: measured 2026-09-23, "top 5 general ledger entries" came back
+        # from this path as seven unordered amenity rows and was narrated as the top five. A
+        # federation that cannot honour the ranking is refused the same way a blocked one is,
+        # rather than shipping an arbitrary N.
+        try:
+            _ok_r, _why_r = _ranked_ok(query, sql)
+        except Exception:
+            _ok_r, _why_r = True, None
+        if not _ok_r:
+            print(f"  [federated] refused: {_why_r}")
+            result = {"ok": False, "status": "federated_refused", "error": _why_r, "sql": sql,
+                      "usage": _fed_usage_totals, "latency_ms": _fed_latency_ms}
+            return MultiResult(items=[_to_subresult(query, "federated", result)])
         # group_table is DuckDB-qualified (src_2.public."assets_asset") — strip to the
         # bare table name for display; _business_table_name() would otherwise humanize
         # the dots/quotes verbatim into garbage.
@@ -1214,7 +1272,8 @@ def _emit_terminal_lifecycle(timeline, final_status: str) -> None:
         pass
 
 
-def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
+def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None,
+                     conversation_context=None):
     """Public front door. Owns the ONE query trace for the whole request.
 
     Mints a trace_id (reusing the caller's request id when one is passed —
@@ -1225,6 +1284,17 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None):
     once (Tier-1's own finish() becomes a checkpoint while this scope owns the
     trace — see explain.ExplainTrace.finish). Observability only: the returned
     MultiResult is byte-identical except for the added trace_id field."""
+    # The conversation layer's structured state for this turn, when there is one. Bound
+    # ambiently for the same reason the trace and the timeline are: the pipeline's public
+    # functions are frozen and this value is consumed in one place, deep inside. Absent
+    # (every non-chat caller) leaves it {} and the engine behaves exactly as before.
+    #
+    # `query` itself is the USER'S OWN WORDS and is not touched here or anywhere below —
+    # that is the whole point of the context arriving separately.
+    _set_conv(conversation_context)
+    if verbose and conversation_context:
+        print(f"  [conversation] context: {conversation_context}")
+
     tr = new_trace(query, trace_id=trace_id)
     # The user-safe execution timeline + per-source recorder for THIS query. Both
     # are _Null* objects unless their flag is on, so with the flags off this is two
@@ -2555,6 +2625,29 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     ok_val, bad = value_grounding(raw_sql, _resolve, cols_meta)
     if not ok_val:
         return False, f"ungrounded value {bad}"
+
+    # CONVERSATION STATE. Tier-2 fires precisely when the deterministic head refused, and
+    # it knows nothing about the conversation — so on a follow-up it can answer by widening
+    # the question back out. Measured 2026-09-24: after the conversation had narrowed to
+    # Nagpur, "only the gated ones" was refused by Tier-1 (the boolean would not ground),
+    # and Tier-2 answered `SELECT t1."is_gated" FROM assets_asset LIMIT 1000` — no filter,
+    # no grouping, delivered with full confidence, and the drill path was then wiped
+    # because memory keeps only levels still present in the answer's filters.
+    #
+    # Same rule Tier-1 applies: refuse only when the candidate is ON the conversation's own
+    # table and keeps NOT ONE remembered filter. Keeping some of them is a legitimate
+    # replacement, and a different table is a topic change.
+    try:
+        from veda_core.context import current_conversation_context as _cur_conv
+        _cv = _cur_conv() or {}
+    except Exception:
+        _cv = {}
+    _cv_filters = [f for f in (_cv.get("filters") or [])
+                   if isinstance(f, dict) and f.get("column")]
+    if _cv_filters and _cv.get("entity_table") in allowed_tables:
+        if not any(f'"{f["column"]}"' in raw_sql for f in _cv_filters):
+            _lost = ", ".join(sorted({str(f["column"]) for f in _cv_filters}))
+            return False, f"dropped the conversation's narrowing ({_lost})"
     # STRICT: LLM-lane answers face the QSR-aware gate — an unaccounted token with a
     # referent anywhere in the schema is a dropped qualifier, closing the wrong-table
     # blind spot (SELECT * FROM assets_asset for "most expensive financial records").
@@ -2665,7 +2758,13 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
     try:
         from veda.business_explain import extract_sql_facts
         facts = extract_sql_facts(sql or "")
-        table = facts["entities"][0] if facts["entities"] else None
+        # The FROM anchor, not the alphabetically-first table. `entities` is a sorted
+        # SET; its first element is alphabetical order, and the conversation layer
+        # harvests this field as the QueryFrame's entity — so a wrong value here moves
+        # the whole conversation to another table (measured 2026-09-22: a Mumbai
+        # follow-up on assets_asset reported accounts_generalledger and every later turn
+        # asked about the ledger).
+        table = facts.get("anchor") or (facts["entities"][0] if facts["entities"] else None)
     except Exception:
         pass
     result["table"] = table

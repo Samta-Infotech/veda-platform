@@ -38,13 +38,14 @@ from apps.core.messages import MESSAGES
 
 from ..models import CatalogResource, Effect, Permission, Role, RolePermission, UserRole
 from .admin_guard import ADMIN_ROLE_NAME, LastAdminRoleProtected, is_last_active_admin
-from .base import ConflictError, paginate
+from .base import AccessManagementError, ConflictError, paginate
 from .permissions import PermissionNotFound
 from .roles import RoleNotFound
 from .users import UserNotFound
 
 logger = logging.getLogger(__name__)
 
+CODE_USER_INACTIVE = "USER_INACTIVE"
 CODE_ROLE_INACTIVE = "ROLE_INACTIVE"
 CODE_PERMISSION_INACTIVE = "PERMISSION_INACTIVE"
 CODE_INVALID_RESOURCE = "INVALID_RESOURCE_PATH"
@@ -53,6 +54,27 @@ USER_ROLE_LIST_FIELDS = ("id", "user_id", "role_id", "granted_by_id",
                          "created_at", "updated_at")
 ROLE_PERMISSION_LIST_FIELDS = ("id", "role_id", "permission_id", "resource_path",
                                "effect", "granted_by_id", "created_at", "updated_at")
+
+
+class UserInactive(AccessManagementError):
+    """The target account is deactivated, so its role membership cannot be changed.
+
+    Renders as 400 through ``views/base.py``'s documented fallback — it descends from
+    neither ``ConflictError`` nor ``NotFoundError`` because it is neither: the record
+    exists and nothing collides, the caller simply addressed an account that is not
+    in a state to be edited.
+
+    This REVERSES an earlier deliberate choice (see ``UserRoleService.assign``), which
+    allowed assigning to an inactive user so access could be pre-provisioned before an
+    account was enabled. That is genuinely useful, but it also meant an administrator
+    editing a deactivated account got a 2xx and a changed grant list with no signal
+    that the edit was inert, which read as "the change applied". Refusing loudly is
+    the behaviour asked for; pre-provisioning now means creating the account active,
+    or reactivating before granting.
+    """
+
+    code = CODE_USER_INACTIVE
+    message = MESSAGES["grant"]["user_inactive"]
 
 
 class RoleInactive(ConflictError):
@@ -108,10 +130,12 @@ class _GrantServiceBase:
                 f"actor={actor if actor is not None else '-'}")
 
     @staticmethod
-    def _get_user(user_id):
+    def _get_user(user_id, *, require_active: bool = False):
         user = get_user_model().objects.filter(pk=user_id).first()
         if user is None:
             raise UserNotFound()
+        if require_active and not user.is_active:
+            raise UserInactive()
         return user
 
     @staticmethod
@@ -145,12 +169,14 @@ class UserRoleService(_GrantServiceBase):
         Raises:
             UserNotFound / RoleNotFound: unknown target.
             RoleInactive: the role is retired.
+            UserInactive: the target account is deactivated.
 
-        A retired role is refused, but an *inactive user* is not: pre-provisioning
-        access for an account that is not yet enabled is a legitimate workflow, and
-        the assignment grants nothing until the account is active anyway.
+        A deactivated account is refused. This reverses the original rule, which let
+        an inactive user be assigned so access could be pre-provisioned before the
+        account was enabled — see ``UserInactive`` for why that was changed: the
+        caller got a 2xx and a changed grant list for an edit that grants nothing.
         """
-        user = self._get_user(user_id)
+        user = self._get_user(user_id, require_active=True)
         role = self._get_role(role_id, require_active=True)
 
         with transaction.atomic():
@@ -180,7 +206,19 @@ class UserRoleService(_GrantServiceBase):
         Raises:
             LastAdminRoleProtected: ``role_id`` is the Admin role and ``user_id`` is
                 the platform's only active admin.
+            UserInactive: the target account exists and is deactivated.
+
+        The inactive check deliberately runs only when the user EXISTS: a revoke
+        naming an unknown id keeps its original no-op success (see above), so the
+        new rule cannot turn a previously-harmless cleanup script into a 400 on rows
+        that were never there. It cannot collide with the admin guard either — the
+        last ACTIVE admin is by definition active, so at most one of the two fires.
         """
+        target = (get_user_model().objects
+                  .filter(pk=user_id).only("pk", "is_active").first())
+        if target is not None and not target.is_active:
+            raise UserInactive()
+
         with transaction.atomic():
             # Only the Admin role needs the extra query and the row lock — every
             # other role keeps the original zero-lookup fast path untouched.
@@ -352,6 +390,18 @@ def role_stats(role_ids) -> dict:
     ``connected_sources``: a permission that applies to the whole platform is not
     "connected" to any particular kind of source, and guessing one would be a
     fabricated answer no grant actually gave.
+
+    Neither do its DENY rows (reported live: a source a role DENIED still showed up
+    in the role grid, because this read every row and never looked at ``effect``).
+    A deny is a restriction, not reach — a deny-only role is connected to nothing.
+
+    The filter is per ROW, not per kind: a role that allows ``db:crm`` and denies
+    ``db:hr`` is still connected to "Database", because the ALLOW row survives on its
+    own. And it is deliberately NOT the resolver's full ``allows()`` rule — strict
+    hierarchy is a USER-level question, resolved across the union of that user's
+    roles. A role holding only ``db:crm:employee`` grants nothing alone but does
+    contribute reach once another role allows ``db:crm``, so applying the source-gate
+    rule here would under-report what the role is actually wired to.
     """
     stats = {role_id: {"users_count": 0, "connected_sources": []} for role_id in role_ids}
     if not role_ids:
@@ -363,7 +413,7 @@ def role_stats(role_ids) -> dict:
         stats[row["role_id"]]["users_count"] = row["count"]
 
     kinds_by_role: dict = {}
-    paths = (RolePermission.objects.filter(role_id__in=role_ids)
+    paths = (RolePermission.objects.filter(role_id__in=role_ids, effect=Effect.ALLOW)
             .exclude(resource_path="").values_list("role_id", "resource_path"))
     for role_id, path in paths:
         kinds_by_role.setdefault(role_id, set()).add(rp.kind_of(path))

@@ -20,15 +20,15 @@ MESSAGES = {
         "token_refreshed": "Token refreshed successfully.",
         "logout_success": "Logout successful.",
         "invalid_credentials": "Invalid username or password.",
-        "account_inactive": "This account has been deactivated. Please contact your admin.",
+        "account_inactive": "Account has been deactivated. Please contact your admin.",
         "no_role_assigned": ("Your account has no role assigned yet. Please contact "
                              "your admin to get access."),
         "account_locked": "Too many failed login attempts. Please try again later.",
         "invalid_token": "Invalid or expired token.",
         "password_changed": "Password changed successfully.",
-        "current_password_incorrect": "The current password is incorrect.",
+        "current_password_incorrect": "Current password is incorrect.",
         "already_bootstrapped": (
-            "An administrator already exists; bootstrap can only run on an "
+            "Administrator already exists; bootstrap can only run on an "
             "empty user table."),
         "admin_required": "Access Denied: Admin privileges required.",
     },
@@ -37,9 +37,9 @@ MESSAGES = {
         "retrieved": "User retrieved successfully.",
         "list": "Users retrieved successfully.",
         "updated": "User updated successfully.",
-        "username_taken": "A user with that username already exists.",
-        "email_taken": "A user with that email address already exists.",
-        "conflict": "A user with those details already exists.",
+        "username_taken": "User with this username already exists.",
+        "email_taken": "User with this email address already exists.",
+        "conflict": "User with those details already exists.",
         "not_found": "No such user.",
         "last_admin_protected": (
             "This is the last active administrator; the platform must always "
@@ -86,11 +86,14 @@ MESSAGES = {
         "list": "Permission grants retrieved successfully.",
     },
     "grant": {
-        "role_inactive": "That role is retired and cannot be assigned.",
-        "permission_inactive": "That permission is disabled and cannot be granted.",
-        "invalid_resource": "That resource path is not valid.",
+        "role_inactive": "Role is retired and cannot be assigned.",
+        "user_inactive": (
+            "Account is deactivated; its roles cannot be changed. "
+            "Reactivate the account first."),
+        "permission_inactive": "Permission is disabled and cannot be granted.",
+        "invalid_resource": "Resource path is not valid.",
         "last_admin_role_protected": (
-            "This is the last active administrator; the Admin role cannot be "
+            "Last active administrator; the Admin role cannot be "
             "removed from them."),
     },
     "resolver": {

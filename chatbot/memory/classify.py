@@ -20,6 +20,7 @@ from typing import Any, Dict, Optional, Tuple
 from ..llm import call_slm
 from ..prompts.delta_classify import (
     DELTA_TYPES,
+    DELTA_TYPES_WITH_FIELD,
     build_delta_classify_system_prompt,
     build_delta_classify_user_prompt,
 )
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 
-def parse_delta_response(raw: Optional[str], message: str) -> Tuple[str, list]:
+def parse_delta_response(raw: Optional[str], message: str) -> Tuple[str, list, str]:
     """Parse + vocabulary-gate + confidence-gate a raw SLM response containing
     `delta_type`/`slot_candidates` JSON fields, regardless of which prompt
     produced it. Extracted (latency fix — see chatbot/prompts/supervisor.py's
@@ -42,19 +43,19 @@ def parse_delta_response(raw: Optional[str], message: str) -> Tuple[str, list]:
     continuation type it isn't sure of (refuse-over-guess, same posture as
     chatbot/nodes.py::classify_node's own error handling)."""
     if not raw:
-        return "ambiguous", []
+        return "ambiguous", [], ""
 
     match = _JSON_RE.search(raw)
     if not match:
-        return "ambiguous", []
+        return "ambiguous", [], ""
     try:
         parsed = json.loads(match.group())
     except Exception:
-        return "ambiguous", []
+        return "ambiguous", [], ""
 
     delta_type = parsed.get("delta_type")
     if delta_type not in DELTA_TYPES:
-        return "ambiguous", []
+        return "ambiguous", [], ""
 
     slots = parsed.get("slot_candidates") or []
     if not isinstance(slots, list):
@@ -80,20 +81,30 @@ def parse_delta_response(raw: Optional[str], message: str) -> Tuple[str, list]:
     # downgraded here — that's a softer signal (e.g. a legitimate
     # regroup/comparison with no new literal value) and downgrading it too
     # would make ordinary refinements needlessly ask for clarification.
-    if delta_type in ("refine", "drill_down", "compare") and slots and not grounded_slots:
+    # `delta_field` names WHICH remembered filter a replace/remove acts on. Read only for
+    # those two — a field on any other operation has no target and is dropped, so a model
+    # that emits one everywhere cannot cause an unintended mutation. It is not gated
+    # against the message (the field name is the FRAME's word, not the user's); the
+    # binding gate lives in frame.py::apply_context_delta, which drops the delta outright
+    # when the named field is not one the frame actually holds.
+    delta_field = parsed.get("delta_field") or ""
+    if not isinstance(delta_field, str) or delta_type not in DELTA_TYPES_WITH_FIELD:
+        delta_field = ""
+
+    if delta_type in ("refine", "replace", "drill_down", "compare") and slots and not grounded_slots:
         logger.info(
             "parse_delta_response: delta_type=%s proposed slot_candidates=%r but NONE were "
             "grounded in the message — downgrading to ambiguous rather than trusting "
             "an unsupported classification", delta_type, slots,
         )
-        return "ambiguous", []
+        return "ambiguous", [], ""
 
-    return delta_type, grounded_slots
+    return delta_type, grounded_slots, delta_field
 
 
 def classify_delta(
     frame: Optional[Dict[str, Any]], message: str, episodic: Optional[list] = None,
-) -> Tuple[str, list]:
+) -> Tuple[str, list, str]:
     """Standalone fallback call (chatbot/nodes.py::context_resolve_node uses
     this ONLY when classify_node's own merged call — see
     chatbot/prompts/supervisor.py — didn't already produce a valid
@@ -110,7 +121,7 @@ def classify_delta(
         # No prior frame to continue from — deterministically new_topic, no
         # SLM call needed at all (mirrors classify_node's own instant
         # deterministic fast paths for greetings/thanks/bye/date questions).
-        return "new_topic", []
+        return "new_topic", [], ""
 
     try:
         raw = call_slm(
@@ -123,6 +134,6 @@ def classify_delta(
         # call_slm itself returns None on failure rather than raising, but this
         # guards against any future change to that contract — refuse-over-guess.
         logger.warning("classify_delta: call_slm failed, defaulting to ambiguous", exc_info=True)
-        return "ambiguous", []
+        return "ambiguous", [], ""
 
     return parse_delta_response(raw, message)

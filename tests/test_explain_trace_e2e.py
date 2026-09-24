@@ -204,3 +204,53 @@ def test_disabled_path_is_null(monkeypatch):
     # every method is a safe no-op
     t.set("x", a=1); t.slm_call("p", "m", 1.0, True); t.cand("x", "k", 1)
     assert t.to_dict() is None and t.finalize("answered") is None
+
+
+# ── 8. trace log rotation (bounded, unattended growth) ────────────────────────
+def test_trace_log_rotates_past_the_size_cap(tmp_path, monkeypatch):
+    """The JSONL writer had no cap anywhere in the path — measured at 35 MB /
+    7,096 records on a real deployment. Same shape as
+    logging.handlers.RotatingFileHandler (house convention in utils/logger.py:
+    maxBytes + backupCount), hand-rolled because this is a raw `open(path, "a")`,
+    not a logging handler."""
+    log = tmp_path / "explain_trace.jsonl"
+    monkeypatch.setattr(ex, "_TRACE_LOG", str(log))
+    monkeypatch.setattr(ex, "_TRACE_LOG_MAX_BYTES", 500)
+    monkeypatch.setattr(ex, "_TRACE_LOG_BACKUPS", 2)
+
+    for i in range(20):
+        t = ExplainTrace(query=f"q{i}", trace_id=f"t{i}")
+        t.finalize("answered", route="deterministic")
+
+    files = sorted(tmp_path.glob("explain_trace.jsonl*"))
+    assert len(files) <= 3, f"unbounded growth: {files}"
+    assert log.exists(), "the primary file must still be there to append to"
+
+
+def test_trace_log_rotation_never_raises_on_a_missing_file(tmp_path, monkeypatch):
+    """Best-effort: a missing/racing file must not turn rotation into a failure
+    that could ever reach the write it guards."""
+    log = tmp_path / "nested" / "explain_trace.jsonl"     # parent dir doesn't exist
+    ex._rotate_trace_log_if_needed(str(log))               # must not raise
+
+
+def test_a_file_under_the_cap_is_left_alone(tmp_path, monkeypatch):
+    log = tmp_path / "explain_trace.jsonl"
+    log.write_text('{"x": 1}\n')
+    monkeypatch.setattr(ex, "_TRACE_LOG_MAX_BYTES", 10_000)
+    ex._rotate_trace_log_if_needed(str(log))
+    assert log.read_text() == '{"x": 1}\n'
+    assert not (tmp_path / "explain_trace.jsonl.1").exists()
+
+
+def test_rotation_preserves_the_oldest_backup_chain(tmp_path, monkeypatch):
+    """.1 -> .2 -> ... in the right order, not overwritten out of sequence."""
+    log = tmp_path / "explain_trace.jsonl"
+    log.write_text("current\n" * 100)
+    (tmp_path / "explain_trace.jsonl.1").write_text("was-one\n")
+    monkeypatch.setattr(ex, "_TRACE_LOG_MAX_BYTES", 10)
+    monkeypatch.setattr(ex, "_TRACE_LOG_BACKUPS", 2)
+    ex._rotate_trace_log_if_needed(str(log))
+    assert (tmp_path / "explain_trace.jsonl.2").read_text() == "was-one\n"
+    assert (tmp_path / "explain_trace.jsonl.1").read_text() == "current\n" * 100
+    assert not log.exists()          # rotated away; the next open("a") recreates it
