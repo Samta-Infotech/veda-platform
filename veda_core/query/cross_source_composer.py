@@ -21,6 +21,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Dict, List, Optional
 
 from query.federated_executor import (
@@ -38,11 +39,142 @@ def selected_source_ids(selected_columns) -> List[str]:
     return out
 
 
-def should_federate(selected_columns) -> bool:
-    """True when the selected tabular subgraph spans ≥ 2 sources — the routing
-    decision (not a feature flag) that sends a plan to the federated path. Single-
-    source plans keep the existing direct execution path."""
-    return len(selected_source_ids(selected_columns)) >= 2
+#: Phrases that ask for a cross-source answer outright. Closed list, same shape as the
+#: other grammar lists in config — not a semantic vocabulary.
+_CROSS_SOURCE_PHRASES = (
+    " across sources ", " across all sources ", " across systems ", " both sources ",
+    " each source ", " per source ", " from all sources ", " combined across ",
+    " across datasets ", " across both ",
+)
+
+
+def _generic_nouns():
+    """Collection/relation nouns that name a ROW, not an entity — "record", "entry",
+    "item", "detail", "listing". config.QUERY_LANGUAGE already curates exactly this
+    class. They must not count as naming a source: routing-card business names are
+    prose ("Ticket activity RECORD"), so "how many maintenance RECORDS per category"
+    matched source 2 on the word "record" alone, made two sources look named, and kept
+    federating a single-source question."""
+    try:
+        from config import QUERY_LANGUAGE
+        base = set(QUERY_LANGUAGE.get("collection_nouns", []))
+    except Exception:
+        base = {"record", "entry", "item", "row", "listing", "detail", "value"}
+    out = set()
+    for w in base:
+        w = w.lower()
+        out.add(w)
+        out.add(w[:-1] if w.endswith("s") and len(w) > 3 else w)
+    return out
+
+
+def _source_entity_tokens(source_id, tenant="default"):
+    """The entity vocabulary of ONE source: its routing-card entity names and table
+    tokens, plus its curated business-noun glossary. Schema/curated vocabulary only —
+    never a hand-written keyword list. Generic row-nouns are excluded (see
+    _generic_nouns)."""
+    toks = set()
+    _generic = _generic_nouns()
+
+    def _add(name):
+        for w in re.findall(r"[a-z]+", str(name or "").lower()):
+            if len(w) > 2:
+                w = w[:-1] if w.endswith("s") and len(w) > 3 else w
+                if w not in _generic:
+                    toks.add(w)
+
+    try:
+        from ingestion.routing_card import load_routing_card
+        card = load_routing_card(source_id, tenant) or {}
+        for e in (card.get("entities") or []):
+            # TABLE NAMES ONLY. `business_name` is model-written prose ("Ticket activity
+            # record", "currency entity") and `purpose` is a sentence; tokenizing either
+            # makes almost every ordinary word "name" some source — measured: with
+            # business_name included, "how many maintenance records per category"
+            # matched sources 2, 3 AND 4, so the evidence test passed and the question
+            # federated anyway. A table name is the schema's own identifier for the
+            # entity and is the only part of the card that is vocabulary rather than
+            # description.
+            _add(e.get("table"))
+    except Exception:
+        pass
+    try:
+        from query.entity_resolver import _entity_glossary
+        from veda_core import context as _ctx
+        c = _ctx.try_current()
+        if c is not None and str(c.source_id) == str(source_id):
+            for noun in (_entity_glossary() or {}):
+                _add(noun)
+    except Exception:
+        pass
+    return toks
+
+
+def question_names_sources(query, source_ids, tenant="default") -> List[str]:
+    """Which of `source_ids` the QUESTION itself names, by that source's own entity
+    vocabulary. The evidence `should_federate` needs."""
+    ql = " " + (query or "").lower() + " "
+    qtoks = {w[:-1] if w.endswith("s") and len(w) > 3 else w
+             for w in re.findall(r"[a-z]+", ql) if len(w) > 2}
+    named = []
+    for sid in source_ids:
+        if _source_entity_tokens(sid, tenant) & qtoks:
+            named.append(str(sid))
+    return named
+
+
+def should_federate(selected_columns, query=None, tenant="default") -> bool:
+    """True when this question genuinely spans ≥ 2 sources.
+
+    The old rule was PRESENCE: "did retrieval select a column from ≥ 2 sources". That is
+    not evidence about the QUESTION — it is evidence about retrieval's recall. config.py's
+    own note on FEDERATION_SOURCE_QUALIFICATION_ENABLED records the measurement: over a
+    182-query benchmark whose ground truth is homzhub-only for ALL 182, the presence test
+    federated 182/182, because a 4-column datalake source landed in every selected column
+    set at cosine 0.28-0.36 against a homzhub top of ~0.63 — "never competitive, merely
+    present". That flag was supposed to fix this; it is defined in config.py and read
+    NOWHERE in the engine (verified across every commit on this branch and master), so the
+    presence test has been the whole decision all along. Measured consequence: unpinned
+    question.txt questions were answered by the federated planner — with its own anchoring
+    and none of the single-source grounding — while the SAME questions pinned to source 2
+    went through pipeline.run_query.
+
+    The rule is now QUESTION-LEVEL, and deliberately the same one the coordinator already
+    uses for its deterministic MULTI override (`source_coordinator._edge_multi_pair`): the
+    query must NAME the entity vocabulary of ≥ 2 in-scope sources, or ask for a
+    cross-source answer outright. `query=None` keeps the legacy presence behaviour, so
+    callers that have no query text are unaffected.
+    """
+    sids = selected_source_ids(selected_columns)
+    if len(sids) < 2:
+        return False
+    if query is None:
+        return True                      # legacy callers: unchanged
+    ql = " " + (query or "").lower() + " "
+    if any(p in ql for p in _CROSS_SOURCE_PHRASES):
+        return True
+
+    # THE EVIDENCE IS A NAMED EDGE, NOT TWO NAMED SOURCES. Counting sources whose
+    # vocabulary the question touches does not work, because the same entity noun lives
+    # in several sources: "how many MAINTENANCE records per category" names a
+    # `maintenance` table in BOTH source 3 and source 4, and "list all AMENITIES" names
+    # `assets_amenity` (source 2) and `amenities_catalog` (source 5). That is ambiguity
+    # about WHICH source answers, not a cross-source join — federating it made the
+    # unpinned answer differ from the pinned one on four source-4 and two source-5 pairs
+    # of the cross-source battery.
+    #
+    # A real federation names TWO DIFFERENT entities that a cross_source_fk edge
+    # connects ("which ASSETS have MAINTENANCE tickets"). That is precisely
+    # source_coordinator._edge_multi_pair's rule, so this calls it rather than growing a
+    # second, subtly different copy — per the instruction not to write one twice.
+    try:
+        from query.source_coordinator import _edge_multi_pair
+        return _edge_multi_pair(query, sids) is not None
+    except Exception:
+        # Without the coordinator's edge table there is no positive evidence of a
+        # cross-source join, and the safe direction is the single-source path (which is
+        # the one with all the grounding).
+        return False
 
 
 def partition_subgraph(selected_columns, selected_chunks) -> Dict:

@@ -928,7 +928,11 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
         logger.warning("federated_route: retrieval failed (%s)", e)
         return None
     cols = getattr(sel, "columns", []) or []
-    if not should_federate(cols):
+    # Pass the QUERY: federation must be decided on what the question names, not on
+    # which sources retrieval happened to touch. See should_federate's docstring.
+    if not should_federate(cols, query=query, tenant=tenant):
+        logger.info("federated_route: question does not name >=2 in-scope sources "
+                    "— deferring to the single-source path")
         return None                      # single-source plan → normal path
 
     by_source = _selected_by_source(cols)

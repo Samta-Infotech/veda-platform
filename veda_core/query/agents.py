@@ -91,7 +91,12 @@ def _from_sql_dict(d, source_id, source_type) -> AgentResult:
                                         "status", "analytics", "ir", "business_intent")},
         )
     # clarify is a terminal, understood outcome (not a failure) — surface as refused-with-reason.
-    if status_str in ("clarify", "refuse", "tier2_rejected"):
+    # qualifier_dropped / ungrounded / invalid are TYPED refusals too — they carry a
+    # feedback object naming the column, value or qualifier that could not be mapped.
+    # They used to fall through to STATUS_FAILED below, which keeps only `error`, so
+    # that explanation was discarded and the user saw the generic clarify text.
+    if status_str in ("clarify", "refuse", "tier2_rejected",
+                      "qualifier_dropped", "ungrounded", "invalid"):
         # Carry the pipeline's OWN explanation through, not just `reason`. run_query builds a
         # purpose-written clarifying question for every non-answered status (veda/feedback.py::
         # explain_failure, e.g. "Is 'Security' a column name or a value you want to filter on?"),

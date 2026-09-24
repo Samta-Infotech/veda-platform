@@ -1,0 +1,25 @@
+{
+  "_about": "TRACKED seed: curated business-noun -> table aliases for source 2 (homzhub). Copied into the per-source artifact veda_entity_aliases.json by the L5 stage ingestion/entity_alias_seeder.py, which is why this file — unlike the artifact — is in source control. Keys starting with '_' are ignored by every reader.",
+  "_why_tracked": "The artifact itself lives under veda_core/data/, which .gitignore excludes as 'derived ingestion artifacts, regenerated every ingest'. This file is NOT derived — it is hand-curated evidence — and when it lived only as a gitignored artifact the 2026-09-22 reingest silently deleted it (veda_entity_aliases.json.bak-20260922-140816 is the corpse). With the glossary gone, 'property' had no table to ground to, so the bare-count anchor gate refused 'how many properties are there' and the qualifier gate offered 'property' as a missing VALUE — the ['property'] clarify that hit 5 of the 20 question.txt questions on 2026-09-23.",
+  "_readers": "query/entity_resolver._entity_glossary, veda/understanding/grounding (ground_entity, anchor_named_in_query), veda/validation.qualifier_completeness, veda/routing.select_primary_table",
+
+  "property": "assets_asset",
+  "properties": "assets_asset",
+
+  "payment": "accounts_paymenttransaction",
+  "payments": "accounts_paymenttransaction",
+  "payment transaction": "accounts_paymenttransaction",
+  "payment transactions": "accounts_paymenttransaction",
+
+  "accounting entry": "accounts_generalledger",
+  "accounting entries": "accounts_generalledger",
+  "ledger entry": "accounts_generalledger",
+  "ledger entries": "accounts_generalledger",
+  "financial record": "accounts_generalledger",
+  "financial records": "accounts_generalledger",
+  "financial log": "accounts_generalledger",
+  "financial logs": "accounts_generalledger",
+
+  "sale listing": "assets_salelisting",
+  "sale listings": "assets_salelisting"
+}

@@ -421,6 +421,15 @@ def _names_entity_column(token, tables_in_sql, sm):
         tbl, _, cn = key.partition(".")
         if tbl not in tables_in_sql:
             continue
+        # An IDENTIFIER column named after the entity it points AT ("property_id",
+        # "asset_id") does not make "property" a projectable ATTRIBUTE of this table —
+        # it names the referenced ENTITY. Treating it as a dropped attribute is what
+        # sent "property" down the value-clarify path and produced "did you mean one of
+        # , true (asset_id)?". The entity itself is credited through the FK-parent and
+        # glossary vocabulary in qualifier_completeness instead.
+        if str((m or {}).get("business_role", "")).upper() == "IDENTIFIER" or \
+                str((m or {}).get("semantic_type", "")).upper() == "IDENTIFIER":
+            continue
         ctoks = [w for w in re.findall(r"[a-z]+", cn.lower()) if len(w) > 2]
         if token in ctoks or (len(token) >= 4 and any(len(w) >= 4 and (token in w or w in token)
                                                       for w in ctoks)):
@@ -548,8 +557,24 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
     global _GATE_STRIP
     if _GATE_STRIP is None:
         _GATE_STRIP = _gate_strip()
-    content = {_singularize(w) for w in re.findall(r"[a-z]+", query.lower())
-               if len(w) > 2 and w not in _GATE_STRIP and _singularize(w) not in _GATE_STRIP}
+    # [a-z0-9]+, not [a-z]+: a NUMERAL is content. "priced above 10,000" and "between
+    # 100 and 50,000" carry their whole constraint in the digits, and while the gate
+    # tokenized letters only, those questions passed the completeness check with the
+    # range dropped — the SQL matched every LETTER the user typed and still answered a
+    # different question (2026-09-23, Q9/Q10). `_accounted` below now has to find the
+    # number in the SQL for the query to pass.
+    # Numbers are tokenized as WHOLE numbers with their separators removed, so the
+    # "10,000" a user types is the "10000" the SQL contains. A naive [a-z0-9]+ split
+    # would yield "10" and "000" and match neither.
+    _raw_toks = re.findall(r"[a-z]+|\d[\d,]*(?:\.\d+)?", query.lower())
+    content = set()
+    for _w in _raw_toks:
+        if _w[0].isdigit():
+            _w = _w.replace(",", "").rstrip(".")
+            if _w.endswith(".0"):
+                _w = _w[:-2]
+        if len(_w) > 2 and _w not in _GATE_STRIP and _singularize(_w) not in _GATE_STRIP:
+            content.add(_singularize(_w))
     if not content:
         return True, None
     try:
@@ -570,9 +595,22 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
     for a in tree.find_all(exp.Alias):
         if a.alias:
             sqltoks |= _idtoks(a.alias)
+    _has_cmp = any(next(tree.find_all(_op), None) is not None
+                   for _op in (exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between,
+                               exp.EQ, exp.NEQ))
     for lit in tree.find_all(exp.Literal):
         if lit.is_string:
             sqltoks |= _idtoks(lit.name)
+        elif _has_cmp:
+            # A NUMERIC literal accounts for a number the user typed only when the SQL
+            # actually COMPARES on something. A bare `LIMIT 100` must never be allowed to
+            # "account for" the 100 in "between 100 and 50,000" — that is precisely how
+            # Q10's unfiltered dump passed this gate on 2026-09-23.
+            _n = str(lit.name).replace(",", "")
+            if _n.endswith(".0"):
+                _n = _n[:-2]
+            if len(_n) > 2:
+                sqltoks.add(_n)
     # Data-derived synonyms: the NL vocabulary of the entities actually queried — table
     # business-purpose + the aliases/business_role of the columns the SQL references.
     # This admits descriptors/synonyms ("workflow"↔state, "mapping"↔a junction) from the
@@ -588,10 +626,44 @@ def qualifier_completeness(query, sql, sm=None, strict=False):
         # ACCOUNTED — otherwise the gate false-refuses the synonym as a "dropped" column
         # (e.g. "property" substring-matches assets_asset.corner_property, so a join to the
         # asset entity is wrongly seen as dropping "property").
+        # FK PARENTS of the queried tables count as "in this SQL" for vocabulary
+        # purposes. `accounts_generalledger.asset_id -> assets_asset` means a ledger row
+        # IS a row about a property, so a question about "properties" answered from
+        # accounts_generalledger has not dropped the word — it reached the entity through
+        # the key. Without this the gate refused "the latest payments made for our
+        # PROPERTIES" as a dropped qualifier even though the anchor is keyed to the asset.
+        _fk_parents = set()
+        try:
+            from query.join_planner import load_graph
+            for _e in load_graph().get("edges", []):
+                if _e.get("source_table") in tables_in_sql and _e.get("target_table"):
+                    _fk_parents.add(_e["target_table"])
+        except Exception:
+            _fk_parents = set()
+        # NOTE the asymmetry, and it is deliberate. Domain SYNONYMS stay scoped to the
+        # tables actually in the SQL; only the curated ENTITY glossary below gets the
+        # FK-parent expansion. Extending the synonym vocabulary across FK parents let a
+        # synonym phrase on a parent LOOKUP table credit a word that is really a VALUE
+        # the SQL had dropped — "show tickets with HIGH priority" stopped being refused
+        # and returned an unfiltered 100-row list. Entity nouns name a row's identity
+        # and travel across a key; a value does not.
         for _phrase, _cids in _domain_synonyms().items():
             _cl = _cids if isinstance(_cids, list) else [_cids]
             if any(str(_c).split(".")[0] in tables_in_sql for _c in _cl):
                 sqltoks |= _idtoks(_phrase)
+        # The curated business-noun -> TABLE glossary (veda_entity_aliases.json) is the
+        # only evidence that "property" names assets_asset — L3 emits no such business
+        # name (primary_entity for assets_asset is literally "Asset"). Until now ONLY
+        # query/entity_resolver read it, so the word the whole homzhub question set is
+        # built around was invisible to this gate and came back to the user as
+        # "'property' doesn't match any value in this data" (2026-09-23, 5 of 20).
+        try:
+            from query.entity_resolver import _entity_glossary
+            for _noun, _tbl in (_entity_glossary() or {}).items():
+                if str(_tbl) in (tables_in_sql | _fk_parents):
+                    sqltoks |= _idtoks(_noun)
+        except Exception:
+            pass
         referenced_cols = {c.name for c in tree.find_all(exp.Column) if c.name}
         for tname in tables_in_sql:
             for cname in referenced_cols:
@@ -674,14 +746,32 @@ def grouped_shape_ok(query, sql):
     if not _on or not sql:
         return True
     ql = " " + (query or "").lower().strip() + " "
-    grouped = any(s in ql for s in (" by ", " per ", " each ", "distribution",
-                                    "breakdown", "broken down", "grouped"))
+    # Bare " by " is NOT a grouping signal. "ordered by property name", "sorted by date",
+    # "oldest financial records we have on file BY DATE" are SORT keys — this guard read
+    # them as a per-group breakdown and refused with "please name the column to group by
+    # (e.g. 'by city')" on a question that never asked for a breakdown (2026-09-23
+    # question.txt run, Q18). config.QUERY_GRAMMAR["grouping"] is the vocabulary that was
+    # actually measured against a labelled set of "by"-distractors (increased by / sorted
+    # by / divided by …) at precision=1.0, recall=1.0, and it deliberately omits bare
+    # "by" for exactly this reason — use it instead of a second, looser copy.
+    try:
+        from config import QUERY_GRAMMAR as _QG
+        _group_words = list(_QG.get("grouping", []))
+    except Exception:
+        _group_words = ["per", "each", "grouped by", "breakdown", "broken down by"]
+    grouped = any((" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql)
+                  for w in _group_words)
     if not grouped:
         return True
     try:
         tree = sqlglot.parse_one(sql, read="postgres")
     except Exception:
         return True                                  # don't block on a parse issue
+    # An ORDER BY means the SQL answered a RANKING, which is what "by <date/measure>"
+    # asks for when it is a sort key. A genuine breakdown request that also sorts still
+    # carries its GROUP BY (checked next), so this never lets a dropped grouping through.
+    if tree.find(exp.Order) is not None:
+        return True
     if tree.find(exp.Group) is not None:
         return True                                  # already grouped → fine
     if tree.find(exp.AggFunc) is not None:

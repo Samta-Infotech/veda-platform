@@ -171,14 +171,41 @@ def _select_dim_span(mode, words, spans):
     GROUPED prefers the grouping-word path ("per CATEGORY"), then falls back to the
     interrogative scan; SUPERLATIVE stays interrogative-first ("which CATEGORY has the
     highest …"). One content word either way."""
+    # Bare "by" is ambiguous: "grouped by city" is a GROUP BY, but "ordered by property
+    # name", "sorted by date" and "oldest records on file by date" are ORDER BY. "per"
+    # and "each" are unambiguous grouping words and stay unconditional; bare "by" only
+    # counts as grouping when the query is NOT a ranking request and the word it
+    # introduces is not a measure or a temporal column (2026-09-23: Q18 "oldest financial
+    # records we have on file by date" was planned as a grouped breakdown and refused).
+    _TEMPORALISH = ("date", "time", "_at", "timestamp", "day", "month", "year")
+
+    def _is_sort_key(tr):
+        if tr.measures:
+            return True                # "by amount" ranks, never groups
+        for cid in tr.dimensions:
+            cn = cid.rpartition(".")[2].lower()
+            if any(t in cn for t in _TEMPORALISH):
+                return True            # "by date" is a sort key
+        return False
+
+    def _ranked_query():
+        try:
+            from query.ranking_parser import parse_ranking
+            return parse_ranking(" ".join(words)).ranked
+        except Exception:
+            return False
+
     def _dim_after_grouping():
         for i, w in enumerate(words):
             if w in ("per", "each", "by"):
+                bare_by = (w == "by")
                 for nxt in words[i + 1:]:
                     tr = spans.get(nxt)
                     if tr is None or tr.grammar:
                         continue
                     if tr.dimensions:
+                        if bare_by and (_is_sort_key(tr) or _ranked_query()):
+                            break      # an ORDER BY, not a GROUP BY
                         return nxt
                     break              # only the immediate next content word
         return None
@@ -218,12 +245,46 @@ def _dimension_phrase(dim_span, words, spans):
     return dim_phrase
 
 
-def _select_anchor(spans, dim_span, dim_phrase, count_rank, mode, evidence, why_ev, sm):
+def _glossary_anchor(query, sm):
+    """The table a curated alias in the query names outright, or None.
+
+    ONE ANCHOR POLICY (2026-09-23): `query/entity_resolver` already treats this glossary
+    as the first authority and pins its answer silently (ER_GROUNDED_REFUSAL=False),
+    while this planner used to reach its own verdict from typed evidence alone. The two
+    disagreed on exactly the questions the glossary exists for: "payments" resolved to
+    accounts_paymenttransaction over there, and clarified across five payment tables
+    over here. The longest alias wins, so "payment transaction" beats "payment"."""
+    try:
+        from query.entity_resolver import _entity_glossary
+        g = _entity_glossary() or {}
+    except Exception:
+        return None
+    if not g:
+        return None
+    ql = f" {(query or '').lower()} "
+    best, best_len = None, 0
+    for noun, tbl in g.items():
+        if tbl not in (sm.get("tables") or {}):
+            continue
+        n = str(noun).lower()
+        if re.search(rf"\b{re.escape(n)}\b", ql) and len(n) > best_len:
+            best, best_len = tbl, len(n)
+    return best
+
+
+def _select_anchor(spans, dim_span, dim_phrase, count_rank, mode, evidence, why_ev, sm,
+                   query=None):
     """Pick the anchor table. Returns ("ok", anchor) | ("clarify", msg) | ("bail", None).
 
-    Order: measure+dimension co-owner recovery, then typed evidence (with the dim-ownership
-    tie-break), with a grounded clarify when the query names a dimension but no entity/value
-    evidence. Mutates `why_ev` with the winning table's rationale."""
+    Order: a curated glossary alias the query names outright (the same first authority
+    query/entity_resolver uses — see _glossary_anchor), then measure+dimension co-owner
+    recovery, then typed evidence (with the dim-ownership tie-break), with a grounded
+    clarify when the query names a dimension but no entity/value evidence. Mutates
+    `why_ev` with the winning table's rationale."""
+    _gl = _glossary_anchor(query, sm) if query else None
+    if _gl is not None:
+        why_ev[_gl].append("named by a curated business alias (entity glossary)")
+        return ("ok", _gl)
     # ── measure-aggregation anchor recovery: a pure "<op> <measure> per <dim>" question has
     # NO entity/value span of its own; its only anchor signal is that ONE table co-owns the
     # requested measure column AND the grouping dimension column. When the evidence winner
@@ -558,7 +619,7 @@ def _try(query: str, sm=None, mode=None):
     why_ev = defaultdict(list, why_ev)
 
     _r, _v = _select_anchor(spans, dim_span, dim_phrase, count_rank, mode,
-                            evidence, why_ev, sm)
+                            evidence, why_ev, sm, query=query)
     if _r == "clarify":
         return ("clarify", _v)
     if _r == "bail":

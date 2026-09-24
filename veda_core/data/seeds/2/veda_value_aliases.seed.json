@@ -1,0 +1,30 @@
+{
+  "_about": "TRACKED seed: business PHRASE -> concrete column VALUE, per source. Published into the per-source artifact veda_value_aliases.json by the L5 stage ingestion/entity_alias_seeder.py (publish_values), and consumed by query/value_glossary.py before SQL generation.",
+  "_why": "A lifecycle qualifier is not a word that appears in the data. 'currently on the market for sale' means assets_salelisting.status = 'APPROVED', but no sampled value contains the words 'on the market', so the value arbiter (which grounds by EXACT value match) could not see it and the qualifier was silently dropped: the 2026-09-23 run answered 'the cheapest properties currently ON THE MARKET' with 74 of 100 rows DRAFT or CANCELLED, and the three cheapest rows were all DRAFT.",
+  "_shape": "{\"<table>.<column>\": {\"<VALUE>\": [phrases...]}}. Phrases are matched case-insensitively as whole phrases against the query.",
+  "assets_salelisting.status": {
+    "APPROVED": [
+      "on the market",
+      "currently on the market",
+      "currently listed",
+      "active listing",
+      "available for sale",
+      "live",
+      "on sale",
+      "still on the market"
+    ],
+    "DRAFT": [
+      "draft",
+      "unpublished",
+      "not yet listed"
+    ],
+    "CANCELLED": [
+      "cancelled",
+      "canceled",
+      "withdrawn",
+      "delisted",
+      "taken off the market"
+    ]
+  },
+  "_pruned_2026_09_23": "'for sale' / 'up for sale' / 'listed' were removed: they name the ENTITY (assets_salelisting is the sale-listing table) rather than a lifecycle value, so mapping them to APPROVED over-filtered 'the oldest properties we put UP FOR SALE' \u2014 a question about all listings \u2014 down to the approved ones."
+}

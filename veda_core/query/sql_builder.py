@@ -284,21 +284,69 @@ def _remap_to_temporal_col(
     return None
 
 
-def _pick_best_temporal(candidates: list, col_map: Dict[str, Dict]) -> Optional[str]:
+# Recency VERBS the user attaches to a date, and the column-name stems each one means.
+# "most recently UPDATED" is updated_at; "most recently DATED" is the business event
+# date; "recently CREATED/logged" is created_at. Checked before any generic preference.
+_TEMPORAL_VERB_HINTS = (
+    (("updated", "modified", "changed", "amended", "revised", "edited"),
+     ("updated", "modified", "changed", "revised", "amended")),
+    (("dated", "transacted", "posted", "booked", "entered", "paid", "settled"),
+     ("transaction", "posted", "booked", "entry", "payment", "settle", "value_date")),
+    (("created", "added", "logged", "recorded", "opened", "raised", "registered"),
+     ("created", "logged", "recorded", "opened", "raised", "registered", "added")),
+)
+
+
+def _pick_best_temporal(candidates: list, col_map: Dict[str, Dict],
+                        query: Optional[str] = None) -> Optional[str]:
     """
     From a list of TEMPORAL col_ids, pick the best candidate for a date-range
-    filter. Prefers columns whose name suggests event creation/occurrence time.
-    Falls back to the first candidate alphabetically by column name.
+    filter or a recency ORDER BY.
+
+    `query`, when given, binds the column to the VERB the user put next to the recency
+    word — "most recently UPDATED" is `updated_at`, "most recently DATED" is
+    `transaction_date` — and then prefers the anchor's BUSINESS event date over
+    `created_at`. Without it the behaviour is exactly the historical one (created/
+    occurred/reported… then any date/time column), so every existing caller is
+    byte-identical.
+
+    Why the business date outranks `created_at` for a recency question: `created_at` is
+    when the ROW was written, which for back-loaded or migrated data has nothing to do
+    with when the event happened. Measured 2026-09-23: "the most recent accounting
+    entries" resolved to `accounts_generalledger.created_at`, and because every row was
+    bulk-loaded outside the derived 30-day window the answer came back empty — while
+    `transaction_date` had entries up to 2027-04-08.
     """
     _PREFER = ("created", "occurred", "reported", "raised", "opened", "started")
     _SECOND = ("date", "time", "timestamp", "at")
+
+    def _name(cid):
+        return col_map[cid].get("col_name", "").lower()
+
+    if query:
+        ql = f" {query.lower()} "
+        # 1. an explicit verb next to the recency word
+        for triggers, stems in _TEMPORAL_VERB_HINTS:
+            if not any(re.search(rf"\b{t}\b", ql) for t in triggers):
+                continue
+            for cid in candidates:
+                if any(stem in _name(cid) for stem in stems):
+                    return cid
+        # 2. the anchor's BUSINESS event date, ahead of row-creation bookkeeping
+        _EVENT = ("transaction", "posted", "booked", "entry", "payment", "settle",
+                  "occurred", "reported", "issued", "due")
+        for stem in _EVENT:
+            for cid in candidates:
+                if stem in _name(cid):
+                    return cid
+
     for pref in _PREFER:
         for cid in candidates:
-            if pref in col_map[cid].get("col_name", "").lower():
+            if pref in _name(cid):
                 return cid
     for pref in _SECOND:
         for cid in candidates:
-            if pref in col_map[cid].get("col_name", "").lower():
+            if pref in _name(cid):
                 return cid
     return candidates[0]
 

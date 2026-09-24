@@ -345,6 +345,45 @@ def _edges_between(graph, a, b):
     return out
 
 
+def _join_key_candidates(graph, a, b):
+    """Edges between `a` and `b` that are genuinely COMPETING join keys.
+
+    `_edges_between` returns the raw graph, and the raw graph is not a list of
+    alternatives a user should ever be asked to choose between. Measured on source 2,
+    `accounts_generalledger` <-> `assets_asset` has SIX edges: one real
+    `declared_fk` (`asset_id`), plus five `data_inferred` ones on `floor_number`,
+    `total_floors` and `carpet_area_unit_id` — of which `floor_number` and
+    `total_floors` each appear TWICE, identically. The parallel-key ambiguity test
+    counted all six, so any question joining a ledger to a property was refused with
+    "ambiguous join to assets_asset — which key: asset_id, floor_number, floor_number,
+    total_floors, total_floors, carpet_area_unit_id?". That hit 5 of the 20
+    question.txt questions, and the duplicate-only form of it ("which key: ticket_id,
+    ticket_id?") is the per-source battery's src4 failure.
+
+    Two reductions, in order:
+
+    1. **Dedupe.** The same (source_table, source_column, target_table, target_column)
+       listed twice is one key, not two alternatives.
+    2. **A declared FK wins.** When the schema DECLARES a foreign key between two
+       tables, that is the relationship; a `data_inferred` edge is a statistical guess
+       about column overlap and is not a competing answer to "which key". Only several
+       DECLARED keys are a real ambiguity worth asking about.
+
+    This is the same principle the caller already applies to `audit` edges (metadata,
+    not the entity relationship) — applied to provenance instead of edge type.
+    """
+    seen, deduped = set(), []
+    for e in _edges_between(graph, a, b):
+        k = (e.get("source_table"), e.get("source_column"),
+             e.get("target_table"), e.get("target_column"))
+        if k in seen:
+            continue
+        seen.add(k)
+        deduped.append(e)
+    declared = [e for e in deduped if e.get("discovery") == "declared_fk"]
+    return declared or deduped
+
+
 def _path_intermediate_tables(path, endpoints):
     """Tables a path passes THROUGH that are neither the anchor nor the target."""
     tbls = set()
@@ -372,8 +411,10 @@ def plan_joins(anchor, targets, graph, query="", allowed_intermediates=None):
     for tgt in targets:
         if tgt == anchor:
             continue
-        # direct multi-edge ambiguity (e.g. created_by_id vs updated_by_id → users)
-        direct = _edges_between(graph, anchor, tgt)
+        # direct multi-edge ambiguity (e.g. created_by_id vs updated_by_id → users).
+        # Same reduction as plan_join_tree below — duplicates and data_inferred noise
+        # are not alternatives to a declared FK. See _join_key_candidates.
+        direct = _join_key_candidates(graph, anchor, tgt)
         if len(direct) > 1:
             # Disambiguate by the relation the query NAMES: match meaningful FK-column
             # parts (assigned_to_id → "assigned") against query WORDS. Word-set match,
@@ -528,7 +569,7 @@ def plan_join_tree(anchor, targets, graph, query="", allowed_intermediates=None,
         # clarifying on created_by_id vs updated_by_id. The shortest-path step below
         # still uses an audit edge when it's genuinely the only route (and prefers the
         # cheaper junction path when one exists).
-        direct = [e for e in _edges_between(graph, anchor, tgt)
+        direct = [e for e in _join_key_candidates(graph, anchor, tgt)
                   if e.get("relationship_type") != "audit"]
         if len(direct) <= 1:
             continue

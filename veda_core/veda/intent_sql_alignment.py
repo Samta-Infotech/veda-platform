@@ -255,7 +255,11 @@ def aggregate_presence_ok(query, sql, sm=None):
 # shape as _AGG_INTENT / _TIME_UNITS above — not a semantic vocabulary.
 _CMP_WORDS = (" above ", " over ", " below ", " under ", " more than ", " less than ",
               " greater than ", " fewer than ", " at least ", " at most ", " higher than ",
-              " lower than ")
+              " lower than ",
+              # two-sided ranges state a comparison just as much as a one-sided one;
+              # without them "between 100 and 50,000" was not even seen as a filter
+              # request, so the filter-presence guard had nothing to check (2026-09-23).
+              " between ", " range ", " in the range ", " from ")
 
 
 def _filter_presence_enabled() -> bool:

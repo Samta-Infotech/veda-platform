@@ -22,30 +22,66 @@ _NUM_PATTERN = r"(\d+|" + "|".join(NUM_WORDS) + r")"
 # ("most recent") are tried before the bare words they contain ("most").
 # basis="temporal"  → rank by a date/time column (recency)
 # basis="metric"    → rank by a measure column (magnitude)
+# TEMPORAL ENTRIES COME FIRST AND THAT IS LOAD-BEARING: `basis` is set by the first
+# match, so a recency phrase outranks "top" when a query carries both. "Show me the top
+# 5 MOST RECENTLY dated accounting entries" must rank by date, not by a measure — and
+# before 2026-09-23 it ranked by neither, because "most recent" is wrapped in \b...\b
+# and `\bmost recent\b` does not match "most recentLY" (the char after "recent" is a
+# word char). "top" then won, basis became "metric", and the ORDER BY was dropped
+# entirely. The -ly / bare forms are spelled out rather than made optional in the regex
+# so the matching stays one literal phrase per row.
+# (phrase, direction, basis, PRIORITY) — priority, not list order, decides which basis
+# wins when a query carries several ranking words, because neither pure ordering works:
+#
+#   "top 5 MOST RECENTLY dated entries"  -> must rank by DATE  (temporal beats "top")
+#   "SMALLEST payments ... RECENTLY"     -> must rank by AMOUNT (a measure beats vague
+#                                           recency; "recently" is a qualifier there)
+#
+# so specificity is the tiebreak, lowest number wins:
+#   0  an explicit MEASURE superlative — names a magnitude direction outright
+#   1  an explicit TEMPORAL phrase     — names a date direction outright
+#   2  a GENERIC ranking word          — "top"/"last"/"most": a direction, no subject
+#   3  VAGUE RECENCY                   — "recent"/"recently": weakest; a time qualifier
+#                                        that only becomes the ranking basis alone
+#
+# Before 2026-09-23 "most recent" also silently MISSED on "most recentLY" — it is
+# matched as \bmost recent\b and the following char is a word char — so "top" won by
+# default and the ORDER BY was dropped. The -ly and bare forms are spelled out below.
 _RANKING_WORDS = [
-    ("most recent", "desc", "temporal"),
-    ("latest",      "desc", "temporal"),
-    ("newest",      "desc", "temporal"),
-    ("last",        "desc", "temporal"),
-    ("oldest",      "asc",  "temporal"),
-    ("earliest",    "asc",  "temporal"),
-    ("first",       "asc",  "temporal"),
-    ("top",         "desc", "metric"),
-    ("highest",     "desc", "metric"),
-    ("biggest",     "desc", "metric"),
-    ("largest",     "desc", "metric"),
-    ("greatest",    "desc", "metric"),
-    ("most",        "desc", "metric"),
-    ("maximum",     "desc", "metric"),
-    ("max",         "desc", "metric"),
-    ("bottom",      "asc",  "metric"),
-    ("lowest",      "asc",  "metric"),
-    ("smallest",    "asc",  "metric"),
-    ("least",       "asc",  "metric"),
-    ("minimum",     "asc",  "metric"),
-    ("min",         "asc",  "metric"),
-    ("fewest",      "asc",  "metric"),
-    ("fewer",       "asc",  "metric"),
+    # --- explicit measure superlatives (priority 0) ---
+    ("most expensive",  "desc", "metric",   0),
+    ("least expensive", "asc",  "metric",   0),
+    ("cheapest",    "asc",  "metric",   0),
+    ("dearest",     "desc", "metric",   0),
+    ("highest",     "desc", "metric",   0),
+    ("biggest",     "desc", "metric",   0),
+    ("largest",     "desc", "metric",   0),
+    ("greatest",    "desc", "metric",   0),
+    ("maximum",     "desc", "metric",   0),
+    ("max",         "desc", "metric",   0),
+    ("lowest",      "asc",  "metric",   0),
+    ("smallest",    "asc",  "metric",   0),
+    ("least",       "asc",  "metric",   0),
+    ("minimum",     "asc",  "metric",   0),
+    ("min",         "asc",  "metric",   0),
+    ("fewest",      "asc",  "metric",   0),
+    ("fewer",       "asc",  "metric",   0),
+    # --- explicit temporal phrases (priority 1) ---
+    ("most recently", "desc", "temporal", 1),
+    ("most recent", "desc", "temporal", 1),
+    ("latest",      "desc", "temporal", 1),
+    ("newest",      "desc", "temporal", 1),
+    ("oldest",      "asc",  "temporal", 1),
+    ("earliest",    "asc",  "temporal", 1),
+    # --- generic ranking words (priority 2) ---
+    ("top",         "desc", "metric",   2),
+    ("bottom",      "asc",  "metric",   2),
+    ("most",        "desc", "metric",   2),
+    ("last",        "desc", "temporal", 2),
+    ("first",       "asc",  "temporal", 2),
+    # --- vague recency (priority 3) ---
+    ("recently",    "desc", "temporal", 3),
+    ("recent",      "desc", "temporal", 3),
 ]
 
 
@@ -83,13 +119,14 @@ def parse_ranking(query: str) -> RankingSpec:
     ranked = False
     direction, basis, top_n, subject = "desc", None, None, None
 
-    for phrase, d, b in _RANKING_WORDS:
+    best_prio = 99
+    for phrase, d, b, prio in _RANKING_WORDS:
         p = re.escape(phrase)
         if not re.search(rf"\b{p}\b", ql):
             continue
         ranked = True
-        if basis is None:   # first (i.e. highest-priority / longest-phrase) match wins
-            direction, basis = d, b
+        if prio < best_prio:        # most SPECIFIC match wins, not the first one seen
+            direction, basis, best_prio = d, b, prio
         if top_n is None:
             m = (re.search(rf"\b{p}\s+(?:of\s+)?{_NUM_PATTERN}\b", ql)
                  or re.search(rf"\b{_NUM_PATTERN}\s+(?:of\s+(?:the\s+)?)?{p}\b", ql))

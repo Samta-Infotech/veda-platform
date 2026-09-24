@@ -27,7 +27,7 @@ _AGG_WORD = {"SUM": "total", "AVG": "average", "MIN": "minimum", "MAX": "maximum
 _OP_WORD = {
     "EQ": "equals", "NEQ": "not equals", "GT": "greater than", "GTE": "greater than or equal to",
     "LT": "less than", "LTE": "less than or equal to", "Like": "contains",
-    "In": "is one of", "Is": "is",
+    "In": "is one of", "Is": "is", "NotIs": "is not", "Between": "between",
 }
 
 # One underlying check can be worth more than one plain-language guarantee to a
@@ -304,17 +304,45 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
             if col is None:
                 continue
             _note_table(col)
-            lit = pred.find(exp.Literal)
-            if lit is not None:
-                val = lit.name
-            else:
-                b = pred.find(exp.Boolean)
+            _op_name = type(pred).__name__
+
+            def _one_value(node):
+                lit = node.find(exp.Literal)
+                if lit is not None:
+                    return lit.name
+                b = node.find(exp.Boolean)
                 if b is not None:
-                    val = str(b.this)
-                else:
-                    ph = pred.find(exp.Placeholder)
-                    val = placeholder_values.get(id(ph)) if ph is not None else None
-            out["filters"].append((col.name, type(pred).__name__, val))
+                    return str(b.this)
+                ph = node.find(exp.Placeholder)
+                return placeholder_values.get(id(ph)) if ph is not None else None
+
+            if isinstance(pred, exp.Between):
+                # BETWEEN has TWO bounds and `pred.find(exp.Literal)` returns only the
+                # first, so the panel reported "Creation Time between 2026-08-24" with no
+                # upper bound — the reader could not see the window that produced an
+                # empty result (2026-09-23, Q6/Q11). Render both.
+                _lo = _one_value(pred.args.get("low")) if pred.args.get("low") is not None else None
+                _hi = _one_value(pred.args.get("high")) if pred.args.get("high") is not None else None
+                val = (_lo, _hi)
+            else:
+                val = _one_value(pred)
+                # `WHERE "x" IS NOT NULL` carries its negation on the Is node itself
+                # (sqlglot: `Is(this=..., expression=Null(), negate=True)`), NOT as a
+                # wrapping Not — so reading only the node TYPE reported the exact
+                # OPPOSITE of the predicate that ran: Q2 and Q14 both emitted
+                # `IS NOT NULL` and the panel said "Expected Sale Price is empty"
+                # (2026-09-23). A wrapping Not is also honoured, for dialects that
+                # produce that shape.
+                if isinstance(pred, exp.Is):
+                    _neg = bool(pred.args.get("negate"))
+                    if not _neg:
+                        _p = pred.parent
+                        while _p is not None and isinstance(_p, exp.Paren):
+                            _p = _p.parent
+                        _neg = isinstance(_p, exp.Not)
+                    if _neg:
+                        _op_name = "NotIs"
+            out["filters"].append((col.name, _op_name, val))
     return out
 
 
@@ -330,6 +358,13 @@ def extract_sql_facts(sql: str, params: Optional[List[Any]] = None) -> Dict[str,
 def _filter_phrase(field: str, op_class: str, val: Optional[str]) -> str:
     if op_class == "Is" and val is None:
         return f"{field} is empty"
+    if op_class == "NotIs":
+        return f"{field} is not empty" if val is None else f"{field} is not {val}"
+    if op_class == "Between" and isinstance(val, tuple):
+        lo, hi = val
+        if lo is not None and hi is not None:
+            return f"{field} between {lo} and {hi}"
+        return f"{field} between {lo if lo is not None else hi}"
     word = _OP_WORD.get(op_class, op_class.lower())
     return f"{field} {word} {val}" if val is not None else f"{field} {word}"
 

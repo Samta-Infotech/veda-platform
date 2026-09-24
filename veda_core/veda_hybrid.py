@@ -3360,7 +3360,16 @@ def _constraint_kind(query):
     except Exception:
         return ""
     q = " " + (query or "").lower().strip() + " "
-    if any(s in q for s in _COUNT_THRESHOLD) or _re_mod.search(r"\b(above|below|under|over)\s+\d", q):
+    # Comparator SYMBOLS and two-sided ranges are thresholds too. "amount > 10000",
+    # "between 100 and 50,000" and "from 100 to 50000" carry exactly the constraint this
+    # class exists to protect, and none of them is in _COUNT_THRESHOLD or matches the
+    # word-anchored pattern — so Tier-2's envelope believed it could express them and
+    # dropped the range (2026-09-23, Q9/Q10).
+    if any(s in q for s in _COUNT_THRESHOLD) \
+            or _re_mod.search(r"\b(above|below|under|over|exceeding)\s+\d", q) \
+            or _re_mod.search(r"(>=|<=|>|<)\s*\d", q) \
+            or _re_mod.search(r"\bbetween\s+[\d,.]+\s+and\s+[\d,.]+", q) \
+            or _re_mod.search(r"\bfrom\s+[\d,.]+\s+to\s+[\d,.]+", q):
         return "threshold"
     if any(s in q for s in _NEGATION):
         return "negation"
@@ -3382,6 +3391,29 @@ def _sql_keeps_constraint(sql, kind):
     return any(tree.find(k) is not None for k in kinds)
 
 
+# ── E.2 note: Tier-2 and the strict qualifier gate ────────────────────────────────────
+# `_tier2_validate` and the two repair loops below run `firewall.check(...,
+# strict_qualifier=True)` — the SAME gate, with the same strictness, that refused Tier-1.
+# Tier-2 exists to answer what Tier-1 could not, but it is handed no IR DELTA describing
+# what it must satisfy differently, so for the whole class of questions whose Tier-1
+# refusal WAS the strict qualifier gate, Tier-2 re-derives a similar query and is refused
+# by the identical predicate — two SLM round-trips to reach the same verdict. That is
+# what the 2026-09-23 run shows as `validation: failed` followed immediately by
+# `data_retrieval: warning — the primary method could not answer this, so an alternate
+# method was used` and then `result_preparation: warning`, on six questions with trivially
+# correct SQL answers.
+#
+# The fix adopted here is upstream, not a loosening of Tier-2: Parts C and D ground the
+# entity nouns, numeric ranges and lifecycle phrases that the gate was refusing, so the
+# refusal no longer fires and Tier-2 is not entered for them at all. Loosening the gate
+# for Tier-2 specifically was deliberately NOT done — it is the one check standing
+# between a dropped qualifier and a confidently wrong answer, and Tier-2's output is
+# LLM-written IR, the input it protects against most.
+#
+# The coordinator's SINGLE path (`_dispatch_single`) skips Tier-2 entirely for a pinned
+# single-source chat turn; those questions therefore see the Tier-1 verdict as final,
+# which is why the typed-clarify quality of Tier-1's refusal (Part A) is what actually
+# reaches the user there.
 def _envelope_inexpressible(query):
     """Reason string when the frozen intent envelope (INTENT_ENVELOPE_CONTRACT v1:
     count/measure/ratio/trend/compare/group/dimension_list, filters eq|ne) cannot

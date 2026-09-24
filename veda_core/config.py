@@ -2389,10 +2389,17 @@ QUERY_LANGUAGE = {
                       "fetch", "tell", "select", "retrieve", "provide", "see",
                       "count", "rank", "sort", "order", "view", "pull"],
     # ranking operators → become ORDER BY ... LIMIT, never a literal in the SQL
+    # 2026-09-23: sort/order vocabulary added. "sorted by currency", "ordered by
+    # property name in reverse alphabetical order", "in descending order" are ranking
+    # requests in the user's own words; without these words the gates saw "sorted" /
+    # "descending" as unaccounted CONTENT tokens and refused the query as a dropped
+    # qualifier instead of reading them as the ORDER BY they are.
     "ranking": ["largest", "biggest", "greatest", "highest", "smallest", "lowest",
                 "oldest", "newest", "latest", "earliest", "maximum", "minimum",
                 "max", "min", "most", "least", "greater", "fewer", "fewest", "top",
-                "bottom", "first", "last"],
+                "bottom", "first", "last",
+                "sorted", "ordered", "desc", "asc", "descending", "ascending",
+                "alphabetical", "alphabetically", "cheapest", "expensive"],
     # function words (articles, prepositions, conjunctions, auxiliaries, pronouns)
     "stopwords": ["the", "all", "any", "each", "and", "for", "with", "from", "into",
                   "out", "that", "those", "these", "this", "are", "was", "were",

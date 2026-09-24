@@ -41,11 +41,15 @@ def _ambient_ctx():
     return None
 
 
-def _resolve_temporal_column(table, sm):
+def _resolve_temporal_column(table, sm, query=None):
     """Canonical temporal column of `table` — schema-metadata driven (semantic_type=
     TEMPORAL). When several exist, REUSE the existing canonical-temporal chooser
     (query.sql_builder._pick_best_temporal) so there's ONE source of truth for the
-    event-time preference, not a second hardcoded name list. None if no temporal column."""
+    event-time preference, not a second hardcoded name list. None if no temporal column.
+
+    `query` lets that chooser bind the column to the verb the question used
+    ("most recently UPDATED" -> updated_at, "most recently DATED" -> transaction_date)
+    and prefer the business event date over created_at."""
     temporal = [k.split(".", 1)[1] for k, m in (sm.get("columns", {}) or {}).items()
                 if k.startswith(table + ".") and (m or {}).get("semantic_type") == "TEMPORAL"]
     if not temporal:
@@ -54,13 +58,17 @@ def _resolve_temporal_column(table, sm):
         return temporal[0]
     try:
         from query.sql_builder import _pick_best_temporal
-        return _pick_best_temporal(temporal, {c: {"col_name": c} for c in temporal})
+        return _pick_best_temporal(temporal, {c: {"col_name": c} for c in temporal},
+                                   query=query)
     except Exception:
         return sorted(temporal)[0]
 
 
+# Bare "recent" joins the list (2026-09-23): "any RECENT payments between 100 and
+# 50,000" is the same vague wording as "recently" and must not pin a synthetic 30-day
+# window onto a question whose real constraint is the amount range.
 _VAGUE_RECENCY_RE = re.compile(
-    r'\b(?:recently|lately|latest|newest|most\s+recent)\b', re.IGNORECASE)
+    r'\b(?:recently|recent|lately|latest|newest|most\s+recent(?:ly)?)\b', re.IGNORECASE)
 
 
 def _sql_references(sql: str, name: str) -> bool:
@@ -133,6 +141,18 @@ def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
     if sort_col:
         direction = "ASC" if rank.direction == "asc" else "DESC"
         return f' ORDER BY {prefix}"{sort_col}" {direction} LIMIT {limit}'
+    if rank.ranked:
+        # A RANKED request we could not resolve an ORDER BY for (no canonical temporal
+        # column for a recency ask; several equally-plausible measures for a magnitude
+        # one). Emitting ' LIMIT N' here is the worst available answer: it returns N
+        # ARBITRARY rows under the user's own words "the top 5" / "the last 5", which is
+        # indistinguishable from a real ranking (2026-09-23 question.txt, Q11 — the
+        # ORDER BY was dropped and a LIMIT 5 survived, so five unordered rows were
+        # rendered as "the top 5 most recently dated"). Drop the COUNT instead: the
+        # unranked page that comes back no longer impersonates a ranking, and the
+        # intent/SQL alignment guard downstream refuses it as a typed clarify rather
+        # than letting it render.
+        return ' LIMIT 100'
     return f' LIMIT {limit}'
 
 
@@ -182,6 +202,15 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # M3 checkpoint 1: branch state the firewall's IR is built from (bound later by the
     # branches that have it; these defaults mean "unknown" → partial IR slots).
     _u = None; _arb_filters = []; _rank = None; _tpred = None; _tcol = None; _rank_sort_col = None
+    # Same rule, same reason, for the two filter classes added 2026-09-23: they are bound
+    # inside the single-table planning block, but READ unconditionally by the branch
+    # selection (`elif _arb_filters or _num_filters or _vg_filters`) and by the IR
+    # construction far below. Any path that reaches those without entering that block hit
+    # `UnboundLocalError: cannot access local variable '_num_filters'`, which the API tier
+    # surfaced as a 502 LLM_UNAVAILABLE — five of the twenty question.txt questions failed
+    # this way the moment the scope was pinned to one source. `_arb_filters` above already
+    # carried this default for exactly this reason; these two were missing it.
+    _num_filters = []; _num_clarify = None; _vg_filters = []; _vg_matched = []
     # M4: the QueryIR the firewall checked, surfaced on the RESULT so the api tier's
     # session memory can stack it (chatbot/memory/frame.py). A mutable holder, not a
     # plain local, because _done() is a closure that also runs on refusal paths that
@@ -429,6 +458,39 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         if _floor > 0 and float(_confidence) < _floor:
                             from veda import warnings as _vwc
                             _vwc.add(_vwc.LOW_EVIDENCE)
+                            # E.1 (2026-09-23): ZERO ROWS at low confidence is not an
+                            # answer. "No results found." is a factual claim about the
+                            # data — it tells the user their portfolio contains nothing
+                            # matching — and when the engine is itself unsure it picked
+                            # the right table, that claim is unfounded. Q11 rendered
+                            # "No results found." at confidence 0.045 against the WRONG
+                            # table; the right table had 754 rows. Say which anchor was
+                            # searched and let the user redirect, rather than reporting
+                            # an emptiness that may be an artefact of the routing.
+                            # Narrow on purpose. An empty result is usually a genuine,
+                            # useful fact ("no users were created last month"), so this
+                            # must fire only when the engine is BADLY unsure it even
+                            # looked in the right place — Q11 scored 0.045 against the
+                            # wrong table. At the plain warning threshold (0.5) it
+                            # converted correct empty answers into clarifies, which is a
+                            # worse failure than the one it fixes.
+                            _rows_out = kw.get("rows")
+                            _very_low = float(_confidence) < min(_floor / 3.0, 0.15)
+                            if _very_low and rc == 0 and isinstance(_rows_out, (list, tuple)) \
+                                    and len(_rows_out) == 0:
+                                # kw["table"] is the anchor this answer ran against;
+                                # `primary` is a closure local that is not guaranteed to
+                                # be bound at every _done() exit, so it is not used here.
+                                _anchor_name = kw.get("table") or "that data"
+                                _lcmsg = (
+                                    f"I searched {_anchor_name} and found no matching "
+                                    f"rows, but I'm not confident that's the right place "
+                                    f"to look for this — so I'd rather not report it as "
+                                    f"an empty result. Which entity did you mean?")
+                                status = "clarify"
+                                kw["msg"] = _lcmsg
+                                kw["feedback"] = _feedback("clarify", msg=_lcmsg)
+                                tr.finish(status)
                 except Exception:
                     pass
                 try:
@@ -1668,6 +1730,70 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 except Exception:
                     _arb_filters = []
 
+            # Lifecycle/status phrase grounding (D.5, 2026-09-23): "currently on the
+            # market for sale" means assets_salelisting.status = 'APPROVED', but no
+            # sampled VALUE contains those words, so the value arbiter (exact-match only)
+            # never saw the qualifier and it was dropped in silence — "the cheapest
+            # properties currently on the market" came back with 74 of 100 rows DRAFT or
+            # CANCELLED. The curated phrase->value glossary grounds it; an unmapped state
+            # word on an anchor that HAS a status column becomes a clarify naming that
+            # column's real domain, never a silent unfiltered answer.
+            _vg_filters, _vg_matched = [], []
+            try:
+                from query.value_glossary import phrase_filters as _vg_build
+                _vg_filters, _vg_matched = _vg_build(query, primary, sm)
+                if _vg_filters:
+                    from query.value_glossary import explain as _vg_explain
+                    print("  [L4c] lifecycle    " + _vg_explain(_vg_filters))
+            except Exception:
+                _vg_filters, _vg_matched = [], []
+            # Runs even when a phrase DID ground: "which properties available for sale
+            # currently have an ACTIVE status" grounds "available for sale" to APPROVED
+            # while still naming a state ("active") that does not exist in the column at
+            # all. Answering that with APPROVED silently substitutes a different question.
+            if True:
+                try:
+                    from query.value_glossary import unmapped_state_clarify as _vg_clar
+                    _sc = _vg_clar(query, primary, sm, _vg_matched)
+                    if _sc:
+                        fb = _feedback("clarify", msg=_sc)
+                        # A literal tag, not `_route + ...`: `_route` is not bound
+                        # until the branch chain has chosen a head (~500 lines below),
+                        # and referencing it here raised UnboundLocalError, which the
+                        # API tier reported as a 502 LLM_UNAVAILABLE.
+                        log_route("deterministic.state_ungrounded", query,
+                                  (time.time() - start) * 1000)
+                        return _done(0, "clarify", msg=_sc, feedback=fb) if return_result else 0
+                except Exception:
+                    pass
+
+            # Numeric-predicate grounding (D.1, 2026-09-23): "between 100 and 50,000",
+            # "priced above 10,000". The value arbiter only ever grounded CATEGORICAL
+            # spans, so a numeric range reached SQL generation carried in English alone
+            # and came back as an unfiltered LIMIT 100 dump with the range silently
+            # dropped — the worst failure shape in the set, because it renders as a real
+            # answer. query/numeric_filter resolves the comparison onto a REAL measure
+            # column of the anchor, or returns a clarify NAMING the candidates when the
+            # anchor has several and the question doesn't say which. It never guesses.
+            _num_filters, _num_clarify = [], None
+            try:
+                from query.numeric_filter import build_filters as _num_build
+                _num_filters, _num_clarify, _num_cands = _num_build(query, primary, sm)
+                if _num_filters:
+                    from query.numeric_filter import explain as _num_explain
+                    print("  [L4d] numeric      " + _num_explain(_num_filters))
+                    tr.set("numeric_filters", table=primary, filters=[
+                        (f["column"], f["op"], f["value"], f.get("value2"))
+                        for f in _num_filters])
+            except Exception:
+                _num_filters, _num_clarify = [], None
+            if _num_clarify:
+                fb = _feedback("clarify", msg=_num_clarify)
+                # literal tag — `_route` is not bound this early (see above)
+                log_route("deterministic.numeric_ambiguous", query,
+                          (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_num_clarify, feedback=fb) if return_result else 0
+
             # Temporal window → grounded predicate on the anchor's canonical temporal
             # column, applied DIRECTLY in the deterministic SQL (FK / arbiter / temporal-
             # only). A date filter is never silently dropped, and we never fall back to the
@@ -1677,7 +1803,13 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             # needs the canonical column resolved even when L1 found no date RANGE at
             # all (e.g. "last 10 ledger entries" — "last" without a time unit sets no
             # temporal_filter), so ORDER BY has something to sort by.
-            _want_rank_order = _rank.top_n is not None and _rank.basis == "temporal"
+            # `ranked`, not `top_n is not None`: "the LATEST payments" and "the OLDEST
+            # financial records" name a sort without naming a count, and gating on an
+            # explicit N meant those fell through with no ORDER BY at all — the engine
+            # returned an arbitrary 100-row page and called it "the latest" (2026-09-23
+            # question.txt, Q1/Q5/Q6/Q18/Q19/Q20). The count stays optional; the SORT is
+            # what the question actually asked for.
+            _want_rank_order = _rank.ranked and _rank.basis == "temporal"
             # Bare-count shape (2026-09-15): "how many X are there" — aggregate_mode()'s
             # "counting" branch (veda/planning.py) already flags this correctly in
             # query_understanding.aggregation (_agg here), but nothing downstream in this
@@ -1706,8 +1838,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 (" " in w and w in _ql_bc) or re.search(rf"\b{re.escape(w)}\b", _ql_bc)
                 for w in _QG_bc.get("grouping", []))
             _bare_count = bool(_agg) and _agg.get("op") is None and _agg.get("threshold") is None \
-                and not _agg.get("top_n") and not _agg.get("ranked") and not _has_grouping_bc
-            _tcol = (_resolve_temporal_column(primary, sm)
+                and not _agg.get("top_n") and not _agg.get("ranked") and not _has_grouping_bc \
+                and not _num_filters       # "how many X above 10,000" is a FILTERED count
+            _tcol = (_resolve_temporal_column(primary, sm, query)
                     if (tf and (tf.start or tf.end)) or _want_rank_order else None)
             # "latest 10 X" ALSO makes L1 match the vague-recency word and derive a
             # synthetic last-30-days BETWEEN window (query/temporal_parser.py) — but
@@ -1884,10 +2017,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 tr.set("sql_planning", action="multihop_fk_resolution", table=primary,
                        path=_mh["path"], anchor_col=_mh["anchor_col"], temporal=_tcol)
                 _tick("sql_planning", "Tracing the connection through related records")
-            elif _arb_filters:
+            elif _arb_filters or _num_filters or _vg_filters:
                 # Deterministic single-table SQL with arbiter-grounded categorical
-                # filters (= for VALUE, != for NEGATED_VALUE). All columns belong to the
-                # anchor table by construction (anchor_filters filtered on `primary`).
+                # filters (= for VALUE, != for NEGATED_VALUE) and/or grounded NUMERIC
+                # comparisons ("amount BETWEEN 100 AND 50000"). All columns belong to the
+                # anchor table by construction (anchor_filters filtered on `primary`;
+                # numeric_filter resolves only against the anchor's own measures).
                 # where_clause compares lower(col) to value_norm, so High/high/HIGH match.
                 from query.value_arbiter import where_clause as _arb_where
                 # Business-facing SELECT list — NOT the validation allow-list.
@@ -1897,19 +2032,37 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 # actually gets projected — composed from metadata VEDA already
                 # computed at ingestion + this query's own retrieval relevance
                 # (veda/routing.py::recommended_projection — never re-ranked here).
+                # The column a numeric comparison filters on must also be SHOWN — an
+                # answer to "payments between 100 and 50,000" that never displays the
+                # amount is unreadable (Q10 projected twelve columns, none of them an
+                # amount, while claiming to answer a range question).
+                _must = [c for c in ([_rank_sort_col] if _rank_sort_col else [])
+                         + [f["column"] for f in _num_filters]
+                         + [f["column"] for f in _vg_filters] if c]
                 _proj_cols = recommended_projection(primary, allowed_columns, results, sm, query,
-                                                    must_include=[_rank_sort_col] if _rank_sort_col else None)
+                                                    must_include=_must or None)
                 _proj = ", ".join(f'"{c}"' for c in _proj_cols) or "*"
-                _wparts = [_arb_where(_arb_filters)]
+                _wparts = []
+                if _arb_filters:
+                    _wparts.append(_arb_where(_arb_filters))
+                if _vg_filters:
+                    from query.value_glossary import where_clause as _vg_where
+                    _wparts.append(_vg_where(_vg_filters))
+                if _num_filters:
+                    from query.numeric_filter import where_clause as _num_where
+                    _wparts.append(_num_where(_num_filters))
                 if _tpred:
                     _wparts.append(_tpred)        # value filter + temporal stays deterministic
                 sql = (f'SELECT {_proj} FROM "{primary}" WHERE '
                        + " AND ".join(_wparts) + _rank_tail)
                 allowed_columns = (allowed_columns + [f["column"] for f in _arb_filters]
+                                   + [f["column"] for f in _num_filters]
+                                   + [f["column"] for f in _vg_filters]
                                    + ([_tcol] if _tcol else []))
                 _llm_sql = False                 # deterministic — skip IR-equivalence
                 tr.set("sql_planning", action="value_arbiter_filter", table=primary,
-                       filters=[(f["column"], f["op"], f["value"]) for f in _arb_filters],
+                       filters=[(f["column"], f["op"], f["value"]) for f in _arb_filters]
+                               + [(f["column"], f["op"], f["value"]) for f in _num_filters],
                        temporal=_tcol)
                 _tick("sql_planning", "Applying your filters")
                 print(f"  [L4c] value filter {primary} WHERE {' AND '.join(_wparts)}"
@@ -1993,7 +2146,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 print(f"  [L4e] Ranked       {primary} ORDER BY {_tcol} "
                       f"{_rank.direction.upper()} LIMIT {_rank.top_n or 100}"
                       "  — deterministic, no LLM")
-            elif _rank.top_n is not None and _rank.basis == "metric" and _rank_sort_col \
+            elif _rank.ranked and _rank.basis == "metric" and _rank_sort_col \
                     and _rank_tail:
                 # "top 3 vendors by rating" / "top 5 amenities by monthly fee" — a ranking on a
                 # MEASURE column of the anchor (2026-09-15, M1 close-out battery). Only the
@@ -2068,6 +2221,19 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 sql = _analytical_sql or generate_sql(query, primary, allowed_columns, tf,
                                    col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
                                    recommended_projection=_proj_cols)
+                if not _analytical_sql:
+                    # generate_sql may have answered from its OWN deterministic builder
+                    # (veda/generation._deterministic_single_table_sql) rather than the
+                    # SLM. That output is deterministic and must be treated like every
+                    # other deterministic branch — skip IR-equivalence, which otherwise
+                    # audits it as if a model had written it.
+                    try:
+                        from veda.generation import last_was_deterministic as _lwd
+                        if _lwd():
+                            _llm_sql = False
+                            print("  [L5] SQL gen       deterministic builder (no SLM)")
+                    except Exception:
+                        pass
                 if _analytical_sql:
                     # deterministic build from a grounded spec — skip IR-equivalence like every
                     # other deterministic branch (it rejected the spec's own grounded filter
@@ -2162,9 +2328,27 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                                                   value=f.get("value_norm", f.get("value")), grounding="value_arbiter")
             for f in (_arb_filters or [])]})
     else:
+        # M3 checkpoint 2 (2026-09-23): the deterministic branches KNOW their own shape
+        # — this file built the WHERE, the ORDER BY and the LIMIT a few hundred lines
+        # above — so their IR is complete and firewall._ir_vs_sql can check it
+        # structurally instead of falling back to the text heuristic. `complete=False`
+        # meant every branch.* head was reported ir_partial and the structural check was
+        # skipped on Tier-1 entirely. _ir_vs_sql only asserts that slots the IR KNOWS are
+        # present in the SQL (it never rejects the SQL for carrying more), so completing
+        # the IR can add refusals only where the SQL genuinely lost something the branch
+        # asked for.
+        #
+        # The numeric predicates go in as extra_filters: without them the IR would not
+        # know about the comparison this branch just built, and the structural check
+        # would silently skip exactly the filter class that was being dropped.
+        _ir_extra = ([{"column": f["column"], "op": f["op"], "value": f.get("value"),
+                       "grounding": "numeric_filter"} for f in (_num_filters or [])]
+                     + [{"column": f["column"], "op": "=", "value": f.get("value"),
+                         "grounding": "value_glossary"} for f in (_vg_filters or [])])
         _ir = _ir_from_branch(f"branch.{_route}", primary, arb_filters=_arb_filters,
                               tpred_col=(_tcol if _tpred else None), tf=tf,
-                              rank=_rank, rank_col=_rank_sort_col, complete=False)
+                              rank=_rank, rank_col=_rank_sort_col,
+                              extra_filters=_ir_extra, complete=True)
     _ir_holder["ir"] = _ir
     _fv = _fw.check(_ir, sql, sm, query=query, allowed_tables=allowed_tables, allowed_columns=allowed_columns,
                     ctx=_ambient_ctx(), resolve_table=_resolve, skip_values=skip_values,
@@ -2192,7 +2376,56 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     missing = (_fv.detail if isinstance(_fv.detail, list) else [_fv.detail]) if not ok_q else []
     if not ok_q and _fv.slot and _fv.slot.startswith("filter:"):
         missing = [_fv.slot.split(":", 1)[1]]            # IR-vs-SQL: the dropped IR slot
-    tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
+    # `missing` is a LIST (it can name several dropped qualifiers), but every user-facing
+    # site below interpolates ONE token into a sentence, and veda/feedback.py's helpers
+    # (`_restricted_match`'s term.strip(), `_closest`'s name.lower()) are str-only. Passing
+    # the list rendered "'['property']' doesn't match any value in this data" to the user
+    # and raised AttributeError inside _feedback — swallowed at the `except Exception:
+    # return None` above, so `feedback=None` reached the chat and it printed the generic
+    # "Could you clarify what you're asking about?" instead. The list stays for the trace;
+    # the scalar is what human-readable text and feedback get.
+    missing_tok = missing[0] if missing else ""
+    # ENTITY-NOUN RULE (2026-09-23): a token that grounds to a TABLE is ACCOUNTED, and is
+    # never offered to the user as a missing VALUE. "property", "payments", "accounting
+    # entries" name entities, not cell contents — asking "did you mean one of <values of
+    # some column>?" about them is a category error, and it is what produced the
+    # "'property' doesn't match any value in this data — did you mean one of , true
+    # (asset_id)?" clarify on 5 of the 20 question.txt questions. "Grounds to a table"
+    # means the CURATED alias glossary maps it — see the note below for why the fuzzier
+    # referent-table evidence is not accepted here. (The FK-parent and glossary
+    # vocabulary that stop most of these from reaching the gate at all live in
+    # veda/validation.qualifier_completeness; this is the backstop for what slips past.)
+    _entity_noun_ok = False
+    if not ok_q and missing_tok:
+        try:
+            _tok = str(missing_tok).strip().lower()
+            _grounds_to_table = False
+            try:
+                from query.entity_resolver import _entity_glossary
+                _g = _entity_glossary() or {}
+                _grounds_to_table = _tok in _g or _tok.rstrip("s") in _g or (_tok + "s") in _g
+            except Exception:
+                pass
+            # DELIBERATELY glossary-only. The first version also accepted
+            # `resolution.referent_tables(tok)` as proof that a token "names a table",
+            # but that function credits a table for VALUE evidence too — so "high" in
+            # "show tickets with high priority" resolved to referent tables, was
+            # reclassified as an entity noun, and the dropped `priority = 'high'` filter
+            # sailed through the gate into an unfiltered 100-row answer (caught by the
+            # per-source battery, which asserts that question must REFUSE because no
+            # such priority value exists). The curated glossary contains entity nouns
+            # only, so it cannot make that mistake; a genuine value keeps going down the
+            # value_referents path below, which is where it belongs.
+            if _grounds_to_table:
+                print(f"  [L6b] Qualifier    ✓  '{_tok}' names an ENTITY (table), not a "
+                      f"value — accounted")
+                tr.check("qualifier_completeness", True,
+                         f"'{_tok}' grounds to a table (entity noun)")
+                ok_q, missing, missing_tok, _entity_noun_ok = True, [], "", True
+        except Exception:
+            pass
+    if not _entity_noun_ok:
+        tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
         _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
         # QUALIFIER SALVAGE (generic, schema-agnostic): before refusing, ask QSR what
@@ -2212,7 +2445,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if QUALIFIER_SALVAGE_ENABLED and anchor_hint is None:
             try:
                 from query.resolution import referent_tables
-                _refs = [r for r in referent_tables(missing, sm)
+                _refs = [r for r in referent_tables(missing_tok, sm)
                          if r["table"] not in _sql_tabs]
                 # Anchor preference: a table backed by ENTITY/COLUMN-NAME evidence
                 # beats a value-only home — the latter is usually a shared label
@@ -2227,7 +2460,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 _refs = []
             if (_refs and QUALIFIER_REANCHOR_RETRY
                     and (time.time() - start) <= QUALIFIER_REANCHOR_MAX_HEAD_S):
-                print(f"  [L6b] Qualifier salvage  '{missing}' → {_refs[0]['table']} "
+                print(f"  [L6b] Qualifier salvage  '{missing_tok}' → {_refs[0]['table']} "
                       f"({'; '.join(_refs[0]['why'][:2])}) — re-anchored retry")
                 tr.note("validation", f"qualifier salvage retry → {_refs[0]['table']}")
                 try:
@@ -2262,7 +2495,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         try:
             from query.resolution import value_referents, domain_via
             from query.join_planner import load_graph
-            _vr = value_referents(missing)
+            _vr = value_referents(missing_tok)
             if not _vr["direct"] and not _vr["closed"]:
                 _qw = set(re.findall(r"[a-z]+", query.lower()))
                 _doms = []
@@ -2278,7 +2511,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 if _doms:
                     _doms.sort()
                     _, _col, _d = _doms[0]
-                    _msg = (f"'{missing}' doesn't match any value in this data — "
+                    _msg = (f"'{missing_tok}' doesn't match any value in this data — "
                             f"did you mean one of {', '.join(_d[:5])} ({_col})?")
                     fb = _feedback("clarify", msg=_msg)
                     log_route(_route + ".grounded_clarify", query, (time.time() - start) * 1000)
@@ -2294,9 +2527,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 _names = list(dict.fromkeys(_human(r["table"], sm) for r in _refs[:2]))
             except Exception:
                 _names = list(dict.fromkeys(r["table"] for r in _refs[:2]))
-            _msg = (f"'{missing}' here refers to {' / '.join(_names)}, which this "
+            _msg = (f"'{missing_tok}' here refers to {' / '.join(_names)}, which this "
                     f"answer never touched — ask about {_names[0]} directly, or say "
-                    f"how '{missing}' relates to your question.")
+                    f"how '{missing_tok}' relates to your question.")
             fb = _feedback("clarify", msg=_msg)
             log_route(_route + ".salvage_clarify", query, (time.time() - start) * 1000)
             return _done(0, "clarify", msg=_msg, feedback=fb)
@@ -2309,13 +2542,13 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if any(t in _sql_tabs for t in _restricted_here["tables"]):
             fb = _feedback("access_denied")
             log_route(_route + ".access_denied", query, (time.time() - start) * 1000)
-            return _done(0, "access_denied", missing=missing, feedback=fb)
-        fb = _feedback("qualifier_dropped", missing=missing)
+            return _done(0, "access_denied", missing=missing_tok, feedback=fb)
+        fb = _feedback("qualifier_dropped", missing=missing_tok)
         # M2: a dropped qualifier on a deterministic answer ("how many amenity CATEGORIES"
         # → bare COUNT(*)) is a refused branch — the grounded candidate (COUNT DISTINCT)
         # gets its turn via re-entry when the layer is on; refusal stands otherwise.
         return _guard_refusal("qualifier_dropped", None, fb, _route + ".qualifier_dropped",
-                              always_done=True, missing=missing)   # this site always returned _done()
+                              always_done=True, missing=missing_tok)  # this site always returned _done()
     print("  [L6b] Qualifier    ✓  every named qualifier is represented in the SQL")
 
     # Entity COVERAGE (flag-gated, never refuses): the companion to the qualifier gate above for the
@@ -2522,7 +2755,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         if _restricted_hit:
             fb = _feedback("access_denied")
             return _done(1, "invalid", error=err, feedback=fb)
-        return _done(1, "invalid", error=err)
+        # Validation rejections used to exit with NO feedback object, so the chat had
+        # nothing to render and printed the contentless "Could you clarify what you're
+        # asking about?" (5 of the 6 generic refusals in the 2026-09-23 question.txt run
+        # logged `validation: failed` right before that text). explain_failure's
+        # invalid/exec_error branch already has the right words — attach them.
+        return _done(1, "invalid", error=err, feedback=_feedback("invalid", error=err))
     _np = len(params) if params else 0
     print(f"  [L6c] Validate     ✓  read-only · parameterized ({_np} bound value"
           f"{'' if _np == 1 else 's'}) · AST/coverage/fan-out checked")
@@ -2578,7 +2816,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     if err:
         print(f"\n❌ [L7] Execution error: {err}\n")
         log_route(_route + ".exec_error", query, (time.time() - start) * 1000, error=err)
-        return _done(1, "exec_error", error=err)
+        return _done(1, "exec_error", error=err,
+                     feedback=_feedback("exec_error", error=err))
 
     print(f"\n  Result: {len(rows)} rows (showing up to 20)\n")
     if cols:

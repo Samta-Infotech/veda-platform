@@ -97,6 +97,18 @@ def _entity_glossary():
                 g = {k.lower(): v for k, v in raw.items() if not str(k).startswith("_")}
         except Exception:
             g = {}
+        if not g:
+            # The artifact is missing or empty. It lives under the gitignored,
+            # reingest-cleared artifact tree, so this is a NORMAL state right after an
+            # ingest and not an error — on 2026-09-22 it wiped the curated map and
+            # "property" stopped resolving to assets_asset for a whole day. Fall back to
+            # the TRACKED seed (ingestion/entity_alias_seeder publishes the same data in
+            # L5) so a lost artifact degrades to "stale but correct", never to "empty".
+            try:
+                from ingestion.entity_alias_seeder import load_seed
+                g = load_seed(key[1] or "")
+            except Exception:
+                g = {}
         _GLOSSARY[key] = g
     return _GLOSSARY[key]
 

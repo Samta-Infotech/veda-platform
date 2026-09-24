@@ -33,9 +33,22 @@ def _distinct_values(table, column, limit=8):
         return []
 
 
+def _as_term(x):
+    """One human-readable term from a caller's value. Several call sites hand these
+    helpers a LIST (veda/pipeline.py's qualifier gate builds `missing` as a list of
+    dropped qualifiers), and every helper here is str-only — `term.strip()` and
+    `name.lower()` raise AttributeError on a list, which pipeline.py's `_feedback`
+    swallows (`except Exception: return None`), so the user got NO feedback at all and
+    the chat fell back to the contentless "Could you clarify what you're asking about?".
+    Scalarize once, here, so no caller can reintroduce that failure."""
+    if isinstance(x, (list, tuple, set)):
+        x = next(iter(x), None) if not isinstance(x, (list, tuple)) else (x[0] if x else None)
+    return "" if x is None else str(x)
+
+
 def _closest(name, options, n=3):
     """Cheap dependency-free ranking: shared word tokens + substring overlap."""
-    name = (name or "").lower()
+    name = _as_term(name).lower()
     ntoks = set(re.findall(r"[a-z]+", name))
     scored = []
     for o in options:
@@ -69,6 +82,7 @@ def _restricted_match(term, sm) -> bool:
     word with it; an exact match is the one case a user's own wording could
     only produce by already knowing the real column/table name.
     """
+    term = _as_term(term)
     if not term:
         return False
     restricted = sm.get("_rbac_restricted") or {}
@@ -83,6 +97,9 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
 
     Fully deterministic. `text` is the user-facing block. Never raises."""
     sm = sm or {}
+    # Both reach user-facing prose and the str-only helpers below — see _as_term.
+    missing = _as_term(missing) if missing is not None else None
+    value = _as_term(value) if value is not None else None
     why = ""
     what = what or ""
     sugg = []

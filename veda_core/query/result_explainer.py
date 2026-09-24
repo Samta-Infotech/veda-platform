@@ -492,8 +492,28 @@ def _numeric_aggregates(columns: List[str], rows: List[dict], max_cols: int = 6)
     return metrics
 
 
+def _sql_order(sql: Optional[str]):
+    """(column, "asc"|"desc") of the executed SQL's FIRST ORDER BY term, or (None, None).
+
+    The narrator needs the DIRECTION, not just the column: on a truncated result the
+    ordering decides which extreme is real and which is an artefact of the page."""
+    if not sql:
+        return None, None
+    m = re.search(r"\bORDER\s+BY\b(.+?)(?:\bLIMIT\b|\bOFFSET\b|$)", sql,
+                  re.IGNORECASE | re.DOTALL)
+    if not m:
+        return None, None
+    first = m.group(1).split(",")[0]
+    toks = [t for t in re.findall(r'"?([A-Za-z_][A-Za-z0-9_]*)"?', first)
+            if t.lower() not in ("asc", "desc", "nulls", "first", "last")]
+    if not toks:
+        return None, None
+    return toks[-1], ("desc" if re.search(r"\bDESC\b", first, re.IGNORECASE) else "asc")
+
+
 def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[str] = None,
-                   truncated: bool = False, fetch_limit: Optional[int] = None) -> dict:
+                   truncated: bool = False, fetch_limit: Optional[int] = None,
+                   order_dir: Optional[str] = None) -> dict:
     """Precompute the compact 'facts' payload that is the ONLY data given to the
     SLM — never the raw rows/table. Cheap (no SLM call), deterministic, and
     constant-size: a 3-row result and a 3,000-row result produce a same-sized
@@ -555,6 +575,29 @@ def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[s
         if row_count > _ANALYSIS_MAX:
             facts["metrics_partial"] = True
             facts["metrics_scanned"] = _ANALYSIS_MAX
+        # A TRUNCATED, ORDERED result only contains one end of the distribution, so the
+        # OTHER end computed over these rows is an artefact of the page — not a fact
+        # about the data. "The cheapest properties" (ORDER BY expected_price ASC LIMIT
+        # 100) reported "33, Mama Thambi Maricar St has the HIGHEST expected_price at
+        # 1000000"; the true maximum is 440,000,000,000 — 440,000x larger — and the
+        # reader was told the portfolio tops out at 1M (2026-09-23, Q2 and Q14).
+        # Deleting the unreliable side is what makes _extreme_claims_grounded reject a
+        # superlative read off it: with no true extreme to match, a claim that matches a
+        # SAMPLED value is caught as "a sampled value passed off as an extreme".
+        if truncated and order_dir in ("asc", "desc"):
+            _drop = "max" if order_dir == "asc" else "min"
+            _dropped_any = False
+            for _cname, _m in (_metrics or {}).items():
+                if isinstance(_m, dict) and _m.get(_drop) is not None:
+                    _m.pop(_drop, None)
+                    _dropped_any = True
+            if _dropped_any:
+                facts["metrics_one_sided"] = _drop
+                facts["metrics_note"] = (
+                    f"These are the {row_count} "
+                    f"{'lowest' if order_dir == 'asc' else 'highest'} rows by "
+                    f"{rank_column or 'the sort column'}; the {_drop}imum over the full "
+                    f"table is NOT known from this result — do not state one.")
     return facts
 
 
@@ -680,9 +723,15 @@ def run_nl_answer(
         return NLAnswerResult(answer="No results found.", row_count=0,
                               duration_ms=round((time.time() - t0) * 1000, 2))
 
+    # The ordering the SQL actually ran. Also fills in `rank_column` when the caller had
+    # none — the fast path resolves its ranking inside the branch and did not pass one
+    # up, so its results were narrated with no idea which field made them "top"/"latest".
+    _ord_col, _ord_dir = _sql_order(sql)
+    if not rank_column and _ord_col:
+        rank_column = _ord_col
     facts = _extract_facts(columns, rows, rank_column=rank_column,
                            truncated=truncated or _sql_truncated(sql, len(rows)),
-                           fetch_limit=fetch_limit)
+                           fetch_limit=fetch_limit, order_dir=_ord_dir)
     glossary = _column_glossary(columns, table, semantic_model)
 
     rank_line = (f"\n\nThese rows are already ordered by \"{rank_column}\" — "

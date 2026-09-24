@@ -103,9 +103,21 @@ def aggregate_mode(query):
     # of X by Y, same as "how many X per Y" — just phrased as a noun instead of a
     # question. Grouped into "counting" rather than a new top-level QUERY_GRAMMAR
     # class since it resolves to the exact same aggregate shape.
+    # ... but ONLY when the question actually names the dimension to break down BY.
+    # "distribution of tickets ACROSS categories" is a grouped count; "give me a quick
+    # BREAKDOWN of the most recent accounting entries" is colloquial English for "show
+    # me", with no dimension anywhere in it. Treating the bare noun as a grouping request
+    # made the planner invent one: measured 2026-09-24 on question.txt Q6 and Q11, it
+    # grouped assets_asset by `floor_number` and returned a COUNT per floor to a question
+    # asking for the latest ledger rows. A grouping word ("per"/"each"/"grouped by"/
+    # "broken down by"/"across"/"by <dim>") must be present for the noun to mean GROUP BY.
+    _has_dim_phrase = (
+        any((" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql)
+            for w in QUERY_GRAMMAR.get("grouping", []))
+        or bool(re.search(r"\b(?:across|by)\s+(?:the\s+)?[a-z]", ql)))
     counting = (any((" " in w and w in ql) or re.search(rf"\b{re.escape(w)}\b", ql)
                     for w in QUERY_GRAMMAR.get("counting", []))
-               or bool(re.search(r"\b(distribution|breakdown)\b", ql)))
+               or bool(re.search(r"\b(distribution|breakdown)\b", ql) and _has_dim_phrase))
     if counting or top_n is not None or ranked:  # "top 5"/"highest" implies ranking by count
         return {"threshold": None, "op": None, "top_n": top_n, "ranked": ranked, "direction": direction}
     return None

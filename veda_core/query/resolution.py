@@ -424,11 +424,50 @@ def domain_via(table: str, fk_column: str, via_column: Optional[str] = None,
         if not cands:
             return []
         if via_column and via_column in cands:
-            return cands[via_column][:limit]
-        # default: smallest INFORMATIVE domain. Size-1 "domains" are meta columns
-        # (a lookup's table_name/column_name) — no clarify value, drop them first.
-        informative = [v for v in cands.values() if len(v) > 1] or list(cands.values())
-        return min(informative, key=len)[:limit]
+            return [v for v in cands[via_column] if str(v).strip()][:limit]
+        # Default pick. The old rule was `min(informative, key=len)` over every label
+        # domain of the FK target, justified as "smallest ~= the human label set". That
+        # does not hold once BOOLEAN columns are in the domain map: for
+        # accounts_generalledger.asset_id the candidates include `project_name` (hundreds
+        # of real property names) alongside six two-element boolean domains like
+        # `is_gated -> ['', 'true']`, and min-by-len picks a boolean — which is how
+        # "property" produced the user-facing "did you mean one of , true (asset_id)?"
+        # (2026-09-23 question.txt run, Q1/Q5/Q7/Q17/Q19). Three rules, in order:
+        #   1. drop the empty string — never a "did you mean" suggestion;
+        #   2. drop domains that are ENTIRELY boolean/bit values — a yes/no column can
+        #      never be the human label set the clarify is asking the user to choose from;
+        #   3. prefer a column NAMED like a label (the same name preference
+        #      veda/generation.py::_resolve_display_column uses to pick a table's display
+        #      column) over the size heuristic; fall back to smallest-informative only
+        #      when no via_column looks like a label.
+        _BOOLISH = {"true", "false", "t", "f", "0", "1", "yes", "no", "y", "n"}
+        clean = {}
+        for k, v in cands.items():
+            vals = [x for x in v if str(x).strip()]
+            if not vals:
+                continue
+            if {str(x).strip().lower() for x in vals} <= _BOOLISH:
+                continue                       # a boolean column, not a label set
+            clean[k] = vals
+        if not clean:
+            return []
+        def _label_rank(col):
+            c = col.lower()
+            if c in ("name", "title", "display_name", "label"):
+                return 0
+            if c.endswith("_name"):
+                return 1
+            if c.endswith(("_no", "_number")):
+                return 2
+            if c.endswith("_code"):
+                return 3
+            return 4
+        best = min(clean, key=lambda k: (_label_rank(k), len(clean[k]), k))
+        if _label_rank(best) == 4:             # nothing looks like a label -> old heuristic
+            informative = {k: v for k, v in clean.items() if len(v) > 1} or clean
+            best = min(informative, key=lambda k: (len(informative[k]), k))
+            return informative[best][:limit]
+        return clean[best][:limit]
     except Exception:
         return []
 

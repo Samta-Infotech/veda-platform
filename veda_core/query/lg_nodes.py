@@ -405,6 +405,15 @@ def _clean_filter_tree(node: Any, valid_col_ids: set) -> Any:
 # Node 5 — assemble_ir (DETERMINISTIC — zero LLM calls)
 # =============================================================================
 
+def _requested_top_n(query):
+    """The explicit row count the question asked for ("top 5", "latest 10"), or None."""
+    try:
+        from query.ranking_parser import parse_ranking
+        return parse_ranking(query or "").top_n
+    except Exception:
+        return None
+
+
 def node_assemble_ir(state: VEDAQueryState) -> Dict:
     t0 = time.time()
     _emit_step(state, "tier2_assemble", "Putting your answer together...")
@@ -512,7 +521,12 @@ def node_assemble_ir(state: VEDAQueryState) -> Dict:
         "aggregations":   aggregations,
         "group_by":       group_by,
         "order_by":       order_by,
-        "limit":          None,
+        # The count the question NAMED. Hardcoding None meant sql_builder._build_limit
+        # fell back to SQL_DEFAULT_LIMIT, so "list top 5 properties by monthly rent"
+        # came back as LIMIT 1000 — the requested 5 silently discarded on every query
+        # this IR path serves. query/ranking_parser is the one parser the deterministic
+        # branches already use for exactly this, so the two lanes agree on the number.
+        "limit":          _requested_top_n(query),
         "confidence":     0.9 if not needs_clarification else 0.3,
         "schema_version": 1,
     }

@@ -1,4 +1,5 @@
 """VEDA · L5 — LLM SQL generation (single-table + join-skeleton fill)."""
+import contextvars
 import os, re, sys, time, json, logging, threading
 from config import (SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL, SLM_NUM_CTX,
                     SLM_TIMEOUT_SECS)
@@ -121,9 +122,20 @@ def _deterministic_single_table_sql(query, table, columns, temporal, time_col,
         return None
     # a WHERE filter the query names but this builder can't express deterministically
     # (a categorical/text condition) must go to the SLM; detect the common markers.
+    # A NUMERIC qualifier this builder cannot express must go to the SLM (or, better,
+    # be grounded upstream by query/numeric_filter) — never silently produce a bare
+    # projection. The comparator words used to be reachable ONLY through the
+    # "with <something> <comparator>" alternative, so "priced above 10,000" and
+    # "between 100 and 50,000" matched nothing, the builder emitted a plain
+    # SELECT ... LIMIT, and the range vanished without a trace (2026-09-23, Q9/Q10).
+    # A bare digit is included for the same reason: a number in the question that this
+    # builder has no way to place is, by construction, a dropped constraint.
     if re.search(r"\b(where|with .+ (of|=|greater|less|more|above|below|over|under)|"
+                 r"between|range|greater|less|above|below|over|under|at least|at most|"
+                 r"more than|less than|fewer than|exceeding|"
                  r"open|closed|completed|active|cancelled|pending|published|failed|paid|"
-                 r"unpaid|verified|approved|rejected)\b", query.lower()):
+                 r"unpaid|verified|approved|rejected)\b", query.lower()) \
+            or re.search(r"\d", query):
         return None
     proj = [c for c in (recommended_projection or []) if c in columns]
     if not proj:
@@ -141,6 +153,25 @@ def _deterministic_single_table_sql(query, table, columns, temporal, time_col,
     return sql + f" LIMIT {_extract_requested_limit(query)}"
 
 
+#: Per-request flag: did `generate_sql` answer from `_deterministic_single_table_sql`
+#: rather than the SLM? The caller needs to know because a deterministically BUILT query
+#: must skip the IR-equivalence check (it has no LLM to disagree with) exactly like the
+#: other deterministic branches — it was previously marked `_llm_sql = True` regardless,
+#: so its own grounded output was audited as if a model had written it. A ContextVar, not
+#: a module global: the engine serves concurrent requests and a global would leak the
+#: flag across them (the same reason query/fast_path stashes its intent this way).
+_LAST_WAS_DETERMINISTIC = contextvars.ContextVar("veda_generation_last_deterministic",
+                                                 default=False)
+
+
+def last_was_deterministic() -> bool:
+    """True when the most recent `generate_sql` in THIS request built its SQL without
+    the SLM. Reading it clears it, so a later SLM-written query cannot inherit it."""
+    v = _LAST_WAS_DETERMINISTIC.get()
+    _LAST_WAS_DETERMINISTIC.set(False)
+    return bool(v)
+
+
 def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=None,
                  time_col=None, recommended_projection=None):
     """Ask Qwen for ONE read-only SELECT over the chosen table's real columns.
@@ -155,6 +186,7 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
         _det = _deterministic_single_table_sql(query, table, columns, temporal,
                                                time_col, recommended_projection)
         if _det is not None:
+            _LAST_WAS_DETERMINISTIC.set(True)
             return _det
 
     date_line = ""

@@ -39,7 +39,14 @@ evaluation/results/*.json
 # Derived ingestion artifacts — regenerated every ingest, never in source control
 # (semantic model, graphs, glossary/synonyms/concepts, precompute indexes, pkls,
 # per-(tenant,source,version) artifact scope trees). Plan §3.1 / Track 1 delta.
-veda_core/data/
+#
+# `veda_core/data/*` (not `veda_core/data/`) so the one HAND-CURATED subtree below can
+# be re-included: git does not descend into an excluded DIRECTORY, so a negation inside
+# one never takes effect. seeds/ holds human-supplied evidence, not derived output —
+# keeping it untracked is how veda_entity_aliases.json was silently destroyed by the
+# 2026-09-22 reingest (see veda_core/data/seeds/2/veda_entity_aliases.seed.json).
+veda_core/data/*
+!veda_core/data/seeds/
 veda_core/schema/*.pkl
 parity_baseline.json
 

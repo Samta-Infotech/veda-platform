@@ -168,4 +168,41 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     except Exception as e:
         out.append(StageOutcome("routing_card", False, fatal=False, error=str(e)))
 
+    # entity aliases (2026-09-23) — republish the TRACKED seed into this source's
+    # veda_entity_aliases.json. The artifact is hand-curated evidence but lives under
+    # the gitignored, reingest-cleared artifact tree, so it was silently destroyed on
+    # 2026-09-22 and "property" stopped grounding to assets_asset. The seed is in source
+    # control; this stage puts it back on every ingest. Pure file transform (no LLM, no
+    # scan) so it runs in skip_llm too; non-fatal — a source with no seed is a no-op.
+    try:
+        from ingestion.entity_alias_seeder import publish_from_state
+        _apath, _n, _dropped = publish_from_state(ctx, state, verbose=verbose)
+        if _apath is None:
+            out.append(StageOutcome("entity_aliases", True, detail="no seed for this source"))
+        else:
+            out.append(StageOutcome("entity_aliases", True, detail=(
+                f"{_n} aliases -> {_apath}" +
+                (f" ({_dropped} dropped: table not in this source)" if _dropped else ""))))
+    except Exception as e:
+        out.append(StageOutcome("entity_aliases", False, fatal=False, error=str(e)))
+
+    # value aliases (2026-09-23) — the business-PHRASE -> column-VALUE glossary
+    # ("currently on the market" -> assets_salelisting.status = APPROVED). Same tracked
+    # seed + same reason as the stage above.
+    try:
+        from ingestion.entity_alias_seeder import publish_values
+        _tabs = None
+        try:
+            _sm = (state or {}).get("semantic_model") or {}
+            if _sm.get("tables"):
+                _tabs = set(_sm["tables"].keys())
+        except Exception:
+            _tabs = None
+        _vpath, _vn = publish_values(ctx.source_id, getattr(ctx, "tenant", "default"),
+                                     known_tables=_tabs)
+        out.append(StageOutcome("value_aliases", True, detail=(
+            f"{_vn} column(s) -> {_vpath}" if _vpath else "no value seed for this source")))
+    except Exception as e:
+        out.append(StageOutcome("value_aliases", False, fatal=False, error=str(e)))
+
     return out

@@ -74,6 +74,48 @@ def select_primary_table(results, query, semantic_model, trace=None):
         if q_tokens & _name_toks(t, semantic_model):
             candidates.add(t)
 
+    # BUSINESS-VOCABULARY candidates + votes. Table NAMES are only one way a query can
+    # name a table: "accounting entries" and "financial records" name
+    # accounts_generalledger through the curated alias glossary, and share no name token
+    # with it at all. Before this, "the most recent accounting entries" routed to
+    # assets_asset (a richer table that matched on retrieval alone) and answered the
+    # wrong question entirely (2026-09-23, Q6/Q11). Collect, per table, the business
+    # vocabulary the model and glossary already carry.
+    _biz_toks = {}
+
+    def _biz(t):
+        if t in _biz_toks:
+            return _biz_toks[t]
+        toks = set()
+        tm = (semantic_model.get("tables", {}) or {}).get(t, {}) or {}
+        for field in ("primary_entity", "business_purpose"):
+            for w in re.findall(r"[a-z]+", str(tm.get(field, "") or "").lower()):
+                if len(w) > 2:
+                    toks.add(_stem(w))
+        for al in (tm.get("aliases") or []):
+            for w in re.findall(r"[a-z]+", str(al).lower()):
+                if len(w) > 2:
+                    toks.add(_stem(w))
+        _biz_toks[t] = toks
+        return toks
+
+    try:
+        from query.entity_resolver import _entity_glossary
+        _gloss = _entity_glossary() or {}
+    except Exception:
+        _gloss = {}
+    _q_stems = {_stem(w) for w in re.findall(r"[a-z]+", query.lower()) if len(w) > 2}
+    _glossary_votes = {}
+    for _noun, _tbl in _gloss.items():
+        if _tbl not in semantic_model.get("tables", {}):
+            continue
+        _noun_toks = {_stem(w) for w in re.findall(r"[a-z]+", str(_noun).lower()) if len(w) > 2}
+        if _noun_toks and _noun_toks <= _q_stems:
+            candidates.add(_tbl)
+            # a MULTI-word alias ("accounting entries") is far stronger evidence than a
+            # single shared noun, so it votes proportionally to how specific it is
+            _glossary_votes[_tbl] = max(_glossary_votes.get(_tbl, 0.0), 1.5 * len(_noun_toks))
+
     if not candidates:
         if trace is not None:
             trace.set("anchor_selection", anchor=None, source="router",
@@ -96,7 +138,16 @@ def select_primary_table(results, query, semantic_model, trace=None):
         lex = (1.5 * len(matched) + 2.0 * coverage) if len(matched) >= 2 else 0.5 * coverage
         sem = routed.get(t, 0.0)                 # 0..1 cosine, the strongest signal
         col = (max_score.get(t, 0.0) / hi) if hi else 0.0   # 0..1 normalized
-        combined = 1.0 * sem + 0.5 * col + lex
+        # Business vocabulary the query shares with this table's own description. This is
+        # FUZZY evidence — business_purpose is prose, and sibling tables in one family
+        # share most of it — so it is a TIE-BREAK only, capped well below one lexical
+        # name-token match. At 0.5/token uncapped it outranked retrieval and re-routed
+        # "list top 5 properties by monthly rent" from assets_renttransaction (correct)
+        # to assets_leasetransaction, whose prose happens to mention rent and property
+        # too. The curated alias vote below is separate and deliberately stronger: it is
+        # exact, reviewed, and per-source.
+        biz = 0.2 * min(len(_q_stems & _biz(t)), 3)
+        combined = 1.0 * sem + 0.5 * col + lex + biz + _glossary_votes.get(t, 0.0)
         scored[t] = combined
         if combined > best_score:
             best_score, best = combined, t
@@ -378,6 +429,26 @@ def vet_primary(query, primary, results, semantic_model, trace=None):
 
 
 _NAME_CONNECTIVES = {"and", "or", "of", "to", "by"}
+
+
+def _stem(word):
+    """`_singularize` plus the ONE derivational suffix that matters for routing: -ing.
+
+    "ACCOUNTING entries" has to reach `accounts_generalledger`, whose name token is
+    "account"; plain singularization leaves "accounting" and the two never meet, so the
+    question routed to whichever table retrieval liked best (2026-09-23: assets_asset,
+    the wrong table entirely). Deliberately shallow — a real stemmer would collapse
+    "financial"->"financ", inventing matches. Only -ing is stripped, only when a
+    >=4-character stem survives.
+
+    It over-stems real nouns ("building"->"build") and that is harmless HERE because
+    both sides of every comparison that uses it are stemmed the same way — the query
+    tokens and the table's business vocabulary/glossary nouns. The table-NAME matching
+    path above is untouched and still uses `_singularize` on both sides."""
+    w = _singularize((word or "").lower())
+    if len(w) > 6 and w.endswith("ing") and len(w) - 3 >= 4:
+        return w[:-3]                      # accounting -> account
+    return w
 
 
 def _name_toks(table_name, sm=None):
