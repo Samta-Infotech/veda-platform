@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -10,6 +11,7 @@ from typing import Iterator
 from chatbot.run import run_chat_turn
 
 from apps.core.messages import MESSAGES
+from apps.query.data_vocabulary import mentions_the_data, vocabulary_for
 
 from .models import ChatMessage, ChatSession, MessageType
 from .table_rendering import (
@@ -115,7 +117,12 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None,
     suggestion into a real VisualizationSpec, reusing the existing
     recommender's own chart-data builders (never re-implemented here) — the
     suggestion only names WHICH columns to chart, the recommender still owns
-    HOW the chart_data is built."""
+    HOW the chart_data is built.
+
+    `analytics` rides along purely so these fallback charts get the same
+    truncation disclosure as the recommender's own (visualization.py's
+    _result_truncated): a chart built from one page of a larger result is no
+    less misleading for having been suggested by the query tier."""
     if not suggestion or not isinstance(suggestion, dict):
         return None
     vtype = suggestion.get("type")
@@ -124,7 +131,8 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None,
         return None
     x_idx, y_idx = cols.index(x_name), cols.index(y_name)
     if vtype == "line":
-        return _visualization_recommender.build_line_spec(cols, rows, x_idx, y_idx)
+        return _visualization_recommender.build_line_spec(cols, rows, x_idx, y_idx,
+                                                          analytics=analytics)
     if vtype in ("bar", "pie"):
         # build_category_specs returns a LIST (it may offer pie + bar for the same data).
         # This function's contract is ONE spec (the callers do `spec.to_dict()`), so
@@ -133,7 +141,7 @@ def _spec_from_suggestion(cols: list, rows: list, suggestion: dict | None,
         # on any bar/pie candidate/suggestion that reached this fallback). None when the
         # data can't be charted (e.g. a single category).
         specs = _visualization_recommender.build_category_specs(cols, rows, x_idx, y_idx,
-                                                                analytics)
+                                                                analytics=analytics)
         if not specs:
             return None
         return next((s for s in specs if s.type.value == vtype), specs[0])
@@ -233,6 +241,34 @@ class ConversationQueryService:
             content=json.dumps(content_blocks), metadata=metadata,
         )
 
+    def _mentions_the_data(self, message: str) -> bool | None:
+        """Does this message name ANYTHING in the scoped sources — a table, a column, a
+        sampled value or a synonym? Returns None when the check cannot be made.
+
+        Computed HERE rather than in the chatbot, and returned as one boolean rather
+        than the vocabulary itself. The vocabulary is ~5,700 tokens; passing it through
+        ChatState meant the checkpointer serialised all of it into Redis on every turn
+        of every conversation (measured on an instance already at 172 MB), which is why
+        the check it feeds was shipped dark. One bool costs nothing, so the check can
+        now be afforded on its own merits instead of being priced out by its input.
+
+        Nothing here is hardcoded: the vocabulary is read from the tenant's own ingested
+        substrate — table names, column names, sampled column values and synonyms — so
+        it grows with the data and needs no curation.
+
+        None (not False) on any failure: absence of evidence must never be read as
+        evidence that the message names nothing.
+        """
+        try:
+            vocabulary = vocabulary_for(self.source_ids)
+            if not vocabulary:
+                return None
+            return mentions_the_data(message, vocabulary)
+        except Exception:
+            logger.exception("_mentions_the_data: unavailable — the grounding check "
+                             "stays disabled for this turn")
+            return None
+
     def run_turn(
         self, chat: ChatSession, message: str, request_id: str = "", stream: bool = False,
     ) -> Iterator[dict]:
@@ -262,7 +298,8 @@ class ConversationQueryService:
                       source_ids=self.source_ids, request_id=request_id,
                       data_scope=self.data_scope,
                       source_profiles=self.source_profiles,
-                      no_cache=self.no_cache)
+                      no_cache=self.no_cache,
+                      message_mentions_data=self._mentions_the_data(message))
         # End-to-end wall clock for THIS turn — so latency_ms is ALWAYS reportable,
         # even when the engine result carries none (a refusal/clarify that never
         # reached _done(), or a path that returned no latency). Used as the fallback
@@ -508,133 +545,157 @@ class ConversationQueryService:
         # moment it renders the answer. Absorbs the final explainability payload first
         # so the "Preparing" step can say what was actually produced (chart / table /
         # summary) rather than guessing from the live stream alone.
+        # THINKING IS AN OBSERVATION OF EXECUTION, NOT A PREREQUISITE FOR IT.
+        #
+        # Everything below builds the four-step progress model and the terminal
+        # frame. None of it produces the answer — the answer is already in `res0`
+        # and is yielded further down as `content`. Until now this ran unguarded in
+        # the middle of the generator, so ANY failure in step aggregation, timing,
+        # evidence absorption or payload assembly propagated out of
+        # `_build_reply_events` BEFORE the answer was ever yielded, and the view's
+        # stream handler turned it into an SSE `error`. A step-model bug could
+        # therefore destroy an answer the engine had already produced correctly.
+        #
+        # ONE boundary, at the architectural seam, rather than broad try/except
+        # scattered through the step model: a failure here degrades Thinking to
+        # nothing and the turn continues to its answer.
         _vizzes = None
-        _steps = getattr(self, "_steps", None)
-        if _steps is not None and not _steps.finished:
-            _ctx = getattr(self, "_step_ctx", None)
-            # Was this an error, or a turn that ran to completion and explained
-            # why it cannot answer? An ALLOW-LIST of engine statuses answered that
-            # question before, and it named `clarify` but not `qualifier_dropped` —
-            # so identical clarifications reported different terminal statuses. The
-            # decision now rests on what the turn PRODUCED. See terminal_outcome().
-            _explain0 = res0.get("explain") or {}
-            _has_refusal = bool(_explain0.get("why")
-                                or _explain0.get("what_would_help")
-                                or _explain0.get("suggestions"))
-            _failed, _err_code = ts_mod.terminal_outcome(
-                ok=bool(res0.get("ok")), engine_status=res0.get("status"),
-                has_refusal_explanation=_has_refusal,
-                access_denied=_steps.access_denied())
-            if _ctx is not None:
-                _ctx.absorb_explain(res0.get("explain") or {})
-                # The turn's OUTCOME, known only here. Without it the Preparing step
-                # said "Putting your answer together." on a refusal — this sentence
-                # overwrites the phase's own honest message at the terminal frame,
-                # so the honest text never reached the user.
-                # `_no_results` is the engine's own decision, made once at its front
-                # door (veda_hybrid._mark_empty_results) from the rows/passages the
-                # turn actually produced. Reading it here rather than re-deriving is
-                # the point: `ok`/`status` describe whether the pipeline RAN, and
-                # reading them as "did it find anything" is what put four green ticks
-                # and "Checks passed" above a reply reading "No results found."
-                # Read from BOTH transports, because neither covers every head.
-                # `_no_results` is a plain key and survives on the dict-shaped
-                # payloads (Tier-1, Tier-2, federated). The RAG head returns a
-                # DATACLASS, and `dataclasses.asdict()` keeps only DECLARED fields —
-                # so the flag the front door sets with setattr is dropped at the
-                # wire. That is the same trap that ate `RAGResult.explain` once
-                # already. The WARNING always arrives, because it is written into
-                # the trace and projected into `explainability.warnings`, so it is
-                # the transport that works on every head.
-                _ctx.found_nothing = bool(res0.get("_no_results")) or (
-                    "no_results" in (_ctx.warnings or []))
-                _ctx.no_answer = _ctx.found_nothing or (
-                    res0.get("status") in ("refused", "clarify")) or (
-                    not res0.get("ok") and res0.get("status") not in ("answered", None))
-                if res0.get("_from_cache"):
-                    _ctx.from_cache = True
-                # Counted evidence, from what the turn ACTUALLY returned. Never a
-                # score: "20 rows" is a fact the reader can weigh, a confidence
-                # percentage the backend never defined is not (§7).
-                _rows0 = res0.get("rows")
-                if isinstance(_rows0, list):
-                    _steps.set_evidence(rows=len(_rows0))
-                if _ctx.passages is not None:
-                    _steps.set_evidence(passages=_ctx.passages)
-                if _ctx.source_names:
-                    _steps.set_evidence(sources=len(_ctx.source_names))
-                elif _ctx.source_count:
-                    _steps.set_evidence(sources=_ctx.source_count)
-                if _steps.execution_type != ts_mod.EXEC_UNKNOWN:
-                    _ctx.execution_type = _steps.execution_type
-                elif _ctx.execution_type != ts_mod.EXEC_UNKNOWN:
-                    _steps.execution_type = _ctx.execution_type
-                else:
-                    # Still unknown: the shape is normally read from an event's
-                    # `intent`, and the CROSS-SOURCE lane emits none — a federated
-                    # answer therefore shipped `execution: {"type": "unknown"}` even
-                    # though the payload named the sources it combined (observed on
-                    # the csv_lake/parquet questions). Derive it from what the turn
-                    # DEMONSTRABLY produced instead of leaving it blank. Every branch
-                    # rests on a fact already established elsewhere in this payload;
-                    # none of them guesses, and no branch fires without one.
-                    _shape = ts_mod.execution_shape_from_evidence(
+        try:
+            _steps = getattr(self, "_steps", None)
+            if _steps is not None and not _steps.finished:
+                _ctx = getattr(self, "_step_ctx", None)
+                # Was this an error, or a turn that ran to completion and explained
+                # why it cannot answer? An ALLOW-LIST of engine statuses answered that
+                # question before, and it named `clarify` but not `qualifier_dropped` —
+                # so identical clarifications reported different terminal statuses. The
+                # decision now rests on what the turn PRODUCED. See terminal_outcome().
+                _explain0 = res0.get("explain") or {}
+                _has_refusal = bool(_explain0.get("why")
+                                    or _explain0.get("what_would_help")
+                                    or _explain0.get("suggestions"))
+                _failed, _err_code = ts_mod.terminal_outcome(
+                    ok=bool(res0.get("ok")), engine_status=res0.get("status"),
+                    has_refusal_explanation=_has_refusal,
+                    access_denied=_steps.access_denied())
+                if _ctx is not None:
+                    _ctx.absorb_explain(res0.get("explain") or {})
+                    # The turn's OUTCOME, known only here. Without it the Preparing step
+                    # said "Putting your answer together." on a refusal — this sentence
+                    # overwrites the phase's own honest message at the terminal frame,
+                    # so the honest text never reached the user.
+                    # `_no_results` is the engine's own decision, made once at its front
+                    # door (veda_hybrid._mark_empty_results) from the rows/passages the
+                    # turn actually produced. Reading it here rather than re-deriving is
+                    # the point: `ok`/`status` describe whether the pipeline RAN, and
+                    # reading them as "did it find anything" is what put four green ticks
+                    # and "Checks passed" above a reply reading "No results found."
+                    # Read from BOTH transports, because neither covers every head.
+                    # `_no_results` is a plain key and survives on the dict-shaped
+                    # payloads (Tier-1, Tier-2, federated). The RAG head returns a
+                    # DATACLASS, and `dataclasses.asdict()` keeps only DECLARED fields —
+                    # so the flag the front door sets with setattr is dropped at the
+                    # wire. That is the same trap that ate `RAGResult.explain` once
+                    # already. The WARNING always arrives, because it is written into
+                    # the trace and projected into `explainability.warnings`, so it is
+                    # the transport that works on every head.
+                    _ctx.found_nothing = bool(res0.get("_no_results")) or (
+                        "no_results" in (_ctx.warnings or []))
+                    _ctx.no_answer = _ctx.found_nothing or (
+                        res0.get("status") in ("refused", "clarify")) or (
+                        not res0.get("ok") and res0.get("status") not in ("answered", None))
+                    if res0.get("_from_cache"):
+                        _ctx.from_cache = True
+                    # Counted evidence, from what the turn ACTUALLY returned. Never a
+                    # score: "20 rows" is a fact the reader can weigh, a confidence
+                    # percentage the backend never defined is not (§7).
+                    _rows0 = res0.get("rows")
+                    if isinstance(_rows0, list):
+                        _steps.set_evidence(rows=len(_rows0))
+                    if _ctx.passages is not None:
+                        _steps.set_evidence(passages=_ctx.passages)
+                    if _ctx.source_names:
+                        _steps.set_evidence(sources=len(_ctx.source_names))
+                    elif _ctx.source_count:
+                        _steps.set_evidence(sources=_ctx.source_count)
+                    if _steps.execution_type != ts_mod.EXEC_UNKNOWN:
+                        _ctx.execution_type = _steps.execution_type
+                    elif _ctx.execution_type != ts_mod.EXEC_UNKNOWN:
+                        _steps.execution_type = _ctx.execution_type
+                    else:
+                        # Still unknown: the shape is normally read from an event's
+                        # `intent`, and the CROSS-SOURCE lane emits none — a federated
+                        # answer therefore shipped `execution: {"type": "unknown"}` even
+                        # though the payload named the sources it combined (observed on
+                        # the csv_lake/parquet questions). Derive it from what the turn
+                        # DEMONSTRABLY produced instead of leaving it blank. Every branch
+                        # rests on a fact already established elsewhere in this payload;
+                        # none of them guesses, and no branch fires without one.
+                        _shape = ts_mod.execution_shape_from_evidence(
+                            source_count=_ctx.source_count,
+                            source_names=_ctx.source_names,
+                            passages=_ctx.passages,
+                            has_rows=isinstance(_rows0, list))
+                        if _shape:
+                            _steps.execution_type = _shape
+                            _ctx.execution_type = _shape
+                    # `multi_source` is a claim about how many sources contributed, so
+                    # it is checked against how many did. The hybrid head reports
+                    # `hybrid` for "database first, then documents" — one source, two
+                    # attempts — and that was being read as several sources.
+                    _fixed = ts_mod.correct_multi_source_claim(
+                        _steps.execution_type,
                         source_count=_ctx.source_count,
                         source_names=_ctx.source_names,
                         passages=_ctx.passages,
-                        has_rows=isinstance(_rows0, list))
-                    if _shape:
-                        _steps.execution_type = _shape
-                        _ctx.execution_type = _shape
-                # `multi_source` is a claim about how many sources contributed, so
-                # it is checked against how many did. The hybrid head reports
-                # `hybrid` for "database first, then documents" — one source, two
-                # attempts — and that was being read as several sources.
-                _fixed = ts_mod.correct_multi_source_claim(
-                    _steps.execution_type,
-                    source_count=_ctx.source_count,
-                    source_names=_ctx.source_names,
-                    passages=_ctx.passages,
-                    has_rows=bool(_rows0) if isinstance(_rows0, list) else False)
-                if _fixed != _steps.execution_type:
-                    _steps.execution_type = _fixed
-                    _ctx.execution_type = _fixed
-                # Context and details are applied BEFORE finish(), not after.
-                # finish() decides what to do with a step that never started, and
-                # that decision depends on whether the step has content: content
-                # means the work happened and was simply never reported as a phase
-                # (the document/RAG head emits nothing mapping to "Analyzing"),
-                # whereas no content means it genuinely did not run. Setting details
-                # afterwards hid that distinction and left the step `pending`
-                # between two completed ones.
-                # Computed BEFORE the terminal frame, deliberately. It used to run
-                # after, and announced itself with its own `thinking` event — which
-                # arrived AFTER the frame that had already said `status: completed`,
-                # telling the client the turn was over and then sending it more
-                # progress (measured on every charted turn). The fact is real, so it
-                # belongs IN the model rather than after it.
-                _vizzes = self._build_visualizations(res0)
-                if _vizzes:  # noqa: SIM102 — the chart fact belongs in the model
-                    _ctx.output = ("chart+summary" if _ctx.output == "summary"
-                                   else "chart")
-                for _k in _steps.steps:
-                    _steps.set_context(_k, _ctx.sentence(_k))
-                    _steps.set_details(_k, _ctx.details(_k), terminal=True)
-            # Emit through the SHARED terminal emitter, not a second copy of it.
-            # There are two ways out of a turn — this one and the outage path — and
-            # keeping two copies is how the no-progress guard came to be applied to
-            # only one of them: a canned greeting still shipped four empty circles.
-            # `_terminal_step_frame` re-applies context/details itself, so the loop
-            # above is now only about the evidence the api tier contributes.
-            yield from self._terminal_step_frame(
-                failed=_failed, error_code=_err_code,
-                retryable=(False if _err_code == ts_mod.ERROR_ACCESS_DENIED else None))
+                        has_rows=bool(_rows0) if isinstance(_rows0, list) else False)
+                    if _fixed != _steps.execution_type:
+                        _steps.execution_type = _fixed
+                        _ctx.execution_type = _fixed
+                    # Context and details are applied BEFORE finish(), not after.
+                    # finish() decides what to do with a step that never started, and
+                    # that decision depends on whether the step has content: content
+                    # means the work happened and was simply never reported as a phase
+                    # (the document/RAG head emits nothing mapping to "Analyzing"),
+                    # whereas no content means it genuinely did not run. Setting details
+                    # afterwards hid that distinction and left the step `pending`
+                    # between two completed ones.
+                    # Computed BEFORE the terminal frame, deliberately. It used to run
+                    # after, and announced itself with its own `thinking` event — which
+                    # arrived AFTER the frame that had already said `status: completed`,
+                    # telling the client the turn was over and then sending it more
+                    # progress (measured on every charted turn). The fact is real, so it
+                    # belongs IN the model rather than after it.
+                    _vizzes = self._build_visualizations(res0)
+                    if _vizzes:  # noqa: SIM102 — the chart fact belongs in the model
+                        _ctx.output = ("chart+summary" if _ctx.output == "summary"
+                                       else "chart")
+                    for _k in _steps.steps:
+                        _steps.set_context(_k, _ctx.sentence(_k))
+                        _steps.set_details(_k, _ctx.details(_k), terminal=True)
+                # Emit through the SHARED terminal emitter, not a second copy of it.
+                # There are two ways out of a turn — this one and the outage path — and
+                # keeping two copies is how the no-progress guard came to be applied to
+                # only one of them: a canned greeting still shipped four empty circles.
+                # `_terminal_step_frame` re-applies context/details itself, so the loop
+                # above is now only about the evidence the api tier contributes.
+                yield from self._terminal_step_frame(
+                    failed=_failed, error_code=_err_code,
+                    retryable=(False if _err_code == ts_mod.ERROR_ACCESS_DENIED else None))
+        except Exception:
+            logger.exception("thinking/step model failed — answer unaffected "
+                             "(chat turn continues without a progress frame)")
         # Audit facts for this turn (traceability Part 19), stashed on the
         # per-request service instance rather than emitted as an event: they are
         # for the QueryLog row only and must never cross the wire. The view reads
         # `service.last_audit` after draining run_turn. Populated from what the
         # turn ALREADY produced — nothing re-derived.
+        # The conversation-layer path for this turn, alongside the engine facts below.
+        # Read by the view into the assistant message's metadata (a JSONField, so no
+        # migration) — that is the table the turn history already lives in, which makes
+        # "which kinds of message are we failing on" a single query instead of a guess.
+        self.last_action = response.get("action") or ""
         self.last_audit = {
+            "action": self.last_action,
             "route": res0.get("_route") or "",
             "status": res0.get("status") or ("answered" if res0.get("ok") else ""),
             # `_from_cache` is set by the engine AT the lane. The sentinel
@@ -646,6 +707,13 @@ class ConversationQueryService:
             "latency_ms": response.get("_turn_latency_ms"),
             "usage": res0.get("usage") or {},
             "explain": res0.get("explain"),
+            # Turn Entry Gate — which tier settled this turn and what the
+            # classification cost, recorded alongside the engine facts so "which paths
+            # are we spending latency on" is a query, not a guess.
+            "entry_path": response.get("entry_path") or "",
+            "classification_latency_ms": response.get("classification_latency_ms"),
+            "requires_veda": response.get("requires_veda"),
+            "requires_context": response.get("requires_context"),
         }
         # Computed (fast, synchronous, no LLM — same call as before) BEFORE any
         # content streams, so the thinking message below completes the
@@ -656,6 +724,13 @@ class ConversationQueryService:
         vizzes = _vizzes if _vizzes is not None else self._build_visualizations(res0)
         # NO `thinking` event here. The turn has already reported its one terminal
         # state, and a progress frame after that contradicts it.
+        # BEFORE the answer, not after: this says what the question was taken to MEAN,
+        # and a user who reads the answer first has already believed it. Emitted only
+        # when context was actually carried (chatbot/nodes.py::_context_used returns
+        # None otherwise), so a first question shows no panel rather than an empty one.
+        _context_used = response.get("context_used")
+        if _context_used:
+            yield {"event": "context", "data": _context_used}
         for block in self._build_content_blocks(response, res0):
             yield {"event": "content", "data": block}
         if vizzes:
@@ -687,8 +762,16 @@ class ConversationQueryService:
         _explain0 = res0.get("explain")
         _bypassed = not (getattr(self, "_steps", None)
                          and self._steps.has_progress()) and not _explain0
-        if not _bypassed:
-            yield {"event": "explainability", "data": _explain0 or _NO_EXPLAIN}
+        # POST-ANSWER OBSERVABILITY. `content` has already been yielded, so a failure
+        # here cannot cost the reader the answer — but it would still escape into the
+        # view's stream handler, which emits `error` and RETURNS, so the turn would
+        # never reach persistence or its `completed` frame. Guarded for that reason,
+        # not for the answer's sake.
+        try:
+            if not _bypassed:
+                yield {"event": "explainability", "data": _explain0 or _NO_EXPLAIN}
+        except Exception:
+            logger.exception("explainability event failed — answer already delivered")
         # Token usage (veda_core/slm/_call_slm.py's usage accumulator, surfaced
         # via veda/pipeline.py's _done() / veda_hybrid.py's Tier-2 dispatch).
         # Always a 3-key dict — {0,0,0} for deterministic fast paths that never
@@ -708,11 +791,14 @@ class ConversationQueryService:
         }}
         # Insight Engine (additive event type): only present when
         # INSIGHT_ENGINE_ENABLED produced these keys server-side.
-        if "insights" in res0 or "follow_up_questions" in res0:
-            yield {"event": "insights", "data": {
-                "insights": res0.get("insights") or [],
-                "follow_up_questions": res0.get("follow_up_questions") or [],
-            }}
+        try:
+            if "insights" in res0 or "follow_up_questions" in res0:
+                yield {"event": "insights", "data": {
+                    "insights": res0.get("insights") or [],
+                    "follow_up_questions": res0.get("follow_up_questions") or [],
+                }}
+        except Exception:
+            logger.exception("insights event failed — answer already delivered")
 
     @staticmethod
     def _build_content_blocks(response: dict, res0: dict) -> list:
@@ -759,6 +845,18 @@ class ConversationQueryService:
         # computed once server-side, preferred over this tier's own structural
         # heuristics (which remain the fallback, e.g. for federated results).
         specs = _visualization_recommender.recommend(cols, rows, analytics=res0.get("analytics"))
+        # A presentation-only follow-up ("as a pie chart") named the format it wants,
+        # so the user's explicit choice outranks this tier's own recommendation —
+        # chatbot/nodes.py::represent_node sets it when it re-renders the previous
+        # result. Only ever a REORDER of what the recommender already produced for
+        # this exact data: a format it did not offer is not forced into existence
+        # here, it falls through to the suggestion/candidate paths below.
+        override = res0.get("viz_override")
+        if specs and override in ("pie", "bar", "line"):
+            specs = ([s for s in specs if s.type.value == override]
+                     + [s for s in specs if s.type.value != override])
+        if override == "table":
+            return []          # the markdown table block is built separately, always
         if specs:
             return [spec.to_dict() for spec in specs]
         # Deterministic rules found nothing confident — fall back to the query

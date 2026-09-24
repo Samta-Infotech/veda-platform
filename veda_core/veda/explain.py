@@ -24,6 +24,36 @@ from typing import Any, Dict, List, Optional
 
 _TRACE_LOG = "logs/explain_trace.jsonl"
 
+#: Matches the house convention in utils/logger.py (RotatingFileHandler,
+#: maxBytes=10MB, backupCount=3) — hand-rolled here because this is a raw JSONL
+#: append, not a `logging` handler. UNBOUNDED before this: measured at 35 MB /
+#: 7,096 records with no rotation and no cap anywhere in the write path — every
+#: verbose trace (the FULL per-turn dict, not just the compact summary) appends
+#: forever. Env-overridable for a deployment that wants a different ceiling.
+_TRACE_LOG_MAX_BYTES = int(os.environ.get("EXPLAIN_TRACE_MAX_BYTES", str(10 * 1024 * 1024)))
+_TRACE_LOG_BACKUPS = int(os.environ.get("EXPLAIN_TRACE_BACKUPS", "3"))
+
+
+def _rotate_trace_log_if_needed(path: str) -> None:
+    """Rotate `path` -> `path.1` -> `path.2` ... when it has grown past the cap.
+
+    Same shape as `logging.handlers.RotatingFileHandler.doRollover`, reimplemented
+    because the trace writer is a plain `open(path, "a")`, not a logging handler.
+    Best-effort: any failure here must cost rotation, never the write that follows
+    it — the caller's own try/except covers that, but this checks its own size stat
+    defensively too, since a missing/racing file must not raise.
+    """
+    try:
+        if not os.path.exists(path) or os.path.getsize(path) < _TRACE_LOG_MAX_BYTES:
+            return
+        for i in range(_TRACE_LOG_BACKUPS - 1, 0, -1):
+            src, dst = f"{path}.{i}", f"{path}.{i + 1}"
+            if os.path.exists(src):
+                os.replace(src, dst)
+        os.replace(path, f"{path}.1")
+    except Exception:
+        pass
+
 
 def _explain_v2_enabled() -> bool:
     try:
@@ -336,6 +366,7 @@ class ExplainTrace:
         if EXPLAIN_TRACE_PERSIST:
             try:
                 os.makedirs(os.path.dirname(_TRACE_LOG), exist_ok=True)
+                _rotate_trace_log_if_needed(_TRACE_LOG)
                 rec = {"route": route, **self.compact()}
                 rec["full"] = self.to_dict() if self.verbose else None
                 with open(_TRACE_LOG, "a") as f:

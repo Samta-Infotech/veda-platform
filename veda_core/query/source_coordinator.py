@@ -333,6 +333,7 @@ def build_candidates(evidence_by_source: dict, profiles: dict) -> List[Candidate
         out.append(CandidateSource(
             source_id=sid,
             source_type=prof.get("source_type", ""),
+            name=str(prof.get("name") or ""),
             presence_tier=getattr(ev, "presence_tier", "NONE"),
             top_score=float(top_score),
             top_item_score=float(getattr(ev, "top_item_score", 0.0) or 0.0),

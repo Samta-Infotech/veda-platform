@@ -11,6 +11,7 @@ from typing import Callable, Optional
 
 from .graph import get_graph
 from .llm import collect_usage, usage_totals
+from .memory.store import session_turn_lock
 
 
 def run_chat_turn(
@@ -25,6 +26,8 @@ def run_chat_turn(
     data_scope: Optional[dict] = None,
     source_profiles: Optional[dict] = None,
     no_cache: bool = False,
+    data_vocabulary: Optional[list] = None,
+    message_mentions_data: Optional[bool] = None,
 ) -> dict:
     """The ONE function a caller (apps/chat) invokes per user turn.
 
@@ -64,7 +67,16 @@ def run_chat_turn(
     # "usage" below so the supervisor's token spend is never silently dropped —
     # previously only the engine side was captured.
     _chat_calls = []
-    with collect_usage() as _chat_usage:
+    # One chat's turns run one at a time. They are causally ordered by definition — turn
+    # N+1 is a follow-up to turn N — so two at once is a race, not a workload: measured
+    # 2026-09-18, 4 concurrent turns on one session left 2 of 8 history entries and a
+    # frame at version 1 instead of 4, with nothing anywhere reporting the loss.
+    # Serialization rather than optimistic retry: LangGraph's checkpoint carries no
+    # version to retry against, so a retry could only ever repair the frame (which
+    # already aborts correctly on conflict) and never the history the checkpointer lost.
+    # Degrades to no locking if Redis is unreachable (chatbot/memory/store.py), which is
+    # exactly how every turn behaved before this existed.
+    with session_turn_lock(tenant, session_id), collect_usage() as _chat_usage:
         result = graph.invoke(
             {
                 "message": message,
@@ -77,6 +89,8 @@ def run_chat_turn(
                 "data_scope": data_scope,
                 "source_profiles": source_profiles,
                 "no_cache": bool(no_cache),   # → call_engine_node → X-Veda-No-Cache
+                "data_vocabulary": data_vocabulary,
+                "message_mentions_data": message_mentions_data,
             },
             config={"configurable": {"thread_id": session_id, "on_event": on_event}},
         )
@@ -123,6 +137,26 @@ def run_chat_turn(
         # explicitly resets status to None every turn, so a missing-vs-None
         # distinction would break this fallback for smalltalk turns.
         "status": result.get("status") or ("smalltalk" if result.get("action") == "smalltalk" else "answered"),
+        # Which path the conversation layer took this turn — "answer"/"followup" reach
+        # the engine, everything else ("smalltalk", "recall", "represent", "no_match",
+        # "reset", "runtime_context") is answered here without it. Returned for
+        # telemetry only; nothing in the pipeline branches on it. Without this the only
+        # recorded signal was the ENGINE's status, so a turn the conversation layer
+        # handled entirely was indistinguishable from one that never ran.
+        "action": result.get("action"),
+        # What the conversation layer carried into this turn — the remembered entity and
+        # filters, the operation applied, and the text actually sent to the engine. None
+        # on a turn that used no context (a first question, smalltalk, recall), which is
+        # exactly when there is nothing honest to show. Built by the graph from facts the
+        # turn already produced (chatbot/nodes.py::_context_used) — never re-derived here.
+        "context_used": result.get("context_used"),
+        # Turn Entry Gate reporting (chatbot/nodes.py::classify_with_entry_gate) —
+        # which tier settled the turn and what the classification itself cost, so the
+        # latency of a direct answer can be told apart from the engine's.
+        "entry_path": result.get("entry_path"),
+        "classification_latency_ms": result.get("classification_latency_ms"),
+        "requires_veda": result.get("requires_veda"),
+        "requires_context": result.get("requires_context"),
         "engine_unavailable": result.get("engine_unavailable", False),
         "engine_result": engine_result,
     }

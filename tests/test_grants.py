@@ -47,6 +47,7 @@ from apps.access_management.models import (  # noqa: E402
 from apps.access_management.services import (  # noqa: E402
     CODE_PERMISSION_INACTIVE,
     CODE_ROLE_INACTIVE,
+    CODE_USER_INACTIVE,
     RoleInactive,
     RolePermissionService,
     UserRoleService,
@@ -209,12 +210,49 @@ def test_assign_rejects_a_retired_role(admin_client, member, role):
     assert not UserRole.objects.exists()
 
 
-def test_assign_allows_an_inactive_user(admin_client, member, role):
-    """Pre-provisioning is legitimate: the assignment grants nothing until the account
-    is active anyway."""
+def test_assign_rejects_a_deactivated_user(admin_client, member, role):
+    """Reverses the former pre-provisioning rule (see services/grants.py::UserInactive).
+
+    400, not 409: the record exists and nothing collides — the account is simply not
+    in a state to be edited. The assertion on UserRole is the point of the test: the
+    refusal must be a refusal, not a message printed over a write that still landed.
+    """
     member.is_active = False
     member.save(update_fields=["is_active"])
 
+    response = _post(admin_client, ASSIGN_URL, user_id=member.pk, role_id=role.pk)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == CODE_USER_INACTIVE
+    assert not UserRole.objects.exists()
+
+
+def test_revoke_rejects_a_deactivated_user(admin_client, member, role):
+    """Revoke is blocked too, so a deactivated account's membership is frozen whole —
+    an admin cannot half-edit it in one direction. The existing edge must SURVIVE."""
+    _post(admin_client, ASSIGN_URL, user_id=member.pk, role_id=role.pk)
+    member.is_active = False
+    member.save(update_fields=["is_active"])
+
+    response = _post(admin_client, REVOKE_URL, user_id=member.pk, role_id=role.pk)
+
+    assert response.status_code == 400
+    assert response.json()["code"] == CODE_USER_INACTIVE
+    assert UserRole.objects.filter(user=member, role=role).exists()
+
+
+def test_revoke_of_an_unknown_user_is_still_a_no_op_not_a_400(admin_client, role):
+    """The inactive check must not catch ids that do not resolve: an unknown user has
+    no `is_active` to be false, and revoke's whole contract is that it does not fail
+    on rows it has nothing to do. Guards the one regression this change could cause."""
+    response = _post(admin_client, REVOKE_URL, user_id=999_999, role_id=role.pk)
+
+    assert response.status_code == 200
+    assert response.json()["data"]["removed"] is False
+
+
+def test_assign_to_an_active_user_is_unaffected(admin_client, member, role):
+    """The flip side: nothing changes for the ordinary case."""
     assert _post(admin_client, ASSIGN_URL,
                  user_id=member.pk, role_id=role.pk).status_code == 201
 

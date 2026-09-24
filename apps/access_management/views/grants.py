@@ -101,7 +101,16 @@ class UserRoleRevokeView(AdminView):
         if failure:
             return failure
 
-        removed = UserRoleService(request).revoke(**data)
+        # Wrapped like every other endpoint in this module. It was NOT before, and the
+        # service has always been able to raise here (LastAdminRoleProtected), so
+        # refusing to strip the last admin's role answered 500 instead of 409 — a real
+        # bug that survived because the guard is only covered at the service layer
+        # (tests/test_admin_bootstrap.py calls revoke() directly, never over HTTP).
+        try:
+            removed = UserRoleService(request).revoke(**data)
+        except AccessManagementError as exc:
+            return self.failure(request, exc)
+
         return api.success(MESSAGES["user_role"]["revoked"] if removed
                            else MESSAGES["user_role"]["not_assigned"], {"removed": removed})
 

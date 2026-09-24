@@ -75,6 +75,14 @@ def _system_prompt():
         return _SYSTEM
 
 
+def _source_names_on() -> bool:
+    try:
+        from config import ROUTING_SLM_SOURCE_NAMES_ENABLED
+        return bool(ROUTING_SLM_SOURCE_NAMES_ENABLED)
+    except Exception:
+        return False
+
+
 def _card_block(c: "CandidateSource") -> str:
     """This candidate's ROUTING CARD as prompt text, or "" when it has none.
 
@@ -142,15 +150,21 @@ def _build_user_message(query: str, candidates: List[CandidateSource],
                            "if it is about something else, ignore this.")
             lines.append("")
     lines.append("CANDIDATE SOURCES (choose only from these source_ids):")
+    _names = _source_names_on()
     for c in candidates:
         ev = c.evidence_summary or {}
         cols = ", ".join(ev.get("columns", [])[:8])
         docs = ", ".join(ev.get("documents", [])[:5])
         card = _card_block(c)
         if card:
+            # The card already names and describes the source in business terms, so the
+            # `name=` hint below would only restate it.
             lines.append(card)
         else:
-            lines.append(f"- source_id={c.source_id} type={c.source_type} domains={c.domain_tags}")
+            # `name` is emitted ONLY when the flag is on AND the api tier actually supplied one, so
+            # the flag-off prompt and the no-profile prompt stay byte-identical to before.
+            _nm = f" name={c.name}" if (_names and getattr(c, "name", "")) else ""
+            lines.append(f"- source_id={c.source_id}{_nm} type={c.source_type} domains={c.domain_tags}")
             if ev.get("description"):
                 lines.append(f"    description: {ev['description']}")
             for it in (ev.get("items") or [])[:3]:

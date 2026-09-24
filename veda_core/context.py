@@ -138,6 +138,31 @@ def current_source_profiles() -> dict:
     return _source_profiles.get() or {}
 
 
+# CONVERSATION CONTEXT (chat follow-ups). The structured state the conversation layer
+# holds for this session, as a plain validated dict — entity_table, filter_values,
+# group_by/measures/order_by/limit, source_id. It travels HERE, out of band, for the same
+# reason tenant/source do (see the module docstring): the engine's public functions are
+# frozen and take no conversation argument, and threading one through five run_query
+# call sites would touch every caller for a value most of them never use.
+#
+# It is a SEPARATE ContextVar from RequestContext on purpose: RequestContext is frozen and
+# hashable because it keys the engine cache, and a per-turn conversation state must never
+# become part of that key.
+#
+# Default {} → the engine behaves exactly as it always has. Every consumer must treat an
+# absent context as "no context", never as an error: /api/v1/query, the CLI, ingestion and
+# evaluation all run with none.
+_conversation: ContextVar[dict] = ContextVar("veda_conversation", default={})
+
+
+def set_conversation_context(ctx: "dict | None"):
+    return _conversation.set(dict(ctx or {}))
+
+
+def current_conversation_context() -> dict:
+    return _conversation.get() or {}
+
+
 def parse_allowed_resources(raw: "str | None") -> "tuple | None":
     """The ``X-Veda-Data-Scope`` header value into ``RequestContext.allowed_resources``.
 

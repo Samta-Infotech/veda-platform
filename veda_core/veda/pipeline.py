@@ -9,7 +9,7 @@ from veda.routing import recommended_projection, select_primary_table, vet_prima
 from veda.rbac_filter import filter_retrieval_results, narrow_allowed, restricted_names
 from veda.runtime import get_engine
 from veda.validation import (qualifier_completeness, validate_and_parameterize, value_grounding,
-                             grouped_shape_ok, distinct_shape_ok)
+                             grouped_shape_ok, distinct_shape_ok, ranked_shape_ok)
 from utils.logger import get_logger
 import importlib
 from veda.explain import new_trace
@@ -130,17 +130,31 @@ def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
     branch (FK / multi-hop / value-filter / temporal-only / plain listing) — so
     'latest 10 X' / 'top 5 Y' / 'bottom 3 Z' are honored everywhere a single-table
     SELECT is constructed deterministically, not only on the LLM-generated path.
-    Falls back to the historical ' LIMIT 100' when the query named no ranking, so
-    an unrelated query's SQL is byte-for-byte unaffected.
+    Emits NO LIMIT when the query named no row count. It used to fall back to a
+    historical ' LIMIT 100', which was not a display cap: every figure the user is
+    given is derived from the rows that come back, so the page silently became the
+    population — measured 2026-09-22 on assets_asset (7,814 rows), answers asserted
+    "There are 1000 assets listed", "The average carpet area is 1628.46 square meters"
+    and "86% of the assets listed are in Pune" (on a query whose WHERE already
+    restricted every row to Pune, so the true share is 100%).
+
+    This was the FOURTH place imposing that cap, and the last to be found, because each
+    one hid the ones below it: veda/generation.py's own default, veda/validation.py
+    appending one to any SQL that carried none, and the model writing "LIMIT 100"
+    itself. Removing the first three left this one still capping every hand-built
+    single-table branch, which is the "deterministic" route most listing questions take.
+
+    A ranking the USER asked for ("top 5", "latest 10") is unchanged.
 
     `alias`: some branches FROM the anchor under an alias (answer-entity's `a`/`t`
     join) — the ORDER BY column must be qualified there to stay unambiguous."""
-    limit = rank.top_n if rank.top_n is not None else 100
+    limit = rank.top_n
     prefix = f"{alias}." if alias else ""
     sort_col = _rank_sort_column(rank, table, sm, tcol)
+    _lim = f" LIMIT {limit}" if limit is not None else ""
     if sort_col:
         direction = "ASC" if rank.direction == "asc" else "DESC"
-        return f' ORDER BY {prefix}"{sort_col}" {direction} LIMIT {limit}'
+        return f' ORDER BY {prefix}"{sort_col}" {direction}{_lim}'
     if rank.ranked:
         # A RANKED request we could not resolve an ORDER BY for (no canonical temporal
         # column for a recency ask; several equally-plausible measures for a magnitude
@@ -148,12 +162,14 @@ def _rank_order_limit_sql(rank, table, sm, tcol, alias=None):
         # ARBITRARY rows under the user's own words "the top 5" / "the last 5", which is
         # indistinguishable from a real ranking (2026-09-23 question.txt, Q11 — the
         # ORDER BY was dropped and a LIMIT 5 survived, so five unordered rows were
-        # rendered as "the top 5 most recently dated"). Drop the COUNT instead: the
-        # unranked page that comes back no longer impersonates a ranking, and the
-        # intent/SQL alignment guard downstream refuses it as a typed clarify rather
-        # than letting it render.
-        return ' LIMIT 100'
-    return f' LIMIT {limit}'
+        # rendered as "the top 5 most recently dated"). Drop the COUNT instead — and
+        # emit no LIMIT at all, not the historical ' LIMIT 100' this used to return,
+        # which was itself a silent population cap (see the docstring). The unranked
+        # page that comes back no longer impersonates a ranking, and the intent/SQL
+        # alignment guard downstream refuses it as a typed clarify rather than letting
+        # it render.
+        return ''
+    return _lim
 
 
 def _temporal_predicate(table, sm, tf):
@@ -171,6 +187,24 @@ def _temporal_predicate(table, sm, tf):
     if tf.start:
         return f"{q} >= '{tf.start}'"
     return f"{q} <= '{tf.end}'"
+
+
+def _anchor_from_sql(sql: str) -> str:
+    """The table a statement actually selects FROM.
+
+    The executed SQL is the ground truth for what ran. Anchor SELECTION (the router,
+    entity resolution, vet_primary) decides what to build; this reports what was built,
+    and the two were measurably able to disagree.
+    """
+    if not sql:
+        return ""
+    try:
+        tree = _sg.parse_one(sql, read="postgres")
+        frm = tree.find(_exp.From)
+        tbl = frm.find(_exp.Table) if frm is not None else None
+        return (tbl.name or "") if tbl is not None else ""
+    except Exception:
+        return ""
 
 
 def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None,
@@ -266,6 +300,78 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             on_event(phase, message, {})
         except Exception:
             logger.exception("_tick: on_event callback raised for phase=%s", phase)
+
+    # The conversation layer's structured state for this turn, when this is a chat
+    # follow-up (veda_core/context.py::set_conversation_context, bound in
+    # run_hybrid_query). {} for every other caller — /api/v1/query, the CLI, ingestion,
+    # evaluation — so everything below is a no-op for them.
+    #
+    # It is consumed in exactly three places, all of them narrow:
+    #   · entity_table  -> the EXISTING anchor_hint, so the remembered table no longer
+    #                      has to be smuggled in as prose
+    #   · user_message  -> the qualifier gate's basis, so it judges the user's words
+    # `filter_values` reaches here in the payload but is deliberately NOT consumed — see
+    # the note at the value arbiter below for the measurement that decided that.
+    # Nothing here plans, joins or generates SQL; the semantic layer keeps that job.
+    try:
+        from veda_core.context import current_conversation_context as _cur_conv
+        _conv = _cur_conv() or {}
+    except Exception:
+        _conv = {}
+    _conv_user_message = _conv.get("user_message") if isinstance(_conv, dict) else None
+    _conv_filters = [f for f in (_conv.get("filters") or [])
+                     if isinstance(f, dict) and f.get("column") and f.get("value") is not None]
+    try:
+        _conv_limit = int(_conv["limit"]) if _conv.get("limit") is not None else None
+    except (TypeError, ValueError):
+        _conv_limit = None
+    _conv_group_by = [str(g) for g in (_conv.get("group_by") or [])]
+    _conv_measures = [str(m) for m in (_conv.get("measures") or [])]
+    _conv_order_by = [str(o) for o in (_conv.get("order_by") or [])]
+
+    def _anchor_columns_for(_sm, _table):
+        """The columns the semantic model says `_table` has, or None when it says nothing.
+        sm["columns"] is keyed "table.column" — the only statement of that fact."""
+        cols = {k.split(".", 1)[1] for k in (_sm.get("columns") or {})
+                if k.startswith(_table + ".")}
+        return cols or None
+
+    def _grouped_this_turn(_q):
+        """Did the USER ask for a grouping in THIS message? Their words win over a
+        remembered shape — reusing the same grammar signal veda/validation.py's
+        grouped-shape guard already uses, rather than inventing a second one."""
+        ql = " " + (_q or "").lower().strip() + " "
+        return any(w in ql for w in (" by ", " per ", " each ", "distribution",
+                                     "breakdown", "broken down", "grouped"))
+    # A remembered table is an anchor HINT, never an override of one the caller passed:
+    # anchor_hint is also the qualifier-salvage retry marker (see below), and that retry
+    # must keep deciding its own anchor.
+    # SOURCE CHECK, before anything in the context is used. The conversation remembers
+    # which source its entity came from; the CURRENT turn's scope is resolved fresh from
+    # RBAC every request (apps/chat/views.py) and is the only authority. If the remembered
+    # source is not in it — a revoked grant, a narrowed pin, a different scope — the whole
+    # context is dropped rather than partially applied. Memory is context, not authority.
+    if _conv.get("source_id") is not None:
+        try:
+            from veda_core.context import try_current as _try_ctx
+            _rc = _try_ctx()
+            _scope = {str(x) for x in (getattr(_rc, "source_ids", ()) or ())} if _rc else set()
+        except Exception:
+            _scope = set()
+        if _scope and str(_conv["source_id"]) not in _scope:
+            print(f"  [conversation] remembered source {_conv['source_id']} is outside this "
+                  f"turn's scope {sorted(_scope)} — context dropped")
+            _conv, _conv_user_message, _conv_filters = {}, None, []
+            _conv_limit, _conv_group_by, _conv_measures = None, [], []
+
+    if anchor_hint is None and _conv.get("entity_table"):
+        _hinted = _conv.get("entity_table")
+        if _hinted in (sm.get("tables") or {}):
+            anchor_hint = _hinted
+            print(f"  [conversation] anchor from remembered context: {_hinted}")
+        else:
+            print(f"  [conversation] remembered table {_hinted!r} is not in this scope's "
+                  f"semantic model — ignored")
 
     def _feedback(status, **ctx):
         """Build + print actionable failure guidance (why / what's needed / suggestions).
@@ -366,6 +472,24 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             pass
 
     def _done(rc, status, **kw):
+        # Report the anchor the SQL actually ran against, decided ONCE at Tier-1's
+        # single exit so every branch gets it — the discipline _mark_empty_results
+        # already uses for the empty-result outcome.
+        #
+        # Measured 2026-09-22: "what about Mumbai", third turn of a drill-down, built
+        #   FROM "assets_asset" t0 JOIN generics_country JOIN users_useraddress
+        #                          JOIN accounts_generalledger
+        # and reported table="accounts_generalledger". harvest_frame takes the
+        # QueryFrame's entity from that field, so the conversation silently relocated
+        # to a financial-ledger topic and every later turn — "only the residential
+        # ones", "go back", "remove the city filter" — asked about the wrong table and
+        # came back asking for clarification. The SQL's own FROM said assets_asset the
+        # whole time.
+        _sql_anchor = _anchor_from_sql(kw.get("sql") or "")
+        if _sql_anchor and kw.get("table") and kw["table"] != _sql_anchor:
+            print(f"  [L7] reported table {kw['table']!r} disagrees with the executed "
+                  f"SQL's FROM {_sql_anchor!r} — reporting the executed anchor")
+            kw["table"] = _sql_anchor
         for _h in _narration_handles:          # answer wins the race, always
             try:
                 _h.cancel()
@@ -704,7 +828,22 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # already has its own deterministic path. Conservative match → falls through on miss.
     from config import FAST_PATH_ENABLED
     fp = None
-    if FAST_PATH_ENABLED and not is_existence and not _reentry:   # re-entry: fast path off (M2)
+    # A drill-UP replays the user's original question with the levels that REMAIN carried
+    # structurally. Both deterministic short-circuits below — this fast path and the
+    # grouped planner — build their SQL straight from the registries and never look at the
+    # conversation, so they answer the replayed question as if nothing had been narrowed.
+    # Measured 2026-09-24: one "go back" from depth 2 returned the unfiltered base answer,
+    # and memory_write_node's prune (which keeps only levels still present in the frame's
+    # filters) then dropped EVERY level — a single "go back" erased the whole path.
+    #
+    # With remembered filters in hand the turn goes the deterministic-branch route
+    # instead, which applies them and rebuilds the remembered GROUP BY around them.
+    # `_conv_filters` is empty for every non-chat caller and every first turn, so this is
+    # byte-identical outside a live drill.
+    if FAST_PATH_ENABLED and not is_existence and not _reentry and _conv_filters:
+        print(f"  [conversation] {len(_conv_filters)} remembered filter(s) still apply — "
+              f"skipping the fast path, which cannot carry them")
+    elif FAST_PATH_ENABLED and not is_existence and not _reentry:   # re-entry: fast path off (M2)
         try:
             fp = try_fast_path(query, tf)
         except Exception as _fpe:
@@ -736,7 +875,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # Deterministic grouped-breakdown planner (same QSR machinery, non-ranked
     # sibling): "how much does each <dim> contribute" → GROUP BY dim, SUM(measure).
     # Same clarify/fall-through contract as the superlative planner above.
-    if fp is None and not is_existence and (_grp or _grpc_mode(query)):
+    # A drill-UP replays the user's ORIGINAL question ("what is the distribution of
+    # properties by furnishing?") with the levels that remain carried structurally. That
+    # text is a grouped question, so the grouped planner below would answer it — and it
+    # builds its SQL directly, short-circuiting the deterministic section that is the only
+    # place remembered filters are applied. Measured 2026-09-24: one "go back" from depth 2
+    # therefore returned the UNFILTERED base answer, and memory_write_node's stack prune
+    # (which keeps only levels still present in the frame's filters) then dropped every
+    # level — so a single "go back" erased the whole path instead of one step of it.
+    #
+    # When the conversation carries filters, the turn is routed to the deterministic branch
+    # instead, which applies them AND rebuilds the remembered GROUP BY around them. With no
+    # conversation context this is byte-identical: `_conv_filters` is empty for every
+    # non-chat caller and for every first turn.
+    if _conv_filters and fp is None and not is_existence and (_grp or _grpc_mode(query)):
+        print(f"  [conversation] {len(_conv_filters)} remembered filter(s) still apply — "
+              f"not taking the grouped fast path, which cannot carry them")
+    elif fp is None and not is_existence and (_grp or _grpc_mode(query)):
         try:
             from config import GROUPED_PLAN_ENABLED
         except Exception:
@@ -855,7 +1010,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # cache_back=False (RequestContext, 2026-09-16): the request opted out of the
     # verified-query cache — no replay here, no write at the end (eval/battery traffic).
     _cache_back = getattr(_ambient_ctx(), "cache_back", True)
-    cached_sql, sim = (None, 0.0) if (is_existence or fp or not _cache_back) else verified_cache_lookup(query)
+    # A context-dependent turn is not looked up either, for the same reason it is not
+    # saved (see the save site below): its words do not identify its question.
+    _context_dependent_turn = bool(_conv.get("entity_table"))
+    cached_sql, sim = ((None, 0.0)
+                       if (is_existence or fp or not _cache_back or _context_dependent_turn)
+                       else verified_cache_lookup(query))
     # Same evidence guard for the CACHED lane — the fourth answer-producing lane,
     # which replays SQL verified under OLDER code: a cached answer whose tables get
     # zero typed evidence from the query is a stale wrong pick → recompute.
@@ -888,8 +1048,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         try:
             from veda.firewall import qualifier_only as _fw_qual
             from veda.ir import partial as _ir_partial_c
-            ok_cache_q = _fw_qual(_ir_partial_c("cache"), cached_sql, sm, query=query)
-            missing_cache_q = None if ok_cache_q else qualifier_completeness(query, cached_sql, sm)[1]
+            ok_cache_q = _fw_qual(_ir_partial_c("cache"), cached_sql, sm, query=query,
+                                  user_message=_conv_user_message)
+            missing_cache_q = None if ok_cache_q else qualifier_completeness(
+                query, cached_sql, sm, user_message=_conv_user_message)[1]
             if not ok_cache_q:
                 print(f"  [cache] demoted: cached SQL drops qualifier {missing_cache_q!r} "
                       f"for THIS query — recompute")
@@ -936,6 +1098,22 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 if _mtop and (not _mlim or _mlim.group(1) != _mtop.group(1)):
                     _shape_why = (f"question asks for top {_mtop.group(1)}, cached SQL has "
                                   f"LIMIT {_mlim.group(1) if _mlim else 'none'}")
+            if not _shape_why:
+                # RANKING is a shape attribute too, same principle: an entry verified for a
+                # query that named no count is replayed for one that DOES ("top 5"), and a
+                # similarity of 0.97 does not notice that the cached statement carries
+                # `LIMIT 10` and no ORDER BY. Demote rather than refuse outright —
+                # recomputing gives the deterministic path its own chance to build a
+                # properly ordered statement; if it cannot, the universal shape guard
+                # below refuses there.
+                ok_cache_r, why_cache_r = ranked_shape_ok(query, cached_sql)
+                if not ok_cache_r:
+                    # why_cache_r is written for the USER (it describes the statement THIS
+                    # query would get); here it only labels the demotion, so keep it
+                    # schematic — the cached statement's own LIMIT may differ from the
+                    # one asked for.
+                    _shape_why = ("cached SQL does not honor this query's ranking "
+                                  f"({why_cache_r.split(', but')[0]})")
             if _shape_why:
                 print(f"  [cache] demoted: {_shape_why} — recompute")
                 tr.note("schema_linking", f"verified-cache hit demoted (shape: {_shape_why})")
@@ -978,8 +1156,31 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         # cache-hit turn). Multi-table cached query: pick deterministically
         # (first alphabetically) rather than guess — never crashes downstream,
         # which only special-cases an empty/unknown primary already.
-        primary = (next(iter(allowed_tables)) if len(allowed_tables) == 1
-                   else (sorted(allowed_tables)[0] if allowed_tables else ""))
+        # The anchor is the table the statement selects FROM, which the SQL states
+        # outright — not a tie to be broken alphabetically. Measured 2026-09-22 on a
+        # drill-down conversation: "what about Mumbai" produced
+        #   FROM "assets_asset" t0 JOIN generics_country t1
+        #                          JOIN users_useraddress t2
+        #                          JOIN accounts_generalledger t3
+        # and sorted() put accounts_generalledger first, so THAT was reported as the
+        # table. harvest_frame takes the QueryFrame's entity from this field, so the
+        # conversation silently relocated to a financial-ledger topic and every later
+        # turn ("only the residential ones", "go back", "remove the city filter") asked
+        # about the wrong table and came back asking for clarification. Alphabetical
+        # order is stable, which is what the note above wanted, but stability is
+        # worthless when the value is wrong.
+        primary = ""
+        try:
+            _from = ct.find(exp.From)
+            _tbl = _from.find(exp.Table) if _from is not None else None
+            primary = (_tbl.name or "") if _tbl is not None else ""
+        except Exception:
+            primary = ""
+        if not primary:
+            # Unparseable FROM (or sqlglot already failed above) — keep the previous
+            # deterministic choice rather than report nothing.
+            primary = (next(iter(allowed_tables)) if len(allowed_tables) == 1
+                       else (sorted(allowed_tables)[0] if allowed_tables else ""))
         allowed_columns = [k.split(".", 1)[1] for k in all_cols
                            if k.split(".", 1)[0] in allowed_tables]
     else:
@@ -1719,9 +1920,59 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     # pointed at the SOURCE DB (no column_values there) and silently
                     # returned [] for every token; the arbiter never saw a value.
                     from query.resolution import typed_value_lookup
+                    # REMEMBERED FILTER VALUES ARE NOT CARRIED AS BARE VALUES. They were,
+                    # briefly, and
+                    # the measurement is why they are not: a frame stores the engine's
+                    # humanised LABEL as a filter's field ("Location"), never the real
+                    # column, so a remembered filter can only travel as a bare VALUE — and
+                    # a bare value does not always name its own column. Measured
+                    # 2026-09-23, carrying "true" forward from an `is_gated` filter
+                    # re-grounded it onto `all_day_access`, filtering the follow-up on a
+                    # column the conversation never mentioned. A grounding-multiplicity
+                    # test does not catch it either: the arbiter resolves "true" to exactly
+                    # one column, just not the right one.
+                    #
+                    # Filtering on a column the user never named is silent-wrong, so the
+                    # value is dropped rather than guessed. The consequence is honest and
+                    # known: a filter from an EARLIER turn is not re-applied by a later one
+                    # — the user's own words for THIS turn still are. Fixing it properly
+                    # means the frame harvesting the REAL column out of `last_sql` (which
+                    # it already stores) instead of the display label; that is its own
+                    # piece of work, tracked as a gap rather than guessed at here.
                     _arb = arbitrate(query, typed_value_lookup(),
                                      build_schema_terms(sm))
                     _arb_filters = anchor_filters(_arb, primary)
+                    # REMEMBERED FILTERS, applied structurally. Each carries the RAW column
+                    # the previous turn's SQL actually filtered on (business_explain now
+                    # keeps it alongside the humanised label), so nothing is re-grounded
+                    # from a bare value and nothing is guessed — this is the same column,
+                    # on the same table, that already executed. Applied ONLY when this turn
+                    # anchored on the SAME table the conversation is about, and never over
+                    # a column THIS turn already filtered on: the user's current words win,
+                    # which is what makes "what about Mumbai" a replacement rather than an
+                    # impossible "Pune AND Mumbai".
+                    if _conv_filters and primary == _conv.get("entity_table"):
+                        _own_cols = {f.get("column") for f in _arb_filters}
+                        # sm["columns"] is keyed "table.column" — the only place the
+                        # semantic model states which columns a table really has.
+                        _anchor_cols = {k.split(".", 1)[1]
+                                        for k in (sm.get("columns") or {})
+                                        if k.startswith(primary + ".")} or None
+                        for _cf in _conv_filters:
+                            _c = _cf["column"]
+                            if _c in _own_cols:
+                                continue
+                            if _anchor_cols is not None and _c not in _anchor_cols:
+                                continue
+                            # Same dict shape anchor_filters produces: where_clause
+                            # compares lower(col) against `value_norm`, the sampler's
+                            # lowercase form, so High/high/HIGH all match. `value` is
+                            # kept for the trace/explain that read it.
+                            _v = str(_cf["value"])
+                            _arb_filters.append({"column": _c, "op": "=", "value": _v,
+                                                 "value_norm": _v.strip().lower()})
+                            print(f"  [conversation] carried filter {_c} = "
+                                  f"{_cf['value']!r} (from the previous turn's SQL)")
                     if _arb.value_filters:
                         for _ln in _arb.explain().splitlines():
                             print("  [L4c] " + _ln)
@@ -2053,8 +2304,96 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     _wparts.append(_num_where(_num_filters))
                 if _tpred:
                     _wparts.append(_tpred)        # value filter + temporal stays deterministic
-                sql = (f'SELECT {_proj} FROM "{primary}" WHERE '
-                       + " AND ".join(_wparts) + _rank_tail)
+
+                # REMEMBERED SHAPE. A drill-down into an AGGREGATED answer used to come
+                # back as a raw row list: "distribution of properties by facing" plus
+                # "only the ones in Pune" produced 1000 rows and no GROUP BY, and the
+                # summariser then narrated those rows as if they were the distribution
+                # (measured 0 of 8 aggregated bases survived, 2026-09-23). The shape is
+                # not re-derived here — group_by and the measure are the columns the
+                # PREVIOUS turn's SQL actually grouped and measured, replayed onto the
+                # same table with this turn's filter added. Applied only when the anchor
+                # IS that table, when this turn asked for no shape of its own, and when
+                # every remembered column still exists on it.
+                _shape_cols = [c for c in _conv_group_by
+                               if _anchor_columns_for(sm, primary) is None
+                               or c in _anchor_columns_for(sm, primary)]
+                _reshaped = False
+                # A SCALAR aggregate — "what is the total rent", "how many sale listings" —
+                # has no group_by at all, so the branch below never fired for it and the
+                # follow-up came back as rows: filtering "total expected monthly rent" by
+                # furnishing returned a row list instead of a total (measured 4/4,
+                # 2026-09-23). The question is still an aggregate once a filter is added;
+                # only the population changed. Same guards as the grouped case.
+                if (not _shape_cols and _conv.get("aggregation")
+                        and primary == _conv.get("entity_table")
+                        and not _rank_tail and not _grouped_this_turn(query)):
+                    _fn0 = {"sum": "SUM", "average": "AVG", "avg": "AVG",
+                            "minimum": "MIN", "min": "MIN",
+                            "maximum": "MAX", "max": "MAX"}.get(
+                        str(_conv.get("aggregation")).lower())
+                    _m0 = next((m for m in _conv_measures
+                                if _anchor_columns_for(sm, primary) is None
+                                or m in _anchor_columns_for(sm, primary)), None)
+                    if _fn0 and _m0:
+                        _a0 = f"{_fn0.lower()}_{_m0}"
+                        _sel = f'{_fn0}("{_m0}") AS "{_a0}"'
+                        allowed_columns = allowed_columns + [_m0]
+                    else:
+                        _sel = f'COUNT(*) AS "{primary}_count"'
+                    sql = (f'SELECT {_sel} FROM "{primary}" WHERE '
+                           + " AND ".join(_wparts))
+                    _reshaped = True
+                    print(f"  [conversation] kept the previous turn's aggregate: {_sel}")
+                if (not _reshaped and _shape_cols and primary == _conv.get("entity_table")
+                        and not _rank_tail and not _grouped_this_turn(query)):
+                    _g = ", ".join(f'"{c}"' for c in _shape_cols)
+                    _meas = next((m for m in _conv_measures
+                                  if _anchor_columns_for(sm, primary) is None
+                                  or m in _anchor_columns_for(sm, primary)), None)
+                    # Use the aggregate the PREVIOUS turn actually computed. Assuming SUM
+                    # turned a COUNT(DISTINCT id) distribution into SUM("id") — a summed
+                    # primary key, which the summariser then reported as a real figure
+                    # ("id_total above the average of 291,689", measured 2026-09-23). A
+                    # count needs no measure column at all.
+                    _fn = {"sum": "SUM", "average": "AVG", "avg": "AVG",
+                           "minimum": "MIN", "min": "MIN",
+                           "maximum": "MAX", "max": "MAX"}.get(
+                        str(_conv.get("aggregation") or "").lower())
+                    if _fn and _meas:
+                        _alias = f"{_meas}_{_fn.lower()}"
+                        _agg = f'{_fn}("{_meas}") AS "{_alias}"'
+                    else:
+                        _alias = f"{primary}_count"
+                        _agg = f'COUNT(*) AS "{_alias}"'
+                    # ORDER BY the ALIAS, not the ordinal: `ORDER BY 2` is a positional
+                    # reference and validate_and_parameterize treats a bare integer as a
+                    # literal to bind, so it came back as `ORDER BY %s` — a parameter
+                    # where Postgres needs an expression.
+                    sql = (f'SELECT {_g}, {_agg} FROM "{primary}" WHERE '
+                           + " AND ".join(_wparts)
+                           + f' GROUP BY {_g} ORDER BY "{_alias}" DESC')
+                    allowed_columns = allowed_columns + _shape_cols + ([_meas] if _meas else [])
+                    _reshaped = True
+                    print(f"  [conversation] kept the previous turn's shape: "
+                          f"GROUP BY {', '.join(_shape_cols)}"
+                          + (f", SUM({_meas})" if _meas else ", COUNT(*)"))
+                if not _reshaped:
+                    # A remembered ORDER BY / LIMIT is the user's own earlier "top 10" or
+                    # "sorted by rent", so it survives a filter unless THIS turn asked for
+                    # a ranking of its own (_rank_tail already carries that).
+                    _tail = _rank_tail
+                    if not _rank_tail and primary == _conv.get("entity_table"):
+                        _ocols = [c for c in _conv_order_by
+                                  if _anchor_columns_for(sm, primary) is None
+                                  or c in _anchor_columns_for(sm, primary)]
+                        if _ocols:
+                            _tail += " ORDER BY " + ", ".join(f'"{c}" DESC' for c in _ocols)
+                            allowed_columns = allowed_columns + _ocols
+                        if _conv_limit:
+                            _tail += f" LIMIT {_conv_limit}"
+                    sql = (f'SELECT {_proj} FROM "{primary}" WHERE '
+                           + " AND ".join(_wparts) + _tail)
                 allowed_columns = (allowed_columns + [f["column"] for f in _arb_filters]
                                    + [f["column"] for f in _num_filters]
                                    + [f["column"] for f in _vg_filters]
@@ -2220,7 +2559,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     _wcols = [c for c in allowed_columns] + [f.column for f in []]
                 sql = _analytical_sql or generate_sql(query, primary, allowed_columns, tf,
                                    col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
-                                   recommended_projection=_proj_cols)
+                                   recommended_projection=_proj_cols,
+                                   rank_sort_col=_rank_sort_col)
                 if not _analytical_sql:
                     # generate_sql may have answered from its OWN deterministic builder
                     # (veda/generation._deterministic_single_table_sql) rather than the
@@ -2355,7 +2695,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     llm_generated=_llm_sql, tf=tf, join_constraints=join_constraints, fanout_guard=fanout_guard,
                     skip_predicate_cols=(join_constraints or {}).get("predicate_cols", set()),
                     run_alignment=False, run_ir_equivalence=False, run_rbac=False,
-                    head=_ir.head, trace=tr, _semantic_only=True)
+                    head=_ir.head, trace=tr, _semantic_only=True,
+                    # WHOSE words the qualifier gate is about — the user's own message, not a
+                    # head-rebuilt `query`. See veda/validation.py::qualifier_completeness.
+                    user_message=_conv_user_message)
     tr.check("value_grounding", _fv.verdict != _fw.UNGROUNDED, "" if _fv.verdict != _fw.UNGROUNDED else str(_fv.detail))
     if _fv.verdict == _fw.UNGROUNDED:
         colname, val = _fv.detail
@@ -2595,6 +2938,57 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         fb = _feedback("clarify", msg=_dmsg)
         log_route(_route + ".distinct_shape_mismatch", query, (time.time() - start) * 1000)
         return _done(0, "clarify", msg=_dmsg, feedback=fb) if return_result else 0
+
+    # Ranking-intent shape guard: the query named an explicit count of RANKED rows ("top 5",
+    # "latest 10") and the SQL returns that many rows in no order, so they are an arbitrary N that
+    # the summariser then presents as the ranked ones. Runs on EVERY produced SQL — deterministic,
+    # LLM and verified-cache replay alike — because the deterministic branch is one of the two
+    # producers that reached it (its ORDER BY needs a single unambiguous measure column, and an
+    # anchor naming two drops the ranking silently). The measure candidates the anchor DOES name
+    # are read back out of the semantic model so the question names real columns to choose between
+    # rather than asking the user to guess.
+    if sql:
+        _ok_rank, _why_rank = ranked_shape_ok(query, sql)
+        if not _ok_rank:
+            _anchor_t = _anchor_from_sql(sql)
+            _meas = ((sm.get("tables", {}).get(_anchor_t, {}) or {})
+                     .get("candidate_measure_columns") or [])
+            _choice = (" — rank by " + " or ".join(_meas) + "?") if _meas else \
+                      " — please name the column to rank by."
+            _rmsg = f"{_why_rank}{_choice}"
+            fb = _feedback("clarify", msg=_rmsg)
+            log_route(_route + ".ranked_shape_mismatch", query, (time.time() - start) * 1000)
+            return _done(0, "clarify", msg=_rmsg, feedback=fb) if return_result else 0
+
+    # CONVERSATION STATE PRESERVATION. A follow-up arrives with the narrowing the
+    # conversation has already established. If the SQL built for it keeps NONE of that
+    # narrowing, the turn has quietly widened the question back out — and the summariser
+    # then reports figures for a population the user stopped asking about two turns ago.
+    #
+    # Measured 2026-09-24: "only the gated ones", after the conversation had narrowed to
+    # Nagpur and EAST-facing, produced `SELECT "is_gated" FROM "assets_asset" LIMIT 1000` —
+    # no GROUP BY, neither filter, and an answer delivered with full confidence. The
+    # boolean could not be grounded, and instead of saying so the turn threw the
+    # conversation away. Refusing names what could not be kept, which is something the
+    # user can act on; answering does not.
+    #
+    # Only fires when the turn is ON the conversation's own table and keeps NOT ONE of the
+    # remembered filters. A turn that keeps some of them is a legitimate replacement
+    # ("what about Mumbai" swaps a value), and a turn on a different table is a topic
+    # change, which is allowed to drop everything.
+    if sql and _conv_filters and _anchor_from_sql(sql) == _conv.get("entity_table"):
+        _kept = {c for c in (f.get("column") for f in _conv_filters) if c and f'"{c}"' in sql}
+        if not _kept:
+            _lost = ", ".join(sorted({str(f.get("column")) for f in _conv_filters
+                                      if f.get("column")}))
+            _cmsg = (f"I couldn't keep the narrowing we'd already applied ({_lost}), so "
+                     f"I'd rather not show figures for everything. Ask this as a new "
+                     f"question if you meant to start over.")
+            fb = _feedback("clarify", msg=_cmsg)
+            log_route(_route + ".drill_state_lost", query, (time.time() - start) * 1000)
+            print(f"  [conversation] refused: the query dropped every remembered filter "
+                  f"({_lost})")
+            return _done(0, "clarify", msg=_cmsg, feedback=fb) if return_result else 0
 
     # Intent↔SQL referent alignment (flag-gated): a generalized comparator (Option B, increment 1) — SQL
     # that groups/anchors on a schema element the question does NOT refer to (a per-time breakdown grouped
@@ -3013,9 +3407,22 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     is_temporal = bool(tf and (tf.start or tf.end))
     # Don't cache fast-path results — they're already instant and the fast path always
     # wins ahead of the cache, so a cached copy would never be served.
-    if not from_cache and fp is None and rows and not is_temporal and not is_existence \
-            and _cache_back:
+    #
+    # And never cache a CONTEXT-DEPENDENT turn. The verified cache is keyed on the query
+    # TEXT, which used to carry the frame's description and so differed per entity. A
+    # follow-up now reaches here as the user's bare words — "only the ones in Pune" — which
+    # are the same three words whatever question they follow. Measured 2026-09-23: one such
+    # entry, saved while following "properties where is gated is true", was then replayed
+    # for sale listings, lease listings and a facing distribution, all of which came back
+    # as the SAME 1000 rows of assets. The meaning of these words lives in the conversation
+    # context, and the cache cannot see it, so it must not key on them.
+    _context_dependent = bool(_conv.get("entity_table"))
+    if (not from_cache and fp is None and rows and not is_temporal and not is_existence
+            and _cache_back and not _context_dependent):
         save_verified_query(query, sql)
+    elif _context_dependent and rows:
+        print("  [cache] not saved — this turn's meaning comes from the conversation "
+              "context, not from its own words")
 
     log_route(_route, query, (time.time() - start) * 1000, table=str(primary), rows=len(rows))
     tag = "cache" if from_cache else f"table={primary}"

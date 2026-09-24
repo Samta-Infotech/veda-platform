@@ -230,6 +230,95 @@ def _rebind_scope(scope: dict) -> None:
             except Exception:
                 pass
 
+def _validated_conversation_context(flags) -> "dict | None":
+    """The conversation context the api tier sent, coerced to a known shape.
+
+    NOTHING here is trusted verbatim: this is a process boundary, and the engine must not
+    be handed an unbounded or wrongly-typed structure because a client asked it to. Only
+    the keys the engine actually consumes survive, each coerced and capped; anything else
+    is dropped silently, and a malformed payload degrades to None (= no context), which is
+    exactly how a first turn already behaves.
+
+    Note what is NOT in the accepted set: the frame's `entity_display`. That display label
+    is what contaminated the natural-language query in the first place, and it has no
+    execution meaning — so it cannot cross this boundary even if a client sends it.
+    """
+    if not isinstance(flags, dict):
+        return None
+    raw = flags.get("conversation_context")
+    if not isinstance(raw, dict):
+        return None
+
+    def _strs(key, cap=20):
+        vals = raw.get(key)
+        if not isinstance(vals, list):
+            return []
+        out = []
+        for v in vals:
+            if isinstance(v, (str, int, float)) and str(v).strip():
+                sv = str(v).strip()[:200]
+                if sv not in out:
+                    out.append(sv)
+            if len(out) >= cap:
+                break
+        return out
+
+    def _int(key):
+        try:
+            v = raw.get(key)
+            return int(v) if v is not None else None
+        except (TypeError, ValueError):
+            return None
+
+    def _filters(cap=20):
+        """Structured remembered filters — each must know its own COLUMN, or it is not a
+        filter this side can apply. Values stay strings; the engine grounds them the same
+        way it grounds a literal from the query itself."""
+        vals = raw.get("filters")
+        if not isinstance(vals, list):
+            return []
+        out_f = []
+        for f in vals:
+            if not isinstance(f, dict):
+                continue
+            col, val = f.get("column"), f.get("value")
+            if not isinstance(col, str) or not col.strip() or val is None:
+                continue
+            op = f.get("operator")
+            out_f.append({"column": col.strip()[:200],
+                          "operator": (op if isinstance(op, str) and op.strip() else "equals")[:32],
+                          "value": str(val)[:200]})
+            if len(out_f) >= cap:
+                break
+        return out_f
+
+    out = {}
+    _f = _filters()
+    if _f:
+        out["filters"] = _f
+    tbl = raw.get("entity_table")
+    if isinstance(tbl, str) and tbl.strip():
+        out["entity_table"] = tbl.strip()[:200]
+    for k in ("filter_values", "group_by", "measures", "order_by"):
+        v = _strs(k)
+        if v:
+            out[k] = v
+    for k in ("source_id", "limit", "drill_depth"):
+        v = _int(k)
+        if v is not None:
+            out[k] = v
+    agg = raw.get("aggregation")
+    if isinstance(agg, str) and agg.strip():
+        out["aggregation"] = agg.strip()[:32]
+    route = raw.get("route")
+    if isinstance(route, str) and route.strip():
+        out["route"] = route.strip()[:64]
+    um = raw.get("user_message")
+    if isinstance(um, str):
+        out["user_message"] = um
+    return out or None
+
+
 if APIRouter is not None:
     router = APIRouter(prefix="/v1")
 
@@ -245,8 +334,9 @@ if APIRouter is not None:
         from veda_core.veda_hybrid import run_hybrid_query
 
         _tid = _incoming_trace_id(request)
-        result = await run_in_threadpool_with_context(run_hybrid_query, req.query,
-                                                      verbose=_verbose(), trace_id=_tid)
+        result = await run_in_threadpool_with_context(
+            run_hybrid_query, req.query, verbose=_verbose(), trace_id=_tid,
+            conversation_context=_validated_conversation_context(req.flags))
         payload = _serialize(result)
         # Surface a top-level status for callers that don't walk items (§19 item 1).
         items = payload.get("items") if isinstance(payload, dict) else None
@@ -287,6 +377,9 @@ if APIRouter is not None:
         # snapshot alone can leave one module view of the scope empty.
         _scope = _capture_scope()
         _tid = _incoming_trace_id(request)
+        # Validated on the request thread, before the worker starts — a malformed payload
+        # must fail here, not halfway through a pipeline run.
+        _conv_ctx = _validated_conversation_context(req.flags)
 
         def on_event(phase: str, message: str, extra: dict):
             loop.call_soon_threadsafe(
@@ -296,8 +389,9 @@ if APIRouter is not None:
         def _run():
             _rebind_scope(_scope)          # belt; the snapshot is the primary path
             try:
-                result = run_hybrid_query(req.query, verbose=_verbose(),
-                                          on_event=on_event, trace_id=_tid)
+                result = run_hybrid_query(
+                    req.query, verbose=_verbose(), on_event=on_event, trace_id=_tid,
+                    conversation_context=_conv_ctx)
                 payload = _serialize(result)
                 items = payload.get("items") if isinstance(payload, dict) else None
                 top_status = (

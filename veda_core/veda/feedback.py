@@ -6,7 +6,11 @@ column values, closest tables). Deterministic by default and the source of truth
 optional, gated LLM pass (FEEDBACK_LLM_POLISH) only REPHRASES these facts — it never
 invents values/tables — and the deterministic text is the guaranteed fallback.
 """
+import json
+import os as _os
+import queue as _q
 import re
+import threading as _th
 from veda.runtime import get_db_config
 
 
@@ -209,19 +213,47 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
     return out
 
 
+#: Hard wall-clock ceiling on the whole polish attempt, DNS included.
+POLISH_DEADLINE_S = float(_os.environ.get("FEEDBACK_POLISH_DEADLINE_S", "3") or 3)
+
+
 def _polish(facts):
     """Rephrase the structured facts into one friendly line — add NOTHING. None on any
-    failure (caller keeps the deterministic text)."""
+    failure (caller keeps the deterministic text).
+
+    BOUNDED BY WALL CLOCK, not by the socket timeout alone. `urlopen`'s `timeout`
+    is applied AFTER `getaddrinfo`, so name resolution sits outside it entirely —
+    which is how a call nominally capped at 6s was measured taking 16,028 ms. The
+    worker below is a daemon thread and is ABANDONED, never joined past the
+    deadline: if it is still resolving DNS when the deadline passes, the caller
+    stops waiting and the deterministic refusal text ships. A late result is simply
+    discarded.
+
+    This is a refusal-wording nicety on the path that produces the terminal answer.
+    It may cost a little; it may never cost an unbounded amount.
+    """
+    out: "_q.Queue" = _q.Queue(maxsize=1)
+
+    def _run():
+        try:
+            from slm import call_slm
+            system = ("You rephrase database-query failure facts into ONE short, friendly "
+                      "sentence for the user. Use ONLY the given facts — never invent column "
+                      "names, values, or tables. If suggestions are given, keep them verbatim. "
+                      "Output one sentence, no markdown.")
+            user = json.dumps({k: facts[k] for k in ("why", "what_needed", "suggestions")})
+            txt = call_slm(user, system=system, purpose="refusal_polish",
+                           temperature=0.1, num_predict=96,
+                           timeout=POLISH_DEADLINE_S).strip()
+            out.put_nowait(txt or None)
+        except Exception:
+            try:
+                out.put_nowait(None)
+            except Exception:
+                pass
+
+    _th.Thread(target=_run, daemon=True, name="veda-refusal-polish").start()
     try:
-        import json
-        from slm import call_slm
-        system = ("You rephrase database-query failure facts into ONE short, friendly "
-                  "sentence for the user. Use ONLY the given facts — never invent column "
-                  "names, values, or tables. If suggestions are given, keep them verbatim. "
-                  "Output one sentence, no markdown.")
-        user = json.dumps({k: facts[k] for k in ("why", "what_needed", "suggestions")})
-        txt = call_slm(user, system=system, purpose="refusal_polish",
-                       temperature=0.1, num_predict=96, timeout=6).strip()
-        return txt or None
+        return out.get(timeout=POLISH_DEADLINE_S)
     except Exception:
-        return None
+        return None                      # deadline passed — the safe text stands

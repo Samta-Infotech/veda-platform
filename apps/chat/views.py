@@ -231,7 +231,21 @@ class ConversationQueryView(APIView):
                       "code": turn_error.get("code", CODE_MODEL_ERROR)},
             )
 
-        metadata = turn.metadata()
+        # Observability metadata (thinking steps, explainability, timeline, usage).
+        # It is what we SAVE ABOUT the turn, not the turn itself — so a failure
+        # building it must cost the metadata, never the answer. Unguarded on the
+        # streaming path it raised AFTER `content` had streamed and took persistence
+        # and the `completed` frame with it: an answer the user saw and that was
+        # never saved.
+        try:
+            metadata = turn.metadata()
+        except Exception:
+            logger.exception("turn metadata failed chat_id=%s — persisting the answer "
+                             "without it", chat.pk)
+            metadata = {}
+        _action = getattr(service, "last_action", "")
+        if _action:
+            metadata["action"] = _action
         assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
         _audit_chat_turn(service, service.user, message, service.source_ids, rid)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
@@ -285,7 +299,21 @@ class ConversationQueryView(APIView):
                               {"code": CODE_STREAM_ERROR, "message": MSG_MODEL_ERROR})
             return
 
-        metadata = turn.metadata()
+        # Observability metadata (thinking steps, explainability, timeline, usage).
+        # It is what we SAVE ABOUT the turn, not the turn itself — so a failure
+        # building it must cost the metadata, never the answer. Unguarded on the
+        # streaming path it raised AFTER `content` had streamed and took persistence
+        # and the `completed` frame with it: an answer the user saw and that was
+        # never saved.
+        try:
+            metadata = turn.metadata()
+        except Exception:
+            logger.exception("turn metadata failed chat_id=%s — persisting the answer "
+                             "without it", chat.pk)
+            metadata = {}
+        _action = getattr(service, "last_action", "")
+        if _action:
+            metadata["action"] = _action
         assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
         # Same audit row as the JSON path, from the same shared writer. Placed after
         # persistence and BEFORE the terminal "completed" frame, so a client that
@@ -463,6 +491,12 @@ def _serialize_history_message(msg) -> dict:
         # none — e.g. every turn recorded before this feature existed.
         if meta.get("trace_id"):
             history_meta["trace_id"] = meta["trace_id"]
+        # What the conversation layer understood this turn to mean. Projected on reload
+        # for the same reason as the step model: a user reopening a conversation must
+        # see the SAME "this is what I carried over" the live stream showed them, or a
+        # follow-up that picked up the wrong context becomes invisible after a refresh.
+        if meta.get("context"):
+            history_meta["context"] = meta["context"]
         # The four-step model, so a reloaded conversation shows the SAME progress
         # panel the live stream did. `timeline` below is the raw backend phase list
         # and is audit-level; it is not a substitute for this.

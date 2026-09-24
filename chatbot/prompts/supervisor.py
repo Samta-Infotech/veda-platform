@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 
-from .common import today_str
+from .common import tidy, today_str
 
 _DELTA_BLOCK = """
 
@@ -33,12 +33,19 @@ SAME topic as the frame above), ALSO classify which ONE of these the new \
 message is, and include it as "delta_type":
 
 - "new_topic"   — asks about a different entity/subject than the frame.
-- "refine"      — adds or changes a filter/grouping on the SAME entity.
+- "refine"      — ADDS a filter/grouping, keeping everything already in the frame.
+- "replace"     — swaps the value of a filter the frame ALREADY HAS (frame has \
+                   Year 2025, user says "what about 2024?"). Also give "delta_field": \
+                   the frame filter being swapped.
+- "remove"      — drops a filter the frame ALREADY HAS ("remove India", "exclude \
+                   enterprise"). Also give "delta_field": the filter being dropped.
 - "drill_down"  — narrows into a MORE SPECIFIC value of a dimension already \
                    in play (e.g. after "by region", user says "North America").
 - "drill_up"    — asks to go back / zoom out / remove the most specific filter.
-- "compare"     — asks to compare the frame against another time period or \
-                   another value of the same dimension.
+- "compare"     — asks to see two things SIDE BY SIDE, with an explicit \
+                   comparison word ("compare", "versus", "vs", "against"). Just \
+                   SWITCHING to a different value ("what about 2024?", "and 2023?", \
+                   "what about the US?") is "replace", NOT "compare".
 - "ambiguous"   — references something ("it", "that", "inactive ones") that \
                    is NOT clearly resolvable from the frame with high \
                    confidence. When unsure, choose this — never guess.
@@ -51,37 +58,85 @@ from the NEW message that name a filter value, dimension, or time period \
 
 If action is "smalltalk" or "answer" (a genuinely new, self-contained \
 question unrelated to continuing the frame), set "delta_type" to \
-"new_topic" and "slot_candidates" to []."""
+"new_topic" and "slot_candidates" to [].
+
+EXAMPLES (frame filters shown, then message -> the two fields that matter):
+["Year equals 2025"]      "what about 2024?"    -> replace, delta_field "Year"
+["Year equals 2025"]      "and 2023?"           -> replace, delta_field "Year"
+["Year equals 2025"]      "compare with 2024"   -> compare, no delta_field
+["Country equals India"]  "what about the US?"  -> replace, delta_field "Country"
+["Country equals India"]  "remove India"        -> remove,  delta_field "Country"
+["Status equals Active"]  "only the ones in Mumbai" -> refine, no delta_field
+
+"""
 
 
+# The HARD RULE below was rewritten on 2026-09-22, after measuring that a real
+# question could be refused as chit-chat. It used to enumerate RELATIONAL nouns
+# ("incident", "count", "organizations", "status"), and a question naming none of them
+# fell off that list: with conversation history present, "what is the dress code" and
+# "how long is the probation period" were classified smalltalk 3/3 and answered with
+# "I'm here for questions about your data" — the user's question never reached the
+# engine. Measured as history-triggered, NOT document- or frame-triggered: the same
+# questions asked as a first turn were classified correctly, and swapping the frame
+# between none, a document frame and a relational frame changed nothing.
+#
+# Adding document nouns to the list would only move the cliff, so the rule now states
+# the invariant instead: asking for information is never smalltalk; smalltalk requests
+# nothing. A/B against the previous wording, history present, both directions probed
+# (10 real questions, 20 greetings/thanks/acknowledgements): 28/30 -> 29/29, with no
+# greeting or acknowledgement regression, "how's it going" included.
+#
+# This file's prompt has regressed three times (see the delta-block note below). Any
+# further edit goes through evaluation/conversation/run_eval.py --mode full, and is
+# reverted on anything below 54/54 scenarios.
 def build_supervisor_system_prompt(frame: dict | None = None) -> str:
     delta_addendum = ""
     action_schema = '"action": "smalltalk"|"followup"|"clarify_reply"|"answer", "reason": "<one short phrase>"'
     if frame and frame.get("entity"):
+        # measures/order_by/limit are shown because the frame now REMEMBERS them
+        # (chatbot/memory/frame.py, 2026-09-17) and the classifier's job depends on
+        # them: "the most expensive instead" is a re-ranking of the same question, and
+        # a model that cannot see what the ranking WAS has nothing to classify the
+        # change against. They were harvested and carried into the resolved query, but
+        # never shown here — the one place the decision is actually made.
         frame_view = {
             "entity": frame.get("entity_display") or frame.get("entity"),
             "understanding": frame.get("understanding"),
             "filters": [f"{f.get('field')} {f.get('operator')} {f.get('value')}"
                         for f in (frame.get("filters") or [])],
             "group_by": frame.get("group_by") or [],
+            "measures": frame.get("measures") or [],
+            "ranked_by": [f"{o.get('field')} ({'highest' if o.get('desc') else 'lowest'} first)"
+                          for o in (frame.get("order_by") or []) if o.get("field")],
+            "limit": frame.get("limit"),
             "drill_path": frame.get("drill_path") or [],
         }
+        # This addendum is paid on every turn that has a frame, and it is the most
+        # expensive static text in the package (671 tok). Compressing it was ATTEMPTED
+        # and REVERTED on 2026-09-21: rendering it from a shared compact source took the
+        # harness 54/54 -> 53/55 with two consistent failures, and restoring the examples
+        # to that compact form made it 52/55. The examples and the per-type prose are
+        # load-bearing here in a way that does not survive paraphrase. Do not retry
+        # without the harness in --mode full, and revert on anything below 54/54.
         delta_addendum = _DELTA_BLOCK.format(frame_json=json.dumps(frame_view, default=str))
-        action_schema += (', "delta_type": "new_topic"|"refine"|"drill_down"|"drill_up"|'
-                          '"compare"|"ambiguous", "slot_candidates": [<verbatim words from '
+        action_schema += (', "delta_type": "new_topic"|"refine"|"replace"|"remove"|'
+                          '"drill_down"|"drill_up"|"compare"|"ambiguous", '
+                          '"delta_field": "<the frame filter being replaced/removed, '
+                          'omit otherwise>", "slot_candidates": [<verbatim words from '
                           'the NEW message, or empty list>]')
 
-    return f"""\
+    return tidy(f"""\
 You are the front-door supervisor for a data-analyst chatbot. Today's date is \
-{today_str()} — use it if the message or history refers to a relative date \
-("today", "this week", "last month", etc.).
+{today_str()}.
 
 Given the conversation history and the user's new message, classify it into \
 EXACTLY one action:
 
-- "smalltalk"  — ONLY pure greetings, thanks, goodbyes, or casual chit-chat that \
-                 asks for or references NO data, count, entity, table, or fact \
-                 whatsoever (e.g. "hi", "thanks a lot", "how are you", "bye").
+- "smalltalk"  — pure greetings, thanks, goodbyes, casual chit-chat, or a bare \
+                 ACKNOWLEDGEMENT of the answer just given that asks for nothing \
+                 ("hi", "thanks", "bye", "okay", "got it", "hmm"). Nothing here \
+                 references any data, count, entity, table or fact.
 - "followup"   — the message only makes sense combined with the previous turn(s), \
                  e.g. it references "it"/"that"/"this"/an implied entity, or asks for the \
                  same kind of thing again with a different filter \
@@ -91,22 +146,23 @@ EXACTLY one action:
                  entity or metric of their own — e.g. "need more details about this", \
                  "tell me more", "more info?", "what else" — said right after the \
                  assistant discussed a specific record/entity: these are followup, \
-                 NEVER smalltalk, because "this"/"it" refers back to that record.
+                 NEVER smalltalk.
 - "clarify_reply" — the previous assistant turn asked a clarifying question, and \
                  this message is the user's answer to it.
 - "answer"     — a new, self-contained data question.
 
-HARD RULE: if the message names or implies ANY data entity, metric, count, table, \
-or record (e.g. "incident", "count", "how many", "organizations", "status") — it is \
-NEVER "smalltalk", even if it's phrased casually or as a recall ("what was...", \
-"remind me..."). When unsure between "smalltalk" and any other action, choose the \
-other action — a real question wrongly treated as smalltalk means the user gets a \
-made-up, ungrounded answer, which is the one thing this system must never do.
+HARD RULE: if the message ASKS FOR INFORMATION of any kind — a number, a fact, a \
+rule, a definition, a list, or what some document or record says — it is NEVER \
+"smalltalk", even when phrased casually, as a recall ("what was...", "remind \
+me..."), or about something this chatbot may not hold. "smalltalk" is only for \
+messages that REQUEST NOTHING: a greeting, thanks, a farewell, or a bare \
+acknowledgement. When unsure between "smalltalk" and any other action, choose the \
+other action.
 {delta_addendum}
 
 Output ONLY a JSON object, no markdown, no explanation:
 {{{action_schema}}}
-"""
+""")
 
 
 def build_supervisor_user_prompt(message: str, history: list) -> str:

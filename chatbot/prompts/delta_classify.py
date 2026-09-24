@@ -19,13 +19,21 @@ from __future__ import annotations
 
 import json
 
-from .common import today_str
+from .common import tidy, today_str
 
-DELTA_TYPES = ("new_topic", "refine", "drill_down", "drill_up", "compare", "ambiguous")
+# Re-exported from the canonical source (chatbot/prompts/delta_types.py) so the closed
+# set and the field rule exist ONCE. Every existing importer keeps working.
+#
+# The per-type PROSE below is deliberately NOT shared with the supervisor's compact
+# rendering. This is the focused prompt — the one measured classifying shape operations
+# 4/4 where the merged supervisor scored 0/4 — and the extra detail it carries about
+# limit/group_by/order_by IS that difference. Sharing the wording to save duplication
+# would trade a measured accuracy win for tidiness.
+from .delta_types import DELTA_TYPES, DELTA_TYPES_WITH_FIELD  # noqa: F401
 
 
 def build_delta_classify_system_prompt() -> str:
-    return f"""\
+    return tidy(f"""\
 You are a strict continuation classifier for an enterprise analytics assistant. \
 Today's date is {today_str()}.
 
@@ -36,15 +44,32 @@ which ONE of these the new message is:
 - "new_topic"   — asks about a different entity/subject than the current frame \
                    (e.g. frame is about revenue, message asks about compliance \
                    incidents).
-- "refine"      — adds or changes a filter/grouping on the SAME entity in the \
-                   current frame (e.g. "only Finance", "group by department").
+- "refine"      — ADDS a filter/grouping on the SAME entity, keeping everything \
+                   already in the frame (e.g. "only active ones", "group by \
+                   department").
+- "replace"     — swaps something the frame ALREADY HAS for a new one. Either a \
+                   FILTER VALUE (frame has Year 2025, user says "what about 2024?") \
+                   or the SHAPE of the question: how many rows ("make it top 10" -> \
+                   delta_field "limit"), what it is broken down by ("by month \
+                   instead" -> delta_field "group_by"), or what it is sorted by \
+                   ("sort by amount instead" -> delta_field "order_by"). Also \
+                   include "delta_field": the filter name, or the exact word \
+                   "limit", "group_by", "order_by" or "measures".
+- "remove"      — drops something the frame ALREADY HAS ("remove India", "without \
+                   the date filter"), including a shape slot: "don't sort by \
+                   amount" -> delta_field "order_by", "show all of them" -> \
+                   delta_field "limit". Also include "delta_field", same rule as \
+                   "replace".
 - "drill_down"  — narrows into a MORE SPECIFIC value of a dimension already in \
                    play (e.g. after "by region", user says "North America").
 - "drill_up"    — asks to go back / zoom out / remove the most specific filter \
                    ("go back", "zoom out", "remove that filter", "show all again").
-- "compare"     — asks to compare the current frame against another time period \
-                   or another value of the same dimension ("compare with last \
-                   month", "compare with Sales").
+- "compare"     — asks to see two things SIDE BY SIDE, using an explicit \
+                   comparison word: "compare", "versus", "vs", "against", "both", \
+                   "difference between" ("compare 2025 with 2024"). If the user is \
+                   just SWITCHING to a different value and expects only the new one \
+                   ("what about 2024?", "and 2023?", "what about the US?"), that is \
+                   "replace", NOT "compare".
 - "ambiguous"   — the message references something ("it", "that", "the other \
                    one", "inactive ones") that is NOT clearly resolvable from the \
                    current frame with high confidence. When unsure, choose this \
@@ -57,11 +82,32 @@ CRITICAL RULES:
    frame's entity, and could reasonably stand alone, prefer "new_topic".
 3. If you are not at least reasonably confident, output "ambiguous" — never guess.
 
+EXAMPLES (frame shown, then message -> output):
+frame filters ["Year equals 2025"]        "what about 2024?"
+  {{"delta_type": "replace", "delta_field": "Year", "slot_candidates": ["2024"]}}
+frame filters ["Year equals 2025"]        "and 2023?"
+  {{"delta_type": "replace", "delta_field": "Year", "slot_candidates": ["2023"]}}
+frame filters ["Year equals 2025"]        "compare 2025 with 2024"
+  {{"delta_type": "compare", "slot_candidates": ["2024"]}}
+frame filters ["Country equals India"]    "what about the US?"
+  {{"delta_type": "replace", "delta_field": "Country", "slot_candidates": ["US"]}}
+frame filters ["Country equals India"]    "remove India"
+  {{"delta_type": "remove", "delta_field": "Country", "slot_candidates": ["India"]}}
+frame filters ["Status equals Active"]    "only the ones in Mumbai"
+  {{"delta_type": "refine", "slot_candidates": ["Mumbai"]}}
+frame limit 100                           "make it top 10"
+  {{"delta_type": "replace", "delta_field": "limit", "slot_candidates": ["10"]}}
+frame group_by ["year"]                   "show it by month instead"
+  {{"delta_type": "replace", "delta_field": "group_by", "slot_candidates": ["month"]}}
+frame ranked_by ["amount (highest first)"] "don't sort by amount"
+  {{"delta_type": "remove", "delta_field": "order_by", "slot_candidates": ["amount"]}}
+
 Output ONLY a JSON object, no markdown, no explanation:
-{{"delta_type": "new_topic"|"refine"|"drill_down"|"drill_up"|"compare"|"ambiguous", \
-"slot_candidates": [<words copied VERBATIM from the NEW message that name a filter \
-value, dimension, or time period — empty list if none>], "reason": "<one short phrase>"}}
-"""
+{{"delta_type": "new_topic"|"refine"|"replace"|"remove"|"drill_down"|"drill_up"|\
+"compare"|"ambiguous", "delta_field": "<the frame filter, or one of \
+"limit"/"group_by"/"order_by"/"measures", being replaced/removed; omit otherwise>", "slot_candidates": [<words copied VERBATIM from the NEW message \
+that name a filter value, dimension, or time period — empty list if none>]}}
+""")
 
 
 def build_delta_classify_user_prompt(frame: dict, message: str, episodic: list | None = None) -> str:
@@ -82,6 +128,12 @@ def build_delta_classify_user_prompt(frame: dict, message: str, episodic: list |
         "filters": [f"{f.get('field')} {f.get('operator')} {f.get('value')}"
                     for f in (frame.get("filters") or [])],
         "group_by": frame.get("group_by") or [],
+        # Shown because delta_field may now name one of these (see the system prompt):
+        # a model cannot be asked to replace a limit or a ranking it cannot see.
+        "measures": frame.get("measures") or [],
+        "ranked_by": [f"{o.get('field')} ({'highest' if o.get('desc') else 'lowest'} first)"
+                      for o in (frame.get("order_by") or []) if o.get("field")],
+        "limit": frame.get("limit"),
         "drill_path": frame.get("drill_path") or [],
     }
     recent = ""

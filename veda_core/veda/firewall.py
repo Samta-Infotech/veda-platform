@@ -151,15 +151,18 @@ def _ir_vs_sql(ir: QueryIR, sql: str) -> Optional[FirewallVerdict]:
     return None
 
 
-def qualifier_only(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str) -> bool:
+def qualifier_only(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
+                   user_message: Optional[str] = None) -> bool:
     """The qualifier gate alone (fast path decline check): IR-vs-SQL filters for a complete
-    IR, then validation.qualifier_completeness. True = passes."""
+    IR, then validation.qualifier_completeness. True = passes.
+
+    `user_message` — see check() below."""
     from veda.validation import qualifier_completeness
     if ir is not None and not ir.ir_partial:
         v = _ir_vs_sql(ir, sql)
         if v is not None and v.verdict == QUALIFIER_DROPPED:
             return False
-    ok, _missing = qualifier_completeness(query, sql, sm)
+    ok, _missing = qualifier_completeness(query, sql, sm, user_message=user_message)
     return bool(ok)
 
 
@@ -172,12 +175,20 @@ def check(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
           skip_predicate_cols=None, run_alignment: bool = True,
           run_ir_equivalence: bool = True, run_rbac: bool = True,
           head: str = "unknown", trace=None, _semantic_only: bool = False,
-          _skip_value_and_qualifier: bool = False) -> FirewallVerdict:
+          _skip_value_and_qualifier: bool = False,
+          user_message: Optional[str] = None) -> FirewallVerdict:
     """Run every gate, in the pipeline's order, and return ONE verdict. `ir=None` is
     treated as a fully partial IR (text heuristics for every slot). `_semantic_only`:
     stop after the semantic gates (value / qualifier / alignment / IR-equivalence) and
     return ok without parameterising — for a caller that already holds parameterised SQL
-    (Tier-2's post-firewall validate)."""
+    (Tier-2's post-firewall validate).
+
+    `user_message` is WHOSE WORDS the qualifier gate is about — the user's own message when
+    the caller has one distinct from `query`. A chat follow-up reaches the engine as the
+    user's bare words with the remembered state alongside, but the deterministic heads can
+    still rebuild a fuller `query`, and the gate's contract is "every content token THE USER
+    NAMED must appear in the SQL". None = use `query`, which is every non-chat caller.
+    See veda/validation.py::qualifier_completeness."""
     if ir is None:
         ir = _partial_ir(head)
     checks: List[str] = []
@@ -231,7 +242,8 @@ def check(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
             if v is not None and v.verdict == QUALIFIER_DROPPED:
                 v.detail = [v.slot]
                 return _verdict(v)
-        ok_q, missing = qualifier_completeness(query, sql, sm, strict=strict_qualifier)
+        ok_q, missing = qualifier_completeness(query, sql, sm, strict=strict_qualifier,
+                                               user_message=user_message)
         if not ok_q:
             return _verdict(FirewallVerdict(QUALIFIER_DROPPED, reason=f"dropped qualifier {missing!r}",
                                             slot="qualifier", detail=missing))

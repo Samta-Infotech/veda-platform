@@ -166,7 +166,14 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     None (a placeholder has no exp.Literal to find) — `params` lets filter
     values be resolved back by position for explainability/memory purposes."""
 
-    out = {"entities": [], "filters": [], "aggregations": [], "groupings": [],
+    # `anchor` is initialised here, not only on the success path: the callers write
+    # `.get("anchor") or <fallback>`, and a key that exists on some returns and not
+    # others makes that expression accidentally correct rather than deliberately so.
+    # `anchor` and `from_table` are BOTH the FROM clause's table — the same fact under
+    # the name each caller already reads it by (`anchor` is the public one: veda_hybrid
+    # and chatbot/memory/frame.py read it; `from_table` is local to this module).
+    out = {"anchor": "",
+           "entities": [], "filters": [], "aggregations": [], "groupings": [],
            "orderings": [], "distinct": False, "limit": None, "aliases": {},
            "column_tables": {}, "alias_aggs": {}, "from_table": None}
     try:
@@ -186,6 +193,24 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
                 placeholder_values[id(ph)] = params[i]
 
     out["entities"] = sorted({t.name for t in tree.find_all(exp.Table) if t.name})
+    # The table the statement actually selects FROM. `entities` is a SORTED SET, useful
+    # for "which tables did this touch" and nothing else — taking its first element as
+    # the primary entity is alphabetical order masquerading as a decision.
+    #
+    # Measured 2026-09-22: a drill-down follow-up produced
+    #   FROM "assets_asset" t0 JOIN generics_country JOIN users_useraddress
+    #                          JOIN accounts_generalledger
+    # and sorted() put accounts_generalledger first. Two things consumed that: the
+    # reported `table` (which the conversation layer harvests as the QueryFrame's
+    # entity, so the whole conversation relocated to a financial ledger) and `primary`
+    # below, which resolves every column's BUSINESS LABEL — so the labels were being
+    # looked up against the wrong table too.
+    try:
+        _from = tree.find(exp.From)
+        _anchor_tbl = _from.find(exp.Table) if _from is not None else None
+        out["anchor"] = (_anchor_tbl.name or "") if _anchor_tbl is not None else ""
+    except Exception:
+        out["anchor"] = ""
     out["distinct"] = tree.find(exp.Distinct) is not None
 
     # Alias -> REAL table, for every table reference ("FROM x AS t0", "JOIN y AS t2").
@@ -517,7 +542,10 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
     omitted entirely when not applicable rather than genuinely unknown."""
     ir = _extract(sql or "", params=params)
     entities = ir["entities"] or ([table] if table else [])
-    primary = ir.get("from_table") or (entities[0] if entities else table)
+    # The FROM anchor when the SQL has one; the caller's table, or the sorted set's
+    # first element, only as fallbacks — `entities` is sorted, so its first element is
+    # an alphabetical accident. See the note on out["anchor"] in _extract.
+    primary = ir.get("anchor") or ir.get("from_table") or table or (entities[0] if entities else None)
 
     aliases = ir["aliases"]
     alias_aggs = ir.get("alias_aggs") or {}
@@ -577,7 +605,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
                 word = _AGG_WORD.get(func, func.lower())
                 operations.append({"type": word, "summary": f"Calculate {word} {field_of(col) if col else ''}".strip()})
     for g in ir["groupings"]:
-        operations.append({"type": "group", "summary": f"Group by {field_of(g)}"})
+        # `column` alongside the humanised summary, for the same reason filters carry it:
+        # "Group by Facing" is what a person reads, and `facing` is the only one of the two
+        # that can be replayed as SQL. Conversation memory parsed the label out of the
+        # summary, so a drill-down into a grouped answer could not re-apply the grouping —
+        # it was a label, not a column, and the column check dropped it (measured
+        # 2026-09-23: 0 of 8 aggregated bases kept their shape).
+        operations.append({"type": "group", "column": g, "summary": f"Group by {field_of(g)}"})
     for col, desc in ir["orderings"]:
         operations.append({"type": "sort", "summary": f"Sort by {label_of(col)} ({'highest' if desc else 'lowest'} first)"})
     if ir["limit"] is not None:
@@ -625,7 +659,16 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         "operations": operations,
         "filters": {
             "applied": [
-                {"field": field_of(c), "operator": _OP_WORD.get(op, op.lower()), "value": v}
+                # `column` is the RAW column the executed SQL filtered on; `field` is its
+                # humanised label. Both are kept because they answer different questions:
+                # the label is what a person reads, and the column is the only one of the
+                # two that means anything to SQL. The label alone used to be all that
+                # survived into conversation memory, so a follow-up could only carry a
+                # remembered filter as a bare VALUE — and a bare "true", left from an
+                # is_gated filter, was measured re-grounding onto all_day_access
+                # (2026-09-23). Additive: nothing that read `field` is affected.
+                {"field": field_of(c), "column": c,
+                 "operator": _OP_WORD.get(op, op.lower()), "value": v}
                 for c, op, v in ir["filters"]
             ],
             "summary": ", ".join(filter_phrases) if filter_phrases else "No filters applied.",

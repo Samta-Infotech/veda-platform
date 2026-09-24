@@ -19,7 +19,7 @@ from typing import Dict, List, Optional
 
 from query.cross_source_composer import (
     should_federate, resolve_surface, compose_federated, compose_federated_plan,
-    selected_source_ids,
+    selected_source_ids, qualify_columns,
 )
 from query.federated_executor import catalog_name
 from utils.logger import get_logger
@@ -928,10 +928,20 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
         logger.warning("federated_route: retrieval failed (%s)", e)
         return None
     cols = getattr(sel, "columns", []) or []
-    # Pass the QUERY: federation must be decided on what the question names, not on
-    # which sources retrieval happened to touch. See should_federate's docstring.
+    # RELEVANCE before presence. `should_federate` below asks about the QUESTION, but it can
+    # only ask it of the sources still in `cols`, and retrieval puts a small datalake source in
+    # almost every selected set at a cosine nowhere near the top — so a homzhub-only question
+    # federated anyway and could be answered from the wrong source entirely ("top 5 general
+    # ledger entries" → COUNT(*) over amenity names, measured 2026-09-23). The qualification gate
+    # drops sources that are merely present, using the routing layer's clean per-source cosine and
+    # the existing ROUTING_COMPETE_WINDOW margin. When only one source survives, should_federate
+    # goes False on the source count alone and the query takes the normal single-source path.
+    cols = qualify_columns(query, sids, cols)
+    # Then pass the QUERY: federation must be decided on what the question NAMES, not on which
+    # sources retrieval happened to touch. See should_federate's docstring — the two gates narrow
+    # from different directions (score, then named cross-source edge) and neither subsumes the other.
     if not should_federate(cols, query=query, tenant=tenant):
-        logger.info("federated_route: question does not name >=2 in-scope sources "
+        logger.info("federated_route: question does not name >=2 competing in-scope sources "
                     "— deferring to the single-source path")
         return None                      # single-source plan → normal path
 
@@ -987,22 +997,35 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
     # ── UNIFIED OPERATION CLASSIFIER (flag-gated, default OFF) ─────────────────────────────────────
     # When ON, a bounded SLM classifies this cross-source query into ONE supported operation (closed
     # set, validated against the structural context); CODE dispatches to the matching EXISTING
-    # deterministic planner. An UNSUPPORTED / unimplemented / planner-failure shape → a controlled
-    # refusal — the free-form SLM-SQL chain below is NEVER reached in this mode. OFF → skipped
-    # entirely; the legacy sequential-fallback chain runs byte-identical.
+    # deterministic planner. An unimplemented / planner-failure shape → a controlled refusal — for a
+    # CLASSIFIED operation the free-form SLM-SQL chain below is NEVER reached. UNSUPPORTED (nothing in
+    # the closed set applies) falls through to that chain instead. OFF → skipped entirely; the
+    # legacy sequential-fallback chain runs byte-identical.
     if _classifier_enabled():
         from query.operation_classifier import (
-            classify_operation, OperationContext, FEDERATED_OPS)
+            classify_operation, OperationContext, FEDERATED_OPS, OP_UNSUPPORTED)
         op_ctx = OperationContext(has_relationship=bool(hints), has_documents=bool(chunks),
                                   data_source_count=len(by_source))
         op_dec = classify_operation(query, op_ctx, allowed_ops=FEDERATED_OPS)
         if verbose:
             logger.info("federated_route: operation=%s valid=%s — %s",
                         op_dec.operation, op_dec.valid, op_dec.reason)
-        return _dispatch_classified_operation(
-            op_dec.operation, query=query, by_source=by_source, hints=hints, kinds=kinds,
-            rel_sid=rel_sid, schema_text=schema_text, join_text=join_text,
-            cols=cols, chunks=chunks, tenant=tenant, focused=focused)
+        # UNSUPPORTED means "this is not one of the CLOSED cross-source operations" — which is the
+        # normal verdict for an ordinary single-source question that only reached here because the
+        # request carried no source pin (default scope = every ready source → len(sids) >= 2 →
+        # _maybe_federated). Refusing it claims the question is unanswerable when it is not: the same
+        # question pinned to one source answers correctly. Fall through to the legacy chain instead.
+        # A CHOSEN operation is still dispatched and still refuses on planner failure — the closed-set
+        # guarantee (no free-form SQL for a REAL cross-source operation) is unchanged.
+        if op_dec.operation == OP_UNSUPPORTED:
+            if verbose:
+                logger.info("federated_route: UNSUPPORTED — falling through to the legacy chain "
+                            "(no cross-source operation applies)")
+        else:
+            return _dispatch_classified_operation(
+                op_dec.operation, query=query, by_source=by_source, hints=hints, kinds=kinds,
+                rel_sid=rel_sid, schema_text=schema_text, join_text=join_text,
+                cols=cols, chunks=chunks, tenant=tenant, focused=focused)
 
     # BOUNDED SEMI_JOIN / FILTER strategy (flag-gated, default OFF → skipped entirely). A bounded SLM
     # picks among pre-built, grounded (output,filter) candidate key-pairs — it invents nothing; CODE

@@ -2,15 +2,32 @@
 import contextvars
 import os, re, sys, time, json, logging, threading
 from config import (SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL, SLM_NUM_CTX,
-                    SLM_TIMEOUT_SECS)
+                    SLM_TIMEOUT_SECS, SQL_DEFAULT_LIMIT)
 from query.ranking_parser import parse_ranking
 import urllib.request
 from slm import call_slm
 
-_DEFAULT_ROW_LIMIT = 100
+# ONE source of truth for "how many rows when the user named no number". This used to
+# be a second literal (100) sitting alongside config's SQL_DEFAULT_LIMIT (1000), so the
+# same question answered through the structured builder and through this SLM path was
+# capped at two different sizes, and neither number could be changed in one place.
+#
+# NOW: when the user names NO number, NO LIMIT is emitted at all.
+#
+# A cap nobody asked for does not merely shorten the table — it changes the ANSWER.
+# Everything downstream is computed from the rows that come back, so a page becomes the
+# population: measured 2026-09-22 on assets_asset (7,814 rows), a capped run reported
+# "There are 904 assets listed" and "The average carpet area is 1628.46 square meters",
+# both stated as facts about the data and both true only of the page. The share
+# fabrications this was first investigated for ("86% ... are in Pune") are the same
+# defect wearing a percentage sign.
+#
+# An explicit "top 5" is still honoured exactly as before — that limit is the user's
+# own, and the whole point is to stop inventing one they did not ask for.
+_DEFAULT_ROW_LIMIT = None
 
 
-def _extract_requested_limit(query: str) -> int:
+def _extract_requested_limit(query: str):
     """Row count the user explicitly asked for — 'top N' / 'first N' / 'latest N' /
     'bottom N' / ... (see query/ranking_parser.py for the full vocabulary), digit or
     spelled-out ('top five', 'latest 10'). Falls back to _DEFAULT_ROW_LIMIT when the
@@ -19,6 +36,37 @@ def _extract_requested_limit(query: str) -> int:
     returned 100 rows."""
     top_n = parse_ranking(query).top_n
     return top_n if top_n is not None else _DEFAULT_ROW_LIMIT
+
+
+_TRAILING_LIMIT_RE = re.compile(r"\s+LIMIT\s+\d+\s*$", re.I)
+
+
+def _drop_unrequested_limit(sql: str, query: str) -> str:
+    """Remove a row cap the MODEL added when the user asked for none.
+
+    The prompt above now says "do not add a LIMIT" when the question names no row
+    count, and the model adds one anyway — measured 2026-09-22, after both of this
+    system's own default caps were removed, generated SQL still came back ending in
+    LIMIT 100 and the answer was still built from 100 of 7,814 rows. "LIMIT 100" is
+    simply what a 7B writes at the end of a SELECT.
+
+    So it is taken off deterministically rather than asked for again, the same choice
+    made for invented currency symbols and ungrounded numbers in
+    query/result_explainer.py: a guarantee, not a probability.
+
+    A limit the USER asked for is never touched — when parse_ranking finds a number in
+    the question, that number is what the prompt requested and what stays.
+    """
+    if not sql or _extract_requested_limit(query) is not None:
+        return sql
+    stripped = _TRAILING_LIMIT_RE.sub("", sql)
+    if stripped != sql:
+        # This module has no module-level logger (it predates that convention here);
+        # logging.getLogger keeps the record without introducing one for a single line.
+        logging.getLogger(__name__).info(
+            "generation: dropped a LIMIT the model added for a question that named no "
+            "row count: %r", sql[-40:])
+    return stripped
 
 
 def _domain_line() -> str:
@@ -150,7 +198,8 @@ def _deterministic_single_table_sql(query, table, columns, temporal, time_col,
             sql += f' WHERE "{time_col}" <= \'{temporal.end}\''
     if _rank.basis == "temporal" and time_col:
         sql += f' ORDER BY "{time_col}" {"DESC" if _rank.direction == "desc" else "ASC"}'
-    return sql + f" LIMIT {_extract_requested_limit(query)}"
+    _n = _extract_requested_limit(query)
+    return sql + (f" LIMIT {_n}" if _n is not None else "")
 
 
 #: Per-request flag: did `generate_sql` answer from `_deterministic_single_table_sql`
@@ -173,7 +222,7 @@ def last_was_deterministic() -> bool:
 
 
 def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=None,
-                 time_col=None, recommended_projection=None):
+                 time_col=None, recommended_projection=None, rank_sort_col=None):
     """Ask Qwen for ONE read-only SELECT over the chosen table's real columns.
     When SINGLE_TABLE_DETERMINISTIC is on, first try the SLM-free builder for the
     safe cases (projection + date range + temporal rank); fall back to the SLM only
@@ -206,10 +255,22 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
     # 10 X" could return an arbitrary 10 rows instead of the 10 most recent ones.
     _rank = parse_ranking(query)
     order_line = ""
+    _dir = "DESC" if _rank.direction == "desc" else "ASC"
     if _rank.basis == "temporal" and time_col:
-        _dir = "DESC" if _rank.direction == "desc" else "ASC"
         order_line = f'\nOrder results by "{time_col}" {_dir} (the question asks for the ' \
                      f'{"most" if _dir == "DESC" else "least"} recent rows).'
+    elif _rank.basis == "metric" and rank_sort_col:
+        # The SAME instruction for a MAGNITUDE ranking, which had none: this branch was
+        # temporal-only, so "latest 10 X" got an ORDER BY and "top 5 X" — identical shape,
+        # identical need — got nothing, and the model duly returned an arbitrary 5 rows that
+        # the summariser then called the top 5 (measured 2026-09-23 on the general ledger,
+        # where the SLM wrote ORDER BY for "bottom 3" and none for "top 5", same table).
+        # The column is not guessed here: the caller resolved it through the one resolver
+        # that already decides every deterministic branch's sort column, and passes None
+        # when the anchor names no single unambiguous measure — in which case the ranking
+        # shape guard asks the user which measure rather than inventing one.
+        order_line = f'\nOrder results by "{rank_sort_col}" {_dir} (the question asks for the ' \
+                     f'{"highest" if _dir == "DESC" else "lowest"} rows by that measure).'
 
     system = ("You are a PostgreSQL expert. Output ONE read-only SELECT statement "
               "and nothing else — no markdown, no commentary, no semicolon." + _domain_line())
@@ -229,7 +290,8 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
                "Do not add other Available Columns 'just in case'. Available Columns "
                "remains fully usable for WHERE/JOIN/GROUP BY/ORDER BY/HAVING regardless."
                if _proj_block else "")
-            + f" Always end with LIMIT {_limit}.")
+            + (f" Always end with LIMIT {_limit}." if _limit is not None
+               else " Do not add a LIMIT — the question names no row count."))
 
     # temperature 0 + fixed seed → greedy, reproducible decoding. SQL generation
     # must be DETERMINISTIC: the same question had been returning different WHERE
@@ -251,7 +313,7 @@ def generate_sql(query, table, columns, temporal, col_glossary=None, term_map=No
     if sql.startswith("```"):
         sql = sql.strip("`")
         sql = sql[sql.lower().find("select"):] if "select" in sql.lower() else sql
-    return sql.strip().rstrip(";").strip()
+    return _drop_unrequested_limit(sql.strip().rstrip(";").strip(), query)
 
 
 _OVERRIDES_CACHE = {"v": None}
@@ -437,7 +499,9 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf, results=None):
             + recommended_block
             + _join_glossary_block(alias_map, sm) + _term_directive_block(_join_term_map)
             + date_line +
-            f"\nRules: prefix every column with its alias; SELECT only; end with LIMIT {_limit}."
+            f"\nRules: prefix every column with its alias; SELECT only"
+            + (f"; end with LIMIT {_limit}." if _limit is not None
+               else "; do not add a LIMIT — the question names no row count.")
             + (" For the SELECT clause: for EACH alias, use ONLY that alias's Recommended "
                "Projection columns, UNLESS the question explicitly names a column of that "
                "table not in its Recommended Projection list — only then pull the specific "

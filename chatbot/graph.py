@@ -40,9 +40,14 @@ from langgraph.graph import StateGraph, END
 
 from .checkpointer import get_checkpointer
 from .nodes import (
+    clarify_reply_node,
+    no_match_node,
+    reset_node,
+    recall_node,
+    represent_node,
     ask_clarification_node,
     call_engine_node,
-    classify_node,
+    classify_with_entry_gate,
     context_resolve_node,
     format_reply_node,
     memory_read_node,
@@ -69,6 +74,25 @@ def _route_after_classify(state: ChatState) -> str:
     action = state.get("action")
     if action == "smalltalk":
         return "smalltalk"
+    if action == "clarify_reply":
+        # Completes a pending request, then carries on to the engine exactly as an
+        # ordinary turn does — routing, agents and execution are untouched.
+        return "clarify_reply"
+    if action == "reset":
+        # The session's memory was just wiped — acknowledge and stop. Never the engine.
+        return "reset"
+    if action == "no_match":
+        # Nothing in the message names anything in the data — answered honestly and
+        # immediately instead of spending a full engine round-trip on a refusal.
+        return "no_match"
+    if action == "recall":
+        # A question about the conversation itself: answered from the QueryFrame,
+        # which memory_read_node has already loaded. Never reaches the engine.
+        return "recall"
+    if action == "represent":
+        # A presentation-only follow-up: the previous result is still in the
+        # checkpoint and is re-rendered as-is. Never reaches the engine.
+        return "represent"
     if action != "runtime_context" and state.get("history"):
         return "context_resolve"
     return "call_engine"
@@ -92,8 +116,15 @@ def build_graph():
     g = StateGraph(ChatState)
 
     g.add_node("memory_read", memory_read_node)
-    g.add_node("classify", classify_node)
+    # classify_with_entry_gate == classify_node + the Turn Entry Gate's reporting.
+    # The gate adds no decision; see entry_decision in chatbot/nodes.py.
+    g.add_node("classify", classify_with_entry_gate)
     g.add_node("smalltalk", smalltalk_node)
+    g.add_node("represent", represent_node)
+    g.add_node("recall", recall_node)
+    g.add_node("no_match", no_match_node)
+    g.add_node("reset", reset_node)
+    g.add_node("clarify_reply", clarify_reply_node)
     g.add_node("context_resolve", context_resolve_node)
     g.add_node("call_engine", call_engine_node)
     g.add_node("memory_write", memory_write_node)
@@ -104,16 +135,26 @@ def build_graph():
     g.add_edge("memory_read", "classify")
     g.add_conditional_edges("classify", _route_after_classify, {
         "smalltalk": "smalltalk",
+        "represent": "represent",
+        "recall": "recall",
+        "no_match": "no_match",
+        "reset": "reset",
+        "clarify_reply": "clarify_reply",
         "context_resolve": "context_resolve",
         "call_engine": "call_engine",
     })
     g.add_edge("context_resolve", "call_engine")
+    g.add_edge("clarify_reply", "call_engine")
     g.add_conditional_edges("call_engine", _route_after_engine, {
         "memory_write": "memory_write",
         "ask_clarification": "ask_clarification",
     })
     g.add_edge("memory_write", "format_reply")
     g.add_edge("smalltalk", END)
+    g.add_edge("represent", END)
+    g.add_edge("recall", END)
+    g.add_edge("no_match", END)
+    g.add_edge("reset", END)
     g.add_edge("format_reply", END)
     g.add_edge("ask_clarification", END)
 

@@ -85,12 +85,24 @@ _RANKING_WORDS = [
 ]
 
 
+# Explicit SORT verbs. Not ranking words — they name no end of the order and no count
+# ("sorted by price" is neither "top" nor "5") — but they DO ask for an ORDER BY, which is
+# what veda/ir_equivalence.py's unrequested-ordering rule needs to know. They live here so
+# that rule has no second vocabulary of its own: this module exists precisely because the
+# ranking words were once duplicated across generation.py and planning.py, each copy
+# narrower than the last.
+_SORT_VERBS = ["sorted", "sort", "rank", "ranked", "order", "ordered", "arrange", "arranged"]
+
+
 @dataclass
 class RankingSpec:
     top_n:     Optional[int]  # explicit row count the query named, or None
     ranked:    bool           # True if ANY ranking language was detected
     direction: str            # "desc" | "asc" — which end of the order
     basis:     Optional[str]  # "temporal" | "metric" | None — what to sort by
+    sort_requested: bool = False     # the query asked for SOME ordering — a ranking word, or a
+    #                                  bare sort verb ("sorted by price") that names no end and
+    #                                  no count. `ranked` stays the narrower ranking-only signal.
     subject:   Optional[str] = None  # the noun the ranking is OVER ("top 5 PROPERTIES
     #                                  by number of payments" → "properties"). This is the
     #                                  GRAIN of a "top N X by <measure>" query; callers may
@@ -143,5 +155,7 @@ def parse_ranking(query: str) -> RankingSpec:
             if sm:
                 subject = sm.group("subj")
 
+    sort_requested = ranked or any(re.search(rf"\b{v}\b", ql) for v in _SORT_VERBS)
+
     return RankingSpec(top_n=top_n, ranked=ranked, direction=direction,
-                       basis=basis, subject=subject)
+                       basis=basis, sort_requested=sort_requested, subject=subject)
