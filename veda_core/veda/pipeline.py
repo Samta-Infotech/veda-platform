@@ -681,7 +681,22 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # already has its own deterministic path. Conservative match → falls through on miss.
     from config import FAST_PATH_ENABLED
     fp = None
-    if FAST_PATH_ENABLED and not is_existence:
+    # A drill-UP replays the user's original question with the levels that REMAIN carried
+    # structurally. Both deterministic short-circuits below — this fast path and the
+    # grouped planner — build their SQL straight from the registries and never look at the
+    # conversation, so they answer the replayed question as if nothing had been narrowed.
+    # Measured 2026-09-24: one "go back" from depth 2 returned the unfiltered base answer,
+    # and memory_write_node's prune (which keeps only levels still present in the frame's
+    # filters) then dropped EVERY level — a single "go back" erased the whole path.
+    #
+    # With remembered filters in hand the turn goes the deterministic-branch route
+    # instead, which applies them and rebuilds the remembered GROUP BY around them.
+    # `_conv_filters` is empty for every non-chat caller and every first turn, so this is
+    # byte-identical outside a live drill.
+    if FAST_PATH_ENABLED and not is_existence and _conv_filters:
+        print(f"  [conversation] {len(_conv_filters)} remembered filter(s) still apply — "
+              f"skipping the fast path, which cannot carry them")
+    elif FAST_PATH_ENABLED and not is_existence:
         try:
             fp = try_fast_path(query, tf)
         except Exception as _fpe:
@@ -713,7 +728,23 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # Deterministic grouped-breakdown planner (same QSR machinery, non-ranked
     # sibling): "how much does each <dim> contribute" → GROUP BY dim, SUM(measure).
     # Same clarify/fall-through contract as the superlative planner above.
-    if fp is None and not is_existence and _grp:
+    # A drill-UP replays the user's ORIGINAL question ("what is the distribution of
+    # properties by furnishing?") with the levels that remain carried structurally. That
+    # text is a grouped question, so the grouped planner below would answer it — and it
+    # builds its SQL directly, short-circuiting the deterministic section that is the only
+    # place remembered filters are applied. Measured 2026-09-24: one "go back" from depth 2
+    # therefore returned the UNFILTERED base answer, and memory_write_node's stack prune
+    # (which keeps only levels still present in the frame's filters) then dropped every
+    # level — so a single "go back" erased the whole path instead of one step of it.
+    #
+    # When the conversation carries filters, the turn is routed to the deterministic branch
+    # instead, which applies them AND rebuilds the remembered GROUP BY around them. With no
+    # conversation context this is byte-identical: `_conv_filters` is empty for every
+    # non-chat caller and for every first turn.
+    if _conv_filters and _grp and fp is None:
+        print(f"  [conversation] {len(_conv_filters)} remembered filter(s) still apply — "
+              f"not taking the grouped fast path, which cannot carry them")
+    elif fp is None and not is_existence and _grp:
         try:
             from config import GROUPED_PLAN_ENABLED
         except Exception:
@@ -2253,6 +2284,36 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             fb = _feedback("clarify", msg=_rmsg)
             log_route(_route + ".ranked_shape_mismatch", query, (time.time() - start) * 1000)
             return _done(0, "clarify", msg=_rmsg, feedback=fb) if return_result else 0
+
+    # CONVERSATION STATE PRESERVATION. A follow-up arrives with the narrowing the
+    # conversation has already established. If the SQL built for it keeps NONE of that
+    # narrowing, the turn has quietly widened the question back out — and the summariser
+    # then reports figures for a population the user stopped asking about two turns ago.
+    #
+    # Measured 2026-09-24: "only the gated ones", after the conversation had narrowed to
+    # Nagpur and EAST-facing, produced `SELECT "is_gated" FROM "assets_asset" LIMIT 1000` —
+    # no GROUP BY, neither filter, and an answer delivered with full confidence. The
+    # boolean could not be grounded, and instead of saying so the turn threw the
+    # conversation away. Refusing names what could not be kept, which is something the
+    # user can act on; answering does not.
+    #
+    # Only fires when the turn is ON the conversation's own table and keeps NOT ONE of the
+    # remembered filters. A turn that keeps some of them is a legitimate replacement
+    # ("what about Mumbai" swaps a value), and a turn on a different table is a topic
+    # change, which is allowed to drop everything.
+    if sql and _conv_filters and _anchor_from_sql(sql) == _conv.get("entity_table"):
+        _kept = {c for c in (f.get("column") for f in _conv_filters) if c and f'"{c}"' in sql}
+        if not _kept:
+            _lost = ", ".join(sorted({str(f.get("column")) for f in _conv_filters
+                                      if f.get("column")}))
+            _cmsg = (f"I couldn't keep the narrowing we'd already applied ({_lost}), so "
+                     f"I'd rather not show figures for everything. Ask this as a new "
+                     f"question if you meant to start over.")
+            fb = _feedback("clarify", msg=_cmsg)
+            log_route(_route + ".drill_state_lost", query, (time.time() - start) * 1000)
+            print(f"  [conversation] refused: the query dropped every remembered filter "
+                  f"({_lost})")
+            return _done(0, "clarify", msg=_cmsg, feedback=fb) if return_result else 0
 
     # Intent↔SQL referent alignment (flag-gated): a generalized comparator (Option B, increment 1) — SQL
     # that groups/anchors on a schema element the question does NOT refer to (a per-time breakdown grouped

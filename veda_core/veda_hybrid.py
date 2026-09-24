@@ -2625,6 +2625,29 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     ok_val, bad = value_grounding(raw_sql, _resolve, cols_meta)
     if not ok_val:
         return False, f"ungrounded value {bad}"
+
+    # CONVERSATION STATE. Tier-2 fires precisely when the deterministic head refused, and
+    # it knows nothing about the conversation — so on a follow-up it can answer by widening
+    # the question back out. Measured 2026-09-24: after the conversation had narrowed to
+    # Nagpur, "only the gated ones" was refused by Tier-1 (the boolean would not ground),
+    # and Tier-2 answered `SELECT t1."is_gated" FROM assets_asset LIMIT 1000` — no filter,
+    # no grouping, delivered with full confidence, and the drill path was then wiped
+    # because memory keeps only levels still present in the answer's filters.
+    #
+    # Same rule Tier-1 applies: refuse only when the candidate is ON the conversation's own
+    # table and keeps NOT ONE remembered filter. Keeping some of them is a legitimate
+    # replacement, and a different table is a topic change.
+    try:
+        from veda_core.context import current_conversation_context as _cur_conv
+        _cv = _cur_conv() or {}
+    except Exception:
+        _cv = {}
+    _cv_filters = [f for f in (_cv.get("filters") or [])
+                   if isinstance(f, dict) and f.get("column")]
+    if _cv_filters and _cv.get("entity_table") in allowed_tables:
+        if not any(f'"{f["column"]}"' in raw_sql for f in _cv_filters):
+            _lost = ", ".join(sorted({str(f["column"]) for f in _cv_filters}))
+            return False, f"dropped the conversation's narrowing ({_lost})"
     # STRICT: LLM-lane answers face the QSR-aware gate — an unaccounted token with a
     # referent anywhere in the schema is a dropped qualifier, closing the wrong-table
     # blind spot (SELECT * FROM assets_asset for "most expensive financial records").

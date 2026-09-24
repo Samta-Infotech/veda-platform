@@ -780,6 +780,14 @@ class ThinkingStepTracker:
                     continue
                 entry = {"type": kind, "label": str(label)[:160],
                          "state": row.get("state") or STATE_COMPLETED}
+                # Both were being DROPPED here, on the one path that produces the
+                # frame a client actually renders last. Measured live: a turn's
+                # mid-flight frames carried real per-phase durations, and the
+                # terminal frame — built through this branch — had none of them.
+                if isinstance(row.get("duration_ms"), int):
+                    entry["duration_ms"] = row["duration_ms"]
+                if row.get("message"):
+                    entry["message"] = row["message"]
                 if entry not in _kept and entry not in _new:
                     _new.append(entry)
             replaced = _kept + _new
@@ -798,6 +806,8 @@ class ThinkingStepTracker:
                      "state": row.get("state") or STATE_COMPLETED}
             if isinstance(row.get("duration_ms"), int):
                 entry["duration_ms"] = row["duration_ms"]
+            if row.get("message"):
+                entry["message"] = row["message"]
             if row.get("_generic"):
                 entry["_generic"] = True
             elif any(e.get("_generic") and e["type"] == kind for e in st.details):

@@ -1193,6 +1193,31 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                     "pending — handling %r as a followup", message)
         action = "followup"
 
+    # A PENDING CLARIFICATION COMES FROM A TURN THAT FAILED. Completing it means gluing
+    # that failed question onto this message, and the engine parses the result as one
+    # question. Measured 2026-09-24: after "distribution of properties by furnishing"
+    # (answered), "list 5 ledger with highest amount" (refused, which armed the slot),
+    # the next message "only the Nagpur ones" reached the engine as
+    #   "list 5 ledger with highest amount for only the Nagpur ones"
+    # and failed — the user had moved on, and the dead question took their new one with it.
+    #
+    # The model's own delta says which reading it is. When it calls this turn a
+    # CONTINUATION of the frame — refine/replace/remove/drill — there is a live, ANSWERED
+    # query to continue, and continuing it is a coherent reading while gluing it to a
+    # failed one is not. So the frame wins and the dead slot is dropped.
+    #
+    # Both conditions are required. Without a frame there is nothing to continue, so the
+    # pending request is still the better reading; and a delta of new_topic/ambiguous is
+    # not evidence of anything, so those are left alone.
+    elif (action == "clarify_reply" and pending and frame.get("entity")
+            and delta_type in ("refine", "replace", "remove", "drill_down", "drill_up")):
+        logger.info("classify_node: a clarification was pending from a FAILED turn, but "
+                    "%r continues the live frame (%s on %r) — dropping the pending "
+                    "request and handling this as a followup",
+                    message, delta_type, frame.get("entity"))
+        action = "followup"
+        pending = None
+
     logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state
     # across turns (that's the point, for history/context), but sql/rows/
@@ -1226,6 +1251,12 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # context_resolve_node/clarify_reply_node set this, and every route that skips
         # them would otherwise report the PREVIOUS turn's understanding as this one's.
         "context_used": None,
+        # Same per-turn reset, and for a failure with the same shape: context_resolve_node
+        # is the only node that sets this, so on a route that skips it (clarify_reply,
+        # runtime_context) the PREVIOUS turn's context stayed in the checkpoint and was
+        # sent to the engine as if it described this turn — observed carrying a failed
+        # question's `user_message` into the turn after it.
+        "conversation_context": None,
         # Cleared unless the branch above handed the turn to clarify_reply. A slot that
         # survives a turn it did not answer is what compounded.
         "pending_clarification": (state.get("pending_clarification") or {})
@@ -2163,6 +2194,13 @@ def memory_write_node(state: ChatState) -> dict:
     harvested = memory_frame.stabilise_document_entity(
         prev_frame, harvested, referential=state.get("action") == "followup")
 
+    # The mirror case: a conversation on a TABLE whose follow-up came back from the
+    # documents. That turn is `answered`, so it writes — and the frame moved to a document
+    # nobody asked about, taking every later turn with it (measured 2026-09-23). The
+    # entity is held; everything else the turn actually produced is still recorded.
+    harvested = memory_frame.keep_entity_on_lane_change(
+        prev_frame, harvested, referential=state.get("action") == "followup")
+
     new_frame = memory_frame.merge_frame_post_execution(
         prev_frame, harvested, delta_type, tenant, session_id)
 
@@ -2198,9 +2236,18 @@ def memory_write_node(state: ChatState) -> dict:
     # A filter the user REMOVED must leave the drill stack with it. rebuild_frame_from_stack
     # derives filters FROM the stack on the next "go back", so a stale level put the
     # removed filter straight back: remove City -> "go back" -> City=Pune returns.
-    new_stack = [lvl for lvl in new_stack
-                 if any(memory_frame._same_field(lvl.get("dimension"), f.get("field"))
-                        for f in (new_frame.get("filters") or []))]
+    # ... EXCEPT when the classifier had no opinion. `ambiguous` is what parse_delta_response
+    # returns for a genuine judgment call AND for a model call that failed or timed out —
+    # chatbot/llm.py returns None uniformly for both — so it is not evidence that the user
+    # left the drill. Measured 2026-09-24, 3 runs out of 3: after a refused turn the next
+    # follow-up came back `ambiguous` (the SLM host was failing DNS resolution), no context
+    # was carried, the answer therefore had no filters, and this prune then erased a live
+    # 1-level path. Keeping the stack costs nothing if the turn really was a new subject —
+    # the `reset` branch above already empties it on a genuine topic switch.
+    if delta_type != "ambiguous":
+        new_stack = [lvl for lvl in new_stack
+                     if any(memory_frame._same_field(lvl.get("dimension"), f.get("field"))
+                            for f in (new_frame.get("filters") or []))]
 
     # The question the user asked BEFORE any narrowing, kept so "go back" can replay it
     # when it pops the last drill level. Recorded on any answered turn that carries no
