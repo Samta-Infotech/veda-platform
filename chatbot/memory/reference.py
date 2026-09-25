@@ -98,6 +98,25 @@ def points_at_the_one_row(ref: Optional[Dict[str, Any]], message: str,
                 and _SINGULAR_PRONOUN_RE.search(message or ""))
 
 
+def _positions(message: str) -> List[int]:
+    """EVERY position the message points at ("the first and third", "1st, 2nd and 5th"),
+    in order, de-duplicated. Counts ("first 10") are skipped exactly as in _ordinal."""
+    out: List[int] = []
+    for m in _ORDINAL_RE.finditer(message or ""):
+        tail = (message or "")[m.end():]
+        if m.group("word"):
+            if _COUNT_AFTER_RE.match(tail):
+                continue
+            p = _ORDINAL_WORDS[m.group("word").lower()]
+        else:
+            p = int(m.group("num") or m.group("numbered"))
+            if p < 1:
+                continue
+        if p not in out:
+            out.append(p)
+    return out
+
+
 def parse_ordinal(message: str) -> Optional[int]:
     """1-based display position the message points at, -1 for "last", None for none."""
     hit = _ordinal(message)
@@ -220,6 +239,8 @@ def build_reference(engine_result: Dict[str, Any],
 #     projection (other than the key) whose values tell the rows apart;
 #   · orderable values — each numeric or date column, so "the cheapest one" / "the latest
 #     one" can be answered from what was shown instead of asking a model to compute it.
+_MAX_TEXT_COLUMNS = 8
+_MAX_TEXT_LEN = 80
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
@@ -251,12 +272,18 @@ def _selectors(cols: List[Any], rows: List[Any], *, skip: Any) -> Dict[str, Any]
                               for x in cells]
         elif all(_DATE_RE.match(str(x)) for x in present):
             dates[str(c)] = [str(x)[:32] if x is not None else None for x in cells]
-        elif (label_col is None and all(isinstance(x, str) for x in present)
-              and len({x.strip().lower() for x in present}) >= max(2, int(0.8 * len(rows)))
-              and sum(len(x.strip()) for x in present) / len(present) >= 3):
-            label_col = str(c)
-            out["label_column"] = label_col
-            out["labels"] = [_clean(x) for x in cells]
+        elif all(isinstance(x, str) for x in present):
+            # Every shown TEXT column is kept (bounded), so a record can be named by any
+            # value the user saw in it — not only by its naming column.
+            texts = out.setdefault("texts", {})
+            if len(texts) < _MAX_TEXT_COLUMNS:
+                texts[str(c)] = [(_clean(x) or "")[:_MAX_TEXT_LEN] or None for x in cells]
+            if (label_col is None
+                    and len({x.strip().lower() for x in present}) >= max(2, int(0.8 * len(rows)))
+                    and sum(len(x.strip()) for x in present) / len(present) >= 3):
+                label_col = str(c)
+                out["label_column"] = label_col
+                out["labels"] = [_clean(x) for x in cells]
     if values:
         out["values"] = values
     if dates:
@@ -273,18 +300,49 @@ def _find_words(hay: List[str], needle: List[str]) -> bool:
     return n > 0 and any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
 
 
+def _nameable(v: Any) -> bool:
+    """A shown value long and specific enough to be NAMED: 4+ characters, not a number,
+    not a boolean. Short or generic cells ("A", "12", "True") are never matched."""
+    t = str(v or "").strip()
+    return (len(t) >= 4 and not _NUM_RE.match(t)
+            and t.lower() not in ("true", "false", "none", "null"))
+
+
+def _shown_value_hits(ref: Dict[str, Any], message: str) -> List[Tuple[int, str, str]]:
+    """(row/group index, column, value) for every SHOWN value the message names as a whole
+    phrase — only the longest phrase(s) named, so "Green Valley Phase 2" beats "Green
+    Valley". Rows: every remembered text column; groups: their group values."""
+    msg = _words_of(message)
+    hits: List[Tuple[int, str, str]] = []
+    if ref.get("kind") == "rows":
+        for col, vals in (ref.get("texts") or {}).items():
+            for i, v in enumerate(vals or []):
+                if v and _nameable(v) and _find_words(msg, _words_of(v)):
+                    hits.append((i, col, v))
+    elif ref.get("kind") == "groups":
+        for i, item in enumerate(ref.get("items") or []):
+            for col, v in (item or {}).items():
+                if v and _nameable(v) and _find_words(msg, _words_of(v)):
+                    hits.append((i, col, v))
+    if not hits:
+        return []
+    longest = max(len(_words_of(v)) for _, _, v in hits)
+    return [h for h in hits if len(_words_of(h[2])) == longest]
+
+
 def names_a_row(ref: Optional[Dict[str, Any]], message: str,
                 frame: Optional[Dict[str, Any]]) -> bool:
     """Does the message name a displayed record by its label ("details of One & Only
     House")? Evidence of a continuation in itself — the label came from the result on
     screen — but only for a label of 2+ words or 6+ characters, so a common short word
     that happens to be a label is not mistaken for one."""
-    if not (ref and ref.get("kind") == "rows" and ref.get("labels") and frame
+    # Record listings only. On a GROUPED result a named value ("only the EAST ones") is a
+    # drill the engine grounds itself, and treating it as a pick would pin the reference to
+    # the old list and could steal a clarification answer ("EAST").
+    if not (ref and ref.get("kind") == "rows" and frame
             and str(frame.get("entity") or "") == str(ref.get("entity") or "")):
         return False
-    msg = _words_of(message)
-    return any(lab and (len(_words_of(lab)) >= 2 or len(lab) >= 6)
-               and _find_words(msg, _words_of(lab)) for lab in ref["labels"])
+    return bool(_shown_value_hits(ref, message))
 
 
 _NUM_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -345,7 +403,9 @@ def selects_rows(ref: Optional[Dict[str, Any]], message: str,
         return False
     if _SET_EDGE_RE.search(message or "") or _SET_ALL_RE.search(message or ""):
         return True
-    if names_a_row(ref, message, frame):
+    if len(_positions(message)) >= 2:
+        return True                          # "the first and third"
+    if names_a_row(ref, message, frame) or _partial_label_hits(ref, message):
         return True
     # "which one is the cheapest?", "the most expensive one": a superlative over the rows on
     # screen, pointed at with "one(s)" and naming no other subject ("which CITY is the
@@ -423,30 +483,96 @@ def _ranking_reference(ref: Dict[str, Any], message: str,
     return ("filters", _key_filters(ref, picked), terms + (["one"] if "one" in wset else []))
 
 
+def _fold_word(w: str) -> str:
+    return w[:-1] if len(w) > 3 and w.endswith("s") and not w.endswith("ss") else w
+
+
+def _partial_label_hits(ref: Optional[Dict[str, Any]], message: str) -> List[Tuple[int, str]]:
+    """Rows whose NAMING-column value contains, as a contiguous run of whole words, the
+    longest run the message shares with any of them — "infotech", "Friends Colony",
+    "Infotech Towers" (plural folded). Only a run of 2+ words, or one word of 7+
+    characters, counts, so a common word inside a long address never does."""
+    if not ref or ref.get("kind") != "rows" or not ref.get("labels"):
+        return []
+    msg = [_fold_word(w) for w in _words_of(message)]
+    best, hits = 0, []
+    for i, lab in enumerate(ref.get("labels") or []):
+        if not lab:
+            continue
+        lw = [_fold_word(w) for w in _words_of(lab)]
+        run = 0
+        for a in range(len(msg)):
+            for b in range(len(lw)):
+                k = 0
+                while a + k < len(msg) and b + k < len(lw) and msg[a + k] == lw[b + k]:
+                    k += 1
+                if k > run and (k >= 2 or len(msg[a]) >= 7):
+                    run = k
+        if run == 0:
+            continue
+        if run > best:
+            best, hits = run, [(i, lab)]
+        elif run == best:
+            hits.append((i, lab))
+    return hits
+
+
+def _partial_label_reference(ref: Dict[str, Any], message: str) -> Optional[Tuple[Any, ...]]:
+    hits = _partial_label_hits(ref, message)
+    if not hits:
+        return None
+    if len(hits) == 1:
+        lab_words = {_fold_word(w) for w in _words_of(hits[0][1])}
+        return ("filters", _key_filters(ref, [hits[0][0]]),
+                [w for w in _words_of(message) if _fold_word(w) in lab_words])
+    distinct = list(dict.fromkeys(lab for _, lab in hits))
+    if len(distinct) == 1:
+        return ("refuse", f"{len(hits)} of the rows shown are called \"{distinct[0]}\" — "
+                          f"which one do you mean? (for example \"the "
+                          f"{_nth(hits[1][0] + 1)} one\")")
+    names = "; or ".join(f"\"{lab}\"" for lab in distinct[:4])
+    return ("refuse", f"More than one of the rows shown matches that — do you mean {names}?")
+
+
 def _nth(n: int) -> str:
     suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
     return f"{n}{suffix}"
 
 
 def _name_reference(ref: Dict[str, Any], message: str) -> Optional[Tuple[Any, ...]]:
-    """"details of One & Only House" — the displayed record whose label the message names.
-    Two records with that label → a clarification, never the first one."""
-    labels = ref.get("labels") or []
-    msg = _words_of(message)
-    hits = [(i, lab) for i, lab in enumerate(labels)
-            if lab and (len(_words_of(lab)) >= 2 or len(lab) >= 6)
-            and _find_words(msg, _words_of(lab))]
+    """"details of One & Only House", "what about EAST?" — the ONE shown record (or group)
+    whose value the message names. A value several rows share is not a pick but a filter
+    (the engine grounds it as before) — except on the naming column, where two records
+    with the same name are a question, never the first one."""
+    hits = _shown_value_hits(ref, message)
     if not hits:
-        return None
-    longest = max(len(_words_of(lab)) for _, lab in hits)
-    hits = [(i, lab) for i, lab in hits if len(_words_of(lab)) == longest]
-    if len({lab.strip().lower() for _, lab in hits}) > 1:
-        return None                          # names two different records: not a reference
-    if len(hits) > 1:
-        return ("refuse", f"{len(hits)} of the rows shown are called \"{hits[0][1]}\" — "
-                          f"which one do you mean? (for example \"the {_nth(hits[1][0] + 1)} "
+        return _partial_label_reference(ref, message)
+    rows = sorted({i for i, _, _ in hits})
+    terms = _words_of(hits[0][2])
+    # Several DIFFERENT values named, each on exactly one row ("compare Infotech Tower and
+    # Shivsai Apartment") → those rows as a set. One shared value is a filter, not a pick.
+    by_value: Dict[str, set] = {}
+    for i, _c, v in hits:
+        by_value.setdefault(v.strip().lower(), set()).add(i)
+    if (ref.get("kind") == "rows" and len(by_value) >= 2
+            and all(len(ix) == 1 for ix in by_value.values())):
+        picked = sorted({next(iter(ix)) for ix in by_value.values()})
+        return ("filters", _key_filters(ref, picked),
+                [w for v in by_value for w in _words_of(v)] + ["and"])
+    if len(rows) == 1:
+        if ref.get("kind") == "rows":
+            return ("filters", _key_filters(ref, rows), terms)
+        item = (ref.get("items") or [None])[rows[0]]
+        if not item:
+            return None
+        return ("filters", [{"field": c, "column": c, "operator": "equals", "value": str(v),
+                             "source": "result_reference"} for c, v in item.items()], terms)
+    if (ref.get("kind") == "rows" and all(c == ref.get("label_column") for _, c, _ in hits)
+            and len({v.strip().lower() for _, _, v in hits}) == 1):
+        return ("refuse", f"{len(rows)} of the rows shown are called \"{hits[0][2]}\" — "
+                          f"which one do you mean? (for example \"the {_nth(rows[1] + 1)} "
                           f"one\")")
-    return ("filters", _key_filters(ref, [hits[0][0]]), _words_of(hits[0][1]))
+    return None
 
 
 # ── resolving ────────────────────────────────────────────────────────────────────────────
@@ -477,6 +603,17 @@ def resolve_reference(ref: Optional[Dict[str, Any]], message: str, *,
         return None
 
     items = ref["items"]
+    _many = _positions(message)
+    if len(_many) >= 2 and ref.get("kind") == "rows":
+        n = len(items)
+        idx = [n - 1 if p == -1 else p - 1 for p in _many]
+        bad = [p for p, i in zip(_many, idx) if i < 0 or i >= n]
+        if bad:
+            return ("refuse", f"The previous answer had {ref.get('row_count', n)} rows, so "
+                              f"there is no row {bad[0]} to pick. Which ones did you mean?")
+        return ("filters", _key_filters(ref, idx),
+                [t for t in re.findall(r"[A-Za-z0-9#]+", message or "")
+                 if _ORDINAL_RE.fullmatch(t) or t.lower() in ("and",)])
     hit = _ordinal(message)
     pos = hit[0] if hit else None
     # The words the user POINTED with — they name a row they saw, not data, and the engine
@@ -507,8 +644,21 @@ def resolve_reference(ref: Optional[Dict[str, Any]], message: str, *,
             return None
         if len(items) == 1 and ref.get("complete"):
             pos = 1                              # "its price" about a one-row answer
+        elif ref.get("kind") == "rows" and len(ref.get("picked") or []) == 1:
+            # The previous turn picked ONE record of this list ("details of Infotech
+            # Tower"): "its" is that record.
+            col = ref.get("key_column")
+            return ("filters", [{"field": col, "column": col, "operator": "equals",
+                                 "value": str(ref["picked"][0]),
+                                 "source": "result_reference"}], ["its"])
+        elif ref.get("kind") == "rows" and len(items) > 1:
+            # "what is its city?" with several records on screen: "its" means ONE of them
+            # and nothing says which. Asked, not guessed — measured 2026-09-26, sent on as
+            # a fresh question it came back as an unrelated federated answer.
+            return ("refuse", f"The previous answer has {len(items)} rows — which one do "
+                              f"you mean? (for example \"the 2nd one\", or its name)")
         else:
-            return None                          # several rows, no position: not resolved
+            return None                          # several groups, no position: not resolved
     n = len(items)
     index = n - 1 if pos == -1 else pos - 1
     if index < 0 or index >= n:

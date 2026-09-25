@@ -1644,6 +1644,16 @@ def _document_evidence(payload) -> dict:
         chunks = getattr(payload, "chunks", None)
         if chunks is not None:
             out["passages"] = len(chunks)
+        # The SAME top-chunk-similarity value run_rag_layer already computes (its
+        # own `RAGResult.confidence`, used upstream only to gate a >= 0.35 routing
+        # threshold and then discarded) — a document answer's `explain.confidence`
+        # was hardcoded `None` with no SQL path to compute one from, so every
+        # document answer read as equally certain whether the match was a strong
+        # 0.9 or a borderline 0.36. Read here rather than invented: not present at
+        # all unless the head actually reported a number.
+        conf = getattr(payload, "confidence", None)
+        if isinstance(conf, (int, float)):
+            out["confidence"] = round(float(conf), 3)
     except Exception:
         pass
     return out
@@ -1717,6 +1727,12 @@ def _apply_document_v1(explain: dict, ev: dict) -> dict:
                 bits.append(f"using {n} relevant passage{'' if n == 1 else 's'}")
             explain["understanding"] = {"summary": " ".join(bits) + ".",
                                         "breakdown": [o["summary"] for o in ops]}
+        # Only fills the None `build_explain(confidence=None, ...)` left for a
+        # document turn — never overwrites a real value another path already put
+        # here.
+        if explain.get("confidence") is None and isinstance(ev.get("confidence"),
+                                                             (int, float)):
+            explain["confidence"] = ev["confidence"]
     except Exception:
         pass
     return explain

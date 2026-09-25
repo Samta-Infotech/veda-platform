@@ -700,7 +700,21 @@ def _group_signal(query_l: str) -> bool:
     only gets the query INTO that branch."""
     if not _fpg_on():
         return False
-    return any(w in query_l for w in _GROUP_WORDS)
+    if any(w in query_l for w in _GROUP_WORDS):
+        return True
+    # "show properties by city" / "list lease listings by status": a bare "<subject> by
+    # <dimension>" with no ranking, number or aggregate is a breakdown too. Measured
+    # 2026-09-26: it fell to the LLM lane, came back as a plain listing and was refused
+    # "please name the column to group by (e.g. 'by city')" — though the user had. A ranking
+    # ("top 10 … by price", "highest … by rent") keeps its meaning: those words exclude it,
+    # and a "by <word>" that is not a dimension is rejected by the group_dim resolver as before.
+    return bool(re.search(r"\bby\s+[a-z]", query_l)
+                and not re.search(r"\d", query_l)
+                and not re.search(r"\b(top|bottom|highest|lowest|most|least|latest|newest|"
+                                  r"oldest|earliest|first|last|cheapest|costliest|largest|"
+                                  r"smallest|biggest|best|worst|average|avg|mean|total|sum|"
+                                  r"maximum|minimum|max|min|sorted|order|ordered|rank|ranked)\b",
+                                  query_l))
 
 
 def _concat_exact_table(query: str):

@@ -354,3 +354,19 @@ if __name__ == "__main__":
             failed += 1; print("FAIL", name); traceback.print_exc()
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+# ── filter presence: a flag must be NAMED, and belong to the SQL's tables (2026-09-26) ─
+def test_a_word_of_an_unrelated_tables_flag_is_not_a_filter(monkeypatch):
+    from veda import intent_sql_alignment as A
+    sm = {"columns": {
+        "services_valuebundlepricing.is_city_dependent": {"semantic_type": "BOOLEAN"},
+        "assets_asset.is_gated": {"semantic_type": "BOOLEAN"},
+        "assets_asset.power_backup": {"semantic_type": "BOOLEAN"}}}
+    grouped = ('SELECT "city_name", COUNT(DISTINCT "id") AS n FROM "assets_asset" '
+               'GROUP BY "city_name"')
+    assert A.filter_presence_ok("What is the distribution of properties by city?", grouped, sm)[0]
+    # still caught: a flag of the SQL's own table, named, with no filter applied
+    assert not A.filter_presence_ok("only the gated ones", grouped, sm)[0]
+    assert not A.filter_presence_ok("properties with power backup", grouped, sm)[0]
+    assert A._boolean_flag_named("properties with power", sm) is None     # half a name
