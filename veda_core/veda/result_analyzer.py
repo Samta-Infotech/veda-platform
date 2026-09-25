@@ -526,6 +526,23 @@ def compute_chart_candidates(result_shape: str, column_stats: List[ColumnStat],
     return out
 
 
+def _result_truncated(ctx: "InsightContext") -> bool:
+    """Single source of truth for "these rows are one page" lives in
+    query/result_explainer._sql_truncated (executor cap OR a filled trailing LIMIT,
+    minus the limit the USER asked for). Imported, never re-derived — a second copy
+    of those rules would drift from the flag and the cap.
+
+    The import is deferred because the dependency runs the other way at module level
+    (result_explainer imports classify_result_type from here); a top-level import
+    would be a cycle. Any failure degrades to False, i.e. exactly today's behaviour.
+    """
+    try:
+        from query.result_explainer import _sql_truncated
+        return bool(_sql_truncated(ctx.sql, ctx.row_count, ctx.question))
+    except Exception:
+        return False
+
+
 def analytics_summary(ctx: "InsightContext") -> dict:
     """JSON-safe projection of the deterministic analytics — the piece of the
     InsightContext that crosses the inference→api HTTP boundary (attached to
@@ -537,6 +554,14 @@ def analytics_summary(ctx: "InsightContext") -> dict:
         "result_shape":         ctx.result_shape,
         "result_type":          ctx.result_type,
         "row_count":            ctx.row_count,
+        # True when rows were SILENTLY removed — `row_count` is ONE PAGE, not the
+        # population. Measured 2026-09-22: assets_asset holds 7,814 rows, a question
+        # naming no row count came back with 1000 and the summary asserted "There are
+        # 1000 assets listed" / "The average carpet area is 1628.46" as facts about the
+        # table. The api tier (apps/chat/visualization.py) repeats the same mistake in
+        # its "First 50 of 1000 rows" subtitle because nothing tells it the 1000 is
+        # itself a page. This is the only channel that can.
+        "result_truncated":     _result_truncated(ctx),
         # The SQL's own ORDER BY / LIMIT. Crosses the boundary so the api tier can
         # chart a listing on the measure the question actually ranked by, in the
         # order the rows arrived — without it the chart re-sorts and re-picks its
@@ -544,6 +569,14 @@ def analytics_summary(ctx: "InsightContext") -> dict:
         # leading with the most expensive (2026-09-11).
         "orderings":            [[c, asc] for c, asc in ctx.orderings],
         "limit":                ctx.limit,
+        # THIS QUERY's own measures/dimensions (from its SQL), as distinct from
+        # available_measures/available_dimensions above, which are the whole TABLE's.
+        # The conversation layer needs the former to carry "what was being measured"
+        # into the next turn (chatbot/memory/frame.py) — without it a follow-up like
+        # "the most expensive instead" reaches the engine with no idea which quantity
+        # the previous turn ranked on.
+        "query_measures":       list(ctx.measures),
+        "query_dimensions":     list(ctx.dimensions),
         "table":                ctx.table,
         "primary_entity":       ctx.primary_entity,
         "related_entities":     list(ctx.related_entities),

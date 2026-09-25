@@ -17,6 +17,7 @@ import os
 import re
 import json
 import heapq
+from time import monotonic as _monotonic
 from collections import defaultdict
 from dataclasses import dataclass
 from retrieval.query_enrichment import _singularize
@@ -92,6 +93,182 @@ def edge_category(edge, connectors):
 
 
 _ANCHOR_CONNECTIVES = {"and", "or", "of", "to", "by"}
+
+
+# =============================================================================
+# PROVABLY-DEAD FK COLUMNS
+#
+# An FK column that holds NO non-NULL value anywhere (including every column of
+# an empty table) cannot satisfy an equi-join: `t1."id" = t0."fk"` with `fk`
+# always NULL matches nothing, so ANY plan that INNER-joins through that edge
+# returns 0 rows for EVERY question, always. Such an edge is never load-bearing
+# on the INNER-JOIN skeleton path — dropping it there can only turn a
+# guaranteed-empty answer into a real one, and can never change a query that
+# returns rows today.
+#
+# This is a fact about the DATA, not the schema, so it is not in
+# data/veda_relationship_graph.json (whose edges carry no nullability at all).
+# It is measured with two read-only, statement_timeout-bounded probes through
+# veda.execution.execute_sql — the same connection, schema and source-scope
+# resolution the user's own SQL uses — and cached per scope with a TTL, so it
+# costs at most one pair of round-trips per process per TTL window, never one
+# per query.
+#
+# Probe 1 (cheap, catalog-only) NARROWS to candidates: pg_stats.null_frac >= 1
+# plus every column of a table pg_class reports as empty. Probe 2 EXACTLY
+# verifies each candidate with NOT EXISTS, because pg_stats is sampled and a
+# sampled 1.0 is not a proof. Narrowing can only lose candidates (= fewer
+# prunes = safer); only probe 2 can add one.
+#
+# Every failure mode — no DB, no ANALYZE, a non-relational (DuckDB/tabular)
+# scope, a timeout, an exception — yields an EMPTY set, which makes every
+# caller behave byte-identically to before this existed.
+# =============================================================================
+
+_DEAD_FK_CACHE = {}                 # scope key -> (expires_at_monotonic, frozenset)
+_DEAD_FK_TTL_SEC = 900.0            # re-measure at most every 15 min per scope
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+_DEAD_FK_CANDIDATE_SQL = """
+SELECT k FROM (
+    SELECT s.tablename || '.' || s.attname AS k
+      FROM pg_stats s
+     WHERE s.schemaname = current_schema() AND s.null_frac >= 1.0
+    UNION
+    SELECT c.relname || '.' || a.attname
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      JOIN pg_attribute a ON a.attrelid = c.oid
+                         AND a.attnum > 0 AND NOT a.attisdropped
+     WHERE n.nspname = current_schema() AND c.relkind = 'r' AND c.reltuples = 0
+) q
+WHERE q.k = ANY(%s)
+"""
+
+
+def _dead_fk_scope_key():
+    """Cache key: the (tenant, source-set) whose DB the probes actually read.
+    Falls back to a single global key when no request context is set (dev CLI)."""
+    try:
+        from veda import context
+        ctx = context.try_current()
+        if ctx is not None:
+            return (getattr(ctx, "tenant", None), tuple(sorted(ctx.source_ids)))
+    except Exception:
+        pass
+    return ("_global", ())
+
+
+def _measure_dead_fks(fk_keys):
+    """The two probes. Returns a frozenset of "table.column" — empty on ANY problem."""
+    if not fk_keys:
+        return frozenset()
+    try:
+        from veda.execution import execute_sql
+    except Exception:
+        return frozenset()
+    try:
+        _c, rows, err = execute_sql(_DEAD_FK_CANDIDATE_SQL, [sorted(fk_keys)])
+        if err or not rows:
+            return frozenset()
+        cands = [r[0] for r in rows if r and r[0] in fk_keys]
+        # Identifier safety: these names come from our own graph file, but the probe
+        # below interpolates them, so refuse anything that is not a plain identifier.
+        pairs = []
+        for k in cands:
+            t, _, c = k.partition(".")
+            if _IDENT_RE.match(t) and _IDENT_RE.match(c):
+                pairs.append((t, c))
+        if not pairs:
+            return frozenset()
+        probe = "\nUNION ALL\n".join(
+            'SELECT %s AS k WHERE NOT EXISTS '
+            '(SELECT 1 FROM "{t}" WHERE "{c}" IS NOT NULL)'.format(t=t, c=c)
+            for t, c in pairs)
+        _c2, rows2, err2 = execute_sql(probe, [f"{t}.{c}" for t, c in pairs])
+        if err2 or rows2 is None:
+            return frozenset()
+        return frozenset(r[0] for r in rows2 if r)
+    except Exception:
+        return frozenset()
+
+
+def dead_fk_columns(graph):
+    """The graph's FK columns that provably hold no non-NULL value, TTL-cached per
+    scope. Empty set = "unknown", which every caller must treat as "prune nothing"."""
+    key = _dead_fk_scope_key()
+    now = _monotonic()
+    hit = _DEAD_FK_CACHE.get(key)
+    if hit is not None and hit[0] > now:
+        return hit[1]
+    fk_keys = {f"{e.get('source_table')}.{e.get('source_column')}"
+               for e in (graph or {}).get("edges", [])
+               if e.get("source_table") and e.get("source_column")}
+    dead = _measure_dead_fks(fk_keys)
+    _DEAD_FK_CACHE[key] = (now + _DEAD_FK_TTL_SEC, dead)
+    return dead
+
+
+def clear_dead_fk_cache():
+    """Test/ops hook — drop the measured set so the next call re-probes."""
+    _DEAD_FK_CACHE.clear()
+
+
+def is_dead_edge(edge, dead):
+    """True when this edge's FK column is in the provably-dead set. The FK lives on
+    the SOURCE side of a declared edge (child.fk -> parent.pk); a polymorphic edge is
+    never treated as dead (its discriminator predicate, not the raw column, decides)."""
+    if not dead or not edge or edge.get("polymorphic"):
+        return False
+    return f"{edge.get('source_table')}.{edge.get('source_column')}" in dead
+
+
+def prune_dead_edges(plan, graph, dead=None):
+    """Drop the plan's provably-dead edges, then every edge left stranded from the
+    anchor. INNER-JOIN skeleton path ONLY — see the module note above: a plan that
+    contains a dead edge returns 0 rows for every question, so this can only turn an
+    empty answer into a real one. Mutates and returns `plan`; a no-op when nothing is
+    dead (including whenever the measurement is unavailable).
+
+    Deliberately NOT applied to the EXISTS / pre-aggregation plans: a NOT EXISTS over
+    a dead relationship is a correct, non-empty answer today, and removing the edge
+    would silently change it."""
+    path = plan.get("join_path") or []
+    if not path:
+        return plan
+    if dead is None:
+        dead = dead_fk_columns(graph)
+    if not dead:
+        return plan
+    doomed = [e for e in path if is_dead_edge(e, dead)]
+    if not doomed:
+        return plan
+    kept = [e for e in path if e not in doomed]
+    # Anything now disconnected from the anchor contributes nothing but was only
+    # reachable through the dead edge — drop it too (build_skeleton would silently
+    # drop it anyway; doing it here keeps `plan` and the SQL telling one story).
+    reach, grew = {plan.get("anchor")}, True
+    while grew:
+        grew = False
+        for e in kept:
+            s, t = e["source_table"], e["target_table"]
+            if s in reach and t not in reach:
+                reach.add(t); grew = True
+            elif t in reach and s not in reach:
+                reach.add(s); grew = True
+    kept = [e for e in kept
+            if e["source_table"] in reach and e["target_table"] in reach]
+    plan["join_path"] = kept
+    plan["dead_edges_pruned"] = [
+        f"{e['source_table']}.{e['source_column']}->{e['target_table']}.{e['target_column']}"
+        for e in doomed]
+    plan.setdefault("why", []).extend(
+        f"dropped {e['source_table']}.{e['source_column']} -> "
+        f"{e['target_table']}.{e['target_column']}: {e['source_table']}."
+        f"{e['source_column']} holds no values, so this join can only match 0 rows"
+        for e in doomed)
+    return plan
+
 
 
 

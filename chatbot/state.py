@@ -52,6 +52,21 @@ class ChatState(TypedDict, total=False):
                                        # JSON-safe dict, see apps.access_management.services.
                                        # serialize_data_scope), forwarded to call_engine_node
                                        # as the X-Veda-Data-Scope header. None = no narrowing.
+    # The api tier's precomputed grounding facts (apps/chat/services.py), one bool each.
+    # DECLARED, or LangGraph drops them from the graph input without a word: measured
+    # 2026-09-25, message_mentions_data never reached classify_node at all — the
+    # "a follow-up in a session that has answered nothing, naming nothing in the data"
+    # guard it feeds had been dead since the value became a precomputed bool.
+    # Who is asking — the key for the only memory that crosses sessions (per-user session
+    # summaries, chatbot/memory/topics.py). Set by apps/chat/services.py; None for callers
+    # with no user (CLI), which simply have no cross-session memory. DECLARED — see above.
+    memory_in: Optional[Dict[str, Any]]  # chatbot/telemetry.py::memory_summary — what memory
+                                         # held when THIS turn started (the decision record)
+    user_id: Optional[str]
+    previous_topics: List[Dict[str, Any]]  # topics from the user's OTHER sessions, already
+                                           # filtered to this turn's authorised sources
+    message_mentions_data: Optional[bool]
+    message_names_only_values: Optional[bool]  # only data VALUES, no table/column word
     data_vocabulary: Optional[List[str]]  # words the scoped sources actually contain
                                        # (apps.query.data_vocabulary) — used ONLY to skip
                                        # the engine for a message that names none of them
@@ -68,6 +83,21 @@ class ChatState(TypedDict, total=False):
                                        # among irrelevant tables (measured: worklists_quote vs
                                        # list_of_values_listofvalue at 0.1503 vs 0.1502, then an
                                        # "ambiguous subject" clarify). {} / None = same as before.
+    # The structured conversation state for THIS turn, built by context_resolve_node from
+    # the frame AFTER the delta was applied (chatbot/memory/context.py). Carried to the
+    # engine in `flags`, alongside — never inside — the user's own words.
+    #
+    # IT MUST BE DECLARED HERE. LangGraph's StateGraph is typed by this TypedDict and
+    # silently DROPS any key a node returns that the schema does not name. This field was
+    # lost once (2026-09-23) and the symptom did not point at it at all: the whole
+    # conversation boundary went quiet — context_resolve_node still classified the delta
+    # correctly and still passed the user's words through untouched, but the context never
+    # reached call_engine_node, so every follow-up arrived at the engine as a bare fragment
+    # ("only the Nagpur ones"), was routed to RAG, and came back "The provided context does
+    # not contain information specific to Nagpur", which then overwrote the frame with a
+    # document entity and poisoned the rest of the conversation.
+    conversation_context: Optional[Dict[str, Any]]
+
     # ── supervisor decision ─────────────────────────────────────────────────
     action: str                        # "smalltalk" | "answer" | "clarify" | "followup"
     resolved_query: str                # the query actually sent to the engine
@@ -107,10 +137,34 @@ class ChatState(TypedDict, total=False):
     # None on any turn that used no context at all (a first question, smalltalk, recall),
     # which is exactly when there is nothing honest to show.
     context_used: Optional[Dict[str, Any]]
+    # chatbot.memory.context.ConversationContext payload, sent to the engine as
+    # flags.conversation_context. MUST stay declared here: StateGraph silently drops any key
+    # a node returns that this TypedDict does not declare, and losing this one turned every
+    # follow-up into a bare fragment (see SESSION_HANDOFF_2026-09-24.md §1).
+    conversation_context: Optional[Dict[str, Any]]
+    comparison: Dict[str, Any]         # chatbot.memory.frame.build_comparison — both sides of an
+                                       # active comparison; SESSION-level, read by memory_read_node
     pending_clarification: Dict[str, Any]  # {question, original_query, missing, turn_index} —
                                        # set when the engine asks, consumed by the next turn
     memory_reset: bool                 # set by memory_read_node on a "start over" match;
                                        # classify_node ends the turn on it (nodes.py::reset_node)
+    result_reference: Optional[Dict[str, Any]]  # chatbot/memory/reference.py — identities of the
+                                       # rows the user is looking at, read from Redis each turn.
+                                       # DECLARED or LangGraph silently drops it (see the
+                                       # conversation_context note: that exact trap disabled
+                                       # the whole memory boundary once).
+    # chatbot/memory/topics.py — the bounded index of earlier topics (≤5, most recent first),
+    # read from Redis by memory_read_node every turn ALREADY filtered to this turn's
+    # authorised sources, and written only by memory_write_node on an answered turn.
+    # DECLARED or LangGraph silently drops it (the conversation_context trap above).
+    topic_index: Optional[List[Dict[str, Any]]]
+    # THIS turn's return-to-topic decision, set by classify_node only:
+    #   {"kind": "restore", "topic": <index entry>}  — the message names ONE remembered
+    #                                                   non-current topic; replay it
+    #   {"kind": "ambiguous", "candidates": [...]}   — it names several; ask which
+    # None on every other turn. Reset to None by memory_read_node at the start of EVERY
+    # turn, so a route that skips classify's final return can never see a stale one.
+    topic_restore: Optional[Dict[str, Any]]
     last_result: Dict[str, Any]        # the ANSWERED result the user is currently looking at,
                                        # kept across turns so a presentation-only follow-up can
                                        # redraw it — engine_result is cleared every turn

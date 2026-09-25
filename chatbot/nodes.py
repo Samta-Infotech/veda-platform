@@ -20,10 +20,17 @@ import unicodedata
 from langchain_core.runnables import RunnableConfig
 
 from apps.query.data_vocabulary import mentions_the_data
+# The central function-word list (pleasantries, determiners, request verbs). Read, never
+# extended here: the return-to-topic matcher below uses it to set aside the words of a
+# message that name nothing, exactly as the vocabulary check does.
+from apps.query.data_vocabulary import _STOPWORDS as _FUNCTION_WORDS
 from apps.query.inference_client import InferenceClient, InferenceUnavailable
 
 from .llm import CHATBOT_CLASSIFY_MODEL, call_slm
 from .memory import frame as memory_frame
+from .memory import reference as memory_reference
+from . import telemetry as turn_telemetry
+from .memory import topics as memory_topics
 from .memory.classify import DELTA_TYPES, classify_delta, parse_delta_response
 from .memory.context import ConversationContext
 from .memory.store import MemoryStore
@@ -35,6 +42,8 @@ from .prompts import (
     IDENTITY_REPLY,
     FOLLOWUP_SYSTEM_PROMPT,
     STANDALONE_CHECK_SYSTEM,
+    CARRYOVER_CHECK_SYSTEM,
+    build_carryover_check_user_prompt,
     build_followup_user_prompt,
     build_smalltalk_system_prompt,
     build_standalone_check_user_prompt,
@@ -73,9 +82,25 @@ _DATA_QUESTION_HINTS = re.compile(
 # follow-up (the docstring below explains why a fixed word list can't do that);
 # it only needs to catch messages that couldn't possibly qualify, so the model
 # call is skipped for those instead of trusted to always get them right.
+#
+# 2026-09-24: the third-person pronouns (`they|them|their|theirs|its`) and the
+# pronominal `<det> one(s)` shapes were ADDED, after measuring that the single
+# commonest back-referential follow-up in a real 25-turn drill session — "What are
+# their prices?", "How much are they?", "Which one is the cheapest?" — contained
+# not one word on this list and so could not reach ANY of the second-opinion gates
+# that read it. `it` was here; `its`, `they` and `their` were not. This is the one
+# central list for anaphoric language in this package, so the words were added here
+# rather than in a new list next to the new gate.
 _REFERENTIAL_HINTS = re.compile(
-    r"\b(that|this|it|those|these|same|again|more|other|another|previous|"
-    r"above|below|instead|also|too|earlier|before|last one|the one)\b",
+    r"\b(that|this|it|its|they|them|their|theirs|those|these|same|again|more|"
+    r"other|another|previous|above|below|instead|also|too|earlier|before|"
+    # One optional word between the determiner and "one(s)": "the second one", "the 3rd
+    # one", "the cheapest one". Without it an ordinal or superlative pointer at the previous
+    # result contained no word on this list, so it could reach neither the back-reference
+    # gate nor result-reference resolution (chatbot/memory/reference.py) and ran as a fresh
+    # question. Every use of this pattern only OPENS a stricter check or RESTRICTS a
+    # downgrade, so widening it cannot by itself make a turn carry context.
+    r"(?:the|last|first|next|which|each|any|that|this|other)\s+(?:[a-z0-9]+\s+)?ones?)\b",
     re.IGNORECASE,
 )
 
@@ -142,6 +167,29 @@ def _depends_on_history(message: str, history: list) -> bool:
     verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5,
                        model=CHATBOT_CLASSIFY_MODEL, purpose="standalone_check")
     return bool(verdict) and "dependent" in verdict.strip().lower()
+
+
+def _carries_over_subject(message: str, history: list, frame: dict) -> bool:
+    """Does this message stand in for the frame's records with a pronoun/demonstrative
+    instead of naming a subject of its own?
+
+    Second opinion on the SUPERVISOR's verdict, used only where that verdict is
+    `answer` + `new_topic` — the one combination that both drops the conversation's
+    context and wipes the drill stack. See chatbot/prompts/carryover_check.py for the
+    measurement that motivated a dedicated prompt (and for why standalone_check's was
+    measured and rejected for this job: 2 of 8 self-contained CONTROL questions came
+    back 'dependent' there, and a false positive here pollutes a brand-new question
+    with the previous subject).
+
+    Fails closed to False — "trust the supervisor", i.e. exactly today's behaviour —
+    on an empty/failed/unrecognised reply, so an SLM outage can never make this worse
+    than not having the gate. Callers apply the cheap `_REFERENTIAL_HINTS` pre-filter
+    first, so no message without anaphoric language ever pays for this call."""
+    verdict = call_slm(CARRYOVER_CHECK_SYSTEM,
+                       build_carryover_check_user_prompt(frame, message, history),
+                       max_tokens=5, model=CHATBOT_CLASSIFY_MODEL,
+                       purpose="carryover_check")
+    return bool(verdict) and "carryover" in verdict.strip().lower()
 
 # Deterministic fast path for the overwhelming majority of smalltalk: pure
 # greetings/thanks/farewells with nothing else in the message. Tight, anchored
@@ -291,6 +339,13 @@ _RECALL_PATTERNS = (
         r"(?:\s+(?:did\s+(?:that|it|this)\s+(?:return|come\s+back)"
         r"|were\s+(?:there|returned)|(?:did\s+)?(?:that|it|this)\s+return))?"
         r"\s*[.,!?]*\s*$", re.IGNORECASE)),
+    # A question about the conversation's TOPICS ("what have we looked at?") — answered
+    # from the topic index (chatbot/memory/topics.py), never the engine.
+    ("topics", re.compile(
+        r"^\s*(?:so\s+)?(?:what|which\s+(?:topics|things|tables))\s+(?:have|did)\s+we\s+"
+        r"(?:look(?:ed)?\s+at|talk(?:ed)?\s+about|discuss(?:ed)?|cover(?:ed)?|"
+        r"been\s+looking\s+at)(?:\s+(?:so\s+far|earlier|before|today))?"
+        r"\s*[.,!?]*\s*$", re.IGNORECASE)),
     ("trail", re.compile(
         r"^\s*(?:(?:so\s+)?what\s+did\s+you\s+do"
         r"|how\s+did\s+you\s+(?:get|work\s+out|arrive\s+at)\s+(?:that|this|it)"
@@ -421,6 +476,9 @@ _PLOT_RE = re.compile(
 # Verbs, not nouns — a one-word "export" is an instruction and nothing else, unlike a
 # one-word "table" or "chart".
 _UNAMBIGUOUS_RENDER_VERBS = frozenset({"export", "download"})
+# The renderings represent_node can draw — the closed set both the regex path and the
+# model's typed `render` output are held to.
+_RENDER_KINDS = frozenset({"table", "chart", "pie", "bar", "line", "csv"})
 
 _CHART_KIND_ALIASES = {"column": "bar", "donut": "pie", "doughnut": "pie",
                        "graph": "chart", "plot": "chart", "visualize": "chart",
@@ -540,6 +598,17 @@ _DRILL_UP_RE = re.compile(
     r"go\s+up(\s+(a|one)\s+level)?|(zoom|step)\s+out|previous(\s+(level|view|step))?|"
     r"undo(\s+(that|it|the\s+(last|previous)\s+filter))?|"
     r"remove\s+(that|the\s+(last|previous))\s+filter)\s*[.,!?]*\s*$",
+    re.IGNORECASE,
+)
+
+# The SHAPE of a narrowing follow-up — "only the Nagpur ones", "just the FULL ones",
+# "what about SEMI". Used only as a tie-breaker when the model could not label a turn
+# (delta `ambiguous`) and a clarification from a FAILED turn is pending: nobody answers
+# "what does 'pool' refer to?" with "only the Nagpur ones", so this shape continues the
+# live frame instead of being glued onto the dead question. A bare answer ("Nagpur",
+# "the amenities column") does not match and still completes the clarification.
+_CONTINUATION_SHAPE_RE = re.compile(
+    r"^\s*(and\s+)?(only|just)\s+(?!if\b|when\b)(the\s+)?\S.*$|^\s*(and\s+)?what\s+about\s+\S",
     re.IGNORECASE,
 )
 
@@ -729,6 +798,154 @@ def _content_words(text) -> set:
     return out
 
 
+# ── Return to an earlier topic ───────────────────────────────────────────────────────────
+#
+# "go back to the properties" after the conversation moved on to payments. The topic index
+# (chatbot/memory/topics.py) holds a snapshot of each earlier topic; this decides whether a
+# message asks to RETURN to one of them. Deterministic, from structured evidence — the
+# stored topics' own entity, display name, root question and filter values — plus two
+# closed, entity-free word sets:
+#
+#   _RETURN_WORDS        the grammar of returning. Without one of these a message naming
+#                        an earlier topic is a NEW question about it ("show payment
+#                        transactions by month"), and replaying the old snapshot would
+#                        answer something the user did not ask.
+#   _CONVERSATION_WORDS  words that name a piece of the conversation rather than data
+#                        ("the property ANALYSIS", "that TOPIC"), and the conversational
+#                        verbs the central function-word list lacks ("LET's", "GOING").
+#                        Set aside, like the function words: they cannot identify a topic.
+#
+# Every other word must be accounted for by ONE topic's own words. A message with anything
+# left over ("go back to the payments in 2024") is not a pure return — it carries a request
+# of its own — and falls through to the normal path unchanged. Fails closed at every step:
+# no return word, nothing left to match on (plain "go back" — the drill-up path's), no
+# topic matched, or the CURRENT topic among the matches → None, and the turn is handled
+# exactly as it was before this existed.
+_RETURN_WORDS = frozenset({"back", "return", "revisit", "resume", "earlier", "previous",
+                           "again", "continue"})
+_CONVERSATION_WORDS = frozenset({"analysis", "topic", "topics", "question", "questions",
+                                 "query", "queries", "discussion", "conversation", "view",
+                                 "report", "results", "result", "numbers", "data", "ones",
+                                 "let", "lets", "going"})
+
+# The operation a restore sends to the engine and records as this turn's delta. From the
+# closed set (chatbot/prompts/delta_types.py). WHY "drill_up", recorded because it was an
+# explicit design question:
+#   · At the engine boundary `operation` has exactly ONE meaning (memory/context.py,
+#     veda/pipeline.py:270): "the remembered shape is being REPLAYED, not replaced". A
+#     restore is precisely that — the snapshot's own root question re-asked with the
+#     snapshot's own filters and grouping. Every other member of the set is inert there,
+#     and the root question restates its grouping in words ("distribution ... by facing"),
+#     so the engine's shape rule (pipeline.py:1980-1984) then reads it as a NEW grouping
+#     request and drops a remembered group column the user never said (corner_property):
+#     a filtered restore would come back as raw rows — B2, measured 2026-09-25 on this
+#     exact base question.
+#   · The conversation-layer side effects of drill_up do NOT happen: the pop in
+#     context_resolve_node is never reached (the restore branch returns first), and
+#     memory_write_node keys the restore's own handling (base_query, stack) on
+#     `topic_restore`, not on this label. So the label is ONLY what the engine sees; if the
+#     engine ever grows a distinct "replay" operation, change it here and nothing else.
+_RESTORE_OPERATION = "drill_up"
+
+
+def _topic_forms(token: str) -> set:
+    """_content_words' number folding, plus the -y/-ies pair it does not fold
+    ("property" / "properties") — a topic is named in either number."""
+    forms = _content_words(token)
+    if token.endswith("ies") and len(token) > 4:
+        forms |= _content_words(token[:-3] + "y")
+    elif token.endswith("y") and len(token) > 3:
+        forms |= _content_words(token[:-1] + "ies")
+    return forms
+
+
+def _topic_words(entry: dict) -> set:
+    """Every word a remembered topic can be named by: its table, its business name, the
+    user's own root question, and the values it was narrowed to."""
+    texts = [entry.get("entity"), entry.get("entity_display"), entry.get("base_query")]
+    texts += [f.get("value") for f in (entry.get("filters") or []) if isinstance(f, dict)]
+    words: set = set()
+    for text in texts:
+        for w in _content_words(text):
+            words |= _topic_forms(w)
+    return words
+
+
+def _match_remembered_topic(message: str, index, frame: dict) -> Optional[dict]:
+    """{"kind": "restore", "topic": entry} | {"kind": "ambiguous", "candidates": [...]} |
+    None. See the block comment above for the rule; `index` is memory_read_node's
+    already-authorised topic index, so a revoked topic can never be matched."""
+    if not index:
+        return None
+    tokens = [t for t in _WORD_SPLIT_RE.split((message or "").lower()) if len(t) >= 3]
+    if not any(t in _RETURN_WORDS for t in tokens):
+        return None
+    residual = [t for t in tokens if t not in _RETURN_WORDS and t not in _FUNCTION_WORDS
+                and t not in _CONVERSATION_WORDS]
+    if not residual:
+        return None                 # plain "go back": a drill-up of the CURRENT topic
+    matched = [e for e in index if isinstance(e, dict) and e.get("entity")
+               and all(_topic_forms(t) & _topic_words(e) for t in residual)]
+    if not matched:
+        return None
+    current = memory_topics.topic_key(frame) if (frame or {}).get("entity") else None
+    if current is not None and any(memory_topics.topic_key(e) == current for e in matched):
+        # The message names where the conversation already IS. Not a return — whatever it
+        # is, the existing path decides it.
+        return None
+    if len(matched) == 1:
+        return {"kind": "restore", "topic": matched[0]}
+    return {"kind": "ambiguous", "candidates": matched}
+
+
+def _match_named_document(message: str, index, frame: dict) -> Optional[dict]:
+    """{"kind": "document", "topic": entry} when the message NAMES a document this
+    conversation already discussed and the conversation is not in it now; else None.
+
+    The return path above needs a return word because a table topic named in a new
+    question ("show payment transactions by month") is a new question about that table.
+    A document is different: naming it IS the anchor — "what is the fee for repair in the
+    maintenance policy?" asks the policy, whatever the conversation did in between.
+    Measured 2026-09-25 (demo X1): after one database question that turn went to the
+    federated route and answered from a structured fee table, because nothing told the
+    engine the conversation had a maintenance-policy thread to go back to.
+
+    "Named" is frame.py's own test (_already_names): every distinctive word of the
+    document's name appears in the message — the stored name, not a word list. Exactly one
+    document must match; two is left to the existing path rather than guessed."""
+    if not index:
+        return None
+    docs = [e for e in index if isinstance(e, dict) and e.get("entity")
+            and e.get("entity_is_document")
+            and memory_frame._already_names(message or "", str(e["entity"]))]
+    if len(docs) != 1:
+        return None
+    if (memory_frame.is_document_frame(frame)
+            and memory_topics.topic_key(frame) == memory_topics.topic_key(docs[0])):
+        return None                 # already in that document — the normal path anchors it
+    return {"kind": "document", "topic": docs[0]}
+
+
+def _returns_to_current_document(message: str, frame: dict) -> bool:
+    """Is this a pure "go back to <the document we are already in>"?
+
+    Pure means the same thing as in _match_remembered_topic: a return word, and every
+    other word accounted for by the document's name or set aside as grammar. "what does
+    the maintenance policy say again about fees" carries a question of its own and is not
+    one. Measured 2026-09-25: this reached the engine as a question and came back as a
+    bare "Sources: (maintenance_policy.docx)" with no answer in it."""
+    if not memory_frame.is_document_frame(frame) or not frame.get("entity"):
+        return False
+    tokens = [t for t in _WORD_SPLIT_RE.split((message or "").lower()) if len(t) >= 3]
+    if not any(t in _RETURN_WORDS for t in tokens):
+        return False
+    if not memory_frame._already_names(message, str(frame["entity"])):
+        return False
+    doc_words = set(_WORD_SPLIT_RE.split(str(frame["entity"]).lower()))
+    return not [t for t in tokens if t not in _RETURN_WORDS and t not in _FUNCTION_WORDS
+                and t not in _CONVERSATION_WORDS and t not in doc_words]
+
+
 def _is_social(message: str) -> bool:
     """Is this conversational rather than analytical? Wider than the canned test.
 
@@ -828,6 +1045,17 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # memory layer already stored. Requires a frame with an entity — without one there
     # is no "last query" to describe, so it falls through to the normal path.
     recall_kind = _recall_kind(message)
+    if recall_kind == "topics":
+        # Answered from the topic index, which can hold topics even when THIS source has no
+        # frame (they may belong to another source the caller can still see). With an empty
+        # index recall_node says there is nothing to list.
+        logger.info("classify_node: recall question about the conversation's topics — "
+                    "answering from the topic index, engine not called: %r", message)
+        return {"action": "recall", "resolved_query": None, "recall_kind": "topics",
+                "needs_clarification": False, "clarification_question": None,
+                "engine_unavailable": False, "pending_clarification": {},
+                "engine_result": {}, "sql": None, "rows": None, "status": None,
+                "context_used": None}
     if recall_kind and not frame.get("entity"):
         # Nothing to recall — but "what sql did you run" still has an honest, instant
         # answer, and the engine has none. Measured twice: 62s after a "start over", and
@@ -904,6 +1132,18 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # one: see _is_clarification_answer. Requires the frame to actually hold the slot, so
     # it can never fire on a session with nothing to re-shape.
     shape_change = memory_frame.detect_shape_delta(frame, message, explicit_only=True)
+    # A request to RETURN to an earlier topic ("go back to the properties"). Deterministic,
+    # from the authorised topic index; None on every message that is not one.
+    topic_hit = _match_remembered_topic(message, state.get("topic_index") or [], frame)
+    if topic_hit is None:
+        # Not a topic of THIS conversation — perhaps of an earlier one ("continue the
+        # property analysis" in a new chat). Same matcher, same fail-closed ambiguity.
+        topic_hit = _match_remembered_topic(message, state.get("previous_topics") or [],
+                                            frame)
+    if topic_hit is None:
+        # A question that names a document this conversation already read (no return word
+        # needed — see _match_named_document).
+        topic_hit = _match_named_document(message, state.get("topic_index") or [], frame)
 
     _pending_raw = state.get("pending_clarification")
     pending = (_pending_raw.get("original_query")
@@ -911,10 +1151,11 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     is_smalltalk_or_fast_path = bool(
         deterministic_smalltalk or recall_kind or presentation_kind or shape_change
         or _RESET_RE.match(message) or _DRILL_UP_RE.match(message)
-        or _RUNTIME_CONTEXT_RE.match(message))
+        or _RUNTIME_CONTEXT_RE.match(message) or topic_hit)
     if pending:
-        if _is_clarification_answer(message, recall_kind, presentation_kind,
-                                    deterministic_smalltalk, bool(shape_change)):
+        if not topic_hit and _is_clarification_answer(message, recall_kind, presentation_kind,
+                                                      deterministic_smalltalk,
+                                                      bool(shape_change)):
             logger.info("classify_node: a clarification is pending and this message "
                         "answers it: %r", message)
             return {"action": "clarify_reply", "resolved_query": None, "sql": None,
@@ -985,6 +1226,27 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                 "clarification_question": None, "engine_unavailable": False,
                 "pending_clarification": {}, "engine_result": {}, "sql": None,
                 "rows": None, "status": None, "context_used": None}
+    elif not topic_hit and _returns_to_current_document(message, frame):
+        logger.info("classify_node: a return to the document the conversation is already "
+                    "in — answering from memory, engine not called: %r", message)
+        return {"action": "recall", "resolved_query": None,
+                "recall_kind": "already_on_document", "needs_clarification": False,
+                "clarification_question": None, "engine_unavailable": False,
+                "pending_clarification": {}, "engine_result": {}, "sql": None,
+                "rows": None, "status": None, "context_used": None}
+    elif topic_hit:
+        # RETURN TO AN EARLIER TOPIC — deterministic, no model call. context_resolve_node
+        # restores the snapshot (or, when several topics match, asks which). Decided before
+        # the drill-up branches below, which it can never collide with: a message this
+        # matches has named a remembered NON-current topic, which a bare "go back" (the
+        # drill-up path) by construction does not.
+        action = "followup"
+        delta_type = _RESTORE_OPERATION if topic_hit["kind"] == "restore" else None
+        logger.info("classify_node: return to an earlier topic (%s) — %s: %r",
+                    topic_hit["kind"],
+                    [memory_topics.topic_key(e) for e in
+                     ([topic_hit["topic"]] if topic_hit.get("topic")
+                      else topic_hit["candidates"])], message)
     elif _DRILL_UP_RE.match(message) and not state.get("drill_stack"):
         # "go back" with nothing to go back FROM. Previously this fell through to the
         # model and then to the ENGINE: measured 2026-09-21 on the document source,
@@ -1013,7 +1275,6 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         delta_type = "drill_up"
         logger.info("classify_node: deterministic drill_up match, message=%r", message)
     else:
-        _emit(config, "supervisor_classify", "Understanding your message...")
         raw = call_slm(
             build_supervisor_system_prompt(frame),   # built fresh each call so "today" is always
                                                       # current; includes the delta addendum only
@@ -1023,6 +1284,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             purpose="classify",
         )
         action = "answer"
+        model_render = None
         if raw:
             match = _JSON_RE.search(raw)
             if match:
@@ -1031,6 +1293,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                     candidate = parsed.get("action")
                     if candidate in _VALID_ACTIONS:
                         action = candidate
+                    model_render = parsed.get("render")
                 except Exception:
                     logger.warning("classify_node: could not parse LLM output: %r", raw)
             if frame.get("entity"):
@@ -1043,6 +1306,29 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                     delta_field = _dfield
                     delta_value = _slots[0] if _slots else ""
                     delta_type = dt
+        # THE MODEL'S TYPED RENDER REQUEST (plan step 7). The whole-message regexes above
+        # stay the fast path; this catches the phrasings they miss — the harness's own
+        # recorded gaps: "can i see that as a chart", "draw it", "show me a graph of
+        # that", "as a bar graph instead". The model only NAMES a rendering; code decides
+        # whether to honour it, and fails closed:
+        #   · the kind must be one of the closed set the regex path produces;
+        #   · there must be a previous result with rows to redraw, not a document;
+        #   · the message must name NOTHING in the data (message_mentions_data is False,
+        #     the api tier's vocabulary check). A message that names data ("the sales as
+        #     a bar chart") is a data question and goes to the engine as before; an
+        #     undecidable check (None) never honours the model.
+        # Presentation only ever re-renders — it cannot change the analysis or memory.
+        _render = _CHART_KIND_ALIASES.get(str(model_render or "").lower(),
+                                          str(model_render or "").lower())
+        if (_render in _RENDER_KINDS and previous_result.get("rows")
+                and not memory_frame.is_document_frame(frame)
+                and state.get("message_mentions_data") is False):
+            logger.info("classify_node: model asked to re-render the previous result as "
+                        "%s — engine not called: %r", _render, message)
+            return {"action": "represent", "resolved_query": None,
+                    "needs_clarification": False, "clarification_question": None,
+                    "engine_unavailable": False, "viz_override": _render,
+                    "pending_clarification": {}, "context_used": None}
 
     # Deliberately does NOT run _depends_on_history for every "smalltalk"
     # verdict: a message with no referential language at all (_REFERENTIAL_HINTS)
@@ -1103,8 +1389,105 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         )
         action = "followup"
 
+    # Computed at most ONCE per turn and only when something below actually asks for
+    # it — two different branches need the same verdict and neither should pay for a
+    # second round-trip (nor should any turn that reaches neither pay for one at all).
+    _carryover_cache: list = []
+
+    def _carryover() -> bool:
+        if not _carryover_cache:
+            _carryover_cache.append(
+                bool(history) and bool(frame.get("entity"))
+                and bool(_REFERENTIAL_HINTS.search(message))
+                and _carries_over_subject(message, history, frame))
+        return _carryover_cache[0]
+
+    # THE BACK-REFERENCE BACKSTOP. `answer` + `new_topic` is the single verdict that
+    # discards the conversation: context_resolve_node's `referential` is False for it,
+    # so ConversationContext.from_frame gets carry_state=False and the frame's entity
+    # and filters never leave this process — AND memory_write_node's
+    # `reset = delta_type == "new_topic"` empties the drill stack on the way out. The
+    # turn therefore runs as a brand-new standalone question AND destroys the path the
+    # user had drilled, both silently.
+    #
+    # Measured 2026-09-24 (evaluation/drilldown_l7/): over a real 25-turn drill session
+    # the drill stack never left 0 on ANY turn, and a 16-message / 4-family probe of the
+    # SUPERVISOR itself (the merged call that actually produces these labels — NOT the
+    # classify_delta fallback) reproduced why, 2/2 runs per message: "What are their
+    # prices?", "How much are they?", "What do these cost?", "Which one is the
+    # cheapest?", "Which one has the largest area?" and "Which of these has the lowest
+    # price per square foot?" ALL came back `answer` + `new_topic`. The supervisor is
+    # not unsure about these — it is confidently wrong, which is why the existing
+    # `ambiguous` handling never caught them.
+    #
+    # The outcome is DOWNGRADED, never upgraded: `ambiguous` is the honest label for
+    # "this continues the frame but which operation is unknown". It is what makes the
+    # rest of the machinery behave correctly on its own terms — the frame's context
+    # travels (referential is now True), `hold_subject_on_unplaced_turn` protects the
+    # subject, the drill stack is neither reset nor pruned, and memory_write_node's
+    # deterministic `newly_added_filter` still pushes a level when the SQL that actually
+    # ran added a filter. No delta this layer did not observe is ever invented.
+    #
+    # Four conditions, each one there so this can never withhold or pollute a real
+    # question: a frame must exist (nothing to carry otherwise), there must be history,
+    # the message must contain anaphoric language at all (_REFERENTIAL_HINTS — the cheap
+    # deterministic pre-filter, so a self-contained question never pays for the call),
+    # and the dedicated second opinion must AGREE. That last gate was measured on the
+    # same 24 back-references and 8 self-contained controls: 20/24 caught, 0/8 controls
+    # misfired (see chatbot/prompts/carryover_check.py). It fails closed to today's
+    # behaviour on any SLM failure.
+    if (action == "answer" and delta_type == "new_topic" and _carryover()):
+        logger.warning(
+            "classify_node: supervisor said answer/new_topic but %r carries the frame's "
+            "subject over (entity=%r) — handling it as an unplaced follow-up so the "
+            "conversation's context is not silently discarded", message, frame.get("entity"))
+        action = "followup"
+        delta_type = "ambiguous"
+
+    # A BARE VALUE WITH A CONVERSATION IN PROGRESS. A message that names only data values
+    # ("Nagpur", "EAST", "DEBIT") and no table or column has no subject of its own, so it
+    # can only narrow the conversation it arrives in — the same reasoning as a pointer.
+    # The evidence is the tenant's own vocabulary (apps/query/data_vocabulary.py::
+    # names_only_values: every content word a sampled VALUE, none a table/column word),
+    # not a phrase list and not a second model call. Measured 2026-09-25: after
+    # "distribution of properties by facing", a bare "Nagpur" was labelled answer/ambiguous
+    # on one run and followup on the next; the first carried no context and was grounded
+    # on a city/phone-code lookup table instead of the properties being discussed.
+    # Downgraded to the honest label, as above; None (undecidable) changes nothing, and a
+    # word naming a table ("vendors") is a subject, so it is never caught here.
+    # Both labellings that throw the conversation away are covered: answer/new_topic and
+    # FOLLOWUP/new_topic — measured 2026-09-25 (edge E7): "what about Pune?" after a Nagpur
+    # drill came back followup/new_topic, and memory_write_node's `reset` on new_topic wiped
+    # the drill path, so the next "go back" had nothing to return to. A message naming only a
+    # value is never a new topic while a conversation is in progress.
+    if (action in ("answer", "followup") and delta_type in ("new_topic", "ambiguous")
+            and not (action == "followup" and delta_type == "ambiguous")
+            and frame.get("entity") and history
+            and state.get("message_names_only_values") is True):
+        logger.info("classify_node: %r names only data values while the conversation is "
+                    "on %r — continuing it rather than starting over",
+                    message, frame.get("entity"))
+        action = "followup"
+        delta_type = "ambiguous"
+
+    # REMOVED 2026-09-24 — a second, broader frame-preservation guard sat here
+    # (`_has_frame_continuation_evidence`). Its anaphora and continuation-shape arms
+    # duplicated the measured backstop above; its third arm — "the message shares a
+    # content word with the frame, so it continues the frame" — is the positive
+    # direction of `_mentions_frame_subject`, which is NOT what that helper establishes.
+    # Its own docstring defines the INVERSE test: a message sharing no word with the
+    # frame cannot be about the data, used to confirm a smalltalk verdict. Read
+    # forwards it makes any new question that happens to name the same table a
+    # follow-up, which then carries the previous turn's filters into it.
+    # Measured: it regressed the pre-existing
+    # tests/test_clarification_flow.py::test_a_message_that_is_not_an_answer_is_never_swallowed
+    # ("show me the top 5 cities by number of assets" -> followup, frame entity
+    # assets_asset) and two of the carry-over guard's own controls. Same-entity
+    # refinements without anaphora ("how many active users?") remain unhandled, which
+    # is the pre-existing behaviour and wants its own measurement, not this.
+
     if (action in ("followup", "answer") and not frame.get("entity")
-            and _is_bare_referential(message)):
+            and not topic_hit and _is_bare_referential(message)):
         # Universal backstop, independent of HOW `action` got here (the LLM's
         # own direct verdict, OR any override above): a message that is
         # PURELY referential ("other", "that", "it", ...) with no data-
@@ -1172,7 +1555,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # follow-ups, and "the other ones" typed into a session that has answered nothing
     # is still caught.
     _answered_before = bool(state.get("last_result") or state.get("engine_result"))
-    if (action == "followup" and not frame.get("entity")
+    if (action == "followup" and not frame.get("entity") and not topic_hit
             and not _answered_before and _mentions is False):
         logger.info("classify_node: a follow-up in a session that has answered nothing, "
                     "naming nothing in the scoped data — answering without the engine: "
@@ -1207,16 +1590,63 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # failed one is not. So the frame wins and the dead slot is dropped.
     #
     # Both conditions are required. Without a frame there is nothing to continue, so the
-    # pending request is still the better reading; and a delta of new_topic/ambiguous is
-    # not evidence of anything, so those are left alone.
+    # pending request is still the better reading; and a delta of new_topic is not
+    # evidence of a continuation, so it is left alone.
+    #
+    # `ambiguous` is the model saying it could not place the turn — no evidence either
+    # way — and leaving it to the pending slot made the outcome depend on the model's
+    # label: measured 2026-09-24, the SAME "only the Nagpur ones" after a refused
+    # "only the ones with a swimming pool" came back `replace` in one run (drill kept)
+    # and `ambiguous` in another (glued to the dead question, sent with no context, and
+    # refused). For `ambiguous` only, the message's own shape decides: a narrowing
+    # follow-up continues the frame; anything else still answers the clarification.
     elif (action == "clarify_reply" and pending and frame.get("entity")
-            and delta_type in ("refine", "replace", "remove", "drill_down", "drill_up")):
+            and (delta_type in ("refine", "replace", "remove", "drill_down", "drill_up")
+                 or (delta_type in ("ambiguous", None)
+                     and _CONTINUATION_SHAPE_RE.match(message or "")))):
         logger.info("classify_node: a clarification was pending from a FAILED turn, but "
                     "%r continues the live frame (%s on %r) — dropping the pending "
                     "request and handling this as a followup",
                     message, delta_type, frame.get("entity"))
         action = "followup"
         pending = None
+
+    # The same reading, reached by evidence this layer gathers rather than by the
+    # supervisor's own delta. `new_topic`/`ambiguous` really are not evidence of
+    # anything on their own (which is why the branch above leaves them alone) — but a
+    # CONFIRMED back-reference to the live frame is: a message that stands in for the
+    # frame's records with a pronoun is continuing THAT question, not supplying a bare
+    # value to complete a dead one.
+    #
+    # Measured in the same 25-turn run: 5 turns (5, 6, 7, 9, 13 — "What is its current
+    # market status?", "Where is it located?", "How many bedrooms does it have?",
+    # "Which of these has the lowest price per square foot?", "Which properties are no
+    # longer available?") arrived here as `clarify_reply` with a slot armed by an
+    # EARLIER refused turn, and were glued onto that dead question.
+    #
+    # `_is_clarification_answer` has already run, far above, and returns immediately for
+    # every shape it is certain IS a bare value answering the question — so nothing that
+    # reaches this line was recognisable as one, and the risk of stealing a genuine
+    # clarification answer is bounded by that.
+    elif (action == "clarify_reply" and pending and frame.get("entity")
+            and delta_type in ("new_topic", "ambiguous") and _carryover()):
+        logger.info("classify_node: a clarification was pending from a FAILED turn, but "
+                    "%r carries the live frame's subject over (%r) — dropping the "
+                    "pending request and handling this as a followup",
+                    message, frame.get("entity"))
+        action = "followup"
+        delta_type = "ambiguous"
+        pending = None
+
+    # Do not expose classification as user-facing "thinking" for small talk.
+    # The classifier must run for uncanned small talk (for safety: a real data
+    # question must not be swallowed), but once the final action is known there
+    # is no useful work for the user to watch. Emitting before the SLM call made
+    # messages such as "okay"/"hola" show a thinking step even though the graph
+    # immediately took the smalltalk -> END branch. Emit only after all
+    # smalltalk/data overrides have settled the final action.
+    if action != "smalltalk":
+        _emit(config, "supervisor_classify", "Understanding your message...")
 
     logger.info("classify_node: action=%s message=%r", action, message)
     # Reset per-turn output fields — the checkpointer persists the FULL state
@@ -1261,6 +1691,9 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # survives a turn it did not answer is what compounded.
         "pending_clarification": (state.get("pending_clarification") or {})
         if action == "clarify_reply" else {},
+        # Only when the turn is still a follow-up after every override above — nothing else
+        # may act on it. memory_read_node clears it at the start of every turn.
+        "topic_restore": topic_hit if action == "followup" else None,
     }
 
 
@@ -1400,6 +1833,35 @@ def recall_node(state: ChatState) -> dict:
     format_reply directly."""
     kind = state.get("recall_kind") or "trail"
     frame = state.get("frame") or {}
+    if kind == "topics":
+        # The topic index, as memory_read_node loaded it — already filtered to this turn's
+        # authorised sources, so a revoked source's topic is never listed.
+        _topics = [e for e in (state.get("topic_index") or []) if isinstance(e, dict)]
+        if _topics:
+            _lines = []
+            for _i, _e in enumerate(_topics, 1):
+                _src = _source_name(state, _e)
+                _lines.append(f"{_i}. {memory_topics.display_name(_e)}"
+                              + (f" — {_src}" if _src else ""))
+            _reply = ("Here's what we've looked at so far, most recent first:\n"
+                      + "\n".join(_lines)
+                      + "\n\nSay \"go back to …\" with one of these and I'll pick it up again.")
+        elif state.get("previous_topics"):
+            _lines = []
+            for _i, _e in enumerate(state.get("previous_topics") or [], 1):
+                _src = _source_name(state, _e)
+                _lines.append(f"{_i}. {memory_topics.display_name(_e)}"
+                              + (f" — {_src}" if _src else ""))
+            _reply = ("Nothing yet in this conversation. In your earlier conversations "
+                      "we looked at:\n" + "\n".join(_lines)
+                      + "\n\nSay \"continue with …\" or \"go back to …\" with one of "
+                        "these and I'll pick it up again with today's data.")
+        else:
+            _reply = ("We haven't looked at anything yet in this conversation — ask me "
+                      "something about your data to get started.")
+        return {"reply_text": _reply, "status": "answered", "needs_clarification": False,
+                "resolved_query": "", "engine_unavailable": False,
+                "history": _turn_delta(state, _reply)}
     if kind == "presentation_not_applicable":
         _what = frame.get("entity_display") or frame.get("entity") or "a document"
         _reply = (f"There's nothing to chart here — this answer came from {_what}, "
@@ -1413,6 +1875,13 @@ def recall_node(state: ChatState) -> dict:
         _reply = (f"That one doesn't apply here — this answer came from {_what}, "
                   f"not a table of rows, so there's no ordering or row count to change. "
                   f"Ask me something else about it and I'll look it up.")
+        return {"reply_text": _reply, "needs_clarification": False,
+                "resolved_query": "", "engine_unavailable": False,
+                "history": _turn_delta(state, _reply)}
+    if kind == "already_on_document":
+        _what = frame.get("entity_display") or frame.get("entity") or "that document"
+        _reply = (f"We're already on {_what} — ask me anything about it and I'll look "
+                  f"it up.")
         return {"reply_text": _reply, "needs_clarification": False,
                 "resolved_query": "", "engine_unavailable": False,
                 "history": _turn_delta(state, _reply)}
@@ -1606,6 +2075,13 @@ def memory_read_node(state: ChatState) -> dict:
 
     if _RESET_RE.match(message):
         MemoryStore.reset(tenant, session_id)
+        # ...and in the one memory that crosses sessions: "start over" asked to forget
+        # this conversation, so an earlier-session lookup must not bring it back.
+        if state.get("user_id"):
+            MemoryStore.write_user_sessions(
+                tenant, state.get("user_id"),
+                memory_topics.without_session(
+                    MemoryStore.read_user_sessions(tenant, state.get("user_id")), session_id))
         logger.info("memory_read_node: deterministic reset match, message=%r", message)
         # `memory_reset` ends the turn here (classify_node reads it first). Without it
         # the wipe was undone by its own turn: "start over" carried on to the engine,
@@ -1614,7 +2090,10 @@ def memory_read_node(state: ChatState) -> dict:
         # back at version 1 with an entity in it, so the reset had no lasting effect.
         # Sending "start over" to a SQL engine was never meaningful anyway.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": True,
-                "pending_clarification": {}, "last_result": {}, "comparison": {}}
+                "pending_clarification": {}, "last_result": {}, "comparison": {},
+                "result_reference": None, "topic_index": [], "topic_restore": None,
+                "previous_topics": [],
+                "memory_in": turn_telemetry.memory_summary({}, [], None, [], [])}
 
     # Type-guarded, not just falsiness-guarded: a Redis key holding a JSON string or
     # list (a bad write, a manual edit, a format change) previously raised
@@ -1660,6 +2139,10 @@ def memory_read_node(state: ChatState) -> dict:
         # what it destroys, never in what it catches. A frame with no recorded source has
         # no scoped key to delete, so that case still wipes the session.
         MemoryStore.reset(tenant, session_id, source_id=_revoked)
+        # The reset above already dropped the revoked source's topics from the index; the
+        # other sources' topics are still the user's to return to, still filtered here.
+        _topics = [e for e in MemoryStore.read_topics(tenant, session_id)
+                   if _frame_still_authorised(e, state)]
         # engine_result too. classify_node's presentation check reads
         # `last_result or engine_result`, so clearing only the first left the PREVIOUS
         # turn's checkpointed rows to resurrect: recall correctly refused after a
@@ -1667,14 +2150,51 @@ def memory_read_node(state: ChatState) -> dict:
         # data. Everything the revoked source produced goes together or the guard has a
         # hole in it.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": False,
-                "last_result": {}, "pending_clarification": {},
-                "engine_result": {}, "sql": None, "rows": None, "status": None}
+                "last_result": {}, "pending_clarification": {}, "result_reference": None,
+                "engine_result": {}, "sql": None, "rows": None, "status": None,
+                "topic_index": _topics, "topic_restore": None,
+                "previous_topics": _previous_topics(state, tenant, session_id),
+                "memory_in": turn_telemetry.memory_summary({}, [], None, _topics, [])}
+    # The previous answer's row identities — read only AFTER the authorisation check above,
+    # and keyed to the frame's OWN source, so a reference can never outlive the frame it
+    # describes or be read from a source this turn may not see.
+    _ref_source = frame.get("source_id", source_id)
+    reference = (MemoryStore.read_reference(tenant, session_id, _ref_source)
+                 if frame.get("entity") else None)
     # Cleared EXPLICITLY on every non-reset turn. The checkpointer persists the whole
     # state across turns, so a flag only ever set True stays True: live test
     # 2026-09-17, the turn after "start over" was itself answered as a reset, and so
     # would every turn after that until the session ended.
+    # The topic index, filtered by the SAME guard as the frame, entry by entry: a topic
+    # holds filter values read out of the data, so a topic from a source this turn may not
+    # see is invisible here — and therefore can never be matched, listed or restored.
+    topics = [e for e in MemoryStore.read_topics(tenant, session_id)
+              if _frame_still_authorised(e, state)]
+    # `topic_restore` is cleared on EVERY turn (the reset path above too). Only
+    # classify_node's final return sets it, and routes that skip that return
+    # (clarify_reply, recall, represent) would otherwise hand memory_write_node the
+    # PREVIOUS turn's restore.
+    _previous = _previous_topics(state, tenant, session_id)
     return {"frame": frame, "drill_stack": stack, "episodic": episodic,
-            "comparison": comparison, "memory_reset": False}
+            "comparison": comparison, "memory_reset": False,
+            "result_reference": reference or None,
+            "topic_index": topics, "topic_restore": None,
+            "previous_topics": _previous,
+            "memory_in": turn_telemetry.memory_summary(frame, stack, reference, topics,
+                                                       _previous)}
+
+
+def _previous_topics(state: ChatState, tenant: str, session_id: str) -> list:
+    """Topics from this user's OTHER sessions, filtered by the SAME guard as the frame and
+    the in-session index, entry by entry — a topic holds filter values read out of the
+    data, so one from a source this turn may not see is invisible, unmatchable and
+    unrestorable. Empty with no user (CLI) or on any read failure."""
+    user_id = state.get("user_id")
+    if not user_id:
+        return []
+    return [e for e in memory_topics.previous_topics(
+                MemoryStore.read_user_sessions(tenant, user_id), session_id)
+            if _frame_still_authorised(e, state)]
 
 
 def _context_used(frame: dict, delta_type: str, delta_field: str, delta_value: str,
@@ -1709,6 +2229,152 @@ def _context_used(frame: dict, delta_type: str, delta_field: str, delta_value: s
     elif delta_type in ("refine", "drill_down", "drill_up", "compare"):
         changed = {"operation": delta_type}
     return {"carried": carried, "changed": changed, "resolved_query": resolved}
+
+
+_NO_RESULT_TO_POINT_AT = ("There's no earlier list for me to pick that row from — ask the "
+                          "question first, and then you can point at a row of the answer.")
+_ROWS_NOT_PICKABLE = ("I can't pick out a single row of that answer by its position. Name "
+                      "the one you mean instead — for example \"only the DEBIT ones\".")
+
+
+def _reference_refusal(message: str, *, delta_type: Optional[str], reason: str) -> dict:
+    """End a turn whose reference cannot be resolved, honestly and WITHOUT the engine.
+
+    Routed by graph._route_after_resolve to ask_clarification as a terminal answer (no
+    pending slot is armed), and nothing is written — so whatever the conversation had
+    before this turn is exactly what it has after it."""
+    logger.info("context_resolve_node: result reference not resolvable for %r — %s",
+                message, reason)
+    return {"resolved_query": message, "delta_type": delta_type,
+            "engine_result": {"status": "refuse", "route": "reference",
+                              "refuse_reason": reason},
+            "status": "refuse", "conversation_context": None, "context_used": None}
+
+
+_NO_TOPIC_TO_RETURN_TO = "There's no earlier topic like that for me to go back to."
+
+
+def _return_to_topic(state: ChatState, restore: dict) -> dict:
+    """Restore a remembered topic as this turn's CANDIDATE frame + drill stack and replay it.
+
+    Nothing is written here. The candidate reaches Redis only through memory_write_node, and
+    only if the replay is answered — the same commit-on-success rule every other turn
+    follows, so a failed restore leaves the conversation (and the topic index) exactly as
+    it was. Always re-executed; the snapshot holds no rows to replay.
+
+    What is sent is the boundary's usual pair: the user's OWN words — the topic's root
+    question, recorded when they asked it (same principle as a drill-up replay) — and the
+    snapshot's state as structured ConversationContext. A snapshot with no filters is its
+    root question verbatim, so it goes out with no context at all, exactly as it did the
+    first time (the same root-replay rule context_resolve_node applies to a drill-up)."""
+    message = state["message"]
+    if restore.get("kind") == "ambiguous":
+        # Several remembered topics fit. Asking is the only honest answer: picking one is a
+        # guess the user would only discover by reading a wrong answer. Terminal (no pending
+        # slot), no engine call, nothing written.
+        names = []
+        for e in restore.get("candidates") or []:
+            src = _source_name(state, e)
+            names.append(memory_topics.display_name(e) + (f" in {src}" if src else ""))
+        reason = ("More than one earlier topic matches that — which one do you want to go "
+                  "back to? " + "; or ".join(names))
+        logger.info("context_resolve_node: return-to-topic is ambiguous for %r — asking "
+                    "(%d candidates)", message, len(names))
+        return _reference_refusal(message, delta_type=None, reason=reason)
+
+    entry = restore.get("topic") or {}
+    candidate = memory_topics.frame_from_entry(entry)
+    base_query = str(candidate.get("base_query") or "").strip()
+    if restore.get("kind") == "document" or memory_frame.is_document_frame(candidate):
+        return _return_to_document(state, restore, entry, candidate, base_query)
+    if not candidate.get("entity") or not base_query \
+            or not _frame_still_authorised(candidate, state):
+        # memory_read_node only ever hands over authorised, replayable entries, so this is
+        # defence in depth — and it fails closed, never toward the engine.
+        logger.warning("context_resolve_node: topic %r is not restorable this turn — "
+                       "refusing rather than guessing", memory_topics.topic_key(entry))
+        return _reference_refusal(message, delta_type=None, reason=_NO_TOPIC_TO_RETURN_TO)
+
+    # The optimistic lock in MemoryStore.write_frame compares the version STORED under the
+    # topic's source key, which is not the snapshot's version once that source has moved
+    # on to another topic. Carry the live one, so an answered restore commits.
+    tenant = state.get("tenant") or "default"
+    session_id = state.get("session_id") or ""
+    live = state.get("frame") or {}
+    if str(live.get("source_id")) != str(candidate.get("source_id")) or not live.get("entity"):
+        live = MemoryStore.read_frame(tenant, session_id, candidate.get("source_id")) or {}
+    candidate.update({"version": live.get("version") or 0,
+                      "turn_index": live.get("turn_index") or 0,
+                      "tenant": tenant, "session_id": session_id})
+    stack = [dict(lvl) for lvl in (entry.get("drill_stack") or [])]
+
+    # Only filters the boundary can actually send (a column AND a value) make the replay
+    # context-dependent. A value-less one ("transaction_type IS NOT NULL") is part of what
+    # the root question itself produced, and re-asking the root reproduces it.
+    carry = any(f.get("column") and f.get("value") is not None
+                for f in candidate.get("filters") or [])
+    conv_ctx = ConversationContext.from_frame(candidate, base_query, carry_state=carry,
+                                              operation=_RESTORE_OPERATION)
+    display = candidate.get("entity_display") or candidate.get("entity")
+    used = {
+        "carried": {
+            "entity": display,
+            "filters": [f"{f.get('field')} {f.get('operator', 'equals')} {f.get('value')}"
+                        for f in candidate.get("filters") or []
+                        if f.get("field") and f.get("value") is not None],
+            "source_id": candidate.get("source_id"),
+        },
+        "changed": {"operation": "return_to_topic", "topic": display},
+        "resolved_query": base_query,
+    }
+    logger.info("context_resolve_node: returning to topic %r (%d filter(s), stack depth %d) "
+                "— replaying %r, context=%s", memory_topics.topic_key(entry),
+                len(candidate.get("filters") or []), len(stack), base_query,
+                "none" if conv_ctx.is_empty() else conv_ctx.to_payload())
+    return {"resolved_query": base_query, "delta_type": _RESTORE_OPERATION,
+            "frame": candidate, "drill_stack": stack,
+            "conversation_context": conv_ctx.to_payload(), "context_used": used}
+
+
+def _return_to_document(state: ChatState, restore: dict, entry: dict, candidate: dict,
+                        base_query: str) -> dict:
+    """Back into a document conversation: the remembered document becomes this turn's
+    candidate frame, and the question goes to the engine anchored in it, with the frame's
+    route carried as ConversationContext so the engine stays on the document lane.
+
+    Two ways here. A question that NAMES the document ("what is the fee for repair in the
+    maintenance policy?") is asked as written — it is its own question. A pure return
+    ("go back to the maintenance policy") has no question of its own, so it re-asks the
+    last one the conversation put to that document, the same principle as a table topic's
+    replay. Nothing is written here; memory_write_node commits only an answered turn."""
+    message = state["message"]
+    asked = message if restore.get("kind") == "document" else base_query
+    if not candidate.get("entity") or not asked \
+            or not _frame_still_authorised(candidate, state):
+        logger.warning("context_resolve_node: document topic %r is not restorable this "
+                       "turn — refusing rather than guessing", memory_topics.topic_key(entry))
+        return _reference_refusal(message, delta_type=None, reason=_NO_TOPIC_TO_RETURN_TO)
+    tenant = state.get("tenant") or "default"
+    session_id = state.get("session_id") or ""
+    live = state.get("frame") or {}
+    if str(live.get("source_id")) != str(candidate.get("source_id")) or not live.get("entity"):
+        live = MemoryStore.read_frame(tenant, session_id, candidate.get("source_id")) or {}
+    candidate.update({"version": live.get("version") or 0,
+                      "turn_index": live.get("turn_index") or 0,
+                      "tenant": tenant, "session_id": session_id})
+    resolved = memory_frame.render_frame_as_query(candidate, asked, "refine",
+                                                  referential=True)
+    conv_ctx = ConversationContext.from_frame(candidate, resolved)
+    display = candidate.get("entity_display") or candidate.get("entity")
+    used = {"carried": {"entity": display, "filters": [],
+                        "source_id": candidate.get("source_id")},
+            "changed": {"operation": "return_to_topic", "topic": display},
+            "resolved_query": resolved}
+    logger.info("context_resolve_node: back into document %r — asking %r",
+                candidate.get("entity"), resolved)
+    return {"resolved_query": resolved, "delta_type": None,
+            "frame": candidate, "drill_stack": [],
+            "conversation_context": conv_ctx.to_payload(), "context_used": used}
 
 
 def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
@@ -1746,6 +2412,13 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
     delta_field = state.get("delta_field") or ""
     delta_value = state.get("delta_value") or ""
 
+    # RETURN TO AN EARLIER TOPIC — decided by classify_node from the authorised topic index.
+    # First, because the topic may belong to a source whose frame this turn did not load
+    # (the frame below can be empty while the index is not).
+    _restore = state.get("topic_restore") or None
+    if _restore:
+        return _return_to_topic(state, _restore)
+
     if not frame.get("entity"):
         # NO FRAME AT ALL — the session has never had an answered analytical turn, so
         # there is no context to resolve this message against. It goes to the engine
@@ -1763,6 +2436,13 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         # NOT handled here and must not be: classify_node's own backstop downgrades it
         # to smalltalk before it ever reaches this node, precisely so ungrounded text
         # cannot be forwarded to the engine.
+        # ...except a message that only POINTS at a row of a result ("show the 9th one").
+        # It names nothing else, so with no result behind it there is nothing it can mean,
+        # and passing it through unchanged was measured 2026-09-25 to reach the engine and
+        # come back narrating row 9 of an unrelated users table. Refused, not guessed.
+        if memory_reference.result_pointer(message):
+            return _reference_refusal(message, delta_type="new_topic",
+                                      reason=_NO_RESULT_TO_POINT_AT)
         logger.info("context_resolve_node: no frame yet — passing %r through unchanged "
                     "(no rewrite call)", message)
         return {"resolved_query": message, "delta_type": "new_topic"}
@@ -1945,13 +2625,73 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         else:
             resolved = message
 
+    # RESULT REFERENCE ("the second one", "its price"). Resolved against the identities of
+    # the rows the user is looking at (chatbot/memory/reference.py), deterministically, and
+    # only on a turn already placed as a continuation: an ordinal inside a self-contained
+    # question ("the first transaction of 2024") names its own subject, not a row. The
+    # selected row(s) join the CANDIDATE frame as ordinary structured filters — the id, or
+    # the group's values — so the engine re-queries them with this turn's scope and current
+    # data; nothing from the stored result is replayed. Nothing is written here: like every
+    # other candidate change, it reaches memory only if the turn is answered.
+    #
+    # A message that is ONLY a pointer ("the 2nd one") is itself evidence of continuation —
+    # it has no subject of its own — so it resolves whatever label the classifier gave it
+    # (measured: "then the 2nd one" came back answer/ambiguous and was refused on "then").
+    _ref_hit, _ref_terms = None, []
+    _pointer = memory_reference.result_pointer(message)
+    _the_one = memory_reference.points_at_the_one_row(
+        state.get("result_reference"), message, frame)
+    # Never on a drill-up: "go back" navigates the drill path, it points at no row.
+    if ((referential or _pointer or _the_one) and delta_type != "drill_up"
+            and not memory_frame.is_document_frame(frame)):
+        _ref_hit = memory_reference.resolve_reference(
+            state.get("result_reference"), message, frame=frame, referential=True)
+        if _pointer and _ref_hit is None:
+            # A pointer with nothing current to point at. Two different truths, told apart:
+            # rows WERE shown but they are not individually pickable (the engine stated no
+            # row key — measured 2026-09-25, edge E16: "the second one" after a 2-row list was
+            # told "there's no earlier list", which the user could see was false), or there is
+            # genuinely no current result to point at.
+            _shown = (state.get("last_result") or state.get("engine_result") or {}).get("rows")
+            _ref_hit = ("refuse", _ROWS_NOT_PICKABLE if _shown else _NO_RESULT_TO_POINT_AT)
+    if _ref_hit and _ref_hit[0] == "refuse":
+        # A position that is not there. Refused honestly WITHOUT reaching the engine — the
+        # nearest row would be a guess — and routed as a terminal answer (no pending slot):
+        # the reference survives untouched, so the user's next "the 2nd one" resolves.
+        return _reference_refusal(message, delta_type=delta_type, reason=_ref_hit[1])
+    if _ref_hit and _ref_hit[0] == "filters":
+        _picked, _ref_terms = _ref_hit[1], list(_ref_hit[2] if len(_ref_hit) > 2 else [])
+        _cols = {f["column"] for f in _picked}
+        frame = {**frame, "filters": [f for f in (frame.get("filters") or [])
+                                      if f.get("column") not in _cols] + _picked}
+        if delta_type in ("new_topic", "ambiguous"):
+            delta_type = "refine"          # it narrows the current result, by evidence
+        logger.info("context_resolve_node: result reference resolved to %s",
+                    [(f["column"], f["value"]) for f in _picked])
+
+    # ROOT replay: a remove/drill-up that leaves NO filters is the user's original question,
+    # asked again — so it goes out exactly as it did the first time, with no context. Sent
+    # WITH context it was treated as a context-dependent turn (no verified-cache lookup, a
+    # different planner branch) and came back "lists rows without grouping" where the first
+    # ask had answered (measured 2026-09-24, depth 1 → 0). Same distinction the previous
+    # rendering drew (VEDA_DRILLDOWN_10LEVEL_FEASIBILITY.md §K1): replay base_query only when
+    # nothing remains; otherwise send the remaining context.
+    _root_replay = (delta_type in ("remove", "drill_up") and not shape_delta
+                    and not memory_frame.is_document_frame(frame)
+                    and not (frame.get("filters") or [])
+                    and bool((frame.get("base_query") or "").strip())
+                    and resolved == (frame.get("base_query") or "").strip())
+
     conv_ctx = ConversationContext.from_frame(
         frame, resolved,
         # A new topic is self-contained by definition and an `ambiguous` turn is one the
         # classifier could not place — neither may drag remembered state along. This is
         # the same rule the previous rendering applied when it returned the message
         # unchanged for both.
-        carry_state=(delta_type not in ("new_topic", "ambiguous") or referential),
+        carry_state=(not _root_replay
+                     and (delta_type not in ("new_topic", "ambiguous") or referential)),
+        operation=delta_type,
+        resolved_terms=_ref_terms,
     )
 
     logger.info("context_resolve_node: delta_type=%s query=%r context=%s",
@@ -2180,8 +2920,13 @@ def memory_write_node(state: ChatState) -> dict:
         # result had no explain block — skip the write, the user's answer is
         # unaffected, memory just doesn't advance this turn — but the result the user
         # IS looking at is still recorded, or a presentation follow-up would redraw an
-        # older one.
-        return {"last_result": _last_result}
+        # older one. For the same reason the row reference is CLEARED: it describes the
+        # previous answer, and "the second one" must never mean a row of a result the
+        # user is no longer looking at.
+        MemoryStore.write_reference(
+            tenant, session_id, None,
+            source_id=(state.get("frame") or {}).get("source_id") or state.get("source_id"))
+        return {"last_result": _last_result, "result_reference": None}
 
     prev_frame = state.get("frame") or {}
     prev_stack = state.get("drill_stack") or []
@@ -2201,15 +2946,29 @@ def memory_write_node(state: ChatState) -> dict:
     harvested = memory_frame.keep_entity_on_lane_change(
         prev_frame, harvested, referential=state.get("action") == "followup")
 
+    # And the case neither of those covers: a turn the classifier could not place at all.
+    # `ambiguous` carries no context, so the engine answers the bare fragment and lands
+    # wherever that routes — which `is_topic_switch` below (and inside
+    # merge_frame_post_execution) would otherwise read as a deliberate change of subject.
+    harvested = memory_frame.hold_subject_on_unplaced_turn(
+        prev_frame, harvested, delta_type, prev_stack)
+
     new_frame = memory_frame.merge_frame_post_execution(
         prev_frame, harvested, delta_type, tenant, session_id)
 
     reset = delta_type == "new_topic" or memory_frame.is_topic_switch(prev_frame, harvested)
     if reset:
         new_stack: list = []
-    elif delta_type == "drill_down":
-        new_stack = memory_frame.push_drill(prev_stack, harvested)
     else:
+        # EVERY turn, whatever the classifier called it, is decided by the evidence below:
+        # the level pushed is the filter the executed query ADDED relative to the previous
+        # one. A turn labelled `drill_down` used to take its own branch, push_drill(), which
+        # pushes "the LAST filter in the list" — and that list's order is the SQL walker's,
+        # not the order the user narrowed in. Measured 2026-09-25 (DRILLDOWN_QUERY_MATRIX
+        # scenario 2): Pune, then EAST, labelled drill_down, pushed Location a second time
+        # (stack ['Location', 'Location']) while the filters said Direction Facing = east.
+        # Evidence also settles the case the label cannot: a new value on a field already
+        # constrained is a replacement, not a deeper level.
         # A turn the classifier called something else (in practice almost always `refine`) still
         # drilled in if the executed query added a filter the previous one did not. Without this
         # the DrillStack stayed empty for every real narrowing — "only the open ones", "just the
@@ -2254,7 +3013,22 @@ def memory_write_node(state: ChatState) -> dict:
     # filters — that IS the drill root — and never on a drill_up itself, whose message
     # ("go back") is a navigation trigger, not a question. Carried forward otherwise so
     # drilling in does not erase it.
-    if not (new_frame.get("filters") or []) and delta_type != "drill_up":
+    #
+    # A RETURN TO AN EARLIER TOPIC keeps that topic's own root question: this turn's message
+    # ("go back to the properties") is navigation, not a question, and the candidate frame
+    # context_resolve_node restored already carries the root it replayed.
+    #
+    # A NEW TOPIC whose first question already carries a filter is its own root. It used to
+    # inherit the PREVIOUS topic's base_query through the carry-forward branch (a reset
+    # frame has none of its own), so "go back" to the root of the new topic — and, now, a
+    # return to it from the topic index — would have replayed a question about a different
+    # table.
+    _restoring = (state.get("topic_restore") or {}).get("kind") == "restore"
+    if _restoring and prev_frame.get("base_query"):
+        new_frame["base_query"] = prev_frame["base_query"]
+    elif not (new_frame.get("filters") or []) and delta_type != "drill_up":
+        new_frame["base_query"] = state.get("message") or ""
+    elif reset and delta_type != "drill_up":
         new_frame["base_query"] = state.get("message") or ""
     elif prev_frame.get("base_query") and not new_frame.get("base_query"):
         new_frame["base_query"] = prev_frame["base_query"]
@@ -2290,17 +3064,45 @@ def memory_write_node(state: ChatState) -> dict:
     # value, used for the key AND the field, every write below (frame, stack, and the
     # episodic entry this turn contributes) is filed under and stamped with it.
     _source_id = new_frame.get("source_id") or state.get("source_id")
-    MemoryStore.write_frame(tenant, session_id, new_frame,
-                            expected_version=prev_frame.get("version") if prev_frame else None,
-                            source_id=_source_id)
+    _committed = MemoryStore.write_frame(
+        tenant, session_id, new_frame,
+        expected_version=prev_frame.get("version") if prev_frame else None,
+        source_id=_source_id)
     MemoryStore.write_stack(tenant, session_id, new_stack, source_id=_source_id)
     MemoryStore.push_episodic_turn(tenant, session_id, state.get("message", ""),
                                    _templated_gist(engine_result), source_id=_source_id)
+    # The identities of the rows now on screen — or None, which CLEARS the slot: whatever
+    # the user saw before this answer is no longer what "the second one" can mean.
+    _reference = memory_reference.build_reference(engine_result, _source_id)
+    MemoryStore.write_reference(tenant, session_id, _reference, source_id=_source_id)
+
+    # THE TOPIC INDEX. This topic's snapshot moves to the front; a topic the conversation
+    # moved away from keeps the snapshot it had when last answered — that is what "go back
+    # to it" restores. Only when the frame itself committed: an aborted write means a
+    # concurrent turn won, and the index must not describe a frame that is not in memory.
+    # Read-modify-write of the WHOLE list (MemoryStore.read_topics is unfiltered), so topics
+    # of sources that are merely outside this turn's scope are kept, not dropped.
+    _topics = state.get("topic_index") or []
+    _entry = memory_topics.snapshot({**new_frame, "source_id": _source_id}, new_stack)
+    if _committed and _entry:
+        _stored = memory_topics.upsert(MemoryStore.read_topics(tenant, session_id), _entry)
+        MemoryStore.write_topics(tenant, session_id, _stored)
+        _topics = [e for e in _stored if _frame_still_authorised(e, state)]
+        # SESSION MEMORY (step 6): this session's topic snapshots, filed under the USER, so a
+        # later chat can list them ("what did we look at before?") or return to one
+        # ("continue the property analysis"). Snapshots only — never rows or answers; a
+        # restore always re-executes under the then-current authorisation.
+        if state.get("user_id"):
+            MemoryStore.write_user_sessions(
+                tenant, state.get("user_id"),
+                memory_topics.merge_sessions(
+                    MemoryStore.read_user_sessions(tenant, state.get("user_id")),
+                    memory_topics.session_summary(session_id, _stored)))
 
     # An answered turn resolves whatever was pending — nothing is left to complete.
     return {"frame": new_frame, "drill_stack": new_stack, "last_result": _last_result,
-            "comparison": _comparison,
-            "pending_clarification": {}}
+            "comparison": _comparison, "result_reference": _reference,
+            "pending_clarification": {}, "topic_index": _topics}
 
 
 def reset_node(state: ChatState) -> dict:
@@ -2313,6 +3115,7 @@ def reset_node(state: ChatState) -> dict:
     return {"reply_text": reply, "status": "answered", "needs_clarification": False,
             "engine_unavailable": False, "frame": {}, "drill_stack": [],
             "last_result": {}, "pending_clarification": {},
+            "topic_index": [], "topic_restore": None,
             "history": _turn_delta(state, reply)}
 
 
@@ -2348,11 +3151,13 @@ def ask_clarification_node(state: ChatState) -> dict:
     # question. These three routes are minted ONLY by _run_coordinator, always with a
     # human-readable reason. "clarify" is a real question (keep needs_clarification);
     # "no_access"/"no_match" are terminal — no rephrasing changes the answer.
-    _ROUTER_REFUSAL_ROUTES = ("no_access", "no_match", "clarify")
+    # "reference" is context_resolve_node's own: a result position that does not exist
+    # ("the 7th one" after 5 rows) — terminal, the reason already says which rows exist.
+    _ROUTER_REFUSAL_ROUTES = ("no_access", "no_match", "clarify", "reference")
     refuse_reason = res0.get("refuse_reason")
     _route = res0.get("route")
     router_refusal = bool(refuse_reason) and _route in _ROUTER_REFUSAL_ROUTES
-    definite = router_refusal and _route in ("no_access", "no_match")
+    definite = router_refusal and _route in ("no_access", "no_match", "reference")
 
     # The engine's own refusal text, when it has one. A refusal that reaches here through the
     # source-agent/coordinator path carries {answer, ok, refuse_reason, status} — the pipeline's

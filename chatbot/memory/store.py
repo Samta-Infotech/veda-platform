@@ -11,9 +11,14 @@ store never touches LangGraph's own checkpoint keys.
 Keys (per docs/MEMORY_ARCHITECTURE.md §4):
     veda:mem:{tenant}:{session}:src:{source}:frame  STRING (JSON) — that source's QueryFrame
     veda:mem:{tenant}:{session}:src:{source}:stack  LIST  (JSON per element) — its DrillStack
+    veda:mem:{tenant}:{session}:src:{source}:ref    STRING (JSON) — the previous answer's row
+                                                    identities (chatbot/memory/reference.py)
     veda:mem:{tenant}:{session}:active              STRING — id of the last answered source
     veda:mem:{tenant}:{session}:sources             SET    — every source this session has used
     veda:mem:{tenant}:{session}:episodic            LIST  (JSON per element) — capped, short
+    veda:mem:{tenant}:{session}:topics              STRING (JSON list) — the bounded topic
+                                                    index, one snapshot per (source, entity),
+                                                    most recent first (chatbot/memory/topics.py)
     veda:mem:{tenant}:{session}:frame|stack         the PRE-2026-09-18 unscoped keys, still read
 
 FRAME AND STACK ARE PER SOURCE; EPISODIC IS NOT. A frame is evidence harvested from one
@@ -116,6 +121,11 @@ def _k(tenant: str, session_id: str, suffix: str, source_id: Optional[Any] = Non
     return f"{base}:src:{source_id}:{suffix}"
 
 
+def _user_sessions_key(tenant: str, user_id: Any) -> str:
+    """Per USER, tenant-scoped: summaries of the user's recent sessions."""
+    return f"veda:mem:{tenant}:user:{user_id}:sessions"
+
+
 def _comparison_key(tenant: str, session_id: str) -> str:
     """SESSION level, deliberately not under a source. A comparison can span two
     sources; filing it under one would let that side silently own the other — the same
@@ -125,6 +135,13 @@ def _comparison_key(tenant: str, session_id: str) -> str:
 
 def _active_key(tenant: str, session_id: str) -> str:
     return f"veda:mem:{tenant}:{session_id}:active"
+
+
+def _topics_key(tenant: str, session_id: str) -> str:
+    """SESSION level, like the comparison: the topic index is the list of places this
+    conversation has been, across every source it has used. Each entry records its own
+    source, so a read can drop what the caller may no longer see."""
+    return f"veda:mem:{tenant}:{session_id}:topics"
 
 
 def _sources_key(tenant: str, session_id: str) -> str:
@@ -407,6 +424,112 @@ class MemoryStore:
             logger.warning("MemoryStore.write_stack failed for session=%s", session_id, exc_info=True)
 
     @staticmethod
+    def read_reference(tenant: str, session_id: str,
+                       source_id: Optional[Any] = None) -> Optional[Dict[str, Any]]:
+        """The previous answer's row identities (chatbot/memory/reference.py), or None.
+        Per source, like the frame it belongs to. Unreadable memory is "no memory"."""
+        try:
+            key = _k(tenant, session_id, "ref", source_id)
+            raw = _client().get(key)
+            if not raw:
+                return None
+            _client().expire(key, _TTL_SECS)
+            out = json.loads(raw)
+            return out if isinstance(out, dict) else None
+        except Exception:
+            logger.warning("MemoryStore.read_reference failed for session=%s",
+                           session_id, exc_info=True)
+            return None
+
+    @staticmethod
+    def write_reference(tenant: str, session_id: str, reference: Optional[Dict[str, Any]],
+                        source_id: Optional[Any] = None) -> None:
+        """Write, or clear with None. An answered turn whose rows are not referable CLEARS
+        the slot: an ordinal always means a row of the answer the user is looking at now,
+        never of one before it."""
+        try:
+            key = _k(tenant, session_id, "ref", source_id)
+            if not reference:
+                _client().delete(key)
+                return
+            _client().set(key, json.dumps(reference, default=str), ex=_TTL_SECS)
+        except Exception:
+            logger.warning("MemoryStore.write_reference failed for session=%s",
+                           session_id, exc_info=True)
+
+    @staticmethod
+    def read_topics(tenant: str, session_id: str) -> List[Dict[str, Any]]:
+        """The WHOLE topic index, most recent first (chatbot/memory/topics.py).
+
+        Deliberately unfiltered: memory_read_node filters it to the current turn's grants
+        with the frame's own guard (nodes.py::_frame_still_authorised) before anything
+        else sees it, while memory_write_node and the per-source reset below re-write the
+        list — and writing back a filtered view would silently delete the topics of
+        sources that are merely outside THIS turn's scope rather than revoked. Unreadable
+        memory is "no memory"."""
+        try:
+            key = _topics_key(tenant, session_id)
+            raw = _client().get(key)
+            if not raw:
+                return []
+            _client().expire(key, _TTL_SECS)
+            out = json.loads(raw)
+            return [e for e in out if isinstance(e, dict)] if isinstance(out, list) else []
+        except Exception:
+            logger.warning("MemoryStore.read_topics failed for session=%s", session_id,
+                           exc_info=True)
+            return []
+
+    @staticmethod
+    def write_topics(tenant: str, session_id: str,
+                     topics: Optional[List[Dict[str, Any]]]) -> None:
+        """Write the whole index, or clear it with an empty list/None."""
+        try:
+            key = _topics_key(tenant, session_id)
+            if not topics:
+                _client().delete(key)
+                return
+            _client().set(key, json.dumps(topics, default=str), ex=_TTL_SECS)
+        except Exception:
+            logger.warning("MemoryStore.write_topics failed for session=%s", session_id,
+                           exc_info=True)
+
+    @staticmethod
+    def read_user_sessions(tenant: str, user_id: Optional[Any]) -> List[Dict[str, Any]]:
+        """The user's recent session summaries (chatbot/memory/topics.py::session_summary),
+        most recent first. Per USER, not per session — the one memory that crosses chats.
+        Unreadable memory is "no memory"."""
+        if user_id in (None, ""):
+            return []
+        try:
+            key = _user_sessions_key(tenant, user_id)
+            raw = _client().get(key)
+            if not raw:
+                return []
+            _client().expire(key, _TTL_SECS)
+            out = json.loads(raw)
+            return [s for s in out if isinstance(s, dict)] if isinstance(out, list) else []
+        except Exception:
+            logger.warning("MemoryStore.read_user_sessions failed for user=%s", user_id,
+                           exc_info=True)
+            return []
+
+    @staticmethod
+    def write_user_sessions(tenant: str, user_id: Optional[Any],
+                            sessions: List[Dict[str, Any]]) -> None:
+        if user_id in (None, ""):
+            return
+        try:
+            key = _user_sessions_key(tenant, user_id)
+            if not sessions:
+                _client().delete(key)
+                return
+            _client().set(key, json.dumps(sessions, default=str), ex=_TTL_SECS)
+        except Exception:
+            logger.warning("MemoryStore.write_user_sessions failed for user=%s", user_id,
+                           exc_info=True)
+
+    @staticmethod
     def read_comparison(tenant: str, session_id: str) -> Optional[Dict[str, Any]]:
         """The active comparison, or None. Unreadable memory means "no memory", never a
         failed turn — the same degradation every read here uses."""
@@ -511,23 +634,35 @@ class MemoryStore:
             c = _client()
             if source_id is not None:
                 c.delete(_k(tenant, session_id, "frame", source_id),
-                         _k(tenant, session_id, "stack", source_id))
+                         _k(tenant, session_id, "stack", source_id),
+                         _k(tenant, session_id, "ref", source_id))
                 c.srem(_sources_key(tenant, session_id), str(source_id))
                 if (c.get(_active_key(tenant, session_id)) or "") == str(source_id):
                     c.delete(_active_key(tenant, session_id))
+                # That source's topics go with its frame; other sources' topics stay —
+                # the same precision the per-source frame/stack delete above has.
+                from .topics import without_source
+                _topics = MemoryStore.read_topics(tenant, session_id)
+                _kept = without_source(_topics, source_id)
+                if len(_kept) != len(_topics):
+                    MemoryStore.write_topics(tenant, session_id, _kept)
                 return
             keys = [_k(tenant, session_id, "frame"),
                     _k(tenant, session_id, "stack"),
+                    _k(tenant, session_id, "ref"),
                     _k(tenant, session_id, "episodic"),
                     _active_key(tenant, session_id),
                     _sources_key(tenant, session_id),
                     # Session-level, so it is cleared by the whole-session reset only —
                     # a per-source reset must not drop a comparison whose other side
                     # lives in a source the user did not reset.
-                    _comparison_key(tenant, session_id)]
+                    _comparison_key(tenant, session_id),
+                    # Session-level too: "start over" forgets every earlier topic.
+                    _topics_key(tenant, session_id)]
             for known in MemoryStore.known_sources(tenant, session_id):
                 keys.append(_k(tenant, session_id, "frame", known))
                 keys.append(_k(tenant, session_id, "stack", known))
+                keys.append(_k(tenant, session_id, "ref", known))
             c.delete(*keys)
         except Exception:
             logger.warning("MemoryStore.reset failed for session=%s", session_id, exc_info=True)

@@ -281,6 +281,18 @@ def classify(query, verbose=False):
                   f"(remembered table {_conv['entity_table']})")
         return "sql", None
 
+    # The DOCUMENT half of the same continuity. A follow-up in a document conversation
+    # carries the document frame (entity_table = the document's name, route rag/hybrid);
+    # left to the word list below it was routed on whatever its own words suggested, and
+    # a money word ("late fee", "repair fee", "charges") sent it to a structured table —
+    # measured 2026-09-25, demo D1/D3b/X1. Same lane split as the doc-intent override.
+    if _conversation_document_lane():
+        intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
+        if verbose:
+            print(f"  [router] continuing the conversation's document lane "
+                  f"({_conv['entity_table']}) → {intent}")
+        return intent, None
+
     if _DOC_REF_RE.search(q) and _scope_has_doc_source():
         # Prefer the fast RAG lane (retrieve chunks + one synthesis call, ~6-8s). Only take
         # the heavier HYBRID lane (RAG ⊕ deterministic SQL head) when the utterance clearly
@@ -627,6 +639,41 @@ def _datalake_isolated_sm(source_id):
         return None
 
 
+def _conversation_document_lane() -> bool:
+    """Does this turn continue a remembered DOCUMENT conversation? True only when the
+    chatbot sent a document frame as context (a table-less entity with route rag/hybrid —
+    it sends none on a new topic) and the scope still has a document source to answer
+    from. The counterpart of _conversation_pinned_source for the document lane."""
+    try:
+        conv = _cur_conv() or {}
+    except Exception:
+        return False
+    if not conv.get("entity_table") or str(conv.get("route") or "") not in ("rag", "hybrid"):
+        return False
+    return _scope_has_doc_source()
+
+
+def _conversation_pinned_source(permitted_sids):
+    """The source a follow-up must stay on, or None to route normally.
+
+    Set only when the turn carries a remembered SQL conversation (entity_table + source_id,
+    not a document route — same test as _route_intent's lane continuation) AND that source
+    is still in the caller's permitted scope. A new topic carries no state, so it is never
+    pinned; a revoked grant is not in `permitted_sids`, so it falls through to normal
+    routing and its checks.
+    """
+    try:
+        conv = _cur_conv() or {}
+    except Exception:
+        return None
+    if not conv.get("entity_table") or str(conv.get("route") or "") in ("rag", "hybrid"):
+        return None
+    sid = conv.get("source_id")
+    if sid is None or str(sid) not in {str(s) for s in permitted_sids}:
+        return None
+    return str(sid)
+
+
 def _run_coordinator(query, verbose=False, on_event=None):
     """Multi-source routing coordinator entry (Phase 3.6 + authoritative wiring).
 
@@ -678,6 +725,17 @@ def _run_coordinator(query, verbose=False, on_event=None):
         from query.source_coordinator import plan_route, execute_decision
         _emit(on_event, "route", "Deciding which source can answer…")
 
+        # A follow-up that continues a remembered SQL conversation stays on the source that
+        # conversation is about. The user's words now reach here unchanged ("go back", "only
+        # the Nagpur ones"), and scoring a bare fragment against every ready source let an
+        # inaccessible one win: measured 2026-09-24, a drill on assets_asset (source 2) was
+        # answered "You don't have permission to access this data" in 0.5s, and "go back"
+        # erased the path the same way. Same rule the lane router applies
+        # (_route_intent: "continuing the conversation's SQL lane"). Only a source still IN
+        # the caller's permitted scope is kept — a revoked grant falls through to normal
+        # routing, never past it.
+        _pinned = _conversation_pinned_source(sids)
+
         # Permission-aware routing pre-check (flag-gated, default OFF). Decide the best source over ALL
         # ready sources; if the strict winner is one the user has NO access to, refuse with a clear
         # permission message rather than mis-routing to a weaker permitted source. Only match SCORES of
@@ -686,7 +744,7 @@ def _run_coordinator(query, verbose=False, on_event=None):
             from config import ROUTING_PERMISSION_PRECHECK_ENABLED as _perm_pc
         except Exception:
             _perm_pc = False
-        if _perm_pc:
+        if _perm_pc and _pinned is None:
             try:
                 from query.source_coordinator import (all_ready_source_ids,
                                                       best_matching_scored)
@@ -800,7 +858,15 @@ def _run_coordinator(query, verbose=False, on_event=None):
             _lc3s.current_timeline().started(_lc3s.PHASE_SOURCE_SELECTION)
         except Exception:
             pass
-        decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
+        if _pinned is not None:
+            from query.routing_contracts import (RoutingDecision, METHOD_DETERMINISTIC,
+                                                 RC_CONVERSATION_SOURCE)
+            decision = RoutingDecision(
+                status="ROUTED", mode="SINGLE", source_ids=[_pinned],
+                decision_method=METHOD_DETERMINISTIC, reason_code=RC_CONVERSATION_SOURCE,
+                reason="Follow-up continues the conversation's source.")
+        else:
+            decision = plan_route(query, sids, profile_provider=lambda _s: _profiles)
         try:  # user-safe source-selection event, from the decision the router made
             from veda import lifecycle as _lc3
             _tl3 = _lc3.current_timeline()
@@ -1968,7 +2034,32 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
     # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.
-    fed = _maybe_federated(query, verbose=verbose)
+    #
+    # NOT for a follow-up that continues a remembered SQL conversation. The coordinator
+    # already pins such a turn to its conversation's source (_conversation_pinned_source),
+    # but it runs in SHADOW, so the answer path reached this opportunistic federation
+    # regardless: retrieval on a bare value spans sources whenever the value exists in
+    # more than one of them. Measured 2026-09-25: "distribution of properties by facing"
+    # then "Nagpur", context correctly carried (entity assets_asset, source 2), answered
+    # by the FEDERATED route on 1 run in 3 — the other 2 answered on assets_asset. Same
+    # rule, applied at the call site that actually decides. A new topic carries no state
+    # and is never pinned, so genuine cross-source questions are untouched.
+    _ctx_now = _current_ctx()
+    _scope_now = list(getattr(_ctx_now, "source_ids", ()) or ()) if _ctx_now is not None else []
+    _pinned_now = _conversation_pinned_source(_scope_now) if len(_scope_now) >= 2 else None
+    if _pinned_now is not None:
+        if verbose:
+            print(f"  [federated] skipped — follow-up continues the conversation on "
+                  f"source {_pinned_now}")
+        fed = None
+    elif len(_scope_now) >= 2 and _conversation_document_lane():
+        # A document conversation's follow-up is answered from the documents (classify's
+        # document-lane continuity), not joined across structured sources.
+        if verbose:
+            print("  [federated] skipped — follow-up continues a document conversation")
+        fed = None
+    else:
+        fed = _maybe_federated(query, verbose=verbose)
     if fed is not None:
         return _merge_extra_usage(fed, _l0_usage_totals)
 
@@ -2900,6 +2991,13 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                                           confidence=_confidence)
     except Exception:
         print("  [Tier2] explainability skipped")
+    try:  # row identity for conversation memory — beside explain, see business_explain.result_key
+        from veda.business_explain import result_key as _result_key
+        _rk = _result_key(sql or "", None, sm)
+        if _rk:
+            result["result_key"] = _rk
+    except Exception:
+        pass
     # business_intent (advisory): deterministic reading of the EXECUTED SQL
     # first (explain.understanding.summary — the source of truth); the SLM's
     # own advisory claim (`business_intent` param, from the Tier-2 IR envelope)

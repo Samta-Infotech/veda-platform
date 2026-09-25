@@ -97,7 +97,7 @@ class TurnEventAccumulator:
         elif kind == "context":
             self.context = payload
 
-    def metadata(self) -> dict:
+    def metadata(self, *, action: str | None = None) -> dict:
         """The persisted/returned ``metadata`` block for this turn.
 
         ``trace_id`` is read back out of the explainability payload
@@ -106,23 +106,31 @@ class TurnEventAccumulator:
         explain block. It is the support reference a user can quote and an
         operator can grep the engine trace by.
         """
-        md = {"thinking": self.thinking_text, "explainability": self.explainability,
-              "usage": self.usage}
+        # Small talk is deliberately a terminal conversational reply, not an
+        # analytical turn. Keep usage for telemetry, but omit the empty progress
+        # and explainability slots so JSON/history clients cannot render phantom
+        # panels. `action` comes from the conversation layer, which is the single
+        # authoritative source for whether the engine was bypassed.
+        md = {"usage": self.usage}
+        if action != "smalltalk":
+            md.update({"thinking": self.thinking_text,
+                       "explainability": self.explainability})
         # The four-step model the user actually watched. Without it, reopening a
         # conversation could not rebuild the progress panel: `thinking` is a single
         # legacy line ("Finalizing the results...") and `timeline` is the RAW
         # backend phase list, which is audit-level content and not what was shown.
         # Absent, not null, for a turn that produced no progress.
-        if self.steps:
+        if action != "smalltalk" and self.steps:
             md["steps"] = self.steps
-        if self.timeline:
+        if action != "smalltalk" and self.timeline:
             md["timeline"] = self.timeline
         # Absent, not null (the envelope convention above): a turn that carried no
         # context has nothing to show, and an empty object would render as a panel
         # claiming an understanding that was never applied.
-        if self.context:
+        if action != "smalltalk" and self.context:
             md["context"] = self.context
-        trace_id = ((self.explainability or {}).get("support") or {}).get("trace_id")
+        trace_id = (((self.explainability or {}).get("support") or {}).get("trace_id")
+                    if action != "smalltalk" else None)
         if trace_id:
             md["trace_id"] = trace_id
         return md

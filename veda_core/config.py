@@ -2225,7 +2225,14 @@ QUERY_LANGUAGE = {
                   "which", "who", "whom", "whose", "where", "there", "here", "please",
                   "their", "its", "about", "also", "only", "just", "much", "more",
                   "less", "than", "exactly", "them", "they", "not", "but", "have",
-                  "has", "had", "been", "being", "does", "per", "give", "along", "among"],
+                  "has", "had", "been", "being", "does", "per", "give", "along", "among",
+                  # conjunctive adverb opening a follow-up ("then the 2nd one") — was
+                  # refused as a dropped qualifier, measured 2026-09-25
+                  "then",
+                  # conversational correction / relation verbs, each refused live as a
+                  # "dropped qualifier" on 2026-09-25: "sorry, I meant Pune" (on 'meant'),
+                  # "which invoices does the late fee apply to?" (on 'apply')
+                  "sorry", "meant", "actually", "apply", "applies"],
     # temporal words (the temporal window itself is resolved by L1, so these tokens
     # are already consumed before SQL generation)
     "temporal": ["last", "past", "previous", "recent", "recently", "ago", "since",

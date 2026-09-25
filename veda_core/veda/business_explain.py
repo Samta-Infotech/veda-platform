@@ -115,6 +115,175 @@ def _business_field_name(table: str, col: str, sm: Optional[dict]) -> str:
     return _humanize(col)
 
 
+_PH_TAG = "vedaph"
+_PH_TAG_RE = re.compile(rf"{_PH_TAG}(\d+)")
+
+
+def _bind_placeholders(tree, params: Optional[List[Any]]) -> Dict[int, Any]:
+    """Map each Placeholder node (by identity) to the param bound to it.
+
+    `params` is in the order the %s marks appear in the RENDERED SQL
+    (validate_and_parameterize() builds it by scanning the rendered text). A tree
+    traversal is not that order: sqlglot's find_all() is breadth-first, so for
+    `a = %s AND b = %s AND c = %s` — parsed as ((a AND b) AND c) — it reaches `c`
+    first. Measured 2026-09-24 on a three-level drill: the frame stored
+    is_gated='full', furnishing='nagpur', city_name='true', and explainability
+    showed the user the same, while the executed query itself was correct.
+    Depth-first is not the answer either: a CTE is rendered FIRST but walked
+    LAST (`with` follows the SELECT list in the node's args).
+
+    So the order is read off the rendering itself: tag every placeholder with its
+    enumeration index, render once, read the indices back in textual order, and
+    restore the tree. Exact by construction for any shape the renderer handles,
+    which is the same renderer that produced the executed SQL."""
+    if not params:
+        return {}
+    nodes = list(tree.find_all(exp.Placeholder))
+    if not nodes:
+        return {}
+    originals = [ph.args.get("this") for ph in nodes]
+    try:
+        for i, ph in enumerate(nodes):
+            ph.set("this", f"{_PH_TAG}{i}")
+        rendered = tree.sql(dialect="postgres")
+        order = [int(m) for m in _PH_TAG_RE.findall(rendered)]
+    except Exception:
+        order = []
+    finally:
+        for ph, orig in zip(nodes, originals):
+            ph.set("this", orig)
+    # Every placeholder must be accounted for exactly once, and the count must agree
+    # with the bound values. Anything else means the mapping cannot be trusted, and
+    # an unknown value (None) is honest where a wrong one is not.
+    if sorted(order) != list(range(len(nodes))) or len(order) != len(params):
+        return {}
+    return {id(nodes[idx]): params[pos] for pos, idx in enumerate(order)}
+
+
+def _primary_key(table: str, sm: Optional[dict]) -> Optional[str]:
+    """The table's key column, by the semantic layer's own convention (`{table}.id` —
+    semantic/compile_semantic_layer.py resolves every entity's primary_key that way).
+    With no semantic model there is nothing to confirm it against, so None."""
+    if not table or not sm:
+        return None
+    return "id" if f"{table}.id" in (sm.get("columns") or {}) else None
+
+
+def result_key(sql: str, anchor: Optional[str], sm: Optional[dict],
+               params: Optional[List[Any]] = None) -> Dict[str, Any]:
+    """Which RESULT column identifies each row, read off the executed statement.
+
+    Deliberately NOT part of build_explain(): the explain payload is streamed verbatim to
+    the client as explainability, and this is conversation-memory plumbing (it can carry a
+    pinned row id). The answer paths attach it beside `explain` as `result_key`.
+    `anchor` None = the statement's own FROM table, which is the anchor by definition.
+
+    Two shapes, because a result is one of two things:
+      rows   — records of `anchor`: the SELECT list projects its primary key, so each
+               row can be re-fetched by id later.
+               {"kind": "rows", "table": anchor, "column": "id", "result_column": "listing_id"}
+      groups — a GROUP BY result: each row IS a combination of group values, so a row is
+               identified by those values. Every group column must be in the SELECT list,
+               or a row could not be told apart from its neighbours.
+               {"kind": "groups", "table": anchor,
+                "columns": [{"column": "facing", "result_column": "facing"}, ...]}
+
+    `result_column` is the name the column carries IN THE RESULT (its alias when it has
+    one) — the only name a consumer holding `cols` + `rows` can match on.
+
+    Empty dict whenever that cannot be established exactly: no parse, an outer FROM that
+    is not the anchor (a CTE, a subquery), a set operation, a result aggregated without a
+    GROUP BY, or no primary key in the projection. Empty means "rows are not referable",
+    never a guess — conversation memory then simply records nothing to refer to."""
+    if not sql:
+        return {}
+    try:
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return {}
+    if not isinstance(tree, exp.Select):
+        return {}
+    from_ = tree.args.get("from") or tree.args.get("from_")
+    base = from_.this if from_ is not None else None
+    if not isinstance(base, exp.Table) or (anchor and base.name != anchor):
+        return {}
+    anchor = base.name
+    # Table aliases in THIS statement: the only way to know which table a qualified
+    # column in the SELECT list belongs to.
+    alias_to_table = {}
+    for t in tree.find_all(exp.Table):
+        if t.alias:
+            alias_to_table[t.alias] = t.name
+        alias_to_table.setdefault(t.name, t.name)
+    single_table = len({t.name for t in tree.find_all(exp.Table)}) == 1
+
+    def _source(e):
+        """(table, column) a SELECT expression reads, or None for anything computed."""
+        inner = e.this if isinstance(e, exp.Alias) else e
+        if not isinstance(inner, exp.Column):
+            return None
+        tbl = alias_to_table.get(inner.table) if inner.table else (anchor if single_table
+                                                                   else None)
+        return (tbl, inner.name) if tbl else None
+
+    selects = list(tree.expressions or [])
+    group = tree.args.get("group")
+    if group is not None:
+        cols = []
+        by_source = {_source(e): e.alias_or_name for e in selects if _source(e)}
+        for g in group.expressions or []:
+            if not isinstance(g, exp.Column):
+                return {}
+            tbl = alias_to_table.get(g.table) if g.table else (anchor if single_table else None)
+            name = by_source.get((tbl, g.name))
+            if not name:
+                return {}
+            cols.append({"column": g.name, "result_column": name})
+        return {"kind": "groups", "table": anchor, "columns": cols} if cols else {}
+    if any(isinstance(a, exp.AggFunc) for e in selects for a in e.find_all(exp.AggFunc)):
+        return {}                                   # a scalar aggregate: one row, no records
+    # SELECT DISTINCT without aggregates: each row IS a combination of its column values,
+    # exactly like a GROUP BY row, so it is identified the same way. Measured 2026-09-25
+    # (edge E16): "payment transactions by transaction type" came back as a DISTINCT list
+    # (CREDIT, DEBIT) and "the second one" could not point at DEBIT.
+    if tree.args.get("distinct") is not None:
+        cols = []
+        for e in selects:
+            src = _source(e)
+            if src is None or src[0] != anchor:
+                return {}
+            cols.append({"column": src[1], "result_column": e.alias_or_name})
+        return {"kind": "groups", "table": anchor, "columns": cols} if cols else {}
+    pk = _primary_key(anchor, sm)
+    if not pk:
+        return {}
+    for e in selects:
+        if isinstance(e, exp.Star):
+            return {"kind": "rows", "table": anchor, "column": pk, "result_column": pk}
+        if _source(e) == (anchor, pk):
+            return {"kind": "rows", "table": anchor, "column": pk,
+                    "result_column": e.alias_or_name}
+    # The key is not projected, but the statement PINS it: `WHERE id = %s` (a row picked
+    # from an earlier answer). The bound value identifies the row just as well — stated
+    # as `pinned` so a consumer uses it only for a one-row result.
+    where = tree.args.get("where")
+    bound = _bind_placeholders(tree, params) if params else {}
+    if where is not None:
+        for eq in where.find_all(exp.EQ):
+            col = eq.find(exp.Column)
+            if col is None:
+                continue
+            tbl = alias_to_table.get(col.table) if col.table else (anchor if single_table else None)
+            if (tbl, col.name) != (anchor, pk):
+                continue
+            ph = eq.find(exp.Placeholder)
+            lit = eq.find(exp.Literal)
+            val = bound.get(id(ph)) if ph is not None else (lit.name if lit is not None else None)
+            if val is not None:
+                return {"kind": "rows", "table": anchor, "column": pk, "pinned": str(val)}
+    return {}
+
+
 def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     """One self-contained sqlglot pass over the final SQL. Deliberately NOT a
     reuse of veda/ir_equivalence.py's extract_sql_ir — that module's shape is
@@ -141,14 +310,7 @@ def _extract(sql: str, params: Optional[List[Any]] = None) -> Dict[str, Any]:
     if tree is None:
         return out
 
-    # Map each Placeholder node (by identity) to its bound value, in the SAME
-    # left-to-right document order validate_and_parameterize() used to build
-    # `params` — find_all() walks the tree in source order, matching that.
-    placeholder_values = {}
-    if params:
-        for i, ph in enumerate(tree.find_all(exp.Placeholder)):
-            if i < len(params):
-                placeholder_values[id(ph)] = params[i]
+    placeholder_values = _bind_placeholders(tree, params)
 
     out["entities"] = sorted({t.name for t in tree.find_all(exp.Table) if t.name})
     # The table the statement actually selects FROM. `entities` is a SORTED SET, useful
@@ -627,3 +789,104 @@ def _apply_v2_refusal(out: Dict[str, Any], *, trace: Any = None, trace_id: str =
         out["version"] = "2.0"
     except Exception:
         pass
+
+
+# =============================================================================
+# Result PROVENANCE — which table.column each returned value actually came from.
+#
+# Motivated by a measured silent-wrong answer (drilldown_l7 turn 21, 2026-09-24):
+# "Who is the listing agent?" ran
+#     SELECT DISTINCT t.first_name FROM assets_salenegotiation a
+#     JOIN users_user t ON a.negotiator_id = t.id
+# and was narrated as "There are 4 listing agents named ...". The prose restated
+# the USER'S business term and never named the column it had actually read, so
+# nothing in the answer let a reader catch that a *negotiator on a sale
+# negotiation* is not a *listing agent*.
+#
+# `_extract()` above deliberately reports `entities` as a sorted SET and says
+# nothing about the SELECT list, which is exactly the missing piece: the answer
+# layer needs "these are the fields this sentence is allowed to be about".
+# Separate function rather than more keys on `_extract()` — that dict's shape is
+# consumed by explainability and result_analyzer and is not free to grow.
+# =============================================================================
+
+def sql_provenance(sql: str) -> Dict[str, Any]:
+    """The fields a result's values actually came from, as a small, stable dict:
+
+        {"projections": ["users_user.first_name"],
+         "tables":      ["assets_salenegotiation", "users_user"],
+         "join_keys":   ["assets_salenegotiation.negotiator_id = users_user.id"],
+         "ordered":     False,
+         "vocabulary":  ["users", "user", "first", "name", ...]}
+
+    `projections` are the SELECT-list columns, qualified with the real table name
+    (aliases resolved). `vocabulary` is the ≥3-char word tokens of every table and
+    column the statement names — the set a business term in the answer can be
+    checked against. `ordered` says whether the statement has an ORDER BY at all
+    (an unordered multi-row result identifies no "first"/"cheapest" row).
+
+    Deterministic, no LLM, no DB. Never raises: an unparseable/empty statement
+    returns the empty shape, and callers must treat that as "provenance unknown"
+    rather than as evidence of anything."""
+    out: Dict[str, Any] = {"projections": [], "tables": [], "join_keys": [],
+                           "ordered": False, "vocabulary": []}
+    if not sql or not str(sql).strip():
+        return out
+    try:
+        tree = sqlglot.parse_one(sql, read="postgres")
+    except Exception:
+        return out
+    if tree is None:
+        return out
+    try:
+        # alias -> real table name (plus name -> name, for unaliased references)
+        alias_map: Dict[str, str] = {}
+        tables: List[str] = []
+        for t in tree.find_all(exp.Table):
+            if not t.name:
+                continue
+            if t.name not in tables:
+                tables.append(t.name)
+            alias_map[t.name] = t.name
+            if t.alias:
+                alias_map[t.alias] = t.name
+        out["tables"] = tables
+        only_table = tables[0] if len(tables) == 1 else None
+
+        def _qualified(col) -> str:
+            tbl = alias_map.get(col.table) if col.table else only_table
+            return f"{tbl}.{col.name}" if tbl else col.name
+
+        select_node = tree if isinstance(tree, exp.Select) else tree.find(exp.Select)
+        if select_node is not None:
+            for proj in select_node.expressions:
+                if isinstance(proj, exp.Star):
+                    continue
+                for c in proj.find_all(exp.Column):
+                    q = _qualified(c)
+                    if q and q not in out["projections"]:
+                        out["projections"].append(q)
+
+        for j in tree.find_all(exp.Join):
+            for eq in j.find_all(exp.EQ):
+                cols = [c for c in (eq.left, eq.right) if isinstance(c, exp.Column)]
+                if len(cols) != 2:
+                    continue
+                phrase = f"{_qualified(cols[0])} = {_qualified(cols[1])}"
+                if phrase not in out["join_keys"]:
+                    out["join_keys"].append(phrase)
+
+        out["ordered"] = tree.find(exp.Order) is not None
+
+        vocab: List[str] = []
+        for name in tables + [c.name for c in tree.find_all(exp.Column) if c.name]:
+            for w in re.findall(r"[a-z]+", str(name).lower()):
+                if len(w) > 2 and w not in vocab:
+                    vocab.append(w)
+        out["vocabulary"] = vocab
+    except Exception:
+        # Partial output is still honest (every field is additive and independently
+        # checked by callers); an internal sqlglot shape surprise must never take
+        # down summarisation.
+        pass
+    return out
