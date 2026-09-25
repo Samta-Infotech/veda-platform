@@ -55,6 +55,13 @@ from .state import ChatState
 logger = logging.getLogger(__name__)
 
 _VALID_ACTIONS = {"smalltalk", "followup", "clarify_reply", "answer"}
+# Every call that DECIDES something about the turn (action, delta, carry-over) samples at
+# 0, like the engine (veda_core SLM_TEMPERATURE). At call_slm's 0.1 default the same
+# follow-up was read two ways on two runs — measured 2026-09-25, chain C1 failed on one run
+# ("gated" read as a furnishing value) and passed on the next — so a rehearsed demo could
+# still take a different path. Only the smalltalk REPLY keeps the default: its words may
+# vary, its decision may not.
+_DECISION_TEMPERATURE = 0.0
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
 
 # Deterministic safety net, on top of the LLM classifier: generic (schema-
@@ -165,8 +172,28 @@ def _depends_on_history(message: str, history: list) -> bool:
     since this is only a second-opinion check, not the primary classifier."""
     user_prompt = build_standalone_check_user_prompt(message, history)
     verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5,
-                       model=CHATBOT_CLASSIFY_MODEL, purpose="standalone_check")
+                       model=CHATBOT_CLASSIFY_MODEL, purpose="standalone_check",
+                       temperature=_DECISION_TEMPERATURE)
     return bool(verdict) and "dependent" in verdict.strip().lower()
+
+
+def _frame_free_action(message: str, history: list) -> Optional[str]:
+    """The supervisor's action for this message with NO frame in the prompt — the same
+    model, prompt and history otherwise. Second opinion for a frame-bearing "smalltalk"
+    verdict only (see its call site for the measurement). None on any failure, which
+    callers treat as "keep the original verdict"."""
+    raw = call_slm(build_supervisor_system_prompt({}),
+                   build_supervisor_user_prompt(message, history),
+                   model=CHATBOT_CLASSIFY_MODEL, purpose="classify_frame_free",
+                   temperature=_DECISION_TEMPERATURE)
+    match = _JSON_RE.search(raw or "")
+    if not match:
+        return None
+    try:
+        candidate = json.loads(match.group()).get("action")
+    except Exception:
+        return None
+    return candidate if candidate in _VALID_ACTIONS else None
 
 
 def _carries_over_subject(message: str, history: list, frame: dict) -> bool:
@@ -188,7 +215,7 @@ def _carries_over_subject(message: str, history: list, frame: dict) -> bool:
     verdict = call_slm(CARRYOVER_CHECK_SYSTEM,
                        build_carryover_check_user_prompt(frame, message, history),
                        max_tokens=5, model=CHATBOT_CLASSIFY_MODEL,
-                       purpose="carryover_check")
+                       purpose="carryover_check", temperature=_DECISION_TEMPERATURE)
     return bool(verdict) and "carryover" in verdict.strip().lower()
 
 # Deterministic fast path for the overwhelming majority of smalltalk: pure
@@ -1282,6 +1309,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             build_supervisor_user_prompt(message, history),
             model=CHATBOT_CLASSIFY_MODEL,
             purpose="classify",
+            temperature=_DECISION_TEMPERATURE,
         )
         action = "answer"
         model_render = None
@@ -1388,6 +1416,25 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             frame.get("entity"), message,
         )
         action = "followup"
+    elif (action == "smalltalk" and frame.get("entity") and not _is_social(message)
+            and _frame_free_action(message, history) == "answer"):
+        # A real question the FRAME talked the model out of. Measured 2026-09-25 with the
+        # frame on properties: "What is the probation period for new recruits?", "what is
+        # the dress code?", "how long is the probation period" came back smalltalk 9/9
+        # ("asks for a fact not in the frame") and were answered "I'm here for questions
+        # about your data" — while the same prompt WITHOUT the frame, same history, said
+        # answer 12/12 for them and smalltalk 27/27 for acknowledgements ("okay", "got
+        # it", "makes sense", "great work", "hmm interesting", ...). So the second opinion
+        # is the same model and prompt minus the frame, asked only when the frame-bearing
+        # call alone said smalltalk. It can only promote to a NEW question (no remembered
+        # state carried); anything else, or a failed call, leaves the verdict as it was.
+        logger.warning("classify_node: LLM said smalltalk with a frame present, but the "
+                       "frame-free reading is a new question — overriding to 'answer': %r",
+                       message)
+        action = "answer"
+        delta_type = "new_topic"
+        delta_field = ""
+        delta_value = ""
 
     # Computed at most ONCE per turn and only when something below actually asks for
     # it — two different branches need the same verdict and neither should pay for a
@@ -1486,6 +1533,21 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
     # refinements without anaphora ("how many active users?") remain unhandled, which
     # is the pre-existing behaviour and wants its own measurement, not this.
 
+    if action == "clarify_reply" and not pending:
+        # The classifier can emit this label on any turn. With nothing pending there is
+        # no request to complete, and clarify_reply_node would pass the raw message to
+        # the engine ungrounded — so treat it as the ordinary follow-up it is.
+        #
+        # Decided HERE, before the two ungrounded-text backstops below, not after them.
+        # They only look at followup/answer, so a relabel that came later walked straight
+        # past both: measured 2026-09-26, "Help me understand this" in a chat that had only
+        # said "Hi" came back clarify_reply, was relabelled followup after the backstops,
+        # and reached the engine with nothing to resolve "this" against (107s, "couldn't
+        # map 'understand'").
+        logger.info("classify_node: classifier said clarify_reply but nothing is "
+                    "pending — handling %r as a followup", message)
+        action = "followup"
+
     if (action in ("followup", "answer") and not frame.get("entity")
             and not topic_hit and _is_bare_referential(message)):
         # Universal backstop, independent of HOW `action` got here (the LLM's
@@ -1568,13 +1630,6 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                     "answering without the engine: %r", message)
         action = "no_match"
 
-    if action == "clarify_reply" and not pending:
-        # The classifier can emit this label on any turn. With nothing pending there is
-        # no request to complete, and clarify_reply_node would pass the raw message to
-        # the engine ungrounded — so treat it as the ordinary follow-up it is.
-        logger.info("classify_node: classifier said clarify_reply but nothing is "
-                    "pending — handling %r as a followup", message)
-        action = "followup"
 
     # A PENDING CLARIFICATION COMES FROM A TURN THAT FAILED. Completing it means gluing
     # that failed question onto this message, and the engine parses the result as one
@@ -2936,6 +2991,25 @@ def memory_write_node(state: ChatState) -> dict:
     # delta_type is not informative on a document frame. A follow-up that still drew on
     # the document being discussed keeps it, rather than moving to whichever document
     # the engine happened to list first.
+    # A FOLLOW-UP THAT LEFT THE CONVERSATION'S TABLE DOES NOT REPLACE IT. "answered" only
+    # says the engine returned something, not that it answered THIS follow-up. Measured
+    # 2026-09-26 (audit, scenario A): on a Noida/furnished frame, "Go back" was answered by
+    # the federated route with "No matching rows", memory filed entity None with a
+    # value-less `city` filter, and every later turn wandered into the employee handbook.
+    # A follow-up on a table frame that comes back with no table of its own (federated,
+    # documents) or with zero rows is not written: the conversation stays where it was,
+    # exactly as after a refusal. New questions and topic returns are unaffected.
+    _rows = engine_result.get("rows")
+    if (state.get("action") == "followup" and not state.get("topic_restore")
+            and prev_frame.get("entity") and not memory_frame.is_document_frame(prev_frame)
+            and (not harvested.get("entity") or memory_frame.is_document_frame(harvested)
+                 or (isinstance(_rows, list) and not _rows))):
+        logger.info("memory_write_node: follow-up on %r answered with %s — not replacing the "
+                    "conversation's state", prev_frame.get("entity"),
+                    "no rows" if isinstance(_rows, list) and not _rows
+                    else f"no table of its own ({harvested.get('entity')!r})")
+        return {"last_result": _last_result}
+
     harvested = memory_frame.stabilise_document_entity(
         prev_frame, harvested, referential=state.get("action") == "followup")
 

@@ -661,6 +661,28 @@ def test_access_sub_check_advances_the_step_it_opens():
     assert t.current_step() == "finding"
 
 
+def test_access_sub_check_at_the_same_instant_does_not_flash_close_understanding():
+    """Measured live: `understanding started` and `access_check started` are
+    emitted back to back in veda_hybrid.py at scope-resolution time and can carry
+    the IDENTICAL `timestamp_ms`. Advancing on that tie closed Understanding with
+    a fabricated ~0 ms duration before its own `completed` event — carrying the
+    real ~1 s of intent work — ever arrived. A genuinely later Finding signal must
+    still close it, just not one that ties with Understanding's own start."""
+    t = ts.ThinkingStepTracker()
+    t.consume(ev("received", status="completed", ts_ms=3_000_000))
+    t.consume(ev("understanding", status="started", ts_ms=3_000_000))
+    t.consume(ev("access_check", status="started", ts_ms=3_000_000))  # same instant
+    assert t.steps["understanding"].state == ts.STATE_ACTIVE, (
+        "a same-instant sub-check open is not evidence Understanding has ended")
+    assert t.steps["finding"].state == ts.STATE_ACTIVE, (
+        "Finding must still open immediately for a responsive UI"
+    )
+    t.consume(ev("source_selection", status="started", ts_ms=3_000_500))
+    assert t.steps["understanding"].duration_ms() == 500, (
+        "Understanding closes on the first genuinely later Finding signal")
+    assert t.current_step() == "finding"
+
+
 def test_narrator_thread_carries_the_trace_so_its_call_is_visible(monkeypatch):
     """A fresh thread starts with an empty contextvars context, so without an
     explicit hand-off the narrator's SLM call records nothing and burns latency and
@@ -2033,6 +2055,24 @@ class TestASourceThatIsNamedIsNotAlsoDescribedVaguely:
                                                          "not be reached"})
         row = [r for r in c.details("finding") if r["type"] == ts.DETAIL_SOURCE][0]
         assert row["state"] == ts.STATE_WARNING
+
+    def test_a_named_source_also_states_its_own_row_count(self):
+        """`contributions` was already populated for every source (not just when 2+
+        took part), but only read by Analyzing's cross-source block — so a
+        single-source turn, the common case, never showed it anywhere at all."""
+        labels = self._labels(self._ctx(source_names=["homzhub"],
+                                        contributions={"homzhub": 7}))
+        assert "homzhub — 7 rows" in labels
+
+    def test_a_single_row_is_not_pluralised(self):
+        labels = self._labels(self._ctx(source_names=["homzhub"],
+                                        contributions={"homzhub": 1}))
+        assert "homzhub — 1 row" in labels
+
+    def test_the_bare_name_survives_when_no_count_is_known(self):
+        """A source with no `contributions` entry (still mid-stream, or a shape that
+        never reports one) must not gain a fabricated count."""
+        assert "homzhub" in self._labels(self._ctx(source_names=["homzhub"]))
 
 
 class TestTheSourceCountIsOnlyAPlaceholderForAName:

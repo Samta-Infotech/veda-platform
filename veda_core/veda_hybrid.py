@@ -1404,6 +1404,7 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None,
             _mark_empty_results(result)
             _backfill_missing_explain(result)   # before the timeline refresh reads it
             _sync_reported_row_count(result)
+            _business_wording(result)
             _reconcile_access_check(result, _tl)
             _emit_terminal_lifecycle(_tl, _final_status)
             # The payload was built before the line above ran, so the PERSISTED
@@ -1883,6 +1884,39 @@ def _sync_reported_row_count(result) -> None:
                 res["row_count"] = len(rows)
     except Exception:
         pass
+
+def _business_wording(result) -> None:
+    """Replace raw table/column names in each answer with plain language
+    (query/business_wording.py). Applied HERE, at the one exit every head passes
+    through, so Tier-1, Tier-2, federated and hybrid summaries follow one rule —
+    measured 2026-09-26: "The assets_asset_count ranges widely from 1 to 471".
+    Text only; rows, columns, SQL and explain are untouched. Any failure leaves the
+    answer exactly as it was."""
+    try:
+        from query.business_wording import business_wording
+        sm = None
+        for item in (getattr(result, "items", None) or []):
+            payload = getattr(item, "result", None)
+            get = payload.get if isinstance(payload, dict) else (
+                lambda k, d=None: getattr(payload, k, d))
+            answer = get("answer")
+            if not isinstance(answer, str) or "_" not in answer:
+                continue
+            if sm is None:
+                try:
+                    sm = _load_semantic_model()[0] or {}
+                except Exception:
+                    sm = {}
+            worded = business_wording(answer, list(get("cols") or get("columns") or []),
+                                      get("table"), sm)
+            if worded != answer:
+                if isinstance(payload, dict):
+                    payload["answer"] = worded
+                else:
+                    setattr(payload, "answer", worded)
+    except Exception:
+        pass
+
 
 def _refresh_persisted_timeline(result, timeline) -> None:
     """Re-read the timeline into the payload AFTER the terminal phase is emitted.

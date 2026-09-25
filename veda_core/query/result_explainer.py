@@ -665,9 +665,19 @@ def _operation_words() -> set:
     good answer. An operation word is not a claim about what the rows ARE."""
     try:
         from veda.business_explain import _AGG_WORD
-        return {str(k).lower() for k in _AGG_WORD} | {str(v).lower() for v in _AGG_WORD.values()}
+        words = {str(k).lower() for k in _AGG_WORD} | {str(v).lower() for v in _AGG_WORD.values()}
     except Exception:
-        return set()
+        words = set()
+    # Comparison words ("above 1000", "at least 2k") name an OPERATION too — read from the
+    # one list that grounds them (query/qualifier_grounding.py::_COMPARATORS). Measured
+    # 2026-09-26: "carpet area above 1000" ran with the filter applied and was then refused
+    # here on 'above'.
+    try:
+        from query.qualifier_grounding import _COMPARATORS
+        words |= {w for phrase, _op in _COMPARATORS for w in phrase}
+    except Exception:
+        pass
+    return words
 
 
 def _query_content_words(query: str) -> List[str]:

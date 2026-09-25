@@ -266,8 +266,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     _conv_measures = [str(m) for m in (_conv.get("measures") or [])]
     _conv_order_by = [str(o) for o in (_conv.get("order_by") or [])]
     # The conversation layer's own statement of what this turn does (ConversationContext
-    # .operation). "drill_up" means the remembered shape is being REPLAYED, not replaced.
-    _conv_replays_shape = str(_conv.get("operation") or "") == "drill_up"
+    # .operation). "drill_up" and "remove" both mean the remembered shape is being
+    # REPLAYED, not replaced: the chatbot sends the user's own root question for both
+    # (chatbot/nodes.py, context_resolve_node), and taking a filter away changes the
+    # population, never the grouping. "remove" was missing — measured 2026-09-26 (audit
+    # D4): "remove the Nagpur filter" on a facing distribution replayed the root question,
+    # its grouping words suppressed the remembered shape, and the answer came back as
+    # 1000 raw rows; the next "go back" then replayed that list.
+    _conv_replays_shape = str(_conv.get("operation") or "") in ("drill_up", "remove")
 
     def _anchor_columns_for(_sm, _table):
         """The columns the semantic model says `_table` has, or None when it says nothing.
@@ -1698,7 +1704,13 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                             # lowercase form, so High/high/HIGH all match. `value` is
                             # kept for the trace/explain that read it.
                             _v = str(_cf["value"])
-                            _arb_filters.append({"column": _c, "op": "=", "value": _v,
+                            # The remembered OPERATOR, not always "=": a carried
+                            # "carpet area above 1000" must stay a comparison on the next
+                            # drill, not become carpet_area = 1000.
+                            _op = {"greater than": ">", "greater than or equal to": ">=",
+                                   "less than": "<", "less than or equal to": "<="}.get(
+                                       str(_cf.get("operator") or "").lower(), "=")
+                            _arb_filters.append({"column": _c, "op": _op, "value": _v,
                                                  "value_norm": _v.strip().lower()})
                             print(f"  [conversation] carried filter {_c} = "
                                   f"{_cf['value']!r} (from the previous turn's SQL)")
@@ -1715,6 +1727,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                       & {r["column"] for r in value_referents("false")["direct"]
                                          if r.get("table") == primary})
                         _qual = ground_flags(query, _flag_cols)
+                        from query.qualifier_grounding import ground_numeric
+                        _qual += ground_numeric(query, primary, sm)
                         _qual_refusal = None
                         if not tf:
                             _yf, _qual_refusal = ground_year(query, primary, sm)

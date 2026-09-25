@@ -165,6 +165,11 @@ def entity_anchor_ok(query, sql, sm):
     if not _enabled() or not sql:
         return True, ""
     named = _named_measure_columns(query, sm)
+    # A measure the query names as a THRESHOLD ("carpet area above 1000") is a filter, not
+    # the figure to rank by — the SQL applies it as `"carpet_area" > 1000`. Measured
+    # 2026-09-26: that drill was refused here although the filter was in the SQL.
+    named = {(t, c) for (t, c) in named
+             if not re.search(rf'"{re.escape(c)}"\s*(?:>=|<=|>|<)', sql)}
     if not named:
         return True, ""                                  # query names no specific measure → cannot misalign
     facts = _facts(sql)
