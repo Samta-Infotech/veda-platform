@@ -124,7 +124,14 @@ def build_supervisor_system_prompt(frame: dict | None = None) -> str:
                           '"drill_down"|"drill_up"|"compare"|"ambiguous", '
                           '"delta_field": "<the frame filter being replaced/removed, '
                           'omit otherwise>", "slot_candidates": [<verbatim words from '
-                          'the NEW message, or empty list>]')
+                          'the NEW message, or empty list>], '
+                          # STEP 7 (VEDA_MEMORY_LAYER_PLAN.md): a presentation-only request
+                          # the whole-message regexes miss ("can i see that as a chart",
+                          # "draw it", "show me a graph of that") as a TYPED output. Held
+                          # to the harness bar in the header note; validated in code.
+                          '"render": "none"|"table"|"chart"|"pie"|"bar"|"line"|"csv" '
+                          '(not "none" ONLY when the message asks to see the PREVIOUS '
+                          'answer in a different form and asks for nothing new)')
 
     return tidy(f"""\
 You are the front-door supervisor for a data-analyst chatbot. Today's date is \

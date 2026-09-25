@@ -242,6 +242,20 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     except Exception:
         _conv = {}
     _conv_user_message = _conv.get("user_message") if isinstance(_conv, dict) else None
+    # Words a grounded qualifier already represents (the "non" of a non-gated FLAG filter,
+    # whose meaning is now the predicate's `false`). Removed from the words the
+    # qualifier gate checks for THIS turn only — see query/qualifier_grounding.py.
+    _qual_consumed: set = set()
+    # ...and words the CONVERSATION layer resolved against memory ("second" / "one" of
+    # "show the second one" — a row of the previous answer, which now arrives as an id
+    # filter). They name something the user saw, not data. Held to words actually in the
+    # message, so this can never exempt a term the user did not type.
+    _um_words = {w.lower() for w in re.findall(r"[A-Za-z0-9]+", _conv_user_message or "")}
+    _qual_consumed.update(str(t).lower() for t in (_conv.get("resolved_terms") or [])
+                          if isinstance(t, str) and t.lower() in _um_words)
+    # Set when the user's words name a specific YEAR column ("built in 2026") that L1 had
+    # read as a date range on the canonical timestamp — the named column wins.
+    _year_replaces_temporal = False
     _conv_filters = [f for f in (_conv.get("filters") or [])
                      if isinstance(f, dict) and f.get("column") and f.get("value") is not None]
     try:
@@ -251,6 +265,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     _conv_group_by = [str(g) for g in (_conv.get("group_by") or [])]
     _conv_measures = [str(m) for m in (_conv.get("measures") or [])]
     _conv_order_by = [str(o) for o in (_conv.get("order_by") or [])]
+    # The conversation layer's own statement of what this turn does (ConversationContext
+    # .operation). "drill_up" means the remembered shape is being REPLAYED, not replaced.
+    _conv_replays_shape = str(_conv.get("operation") or "") == "drill_up"
 
     def _anchor_columns_for(_sm, _table):
         """The columns the semantic model says `_table` has, or None when it says nothing.
@@ -266,6 +283,19 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         ql = " " + (_q or "").lower().strip() + " "
         return any(w in ql for w in (" by ", " per ", " each ", "distribution",
                                      "breakdown", "broken down", "grouped"))
+
+    def _asks_for_remembered_shape(_q, _cols):
+        """The user's grouping IS the remembered one: every remembered group column is
+        named in their own words. This is the drill-up case — "go back" replays the base
+        question ("... for each facing direction"), whose grouping words would otherwise
+        suppress the very shape they describe, and the filtered branch below does not
+        build a GROUP BY from text (measured 2026-09-24: depth 2 → 1 came back as rows).
+        A DIFFERENT grouping ("by city" over a remembered `facing`) still wins."""
+        if not _cols:
+            return False
+        words = set(re.findall(r"[a-z0-9]+", (_q or "").lower()))
+        return all(any(w in words for w in c.lower().split("_") if len(w) > 2)
+                   for c in _cols)
     # A remembered table is an anchor HINT, never an override of one the caller passed:
     # anchor_hint is also the qualifier-salvage retry marker (see below), and that retry
     # must keep deciding its own anchor.
@@ -286,6 +316,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                   f"turn's scope {sorted(_scope)} — context dropped")
             _conv, _conv_user_message, _conv_filters = {}, None, []
             _conv_limit, _conv_group_by, _conv_measures = None, [], []
+            _conv_replays_shape = False
 
     if anchor_hint is None and _conv.get("entity_table"):
         _hinted = _conv.get("entity_table")
@@ -547,6 +578,17 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             if status == "answered" and explain:
                 kw.setdefault("business_intent",
                               (explain.get("understanding") or {}).get("summary"))
+            # Which result column identifies each row — for conversation memory only
+            # (chatbot/memory/reference.py: "the second one"). Beside `explain`, not in it:
+            # explain is streamed to the client verbatim, and this is plumbing.
+            if status == "answered" and kw.get("sql"):
+                try:
+                    from veda.business_explain import result_key as _result_key
+                    _rk = _result_key(kw.get("sql") or "", None, sm, params=params)
+                    if _rk:
+                        kw.setdefault("result_key", _rk)
+                except Exception:
+                    pass
             return {"status": status, "ok": (status == "answered"),
                     # Private (underscore) by convention: audit-only. The user-facing
                     # payload is built solely by veda/safe_projection.py, which has no
@@ -1660,6 +1702,46 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                                                  "value_norm": _v.strip().lower()})
                             print(f"  [conversation] carried filter {_c} = "
                                   f"{_cf['value']!r} (from the previous turn's SQL)")
+                    # FLAG and YEAR qualifiers of a follow-up on the remembered table —
+                    # the two kinds the arbiter cannot ground (see qualifier_grounding.py).
+                    # Before this, "only the gated ones" / "only the ones built in 2026"
+                    # re-ran the previous turn's SQL with the word silently dropped.
+                    if _conv.get("entity_table") and primary == _conv.get("entity_table"):
+                        from query.qualifier_grounding import (ground_flags, ground_year,
+                                                               named_year_column)
+                        from query.resolution import value_referents
+                        _flag_cols = ({r["column"] for r in value_referents("true")["direct"]
+                                       if r.get("table") == primary}
+                                      & {r["column"] for r in value_referents("false")["direct"]
+                                         if r.get("table") == primary})
+                        _qual = ground_flags(query, _flag_cols)
+                        _qual_refusal = None
+                        if not tf:
+                            _yf, _qual_refusal = ground_year(query, primary, sm)
+                            _qual += _yf
+                        elif named_year_column(query, primary, sm):
+                            # L1 read the year as a date range, which lands on the
+                            # canonical timestamp (created_at). The user named a
+                            # specific year column instead ("built" ↔ "year built"),
+                            # so that column wins and the range is not applied.
+                            _yf, _qual_refusal = ground_year(query, primary, sm)
+                            if _yf:
+                                _qual += _yf
+                                _year_replaces_temporal = True
+                        if _qual_refusal:
+                            print(f"  [conversation] year qualifier not groundable — refusing")
+                            fb = _feedback("refuse", msg=_qual_refusal)
+                            log_route("refuse", query, (time.time() - start) * 1000)
+                            return _done(0, "refuse", msg=_qual_refusal, feedback=fb)
+                        # the user's words for THIS turn replace a remembered filter on
+                        # the same column ("only the non-gated ones" after "gated")
+                        _qcols = {f["column"] for f in _qual}
+                        _arb_filters = [f for f in _arb_filters if f["column"] not in _qcols]
+                        for _qf in _qual:
+                            _qual_consumed.update(_qf.get("consumed") or [])
+                            _arb_filters.append(_qf)
+                            print(f"  [conversation] grounded {_qf['grounded_as']} qualifier "
+                                  f"{_qf['column']} = {_qf['value']}")
                     if _arb.value_filters:
                         for _ln in _arb.explain().splitlines():
                             print("  [L4c] " + _ln)
@@ -1690,7 +1772,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             _skip_vague_window = (_want_rank_order
                                   and _is_vague_recency_only(_tp_result.raw_expressions))
             _tpred = (_temporal_predicate(primary, sm, tf)
-                     if _tcol and not _skip_vague_window else "")
+                     if _tcol and not _skip_vague_window and not _year_replaces_temporal
+                     else "")
             _rank_tail = _rank_order_limit_sql(_rank, primary, sm, _tcol)
             _rank_tail_a = _rank_order_limit_sql(_rank, primary, sm, _tcol, alias="a")
             # Whatever column the tail above actually ORDER BY's on (if any) must
@@ -1895,7 +1978,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                     _reshaped = True
                     print(f"  [conversation] kept the previous turn's aggregate: {_sel}")
                 if (not _reshaped and _shape_cols and primary == _conv.get("entity_table")
-                        and not _rank_tail and not _grouped_this_turn(query)):
+                        and not _rank_tail
+                        and (not _grouped_this_turn(query)
+                             or _conv_replays_shape
+                             or _asks_for_remembered_shape(query, _shape_cols))):
                     _g = ", ".join(f'"{c}"' for c in _shape_cols)
                     _meas = next((m for m in _conv_measures
                                   if _anchor_columns_for(sm, primary) is None
@@ -2117,8 +2203,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
 
     # Unified qualifier-completeness gate (all paths): refuse if the user named a
     # qualifier the SQL doesn't account for (a dropped filter → broader answer).
-    ok_q, missing = qualifier_completeness(query, sql, sm,
-                                           user_message=_conv_user_message)
+    _gate_words = _conv_user_message
+    if _qual_consumed:
+        _gate_words = " ".join(w for w in re.findall(r"[A-Za-z0-9]+",
+                                                     _conv_user_message or query)
+                               if w.lower() not in _qual_consumed)
+    ok_q, missing = qualifier_completeness(query, sql, sm, user_message=_gate_words)
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
         _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))

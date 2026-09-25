@@ -93,8 +93,31 @@ def _route_after_classify(state: ChatState) -> str:
         # A presentation-only follow-up: the previous result is still in the
         # checkpoint and is re-rendered as-is. Never reaches the engine.
         return "represent"
+    if action == "followup" and state.get("topic_restore"):
+        # A return to an earlier topic is resolved against the topic index, not the
+        # checkpointed history — so it goes to context_resolve_node even if the checkpoint
+        # holds none (it expires on its own clock; the index is Redis memory).
+        return "context_resolve"
     if action != "runtime_context" and state.get("history"):
         return "context_resolve"
+    # A first turn that only POINTS at a row ("show the 2nd one") has nothing to point at.
+    # context_resolve_node is where that is answered honestly; the engine would guess.
+    if action != "runtime_context" and _points_at_a_row(state.get("message") or ""):
+        return "context_resolve"
+    return "call_engine"
+
+
+def _points_at_a_row(message: str) -> bool:
+    from .memory.reference import result_pointer
+    return result_pointer(message) is not None
+
+
+def _route_after_resolve(state: ChatState) -> str:
+    """context_resolve_node decided the turn cannot be answered from what the user is
+    pointing at (a result position that does not exist) — answer that honestly without the
+    engine. Everything else goes to the engine exactly as before."""
+    if (state.get("engine_result") or {}).get("route") == "reference":
+        return "ask_clarification"
     return "call_engine"
 
 
@@ -143,7 +166,10 @@ def build_graph():
         "context_resolve": "context_resolve",
         "call_engine": "call_engine",
     })
-    g.add_edge("context_resolve", "call_engine")
+    g.add_conditional_edges("context_resolve", _route_after_resolve, {
+        "call_engine": "call_engine",
+        "ask_clarification": "ask_clarification",
+    })
     g.add_edge("clarify_reply", "call_engine")
     g.add_conditional_edges("call_engine", _route_after_engine, {
         "memory_write": "memory_write",

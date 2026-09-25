@@ -233,3 +233,48 @@ def test_validator_defaults_a_missing_operator():
     from inference.routes.hybrid import _validated_conversation_context as V
     out = V({"conversation_context": {"filters": [{"column": "c", "value": "v"}]}})
     assert out["filters"][0]["operator"] == "equals"
+
+
+def test_chat_state_declares_every_key_the_nodes_return():
+    """StateGraph drops any node-returned key its TypedDict does not declare, silently.
+    `conversation_context` went missing from ChatState once and the whole boundary went
+    quiet while every visible signal still looked right (SESSION_HANDOFF_2026-09-24 §1)."""
+    import ast
+    from chatbot.state import ChatState
+    tree = ast.parse(open(os.path.join(ROOT, "chatbot", "nodes.py")).read())
+    returned = set()
+    for fn in tree.body:
+        if isinstance(fn, ast.FunctionDef) and fn.name.endswith("_node"):
+            for n in ast.walk(fn):
+                if isinstance(n, ast.Return) and isinstance(n.value, ast.Dict):
+                    returned |= {k.value for k in n.value.keys
+                                 if isinstance(k, ast.Constant) and isinstance(k.value, str)}
+    assert "conversation_context" in returned
+    assert returned - set(ChatState.__annotations__) == set()
+
+
+def test_drill_up_keeps_the_remaining_filter_with_its_column():
+    """Measured 2026-09-24: "go back" from depth 2 reached the engine with `filter_values`
+    but no `filters` — rebuild_frame_from_stack rebuilt the surviving level from the
+    DrillLevel alone, dropping its raw column, and the boundary drops column-less filters."""
+    from chatbot.memory import frame as F
+    from inference.routes.hybrid import _validated_conversation_context as V
+    fr = {"entity": "assets_asset", "source_id": 2, "route": "deterministic",
+          "filters": [{"field": "Furnishing", "column": "furnishing", "operator": "equals",
+                       "value": "FULL", "source": "executed_sql"},
+                      {"field": "City", "column": "city_name", "operator": "equals",
+                       "value": "Nagpur", "source": "executed_sql"}]}
+    stack = [{"dimension": "Furnishing", "value": "FULL"}, {"dimension": "City", "value": "Nagpur"}]
+    popped = F.pop_drill(stack)
+    rebuilt = F.rebuild_frame_from_stack(fr, popped)
+    assert [f["column"] for f in rebuilt["filters"]] == ["furnishing"]
+    out = V({"conversation_context":
+             ConversationContext.from_frame(rebuilt, "base question").to_payload()})
+    assert [f["column"] for f in out["filters"]] == ["furnishing"]
+
+
+def test_drill_up_with_no_frame_record_still_builds_the_level():
+    from chatbot.memory import frame as F
+    rebuilt = F.rebuild_frame_from_stack({"filters": []}, [{"dimension": "Furnishing", "value": "FULL"}])
+    assert rebuilt["filters"][0]["field"] == "Furnishing"
+    assert rebuilt["filters"][0]["value"] == "FULL"

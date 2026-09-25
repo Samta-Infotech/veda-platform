@@ -428,3 +428,210 @@ def test_grouped_breakdown_still_aggregates_unchanged():
     labels = specs[0].chart_data["labels"]
     assert "Other" in labels                              # long-tail bucketing intact
     assert 1010 in specs[0].chart_data["values"]          # per-category totals intact
+
+
+# --- payload-safety invariants across degenerate inputs (2026-09-11) --------------
+#
+# From an adversarial sweep of the recommender. These are not about which chart is
+# chosen — they are the invariants that must hold for EVERY chart it ever emits,
+# because apps/chat/services.py::_build_visualizations has no try/except around
+# this call: anything raised here takes down the whole chat turn, not just the chart.
+
+def test_nan_and_infinity_never_reach_chart_data():
+    """json.dumps writes NaN/Infinity as bare tokens, which are not valid JSON — a
+    strict frontend JSON.parse rejects the entire response. A NaN measure must be
+    treated exactly like a NULL one (row skipped), on every chart path."""
+    import json
+    import math
+    r = _recommender()
+    rows = [["a", float("nan")], ["b", float("inf")], ["c", 1.0], ["d", 2.0]]
+    for shape in ("RANKING", "DETAIL_TABLE", "GROUPED", "DISTRIBUTION"):
+        for spec in r.recommend(["name", "price"], rows,
+                                {"result_shape": shape, "orderings": [["price", False]]}):
+            payload = spec.to_dict()
+            json.dumps(payload, allow_nan=False)        # raises if NaN/Inf slipped in
+            values = (payload["chart_data"].get("values")
+                      or [s["value"] for s in payload["chart_data"].get("slices", [])])
+            assert all(math.isfinite(v) for v in values)
+
+
+def test_a_row_shorter_than_cols_is_dropped_not_raised():
+    """Every builder indexes rows positionally against cols; one malformed row used
+    to raise IndexError out of the recommender and fail the turn."""
+    specs = _recommender().recommend(
+        ["name", "price"], [["a", 1], ["b"], ["c", 3]],
+        {"result_shape": "RANKING", "orderings": [["price", False]]})
+    assert specs and specs[0].chart_data["values"] == [1, 3]
+
+
+def test_listing_labels_stay_unique_even_against_a_preexisting_suffix():
+    """The de-duplication suffix can itself collide with a label already in the data
+    ("X", "X (2)", "X") — each row must still get its own distinct bar."""
+    rows = [["X", 1], ["X (2)", 2], ["X", 3]]
+    labels = _recommender().recommend(
+        ["name", "price"], rows,
+        {"result_shape": "RANKING", "orderings": [["price", False]]})[0].chart_data["labels"]
+    assert len(labels) == len(set(labels)) == 3
+
+
+def test_listing_label_prefers_the_identifying_column_over_a_repeating_one():
+    """A status/flag column repeats across a listing; the name column identifies each
+    row. Distinctness decides, so SELECT-list position can no longer win."""
+    rows = [["For Sale", f"Bldg{i}", i] for i in range(6)]
+    spec = _recommender().recommend(
+        ["status", "building_name", "price"], rows,
+        {"result_shape": "RANKING", "orderings": [["price", False]]})[0]
+    assert spec.x_axis_title == "Building Name"
+
+
+def test_listing_never_charts_an_identifier_or_text_column_as_the_measure():
+    """Even when the SQL's ORDER BY names one — an id is not a quantity."""
+    r = _recommender()
+    spec = r.recommend(["asset_id", "name", "price"], [[9, "a", 1], [8, "b", 2]],
+                       {"result_shape": "RANKING", "orderings": [["asset_id", False]]})[0]
+    assert spec.y_axis_title == "Price"
+
+
+# --- silent truncation: a page must never be charted as the whole (2026-09-22) ---
+#
+# assets_asset holds 7,814 rows; a question naming no row count comes back with
+# 1,000. The listing sub_title used to read "First 25 of 1000 rows", which tells
+# the reader 1,000 IS the total. The engine now flags the silent cut as
+# analytics["result_truncated"]; a user-requested "top 5" is a complete answer
+# and is excluded by the producer, so these tests only pin how the flag is honoured.
+
+_PAGE_ANALYTICS = {"result_shape": "RANKING", "orderings": [["price", False]],
+                   "result_truncated": True}
+
+
+def _captions(specs):
+    return [s.sub_title for s in specs]
+
+
+def test_truncated_listing_does_not_present_the_page_as_the_total():
+    cols = ["name", "price"]
+    rows = [[f"P{i}", i] for i in range(1000)]
+    spec = _recommender().recommend(cols, rows, _PAGE_ANALYTICS)[0]
+    assert spec.sub_title == ("Partial data — first 25 of the 1,000 rows returned; "
+                              "the full result is larger")
+    # the old wording is what implied a total — it must be gone, not merely amended
+    assert "of 1000 rows" not in spec.sub_title
+    assert spec.chart_data["values"] == list(range(25))   # data itself unchanged
+
+
+def test_untruncated_listing_keeps_the_exact_old_caption():
+    """Pinned: without the flag, the bar cap is our own and "First N of M rows"
+    is then completely true — M really is the row count."""
+    cols = ["name", "price"]
+    rows = [[f"P{i}", i] for i in range(40)]
+    spec = _recommender().recommend(
+        cols, rows, {"result_shape": "RANKING", "orderings": [["price", False]]})[0]
+    assert spec.sub_title == "First 25 of 40 rows, in result order"
+
+
+def test_truncated_listing_shorter_than_the_bar_cap_is_still_captioned():
+    """Only 6 rows on screen, but they are 6 of a larger result — the chart is
+    just as partial as a capped one."""
+    rows = [[f"P{i}", i] for i in range(6)]
+    spec = _recommender().recommend(["name", "price"], rows, _PAGE_ANALYTICS)[0]
+    assert spec.sub_title == "Partial data — the 6 rows returned; the full result is larger"
+
+
+def test_truncated_category_breakdown_drops_the_pie_and_captions_the_bar():
+    """A pie's slices always sum to 100% — no caption undoes that claim, so on a
+    truncated result the part-of-whole chart is suppressed and the bar (which
+    asserts no denominator) carries the disclosure instead."""
+    cols = ["region", "revenue"]
+    rows = [["west", 100], ["east", 200], ["north", 150]]
+    specs = _recommender().recommend(cols, rows, {"result_truncated": True})
+    assert [s.type.value for s in specs] == ["bar"]
+    assert all("Partial data" in (c or "") for c in _captions(specs))
+
+
+def test_truncated_long_tail_breakdown_also_drops_the_pie():
+    """The top-N + 'Other' branch can emit a pie too (<= 6 slices) — same guard."""
+    cols = ["category", "amount"]
+    rows = [[f"cat{i}", 10] for i in range(12)]
+    specs = _recommender().recommend(cols, rows, {"result_truncated": True})
+    assert specs and all(s.type.value != "pie" for s in specs)
+    assert all("Partial data" in (s.sub_title or "") for s in specs)
+
+
+def test_untruncated_category_breakdown_keeps_pie_and_has_no_caption():
+    cols = ["region", "revenue"]
+    rows = [["west", 100], ["east", 200], ["north", 150]]
+    for analytics in (None, {}, {"result_truncated": False}):
+        specs = _recommender().recommend(cols, rows, analytics)
+        assert [s.type.value for s in specs] == ["pie", "bar"], analytics
+        assert _captions(specs) == [None, None], analytics
+
+
+def test_truncated_time_series_captions_every_spec_it_returns():
+    """line + bar are two renderings of the same page — one captioned chart and
+    one bare one beside it would be worse than none."""
+    cols = ["month", "total"]
+    rows = [["2026-01", 100], ["2026-02", 200], ["2026-03", 150]]
+    specs = _recommender().recommend(cols, rows, {"result_truncated": True})
+    assert [s.type.value for s in specs] == ["line", "bar"]
+    assert all(s.sub_title == "Partial data — the 3 rows returned; the full result is larger"
+               for s in specs)
+
+
+def test_truncated_combo_chart_is_captioned():
+    cols = ["month", "sales_volume", "conversion_rate"]
+    rows = [["2026-01", 100, 0.5], ["2026-02", 200, 0.6], ["2026-03", 150, 0.55]]
+    specs = _recommender().recommend(cols, rows, {"result_truncated": True})
+    assert specs[0].type.value == "line_histogram"
+    assert "Partial data" in (specs[0].sub_title or "")
+
+
+def test_truncated_ranking_rescue_is_captioned():
+    """The id-labelled leaderboard is its own return path in recommend() — the
+    disclosure is applied at one choke point so it can't be missed there."""
+    cols = ["payment_reference_number", "paid_amount"]
+    rows = [[f"order_R{i}", 100000 - i * 1000] for i in range(10)]
+    analytics = {"result_shape": "RANKING", "result_truncated": True, "column_stats": [
+        {"name": "payment_reference_number", "kind": "categorical", "role": "identifier"},
+        {"name": "paid_amount", "kind": "numeric", "role": "measure"},
+    ]}
+    specs = _recommender().recommend(cols, rows, analytics=analytics)
+    assert specs and specs[0].type.value == "bar"
+    assert "Partial data" in (specs[0].sub_title or "")
+
+
+def test_truncation_caption_reaches_the_wire_payload():
+    cols = ["month", "total"]
+    rows = [["2026-01", 100], ["2026-02", 200], ["2026-03", 150]]
+    d = _recommender().recommend(cols, rows, {"result_truncated": True})[0].to_dict()
+    assert "Partial data" in d["sub_title"]
+
+
+def test_a_missing_or_malformed_analytics_never_raises_or_captions():
+    """Older payloads omit the key entirely, and other heads may ship something
+    that isn't a dict at all. recommend() has no try/except around it in
+    services._build_visualizations — a raise here fails the whole chat turn."""
+    cols = ["month", "total"]
+    rows = [["2026-01", 100], ["2026-02", 200], ["2026-03", 150]]
+    for analytics in (None, {}, [], "truncated", 7, {"result_truncated": None},
+                      {"column_stats": None}):
+        specs = _recommender().recommend(cols, rows, analytics)
+        assert specs, analytics
+        assert _captions(specs) == [None] * len(specs), analytics
+
+
+def test_public_builders_disclose_truncation_too():
+    """services._spec_from_suggestion reaches these directly when the
+    recommender itself found nothing — the query tier's suggested chart is built
+    from the same page and needs the same caption (and the same pie guard)."""
+    r = _recommender()
+    cols = ["region", "revenue"]
+    rows = [["west", 100], ["east", 200], ["north", 150]]
+    specs = r.build_category_specs(cols, rows, 0, 1, analytics={"result_truncated": True})
+    assert [s.type.value for s in specs] == ["bar"]
+    assert "Partial data" in (specs[0].sub_title or "")
+
+    line = r.build_line_spec(cols, rows, 0, 1, analytics={"result_truncated": True})
+    assert "Partial data" in (line.sub_title or "")
+    # default (no analytics) is byte-identical to the old behaviour
+    assert r.build_line_spec(cols, rows, 0, 1).sub_title is None
+    assert [s.type.value for s in r.build_category_specs(cols, rows, 0, 1)] == ["pie", "bar"]

@@ -235,7 +235,7 @@ class ConversationQueryView(APIView):
         # and the `completed` frame with it: an answer the user saw and that was
         # never saved.
         try:
-            metadata = turn.metadata()
+            metadata = turn.metadata(action=getattr(service, "last_action", ""))
         except Exception:
             logger.exception("turn metadata failed chat_id=%s — persisting the answer "
                              "without it", chat.pk)
@@ -303,7 +303,7 @@ class ConversationQueryView(APIView):
         # and the `completed` frame with it: an answer the user saw and that was
         # never saved.
         try:
-            metadata = turn.metadata()
+            metadata = turn.metadata(action=getattr(service, "last_action", ""))
         except Exception:
             logger.exception("turn metadata failed chat_id=%s — persisting the answer "
                              "without it", chat.pk)
@@ -471,12 +471,17 @@ def _serialize_history_message(msg) -> dict:
             response = [{"type": "markdown", "content": msg.content}]
         meta = msg.metadata or {}
         history_meta = {
-            "thinking": meta.get("thinking", ""),
-            "explainability": meta.get("explainability"),
             # dict() copy: the shared constant must never be handed out by
             # reference into a mutable response payload.
             "usage": meta.get("usage") or dict(_ZERO_USAGE),
         }
+        # Small-talk metadata intentionally has no thinking/explainability keys.
+        # Preserve the existing shape for analytical/refusal turns, while making
+        # history consistent with the live/JSON response for small talk.
+        if "thinking" in meta:
+            history_meta["thinking"] = meta.get("thinking", "")
+        if "explainability" in meta:
+            history_meta["explainability"] = meta.get("explainability")
         # The projection stays an explicit ALLOWLIST (never `dict(meta)`) so a
         # metadata key added for internal use can't leak by default. These two are
         # persisted by TurnEventAccumulator.metadata() and were being dropped here,

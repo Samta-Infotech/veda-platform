@@ -98,8 +98,17 @@ def _same_field(a: Optional[str], b: Optional[str]) -> bool:
 
 
 class DrillLevel(TypedDict, total=False):
-    dimension: str
+    dimension: str      # the humanised LABEL, kept because the path is also shown to people
+    column: str         # the RAW column the executed SQL filtered on
     value: Any
+    # WHY BOTH. A level used to record only the label, and rebuild_frame_from_stack
+    # therefore re-derived a column-less filter after a "go back". ConversationContext
+    # drops a filter that cannot name its own column — deliberately, because re-grounding
+    # from a bare value is the guess that once put an is_gated filter onto all_day_access —
+    # so the remaining level never reached the engine, the answer came back unfiltered, and
+    # memory_write_node's prune (which keeps only levels still present in the frame's
+    # filters) then dropped EVERY level. One "go back" erased the whole path, measured
+    # 2026-09-24 at depth 2. Carrying the column makes the rebuilt filter usable again.
 
 
 class OrderFact(TypedDict, total=False):
@@ -207,6 +216,29 @@ def _looks_like_an_engine_alias(table: Optional[str]) -> bool:
     return bool(_ENGINE_ALIAS_RE.match(name)) or name.lower() in _ROUTE_NAMES
 
 
+def _cited_first(answer: Any, datasets: List[Any]) -> List[Any]:
+    """Reorder `datasets` so the documents the answer's own "Sources:" line names come
+    first, in the order it names them. Only the text after the LAST "Sources:" is read —
+    the document prompt puts citations on the final line and nowhere else — and a name
+    counts as cited when its letters and digits appear there. No "Sources:" line, or
+    none of the datasets named in it, changes nothing.
+    """
+    text = answer if isinstance(answer, str) else ""
+    at = text.lower().rfind("sources:")
+    if at < 0:
+        return datasets
+    cited = _normalise_document_name(text[at + len("sources:"):])
+    hits = []
+    for d in datasets:
+        pos = cited.find(_normalise_document_name(str(d))) if d else -1
+        if pos >= 0 and _normalise_document_name(str(d)):
+            hits.append((pos, d))
+    if not hits:
+        return datasets
+    first = [d for _, d in sorted(hits, key=lambda h: h[0])]
+    return first + [d for d in datasets if d not in first]
+
+
 def harvest_frame(engine_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Pure extraction, NO LLM: turn an "answered" engine_result (the full
     dict chatbot/nodes.py::call_engine_node stores at state["engine_result"],
@@ -270,6 +302,13 @@ def harvest_frame(engine_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     route = engine_result.get("_route") or engine_result.get("route") or ""
 
     entity = engine_result.get("table")
+    if not entity and datasets:
+        # datasets arrive in RETRIEVAL order (the document of the most similar passage
+        # first), which is not the document the answer came from. Measured 2026-09-25
+        # (demo D2): the reply said "Sources: (msa_green_tower.pdf)" while datasets[0] was
+        # the employee handbook, so the frame filed the handbook and the follow-up searched
+        # it instead of the MSA. The document(s) the answer itself cites go first.
+        datasets = _cited_first(engine_result.get("answer"), datasets)
     if not entity and datasets:
         # A retrieval answer has no table — it has a DOCUMENT. Measured 2026-09-21:
         # without this the frame was written with entity=None, and since every
@@ -370,7 +409,8 @@ def push_drill(stack: List[DrillLevel], harvested: Dict[str, Any]) -> List[Drill
     last = filters[-1]
     if not last.get("field"):
         return stack
-    level: DrillLevel = {"dimension": last["field"], "value": last.get("value")}
+    level: DrillLevel = {"dimension": last["field"], "column": last.get("column"),
+                         "value": last.get("value")}
     return (stack + [level])[-_MAX_DRILL_DEPTH:]
 
 
@@ -434,7 +474,8 @@ def push_drill_level(stack: List[DrillLevel], filt: Dict[str, Any]) -> List[Dril
     """
     if not filt or not filt.get("field"):
         return stack
-    level: DrillLevel = {"dimension": filt["field"], "value": filt.get("value")}
+    level: DrillLevel = {"dimension": filt["field"], "column": filt.get("column"),
+                         "value": filt.get("value")}
     return (stack + [level])[-_MAX_DRILL_DEPTH:]
 
 
@@ -1167,6 +1208,61 @@ def _normalise_document_name(name: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", stem)
 
 
+def keep_entity_on_lane_change(prev_frame: Optional[QueryFrame], harvested: Dict[str, Any],
+                              referential: bool) -> Dict[str, Any]:
+    """Do not let a FOLLOW-UP move the conversation to an entity from a different LANE.
+
+    The mirror of stabilise_document_entity, for the case that one does not cover: a
+    conversation anchored on a TABLE, whose follow-up gets answered from the documents.
+
+    Measured 2026-09-23/24. After "What is the distribution of properties by furnishing?"
+    (frame: assets_asset, route deterministic), the follow-up "only the Nagpur ones" was
+    answered by the RAG head — "The provided context does not contain information specific
+    to Nagpur", citing an employee handbook. That turn's status is `answered`, so memory
+    wrote it, and the frame became `Samta-Employee Handbook April 2026`. Every later turn
+    in that conversation was then anchored to a document nobody had asked about.
+
+    The write itself was correct by its own rules — it recorded what the engine returned.
+    What was wrong is ADOPTING it as the conversation's subject: a follow-up is, by
+    definition, a continuation of what came before, so an answer from a different lane is
+    evidence that the turn went astray, not that the topic changed.
+
+    So the ENTITY is held: the rest of the harvest (row count, sql, status) is written
+    unchanged, because those are facts about what just ran. Only the claim "this is what
+    the conversation is about now" is refused.
+
+    Deliberately narrow:
+      · follow-ups only — a NEW topic is allowed to move anywhere, which is what makes it
+        a new topic.
+      · route change only — a follow-up answered by the SAME lane is the normal case and
+        is untouched, however much the table moved within it.
+      · no frame, or no route recorded on either side -> nothing to compare, nothing to do.
+    """
+    if not referential or not prev_frame or not harvested:
+        return harvested
+    prev_route = str(prev_frame.get("route") or "").strip().lower()
+    new_route = str(harvested.get("route") or "").strip().lower()
+    if not prev_route or not new_route or prev_route == new_route:
+        return harvested
+    # Only the SQL-to-document direction. The reverse (a document conversation that finds
+    # a table) is already handled by stabilise_document_entity's own evidence rule, and
+    # re-deciding it here could fight with it.
+    if not (prev_route not in _DOCUMENT_ROUTES and new_route in _DOCUMENT_ROUTES):
+        return harvested
+    if not prev_frame.get("entity"):
+        return harvested
+    out = dict(harvested)
+    out["entity"] = prev_frame.get("entity")
+    out["entity_display"] = prev_frame.get("entity_display")
+    out["route"] = prev_frame.get("route")
+    if prev_frame.get("source_id") is not None:
+        out["source_id"] = prev_frame.get("source_id")
+    logger.info("keep_entity_on_lane_change: follow-up answered via %r but the conversation "
+                "is on %r — keeping entity %r instead of adopting %r",
+                new_route, prev_route, prev_frame.get("entity"), harvested.get("entity"))
+    return out
+
+
 def stabilise_document_entity(prev_frame: Optional[QueryFrame], harvested: Dict[str, Any],
                               referential: bool) -> Dict[str, Any]:
     """Keep a document conversation in its document when the follow-up stayed there.
@@ -1204,6 +1300,41 @@ def stabilise_document_entity(prev_frame: Optional[QueryFrame], harvested: Dict[
                 previous, harvested.get("entity"))
     return {**harvested, "entity": previous,
             "entity_display": (prev_frame or {}).get("entity_display") or previous}
+
+
+# The fields that say WHAT the conversation is about, as opposed to what this turn ran.
+_SUBJECT_FIELDS = ("entity", "entity_display", "route", "source_id", "entity_is_document")
+
+
+def keep_entity_on_lane_change(prev_frame: Optional[QueryFrame], harvested: Dict[str, Any],
+                               referential: bool) -> Dict[str, Any]:
+    """Keep a table conversation on its table when a follow-up came back from documents.
+
+    The mirror of stabilise_document_entity. Measured 2026-09-23: a conversation on
+    `assets_asset` asked "only the Nagpur ones", the RAG head answered from the employee
+    handbook, that turn counted as `answered`, and the frame moved to the handbook —
+    anchoring every later turn to a document nobody had asked about.
+
+    Only the subject is held. What the turn actually ran (row count, SQL, filters) is a
+    fact and is still recorded. Gated on `referential` so a genuinely new question may go
+    anywhere; a document conversation that finds a table is left to the other guard; and
+    with no route on either side there is no lane change to judge.
+    """
+    if not referential or not harvested:
+        return harvested
+    prev = prev_frame or {}
+    if not str(prev.get("entity") or "").strip():
+        return harvested
+    if not prev.get("route") or not harvested.get("route"):
+        return harvested
+    if is_document_frame(prev) or not is_document_frame(harvested):
+        return harvested
+    logger.info("keep_entity_on_lane_change: follow-up on %r was answered from documents "
+                "(%r) — keeping the table as the frame's subject",
+                prev.get("entity"), harvested.get("entity"))
+    out = {k: v for k, v in harvested.items() if k not in _SUBJECT_FIELDS}
+    out.update({k: prev[k] for k in _SUBJECT_FIELDS if k in prev})
+    return out
 
 
 def _render_document_query(frame: QueryFrame, message: str, delta_type: str,
@@ -1350,10 +1481,67 @@ def rebuild_frame_from_stack(frame: QueryFrame, stack: List[DrillLevel]) -> Quer
     frame.filters stays consistent with drill_path for the NEXT turn's
     render/prompt — the actual authoritative filters still get overwritten by
     harvest_frame() once the engine re-executes and returns fresh evidence;
-    this only keeps the pre-call view honest in the interim."""
-    filters: List[FilterFact] = [
-        {"field": lvl["dimension"], "operator": "equals", "value": lvl.get("value"),
-         "source": "executed_sql"}
-        for lvl in stack
-    ]
+    this only keeps the pre-call view honest in the interim.
+
+    Each surviving level keeps the frame's OWN filter record when it has one. A DrillLevel
+    stores only dimension + value, so rebuilding from it alone dropped the raw `column`
+    (and the operator actually executed) — and the inference boundary discards any filter
+    without a column. Measured 2026-09-24: "go back" from depth 2 reached the engine with
+    `filter_values` but no `filters`, so the remaining level was lost and the base
+    question came back ungrouped."""
+    existing = list(frame.get("filters") or [])
+    filters: List[FilterFact] = []
+    for lvl in stack:
+        match = next((f for f in existing if _same_field(f.get("field"), lvl["dimension"])
+                      and str(f.get("value")).lower() == str(lvl.get("value")).lower()), None)
+        filters.append(dict(match) if match else
+                       {"field": lvl["dimension"], "operator": "equals",
+                        "value": lvl.get("value"), "source": "executed_sql"})
     return {**frame, "filters": filters, "drill_path": stack}
+
+
+def hold_subject_on_unplaced_turn(prev_frame: Optional[QueryFrame], harvested: Dict[str, Any],
+                                  delta_type: str, prev_stack: Optional[List[DrillLevel]]) -> Dict[str, Any]:
+    """Do not let a turn the classifier could not PLACE rewrite the conversation's subject.
+
+    Same principle as keep_entity_on_lane_change, applied to `ambiguous`.
+
+    `ambiguous` is what parse_delta_response returns for a genuine judgment call AND for a
+    model call that failed or timed out — chatbot/llm.py returns None uniformly for both.
+    It is therefore not evidence about the topic either way. But it has a second-order
+    effect that IS destructive: an ambiguous turn carries no context (carry_state excludes
+    it), so the engine answers the bare message, lands on whatever table that fragment
+    routes to, and `is_topic_switch` then reads that as "the user changed subject" — at
+    BOTH call sites, the drill-stack reset in memory_write_node and the frame reset in
+    merge_frame_post_execution. Measured 2026-09-24, 3 runs of 3: a refused turn mid-drill
+    made the NEXT follow-up classify ambiguous, and a live drill path was erased by a turn
+    nobody intended as a new question.
+
+    Holding the entity fixes both sites at once, because is_topic_switch compares entities.
+
+    Deliberately narrow — an ambiguous turn on its own is NOT enough:
+      · mid-drill only. A live drill stack is positive evidence that a continuation is the
+        better reading. With no stack there is nothing to protect and a genuinely new
+        subject, phrased oddly, is free to move the frame as it always could.
+      · a DIFFERENT entity only; same entity is a no-op.
+      · nothing else about the turn is touched: sql, row count and status are facts about
+        what just ran and are written unchanged. Only the claim "this is what the
+        conversation is about now" is refused.
+    """
+    if delta_type != "ambiguous" or not prev_frame or not harvested or not prev_stack:
+        return harvested
+    if not prev_frame.get("entity") or not harvested.get("entity"):
+        return harvested
+    if harvested["entity"] == prev_frame["entity"]:
+        return harvested
+    out = dict(harvested)
+    out["entity"] = prev_frame.get("entity")
+    out["entity_display"] = prev_frame.get("entity_display")
+    if prev_frame.get("route"):
+        out["route"] = prev_frame.get("route")
+    if prev_frame.get("source_id") is not None:
+        out["source_id"] = prev_frame.get("source_id")
+    logger.info("hold_subject_on_unplaced_turn: turn came back 'ambiguous' and routed to %r, "
+                "but a %d-level drill on %r is live — keeping the subject",
+                harvested.get("entity"), len(prev_stack), prev_frame.get("entity"))
+    return out

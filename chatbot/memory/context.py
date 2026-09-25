@@ -38,6 +38,7 @@ the new one together.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as _dc_field
 from typing import Any, Dict, List, Optional
 
@@ -61,6 +62,24 @@ def _clean_strs(values: Any, cap: int = _MAX_LIST) -> List[str]:
     return out
 
 
+def _known_operation(op: Optional[str]) -> str:
+    """The operation if it is one of the closed set, else "" — never a free string."""
+    from chatbot.prompts.delta_types import DELTA_TYPES
+    op = str(op or "").strip().lower()
+    return op if op in DELTA_TYPES else ""
+
+
+def _terms_in(terms: Optional[List[str]], message: str) -> List[str]:
+    """The resolved terms that really are words of the message — nothing else travels."""
+    words = {w.lower() for w in re.findall(r"[A-Za-z0-9]+", message or "")}
+    out: List[str] = []
+    for t in terms or []:
+        t = str(t or "").strip()
+        if t and t.lower() in words and t.lower() not in (o.lower() for o in out):
+            out.append(t[:32])
+    return out[:8]
+
+
 @dataclass(frozen=True)
 class ConversationContext:
     """What VEDA Core genuinely needs to know about the conversation — and nothing else."""
@@ -77,11 +96,28 @@ class ConversationContext:
     aggregation: str = ""          # which aggregate the previous turn computed
     route: str = ""
     drill_depth: int = 0
+    # WHAT this turn does to the remembered state — the turn's delta, from the closed set
+    # in chatbot/prompts/delta_types.py. The engine needs it for exactly one decision it
+    # cannot otherwise make safely: whether the remembered shape is being REPLAYED. A
+    # drill-up replays the base question, whose own grouping words ("distribution ... by
+    # facing") look like a request for a NEW grouping; inferring the difference from the
+    # text meant matching column names against words, which broke the moment the planner
+    # grouped by a column the user never said (corner_property; measured 2026-09-25,
+    # depth 2 -> 1 came back as 1000 raw rows). Said once, by the layer that knows.
+    operation: str = ""
+    # Words of `user_message` this layer RESOLVED against memory — the "second" / "one" of
+    # "show the second one", which now travel as an id filter. They name a row the user
+    # saw, not data, so the engine's qualifier gate must not demand them in the SQL
+    # (measured 2026-09-25: "I couldn't map 'second' to any column or value"). Only words
+    # that actually occur in the message are ever sent.
+    resolved_terms: List[str] = _dc_field(default_factory=list)
 
     # ── construction ────────────────────────────────────────────────────────────────
     @classmethod
     def from_frame(cls, frame: Optional[Dict[str, Any]], user_message: str,
-                   *, carry_state: bool = True) -> "ConversationContext":
+                   *, carry_state: bool = True,
+                   operation: Optional[str] = None,
+                   resolved_terms: Optional[List[str]] = None) -> "ConversationContext":
         """Build from the frame AS IT STANDS AFTER the delta was applied.
 
         `carry_state=False` is the new-topic case: the message is self-contained, so no
@@ -143,6 +179,8 @@ class ConversationContext:
             aggregation=str(frame.get("aggregation") or ""),
             route=str(frame.get("route") or ""),
             drill_depth=len(frame.get("drill_path") or []),
+            operation=_known_operation(operation),
+            resolved_terms=_terms_in(resolved_terms, user_message),
         )
 
     # ── transport ───────────────────────────────────────────────────────────────────
@@ -173,6 +211,10 @@ class ConversationContext:
             payload["route"] = self.route
         if self.drill_depth:
             payload["drill_depth"] = self.drill_depth
+        if self.operation:
+            payload["operation"] = self.operation
+        if self.resolved_terms:
+            payload["resolved_terms"] = list(self.resolved_terms)
         return payload
 
     def is_empty(self) -> bool:

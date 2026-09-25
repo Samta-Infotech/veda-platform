@@ -1333,6 +1333,25 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
                 "msg": f"{anchor} and {', '.join(plan['unreachable'])} are not directly "
                        f"related — a join would have to pass through unrelated tables"}
 
+    # Provably-dead FK guard (INNER-JOIN skeleton path only). build_skeleton emits every
+    # edge as a bare INNER JOIN, so an edge whose FK column holds no non-NULL value
+    # anywhere makes THIS WHOLE QUERY return 0 rows — for any question, always. Dropping
+    # such an edge (and whatever was only reachable through it) can therefore only turn a
+    # guaranteed-empty answer into a real one; no query that returns rows today can
+    # change. See query.join_planner.prune_dead_edges. Placed AFTER the existence and
+    # pre-aggregation branches on purpose: a NOT EXISTS over a dead relationship is a
+    # correct non-empty answer, and pruning would silently rewrite it.
+    from query.join_planner import prune_dead_edges
+    try:
+        plan = prune_dead_edges(plan, graph)
+    except Exception:
+        pass                                       # measurement unavailable → plan as before
+    if not plan["join_path"]:
+        # every edge was dead — there is no multi-table answer to give; hand back to the
+        # single-table path rather than emitting a bare FROM that answers a different
+        # question under a join plan's name.
+        return {"action": "fallback"}
+
     skeleton, alias_map = build_skeleton(plan)     # alias_map: alias -> table (occurrence-keyed)
     # Alias-qualified join keys from OUR OWN skeleton (deterministic format), for
     # ON-integrity. Name-only pairs collide when two joins share column names

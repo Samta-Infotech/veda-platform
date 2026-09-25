@@ -166,6 +166,43 @@ def _collect_allowed_numbers(facts: dict, patterns: Optional[List[str]]) -> List
 _CURRENCY_SYMS = "$₹€£¥₩₽"
 
 
+_GROUPED_NUMBER_RE = __import__("re").compile(
+    r"(?<![\d,.])(\d{1,4}(?:,\d+)+)(\.\d+)?(?![\d,])")
+_WESTERN_GROUPING_RE = __import__("re").compile(r"^\d{1,3}(?:,\d{3})+$")
+_INDIAN_GROUPING_RE = __import__("re").compile(r"^\d{1,2}(?:,\d{2})*,\d{3}$")
+
+
+def _regroup_numbers(answer: str) -> str:
+    """Re-group any number whose thousands separators are in the wrong places.
+
+    The summary SLM is handed raw values (1222441350.14) and inserts the commas ITSELF —
+    measured 2026-09-25 on the live engine: "The average expected price of sale listings
+    is 122,244,1350.14" and "The total security deposit … is 23,493,131,4590.000". The
+    VALUE is right (the numeric guard strips commas, so it passed), the rendering is not,
+    and it is the first thing a reader sees. A grouping that is valid in EITHER the
+    Western (1,222,441,350) or the Indian (12,22,44,135) convention is left exactly as
+    written; only an impossible grouping is rewritten, Western-style, digits unchanged.
+    """
+    if not answer or "," not in answer:
+        return answer
+
+    def _fix(m):
+        whole, frac = m.group(1), m.group(2) or ""
+        if _WESTERN_GROUPING_RE.match(whole) or _INDIAN_GROUPING_RE.match(whole):
+            return m.group(0)
+        groups = whole.split(",")
+        # Only a group that is TOO LONG proves a mis-grouped number ("…,1350", "…,4590",
+        # "1234,567"). Groups that are too SHORT ("1,2,3", "10,20") are far more likely a
+        # list of separate figures, and rewriting them would merge values — left alone.
+        if max(len(g) for g in groups[1:]) <= 3 and len(groups[0]) <= 3:
+            return m.group(0)
+        if any(len(g) < 3 for g in groups[1:]):
+            return m.group(0)
+        return f"{int(''.join(groups)):,}{frac}"
+
+    return _GROUPED_NUMBER_RE.sub(_fix, answer)
+
+
 def _strip_invented_currency(answer: str, facts: dict) -> str:
     """Remove any currency symbol the SLM prefixed that ISN'T present in the data
     (2026-07-17). The platform is multi-source/multi-tenant with currency itself a
@@ -184,6 +221,71 @@ def _strip_invented_currency(answer: str, facts: dict) -> str:
         if sym not in facts_text:
             answer = answer.replace(sym, "")
     return answer
+
+
+_PROPORTION_RE = __import__("re").compile(
+    r"(\d+(?:\.\d+)?\s*%)"                             # "86%"
+    r"|(\b\d+(?:\.\d+)?\s*percent\b)"                 # "86 percent"
+    r"|(\b\d[\d,]*\s+of\s+\d[\d,]*\b)"                # "8 of 100"
+    # "79 assets out of 100" — the counted NOUN sits between the number and "out of",
+    # which the adjacent-only form above missed. Measured 2026-09-22: that exact
+    # sentence passed the first version of this guard on a truncated page. Intervening
+    # words are allowed only for the unambiguous "out of"; a bare "of" stays adjacent,
+    # since "1,190.81 square meters of ..." is not a proportion.
+    r"|(\b\d[\d,]*(?:\s+\w+){0,3}\s+out\s+of\s+\d[\d,]*\b)",
+    __import__("re").I)
+
+
+def _states_a_proportion(answer: str) -> bool:
+    """Does this summary express a share of a whole — a percentage, or "N of M"?
+
+    Only ever consulted for a TRUNCATED result, where the page is not the population
+    and every such figure is therefore unsupported by the rows the narrator saw.
+
+    The prompt already forbids this in as many words ("never state a percentage or
+    proportion, never say 'out of N'"), and the model says it anyway. Measured
+    2026-09-22 on one query whose WHERE clause already restricted the rows to Pune —
+    so the true share is 100% — three runs of the SAME SQL produced "86% of the assets
+    listed are in Pune", "8 of 100 rows are in Pune", and a third with no figure at
+    all. Two contradictory invented numbers, both delivered confidently, and the
+    truncation caveat was appended to them rather than preventing them.
+
+    So this is a deterministic guard rather than more prompt text, the same choice
+    this module already made for invented currency symbols and ungrounded numbers
+    above: a hard guarantee, not a lower probability.
+    """
+    return bool(_PROPORTION_RE.search(answer or ""))
+
+
+_AGGREGATE_WORD_RE = __import__("re").compile(
+    r"\b(average|mean|median|typical)\b", __import__("re").I)
+
+
+def _states_page_derived_total(answer: str, facts: dict) -> bool:
+    """Does this summary present a figure derived from the PAGE as a fact about the data?
+
+    Two shapes, both measured on the live engine 2026-09-22 against assets_asset, which
+    holds 7,814 rows:
+
+        "There are 1000 assets listed ..."                  the page size as the total
+        "The average carpet area is 1628.46 square meters"  a mean over one page
+
+    Neither is a truncation artefact the reader can discount — both read as statements
+    about the table. Only consulted when the result was SILENTLY cut; a limit the user
+    asked for ("top 5") is excluded upstream by _user_asked_for_n_rows, so a correct
+    "the top 5 transactions total 45,648,588" is never touched.
+    """
+    if not answer:
+        return False
+    if _AGGREGATE_WORD_RE.search(answer):
+        return True
+    shown = facts.get("rows_shown") or facts.get("row_count")
+    if not shown:
+        return False
+    # The page size quoted back as a quantity — "1000 assets", "There are 1,000 ...".
+    pattern = __import__("re").compile(
+        r"\b" + f"{int(shown):,}".replace(",", "[,]?") + r"\b")
+    return bool(pattern.search(answer))
 
 
 def _answer_numbers_grounded(answer: str, facts: dict, patterns: Optional[List[str]]) -> bool:
@@ -274,7 +376,25 @@ _FACTS_SAMPLE_ROWS = 5   # rows included in the precomputed facts payload, regar
 _LIMIT_RE = __import__("re").compile(r"\bLIMIT\s+(\d+)\s*$", __import__("re").I)
 
 
-def _sql_truncated(sql: Optional[str], n_rows: int) -> bool:
+def _user_asked_for_n_rows(query: Optional[str], n_rows: int) -> bool:
+    """Did the USER ask for exactly this many rows ("top 5", "first 20")?
+
+    A limit the user chose is not a truncation: an answer about their top 5 is an
+    answer about what they asked for, and statistics over those 5 are legitimate. Only
+    rows WE silently removed make a derived figure misleading. Without this the guards
+    below would fire on every "top N" question and strip correct summaries.
+    """
+    if not query or n_rows <= 0:
+        return False
+    try:
+        from query.ranking_parser import parse_ranking
+        top_n = parse_ranking(query).top_n
+    except Exception:
+        return False
+    return top_n is not None and n_rows <= int(top_n)
+
+
+def _sql_truncated(sql: Optional[str], n_rows: int, query: Optional[str] = None) -> bool:
     """True when the executed SQL's trailing LIMIT is exactly filled — i.e. these rows are ONE PAGE
     of a larger result and `len(rows)` is NOT the population size. Deliberately conservative: it
     only fires on a filled limit, so a 1-row aggregate under `LIMIT 100` is never flagged.
@@ -283,7 +403,24 @@ def _sql_truncated(sql: Optional[str], n_rows: int) -> bool:
         from config import SUMMARY_TRUNCATION_AWARE_ENABLED as _on
     except Exception:
         return False
-    if not _on or not sql or n_rows <= 0:
+    if not _on or n_rows <= 0:
+        return False
+    if _user_asked_for_n_rows(query, n_rows):
+        return False
+    # The EXECUTOR's own cap, which applies whether or not the SQL carries a LIMIT:
+    # veda/execution.py fetches at most EXECUTION_RESULT_LIMIT rows. Checking only the
+    # SQL text was correct while every query was given a LIMIT; once the invented
+    # default was removed (veda/validation.py, 2026-09-22) a result could be cut by the
+    # fetch alone and this returned False — silently disabling every truncation
+    # protection downstream, including the proportion guard. Detection must not depend
+    # on the cap being visible in the SQL string.
+    try:
+        from config import EXECUTION_RESULT_LIMIT as _exec_cap
+    except Exception:
+        _exec_cap = None
+    if _exec_cap and n_rows >= int(_exec_cap):
+        return True
+    if not sql:
         return False
     m = _LIMIT_RE.search(sql.strip().rstrip(";"))
     return bool(m) and n_rows >= int(m.group(1))
@@ -442,6 +579,257 @@ def _analytical_context_block(ctx: Optional[dict]) -> str:
     return ("\n\nResolved analytical context: " + "; ".join(bits)) if bits else ""
 
 
+# ── Provenance, and the ungrounded-business-term guard ─────────────────────────
+#
+# Measured silent-wrong answer (evaluation/drilldown_l7, turn 21, 2026-09-24):
+#
+#   Q: "Who is the listing agent?"
+#   SQL: SELECT DISTINCT t.first_name FROM assets_salenegotiation a
+#        JOIN users_user t ON a.negotiator_id = t.id
+#   A: "There are 4 listing agents named Ashutosh, Deepa, Demo, and Pritam."
+#
+# There is no agent concept anywhere in that schema. The summariser was handed
+# the user's question and a bag of first names, and did the one thing this layer
+# must never do: it restated the user's BUSINESS TERM as though the data had
+# confirmed it, while never naming the column it actually read. The SQL's
+# wrongness was completely invisible in the prose — no hedge, no provenance.
+#
+# Two mechanisms here, both deterministic (no SLM, no DB):
+#   1. `_provenance_block` tells the model, in the prompt, exactly which
+#      table.column each value came from and that it may not rename them.
+#   2. `ungrounded_answer_term` is the backstop that does not depend on a 7B
+#      model obeying an instruction: if the prose adopts a salient word from the
+#      question that is grounded NOWHERE in the schema and appears nowhere in the
+#      executed SQL, the fluent sentence is replaced by `ungrounded_term_answer`,
+#      which says so and names the fields actually read.
+#
+# Fail-open by construction — every unknown (no SQL, unparseable SQL, resolver
+# unavailable) means "no finding". This guard may only ever fire on positive
+# evidence that a term is absent from the schema, never on absence of evidence.
+# The upstream refusal gate (veda/validation.py::qualifier_completeness) does not
+# catch this case on purpose: an unaccounted token that names no column of the
+# queried tables and is no stored value is classified as FILLER there, to avoid
+# false refusals on words like "database"/"system". "agent" lands in exactly that
+# bucket. Widening that classification is a hot-path change to the refusal gate;
+# this layer instead refuses to LAUNDER the term into a confident claim.
+
+_UNGROUNDED_MIN_LEN = 4
+_PROV_MAX_FIELDS = 6
+_VALUES_IN_HONEST_ANSWER = 8
+
+
+def _prov_of(sql: Optional[str]) -> dict:
+    """sql_provenance(), never raising, empty dict-shape when unavailable."""
+    try:
+        from veda.business_explain import sql_provenance
+        return sql_provenance(sql or "")
+    except Exception:
+        return {"projections": [], "tables": [], "join_keys": [], "ordered": False,
+                "vocabulary": []}
+
+
+def _provenance_block(prov: Optional[dict]) -> str:
+    """Prompt block naming the fields the values actually came from. Empty when the
+    provenance is unknown — an empty block is honest, an invented one is not."""
+    if not prov or not prov.get("projections"):
+        return ""
+    line = ("\n\nData provenance — every value above was read from these fields and no "
+            "others: " + ", ".join(prov["projections"][:_PROV_MAX_FIELDS]))
+    if prov.get("join_keys"):
+        line += " (reached through " + "; ".join(prov["join_keys"][:2]) + ")"
+    line += (". Describe the values as what THOSE fields are. If the question names a "
+             "business concept that is not one of those fields, do not answer as though "
+             "the data confirmed it — say the data has no such field.")
+    return line
+
+
+def _words(text: Any) -> List[str]:
+    return [w for w in re.findall(r"[a-z]+", str(text or "").lower()) if len(w) > 2]
+
+
+def _singular(word: str) -> str:
+    try:
+        from retrieval.query_enrichment import _singularize
+        return _singularize(word)
+    except Exception:
+        return word[:-1] if len(word) > 3 and word.endswith("s") else word
+
+
+def _operation_words() -> set:
+    """Words that name an ANALYTICS OPERATION rather than a business entity —
+    "average", "total", "minimum", "maximum". Read from veda/business_explain.py's
+    existing SQL-function -> business-word map (`_AGG_WORD`, the one place this
+    translation lives), never re-listed here. Measured need: "What is the average
+    expected price of sale listings?" ran a correct AVG(expected_price), and
+    'average' has no schema referent — without this the guard flagged a perfectly
+    good answer. An operation word is not a claim about what the rows ARE."""
+    try:
+        from veda.business_explain import _AGG_WORD
+        return {str(k).lower() for k in _AGG_WORD} | {str(v).lower() for v in _AGG_WORD.values()}
+    except Exception:
+        return set()
+
+
+def _query_content_words(query: str) -> List[str]:
+    """The user's CONTENT words — what they asked FOR — using the same centralized
+    query-LANGUAGE vocabulary the refusal gate uses (config.QUERY_GRAMMAR /
+    QUERY_LANGUAGE via veda/validation.py::_gate_strip). No word list lives here.
+    Empty on any failure, which disables the guard (fail-open)."""
+    try:
+        from veda.validation import _gate_strip
+        strip = _gate_strip()
+    except Exception:
+        # veda.validation pulls in the runtime (DB/context) — unavailable in some
+        # import contexts. Fall back to the SAME centralized vocabulary it reads,
+        # straight from config; never to a word list written here.
+        try:
+            from config import QUERY_GRAMMAR, QUERY_LANGUAGE
+            strip = set()
+            for ops in QUERY_GRAMMAR.values():
+                for w in ops:
+                    strip.update(w.split())
+            for cls in QUERY_LANGUAGE.values():
+                strip.update(cls)
+        except Exception:
+            return []
+    ops = _operation_words()
+    # Pointer words the conversation layer already resolved into a row of the previous
+    # answer ("second" of "show the second one") are not what was asked FOR — measured
+    # 2026-09-25, a correctly resolved row was replaced by "this data has no 'second'".
+    # One definition, shared with the ranking parser.
+    try:
+        from query.ranking_parser import _resolved_pointer_words
+        pointer = _resolved_pointer_words()
+    except Exception:
+        pointer = set()
+    out = []
+    for w in _words(query):
+        s = _singular(w)
+        if w in strip or s in strip or len(s) < _UNGROUNDED_MIN_LEN:
+            continue
+        if w in ops or s in ops or w in pointer or s in pointer:
+            continue
+        if s not in out:
+            out.append(s)
+    return out
+
+
+def _accounted_in(token: str, vocabulary: List[str]) -> bool:
+    """Same substring-tolerant accounting the refusal gate uses (>=4 chars either
+    way), so morphology (listing/listed, negotiator/negotiation) still matches."""
+    if token in vocabulary:
+        return True
+    return any(len(v) >= 4 and (token in v or v in token) for v in vocabulary)
+
+
+def _schema_referent(token: str, sm: Optional[dict]) -> Optional[bool]:
+    """True / False / None(unknown) — does this token refer to ANYTHING in this
+    scope's schema (a sampled value, an entity table, a column name)? Reuses
+    query/resolution.py::has_schema_referent, the existing schema-derived
+    referent test; None whenever it cannot be consulted, and None never fires."""
+    try:
+        from query.resolution import has_schema_referent
+    except Exception:
+        return None
+    try:
+        return bool(has_schema_referent(token, sm))
+    except Exception:
+        return None
+
+
+def ungrounded_answer_term(question: str, answer: str, columns: List[str],
+                           rows: List[dict], prov: Optional[dict],
+                           sm: Optional[dict] = None) -> Optional[str]:
+    """The business term the ANSWER adopted from the QUESTION that this data cannot
+    support — or None (the overwhelmingly common case).
+
+    All four conditions must hold, and any unknown means None:
+      1. provenance is KNOWN (the SQL parsed and projects real fields),
+      2. the term is a content word of the question that appears nowhere in the
+         executed SQL, the result's columns, or the returned values,
+      3. the term refers to nothing anywhere in the schema (has_schema_referent),
+      4. the prose actually USES the term — i.e. it was laundered into the answer.
+    """
+    if not prov or not prov.get("projections") or not answer:
+        return None
+    vocab = list(prov.get("vocabulary") or [])
+    for c in columns or []:
+        for w in _words(c):
+            if w not in vocab:
+                vocab.append(w)
+    for r in (rows or [])[:_FACTS_SAMPLE_ROWS]:
+        for v in (r.values() if isinstance(r, dict) else []):
+            if isinstance(v, str):
+                for w in _words(v):
+                    if w not in vocab:
+                        vocab.append(w)
+    vocab = [_singular(v) for v in vocab]
+    answer_words = {_singular(w) for w in _words(answer)}
+    content = _query_content_words(question)
+    # Only the HEAD of what was asked for — the last content word of the question
+    # ("the listing AGENT"). A modifier earlier in the phrase is describing a noun
+    # that IS in the data ("the average expected PRICE", "the cheapest PROPERTY"),
+    # and flagging those produced a measured false positive. Deliberately narrow:
+    # this trades recall (a laundered term buried mid-question is missed) for never
+    # refusing a question whose subject the data really does hold. Fail-open again.
+    for token in content[-1:]:
+        if _accounted_in(token, vocab):
+            continue
+        if token not in answer_words and not any(
+                len(a) >= 4 and (token in a or a in token) for a in answer_words):
+            continue
+        if _schema_referent(token, sm) is False:
+            return token
+    return None
+
+
+def ungrounded_term_answer(term: str, prov: dict, columns: List[str],
+                           rows: List[dict]) -> str:
+    """The honest replacement for a fluent answer that asserted `term`. Names the
+    term as unsupported FIRST, then reports what was actually read, with the
+    fields it came from — the provenance the wrong answer was missing."""
+    fields = ", ".join((prov.get("projections") or [])[:_PROV_MAX_FIELDS])
+    via = (prov.get("join_keys") or [])
+    n = len(rows or [])
+    head = (f"I can't answer that: this data has no \"{term}\" — no table, column or "
+            f"value anywhere in it corresponds to that.")
+    body = f" What the query actually returned is {n} row(s) of {fields}"
+    if via:
+        body += ", reached through " + "; ".join(via[:2])
+    body += "."
+    tail = ""
+    if len(columns or []) == 1 and 0 < n <= _VALUES_IN_HONEST_ANSWER:
+        col = columns[0]
+        vals = [str(r.get(col)) for r in rows if isinstance(r, dict) and r.get(col) is not None]
+        if vals:
+            tail = f" Those values are: {', '.join(vals)}."
+    return head + body + tail + (" That is not the same thing — please rephrase using a "
+                                 "field that exists in this data.")
+
+
+def _unordered_note(query: str, prov: Optional[dict], row_count: int) -> str:
+    """A multi-row result with NO ORDER BY identifies no 'first'/'cheapest' row, yet
+    the sample rows handed to the model look exactly like a ranked answer — measured
+    on drilldown_l7 turn 1, where an unordered 373-row result was narrated as
+    "First: status=APPROVED, expected_price=5500000". Says so in the prompt when the
+    question asked for a specific one. Ranking vocabulary comes from the single
+    source of truth (query/ranking_parser.py), never a list here."""
+    if not prov or prov.get("ordered") or row_count < 2:
+        return ""
+    try:
+        from query.ranking_parser import parse_ranking
+        spec = parse_ranking(query or "")
+        asked = bool(getattr(spec, "ranked", False) or getattr(spec, "top_n", None))
+    except Exception:
+        return ""
+    if not asked:
+        return ""
+    return ("\nNOTE: these rows came back in NO particular order (the query has no "
+            "ORDER BY), so the result does not identify a first/top/cheapest/largest "
+            "one. Do not present any row as the one asked for — say the result is "
+            "unordered instead.")
+
+
 def run_nl_answer(
     query:          str,
     columns:        List[str],
@@ -490,8 +878,15 @@ def run_nl_answer(
                               duration_ms=round((time.time() - t0) * 1000, 2))
 
     facts = _extract_facts(columns, rows, rank_column=rank_column,
-                           truncated=_sql_truncated(sql, len(rows)))
+                           truncated=_sql_truncated(sql, len(rows), query))
     glossary = _column_glossary(columns, table, semantic_model)
+    # What the values were ACTUALLY read from — put in front of the model (so it
+    # describes those fields rather than the question's wording) and kept for the
+    # deterministic ungrounded-term check after the call. Empty when `sql` is
+    # absent or unparseable, which disables both.
+    prov = _prov_of(sql)
+    prov_line = _provenance_block(prov)
+    unordered_line = _unordered_note(query, prov, row_count)
 
     rank_line = (f"\n\nThese rows are already ordered by \"{rank_column}\" — "
                 f"refer to that field's values, not any id column, when describing rank/order."
@@ -506,7 +901,36 @@ def run_nl_answer(
     # Deterministic findings (result_analyzer detected these — precomputed, not for the
     # model to recompute or second-guess). Handed in so the SLM NARRATES the decision-
     # relevant ones. Analytical mode gets several; brief mode at most two.
-    _pats = [str(p).strip().rstrip(".") for p in (patterns or []) if str(p).strip()][:_max_findings]
+    _pats = [str(p).strip().rstrip(".") for p in (patterns or []) if str(p).strip()]
+    if facts.get("result_truncated"):
+        # result_analyzer computes its findings over the ROWS IT WAS GIVEN, and has no
+        # notion of truncation — so on a truncated page it emits shares of that page as
+        # if they were shares of the data ("'False' accounts for 74% of corner_property
+        # values", "79 of 100 rows have no facing value").
+        #
+        # They were then handed to the model as "Verified findings", one line below a
+        # prompt telling it never to state a proportion. Measured 2026-09-22: the model
+        # resolved that contradiction by narrating the proportion anyway ("86% of the
+        # assets listed are in Pune", on a query whose WHERE already restricted every
+        # row to Pune), and the deterministic fallback re-appended the same claim
+        # through blend_patterns — so rejecting the model's prose alone did not remove
+        # it. Dropped at the source instead: not shown to the model, not blended into
+        # the fallback. Non-proportional findings (outliers, ranges) still pass.
+        # Averages as well as shares. Measured 2026-09-22: after the proportion filter
+        # landed, the guarded answer still carried "carpet_area has a high outlier
+        # (34234.0 vs average 1628.46)" — the mean of one page of 7,814 rows, blended
+        # back in from the findings after the model's own prose had been rejected. A
+        # page mean is exactly as misleading as a page share; the outlier itself is a
+        # value that genuinely occurs, so only findings that STATE one of these
+        # derived figures are dropped.
+        _kept = [p for p in _pats
+                 if not _states_a_proportion(p) and not _AGGREGATE_WORD_RE.search(p)]
+        if len(_kept) != len(_pats):
+            logger.info("run_nl_answer: dropped %d page-derived finding(s) (share or "
+                        "average) computed over a truncated page",
+                        len(_pats) - len(_kept))
+        _pats = _kept
+    _pats = _pats[:_max_findings]
     findings_line = ("\n\nVerified findings already computed (narrate the decision-relevant "
                      "ones as insight; do not restate as a bare list): "
                      + "; ".join(_pats)) if _pats else ""
@@ -553,7 +977,8 @@ def run_nl_answer(
     prompt = (
         f"User question: {query}\n\n"
         f"Extracted data: {json.dumps(facts, default=str)}"
-        f"{glossary}{ctx_line}{rank_line}{findings_line}{partial_line}{_STYLE_EXEMPLAR}\n\n"
+        f"{glossary}{ctx_line}{prov_line}{rank_line}{findings_line}{partial_line}"
+        f"{unordered_line}{_STYLE_EXEMPLAR}\n\n"
         + role_line
         + f"{shape_line}\n"
         f"Speak in business terms using the column meanings above — name each entity by its "
@@ -597,9 +1022,46 @@ def run_nl_answer(
             logger.warning("run_nl_answer: summary stated an ungrounded number — "
                            "falling back to deterministic answer. summary=%r", answer)
             raise ValueError("ungrounded number in SLM summary")
+        if facts.get("result_truncated") and _states_page_derived_total(answer, facts):
+            # Same fallback as an ungrounded number: the deterministic answer says
+            # "Returned N row(s)", which is true of what came back and claims nothing
+            # about the table.
+            logger.warning("run_nl_answer: summary presented a PAGE-derived figure as a "
+                           "fact about the data (result was silently truncated) — "
+                           "falling back. summary=%r", answer)
+            raise ValueError("page-derived total on a truncated result")
+        if facts.get("result_truncated") and _states_a_proportion(answer):
+            # A share computed over one page is a statement about the page presented as
+            # a statement about the data. Same fallback as an ungrounded number: the
+            # deterministic answer below describes what was actually returned.
+            logger.warning("run_nl_answer: summary stated a proportion over a TRUNCATED "
+                           "page — falling back to deterministic answer. summary=%r",
+                           answer)
+            raise ValueError("proportion stated over a truncated result")
         # Deterministic backstop: drop any currency symbol the model prefixed that
         # the data doesn't actually carry (7B doesn't always obey the prompt rule).
+        # Ungrounded-business-term backstop: the prose may not assert a concept the
+        # schema has no referent for (measured: "listing agents" from
+        # users_user.first_name). Replaced, not just logged — a fluent wrong answer
+        # is the failure mode this whole layer is supposed to prevent.
+        _bad_term = None
+        try:
+            _bad_term = ungrounded_answer_term(query, answer, columns, rows, prov,
+                                               semantic_model)
+        except Exception as _ug:          # never let the guard break summarisation
+            logger.debug("run_nl_answer: ungrounded-term check skipped (%s)", _ug)
+        if _bad_term:
+            logger.warning("run_nl_answer: summary asserted the business term %r, which has "
+                           "no referent in this schema and appears nowhere in the executed "
+                           "SQL — replacing with the provenance-named answer. summary=%r",
+                           _bad_term, answer)
+            return NLAnswerResult(
+                answer=ungrounded_term_answer(_bad_term, prov, columns, rows),
+                row_count=row_count,
+                duration_ms=round((time.time() - t0) * 1000, 2),
+                slm_used=False)
         answer = _strip_invented_currency(answer, facts)
+        answer = _regroup_numbers(answer)
         slm_used = True   # the SLM wove the findings into its prose — caller must NOT re-append
     except Exception as e:
         # Deterministic fallback: blend the findings in ourselves (naturally, not a
@@ -916,11 +1378,17 @@ def run_insight_engine(ctx, verbose: bool = False, timeout: Optional[float] = No
                 f"refer to that field's values, not any id column, when describing rank/order."
                 ) if rank_column else ""
     shape_line = _shape_line(ctx)
+    # Same provenance/ungrounded-term discipline as run_nl_answer — this is the
+    # other summariser (INSIGHT_ENGINE_ENABLED picks one or the other), and a
+    # guard that only covers one of them isn't a guard.
+    prov = _prov_of(ctx.sql)
+    prov_line = _provenance_block(prov)
 
     prompt = (
         f"User question: {ctx.question}\n\n"
         f"Extracted data: {json.dumps(facts, default=str)}"
-        f"{stats_block}{patterns_block}{glossary}{grounding_block}{rank_line}{shape_line}\n\n"
+        f"{stats_block}{patterns_block}{glossary}{grounding_block}{prov_line}"
+        f"{rank_line}{shape_line}\n\n"
         "Return ONLY a JSON object with this exact shape (no markdown, no commentary):\n"
         '{"summary": "ONE analytical sentence (max ~30 words) using the statistics and '
         'detected patterns above — note a range, concentration, gap, or notable pattern, '
@@ -970,6 +1438,17 @@ def run_insight_engine(ctx, verbose: bool = False, timeout: Optional[float] = No
         if not getattr(_cfg, "INSIGHT_FOLLOW_UPS_ENABLED", False):
             follow_ups = []
         visualization = validate_visualization(parsed.get("visualization"), ctx)
+        try:
+            _bad_term = ungrounded_answer_term(ctx.question, summary, ctx.columns,
+                                               ctx.sample_rows, prov, ctx.semantic_model)
+        except Exception:
+            _bad_term = None
+        if _bad_term:
+            logger.warning("run_insight_engine: summary asserted the business term %r, which "
+                           "has no referent in this schema — replacing with the "
+                           "provenance-named answer. summary=%r", _bad_term, summary)
+            summary = ungrounded_term_answer(_bad_term, prov, ctx.columns, ctx.sample_rows)
+            insights = []          # they were narrated about the same ungrounded concept
     except Exception as e:
         summary = _fallback_summary(ctx)
         insights, follow_ups, visualization = [], [], None

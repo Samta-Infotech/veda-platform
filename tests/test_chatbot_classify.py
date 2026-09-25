@@ -157,6 +157,83 @@ def test_followup_with_real_frame_is_not_downgraded(monkeypatch):
     assert result["action"] == "followup"
 
 
+@pytest.mark.xfail(strict=True, reason=(
+    "KNOWN GAP, not a regression. A guard for this (_has_frame_continuation_evidence) "
+    "was added and removed on 2026-09-24: its third arm read _mentions_frame_subject "
+    "FORWARDS ('shares a content word with the frame => continues the frame'), which is "
+    "not what that helper establishes — its docstring defines the INVERSE test. Forwards "
+    "it made any new question naming the same table a follow-up, which then carries the "
+    "previous turn's filters into it. It regressed the pre-existing "
+    "test_clarification_flow::test_a_message_that_is_not_an_answer_is_never_swallowed "
+    "('show me the top 5 cities by number of assets' -> followup). The behaviour asserted "
+    "below is still WANTED; it needs a measured mechanism. Note the live supervisor "
+    "handles 'only the <value> ones' correctly in practice (measured: delta=refine, "
+    "stack=1) — this test forces a model MISS, so the gap is 'a miss on this shape loses "
+    "the frame', which is pre-existing."))
+def test_same_entity_refinement_preserves_frame_when_model_says_new_topic(monkeypatch):
+    """A model miss must not turn an explicit same-entity refinement into a
+    standalone query: ``How many users?`` -> ``How many active users?``."""
+    monkeypatch.setattr(
+        nodes, "call_slm",
+        lambda *a, **k: '{"action":"answer", "delta_type":"new_topic"}',
+    )
+    state = {
+        "message": "How many active users?",
+        "history": _history(),
+        "frame": {"entity": "users_user", "entity_display": "Users",
+                  "aggregation": "count"},
+    }
+    result = nodes.classify_node(state, config={})
+    assert result["action"] == "followup"
+    assert result["delta_type"] == "ambiguous"
+
+
+@pytest.mark.xfail(strict=True, reason=(
+    "KNOWN GAP, not a regression. A guard for this (_has_frame_continuation_evidence) "
+    "was added and removed on 2026-09-24: its third arm read _mentions_frame_subject "
+    "FORWARDS ('shares a content word with the frame => continues the frame'), which is "
+    "not what that helper establishes — its docstring defines the INVERSE test. Forwards "
+    "it made any new question naming the same table a follow-up, which then carries the "
+    "previous turn's filters into it. It regressed the pre-existing "
+    "test_clarification_flow::test_a_message_that_is_not_an_answer_is_never_swallowed "
+    "('show me the top 5 cities by number of assets' -> followup). The behaviour asserted "
+    "below is still WANTED; it needs a measured mechanism. Note the live supervisor "
+    "handles 'only the <value> ones' correctly in practice (measured: delta=refine, "
+    "stack=1) — this test forces a model MISS, so the gap is 'a miss on this shape loses "
+    "the frame', which is pre-existing."))
+def test_only_value_refinement_preserves_frame_when_entity_is_omitted(monkeypatch):
+    """"Only the APPROVED ones" is a narrowing instruction; the entity is
+    intentionally omitted because it is already on the active frame."""
+    monkeypatch.setattr(
+        nodes, "call_slm",
+        lambda *a, **k: '{"action":"answer", "delta_type":"new_topic"}',
+    )
+    state = {
+        "message": "only the APPROVED ones",
+        "history": _history(),
+        "frame": {"entity": "assets_salelisting", "entity_display": "Sale Listings"},
+    }
+    result = nodes.classify_node(state, config={})
+    assert result["action"] == "followup"
+    assert result["delta_type"] == "ambiguous"
+
+
+def test_unrelated_topic_is_not_forced_into_active_frame(monkeypatch):
+    """An explicit topic switch remains a new topic even when a frame exists."""
+    monkeypatch.setattr(
+        nodes, "call_slm",
+        lambda *a, **k: '{"action":"answer", "delta_type":"new_topic"}',
+    )
+    state = {
+        "message": "Show properties",
+        "history": _history(),
+        "frame": {"entity": "users_user", "entity_display": "Users"},
+    }
+    result = nodes.classify_node(state, config={})
+    assert result["action"] == "answer"
+    assert result["delta_type"] == "new_topic"
+
+
 def test_answer_with_data_question_hint_and_no_frame_is_not_downgraded():
     """The backstop must not fire on a genuinely self-contained question just
     because no frame happens to exist yet (e.g. the first real question of a
@@ -224,10 +301,11 @@ def test_go_back_again_also_matches():
     assert nodes._DRILL_UP_RE.match("zoom out")
 
 
-def test_go_back_without_drill_stack_falls_through_to_llm(monkeypatch):
-    """No level to pop (empty/absent drill_stack) — the deterministic path
-    must NOT fire; falls through to the normal LLM classification instead of
-    forcing a drill_up transition into nothing."""
+def test_go_back_without_drill_stack_answers_from_memory(monkeypatch):
+    """No level to pop (empty/absent drill_stack) — no drill_up transition into
+    nothing, and no model or engine call either: "go back" used to fall through to
+    the engine and cost 27s for a non-answer (measured 2026-09-21). It is answered
+    as a recall ("nothing to go back to")."""
     calls = []
 
     def fake_call_slm(system, user, **kwargs):
@@ -237,9 +315,11 @@ def test_go_back_without_drill_stack_falls_through_to_llm(monkeypatch):
     monkeypatch.setattr(nodes, "call_slm", fake_call_slm)
     state = {"message": "go back", "history": _history(),
             "frame": _frame_with_entity(), "drill_stack": []}
-    nodes.classify_node(state, config={})
+    out = nodes.classify_node(state, config={})
 
-    assert len(calls) == 1, "should have fallen through to the LLM classify call"
+    assert calls == [], "empty-stack go back must not call the model"
+    assert out["action"] == "recall"
+    assert out["recall_kind"] == "drill_up_empty"
 
 
 def test_go_back_without_active_frame_falls_through_to_llm(monkeypatch):
@@ -324,3 +404,43 @@ def test_a_greeting_carrying_a_referential_followup_stays_a_followup(msg):
     """The guard that keeps the override useful: a social opener does not make a
     referential question social. This is the case the override exists for."""
     assert nodes._is_social(msg) is False, msg
+
+
+# ── a clarification left by a REFUSED turn vs. an ambiguous continuation ──────────────
+_PENDING = {"question": "Tell me what 'pool' refers to", "missing": "pool",
+            "original_query": "only the ones with a swimming pool", "turn_index": 2}
+
+
+def _classify_after_refusal(monkeypatch, message, delta="ambiguous"):
+    """The model returns clarify_reply/<delta> — measured 2026-09-24, `ambiguous` for
+    "only the Nagpur ones" after a refused "only the ones with a swimming pool"."""
+    monkeypatch.setattr(nodes, "call_slm", lambda system, user, **kw: (
+        '{"action": "clarify_reply", "delta_type": "%s", "slot_candidates": []}' % delta))
+    state = {"message": message, "history": _history(), "frame": _frame_with_entity(),
+             "drill_stack": [{"dimension": "Transaction Type", "value": "debit"}],
+             "pending_clarification": dict(_PENDING)}
+    return nodes.classify_node(state, config={})
+
+
+def test_an_ambiguous_narrowing_follow_up_continues_the_frame(monkeypatch):
+    for msg in ("only the Nagpur ones", "just the FULL ones", "what about SEMI"):
+        out = _classify_after_refusal(monkeypatch, msg)
+        assert out["action"] == "followup", f"{msg!r} was glued onto the dead question"
+
+
+def test_a_bare_answer_still_completes_the_clarification(monkeypatch):
+    """A clarifying question asks for a value; a bare value or a name for the word is an
+    answer and must still reach clarify_reply."""
+    for msg in ("the amenities column", "amenities", "Nagpur"):
+        out = _classify_after_refusal(monkeypatch, msg)
+        assert out["action"] == "clarify_reply", f"{msg!r} should answer the clarification"
+
+
+def test_a_conditional_is_not_read_as_a_narrowing(monkeypatch):
+    out = _classify_after_refusal(monkeypatch, "only if it has a pool")
+    assert out["action"] == "clarify_reply"
+
+
+def test_a_new_topic_label_is_still_left_to_the_pending_request(monkeypatch):
+    out = _classify_after_refusal(monkeypatch, "only the Nagpur ones", delta="new_topic")
+    assert out["action"] == "clarify_reply"

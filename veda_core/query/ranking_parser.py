@@ -30,6 +30,22 @@ _RANKING_WORDS = [
     ("oldest",      "asc",  "temporal"),
     ("earliest",    "asc",  "temporal"),
     ("first",       "asc",  "temporal"),
+    # Price superlatives. These already existed in THREE other copies — config.py's
+    # `superlative_min`, and fast_path's _SUPERLATIVE_ASC / _SUP_ASC — but not here, which
+    # is the fragmentation this module was written to end. Measured 2026-09-24: "Show me
+    # the 5 cheapest ones" parsed to nothing, so the SQL got no ORDER BY *and* no LIMIT and
+    # returned all 373 rows with the summariser narrating an arbitrary first one. The
+    # identical "5 lowest ones" was correct. Multi-word forms lead, so "most expensive"
+    # is tried before the bare "most" below.
+    ("most expensive",  "desc", "metric"),
+    ("least expensive", "asc",  "metric"),
+    ("most affordable", "asc",  "metric"),
+    ("lowest priced",   "asc",  "metric"),
+    ("highest priced",  "desc", "metric"),
+    ("cheapest",    "asc",  "metric"),
+    ("priciest",    "desc", "metric"),
+    ("costliest",   "desc", "metric"),
+    ("dearest",     "desc", "metric"),
     ("top",         "desc", "metric"),
     ("highest",     "desc", "metric"),
     ("biggest",     "desc", "metric"),
@@ -78,6 +94,22 @@ def _to_int(tok: str) -> int:
     return int(tok) if tok.isdigit() else NUM_WORDS[tok.lower()]
 
 
+def _resolved_pointer_words() -> set:
+    """Words of THIS turn's message the conversation layer already resolved into a row of
+    the previous answer ("first" / "one" of "the first one" — now an id or group filter,
+    ConversationContext.resolved_terms). Ranking must not read them a second time:
+    "the first one" is a position the user saw, not "earliest, LIMIT 1" — measured
+    2026-09-25, a group pick came back as the oldest single record of that group. Empty
+    for every caller with no conversation context, which leaves parsing unchanged."""
+    try:
+        from veda_core.context import current_conversation_context
+        ctx = current_conversation_context() or {}
+    except Exception:
+        return set()
+    return {t.lower() for t in (ctx.get("resolved_terms") or [])
+            if isinstance(t, str) and t.strip()}
+
+
 def parse_ranking(query: str) -> RankingSpec:
     """Detect a ranking request and its explicit count, if any.
 
@@ -91,6 +123,10 @@ def parse_ranking(query: str) -> RankingSpec:
     for the softer "is this a ranking-shaped query" signal), so an ordinary
     query is completely unaffected.
     """
+    _consumed = _resolved_pointer_words()
+    if _consumed:
+        query = re.sub(r"\b(?:" + "|".join(re.escape(w) for w in sorted(_consumed)) + r")\b",
+                       " ", query or "", flags=re.IGNORECASE)
     ql = f" {query.lower()} "
     ranked = False
     direction, basis, top_n, subject = "desc", None, None, None

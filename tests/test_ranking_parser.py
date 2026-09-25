@@ -136,3 +136,49 @@ def test_sort_requested_is_true_for_every_ranking_word():
 def test_sort_requested_false_when_nothing_asks_for_order():
     for q in ("list all assets", "how many assets are there", "assets in Pune"):
         assert parse_ranking(q).sort_requested is False, q
+
+
+# ── price superlatives ────────────────────────────────────────────────────────────────
+# Measured 2026-09-24 on the live pipeline: "Show me the 5 cheapest ones" produced
+# `SELECT ... FROM assets_salelisting` with NO ORDER BY and NO LIMIT — all 373 rows, with
+# the summariser narrating an arbitrary first row as the answer. The identical question
+# phrased "5 lowest ones" was correct. Cause: "cheapest" was known to config.py's
+# `superlative_min` and to fast_path's _SUPERLATIVE_ASC/_SUP_ASC, but not to THIS module,
+# which every SQL-construction path reads.
+def test_cheapest_is_a_ranking_word():
+    spec = parse_ranking("Show me the 5 cheapest ones.")
+    assert spec.ranked is True
+    assert spec.top_n == 5
+    assert spec.direction == "asc"
+    assert spec.basis == "metric"
+
+
+def test_a_price_superlative_with_no_count_is_still_ranked():
+    """"Which one is the cheapest?" names no N — it must still order."""
+    spec = parse_ranking("Which one is the cheapest?")
+    assert spec.ranked is True and spec.top_n is None and spec.direction == "asc"
+
+
+def test_the_expensive_end_too():
+    # "the costliest one" is top_n=1, not None: "one" is a NUM_WORD, and reading it as a
+    # count is right — the question asks for a single row.
+    for q, n in (("the 3 most expensive listings", 3), ("2 priciest assets", 2),
+                 ("the costliest one", 1), ("highest priced properties", None)):
+        spec = parse_ranking(q)
+        assert spec.ranked is True, q
+        assert spec.direction == "desc", q
+        assert spec.top_n == n, q
+
+
+def test_multi_word_forms_beat_the_bare_word_they_contain():
+    """"most expensive" must not be read as the bare "most" (desc) — and, worse,
+    "least expensive" must not be read as "least" alone, which happens to agree here but
+    would not if the phrase list were ordered the other way."""
+    assert parse_ranking("least expensive property").direction == "asc"
+    assert parse_ranking("most affordable 4 units").direction == "asc"
+    assert parse_ranking("lowest priced 5").direction == "asc"
+
+
+def test_price_superlatives_ask_for_an_ordering():
+    for word in ("cheapest", "priciest", "costliest", "dearest"):
+        assert parse_ranking(f"{word} 3 listings").sort_requested is True, word

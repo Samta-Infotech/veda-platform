@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import threading
 from decimal import Decimal
 from typing import Any
@@ -313,9 +314,26 @@ def _validated_conversation_context(flags) -> "dict | None":
     route = raw.get("route")
     if isinstance(route, str) and route.strip():
         out["route"] = route.strip()[:64]
+    # The turn's delta (chatbot/prompts/delta_types.py). Shape-checked, not enum-checked:
+    # this tier does not import chatbot/, and it does not need to — the engine acts on
+    # exactly one known value ("drill_up") and ignores anything else, so an unknown
+    # operation is inert rather than trusted.
+    op = raw.get("operation")
+    if isinstance(op, str) and re.fullmatch(r"[a-z_]{1,32}", op.strip()):
+        out["operation"] = op.strip()
     um = raw.get("user_message")
     if isinstance(um, str):
         out["user_message"] = um
+    # Words of user_message the conversation layer resolved against memory. Only short
+    # alphanumeric tokens that literally occur in user_message survive — this is the one
+    # field that RELAXES a check (the qualifier gate), so it is held to the message.
+    rt = raw.get("resolved_terms")
+    if isinstance(rt, list) and isinstance(um, str):
+        _words = {w.lower() for w in re.findall(r"[A-Za-z0-9]+", um)}
+        _ok = [t for t in rt if isinstance(t, str) and re.fullmatch(r"[A-Za-z0-9]{1,32}", t)
+               and t.lower() in _words][:8]
+        if _ok:
+            out["resolved_terms"] = _ok
     return out or None
 
 

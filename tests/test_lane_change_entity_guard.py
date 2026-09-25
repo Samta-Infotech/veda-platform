@@ -101,7 +101,9 @@ def _classify(message, *, pending, frame, delta_type, action="clarify_reply"):
     if action == "clarify_reply" and not pending:
         return "followup"
     if (action == "clarify_reply" and pending and (frame or {}).get("entity")
-            and delta_type in CONTINUATIONS):
+            and (delta_type in CONTINUATIONS
+                 or (delta_type in ("ambiguous", None)
+                     and nodes._CONTINUATION_SHAPE_RE.match(message or "")))):
         return "followup"
     return action
 

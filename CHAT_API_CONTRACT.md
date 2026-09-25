@@ -193,6 +193,7 @@ data: {"chat_id": 42, "message_id": 501, "summary": "The 5 most recent asset acc
 | Event | When | Notes |
 |---|---|---|
 | `thinking` | 0+ times | progress/status messages; only the **last** one is persisted to `metadata.thinking` |
+| `context` | conditionally, once | **emitted BEFORE the first `content` event**, and only when the turn carried conversational context. See `metadata.context` below |
 | `content` | 1+ times | one per content block, same shape as `response[]` items above |
 | `visualization` | 0+ times | only when a chart is actually produced |
 | `explainability` | always, once | `res0.explain` or a neutral fallback object. **`confidence` lives here** — see §1a |
@@ -200,6 +201,46 @@ data: {"chat_id": 42, "message_id": 501, "summary": "The 5 most recent asset acc
 | `insights` | conditionally, once | only emitted if `insights`/`follow_up_questions` are non-empty server-side (Insight Engine ran) |
 | `error` | on failure, terminates stream | `{"code": "...", "message": "..."}` — no further events after this. See the error-code table below |
 | `completed` | always, last (success path) | signals the turn is fully persisted; carries `message_id` for later reference |
+
+### `metadata.context` — what the question was taken to mean
+
+A follow-up ("what about Mumbai", "make it top 10") is only half a question; the other
+half comes from the turn before it. `explainability` describes how the ANSWER was
+produced — this describes how the QUESTION was READ, which is the half that can go wrong
+invisibly: a follow-up resolved against the wrong remembered topic still produces a
+confident, fully-explained answer.
+
+```json
+"context": {
+  "carried": {
+    "entity": "General Ledger",
+    "filters": ["City equals Pune"],
+    "source_id": 2
+  },
+  "changed": {"operation": "replace", "field": "limit", "value": "10"},
+  "resolved_query": "make it top 10 (for General Ledger (accounts_generalledger), City equals Pune)"
+}
+```
+
+| Field | Meaning |
+|---|---|
+| `carried.entity` | the dataset the previous answer came from, as a display name |
+| `carried.filters` | the filters carried over, each a rendered `field operator value` string |
+| `carried.source_id` | the source that dataset was resolved in; `null` when the frame predates source pinning |
+| `changed.operation` | `replace` · `remove` · `refine` · `drill_down` · `drill_up` · `compare` · `clarify_reply` |
+| `changed.field` | which filter or shape slot (`limit`, `group_by`, `order_by`, `measures`) the operation acted on; absent for operations with no single target |
+| `changed.value` | the new value, always a literal the user typed this turn; absent on a removal |
+| `resolved_query` | the exact text handed to the query engine |
+
+**Absent, not null**, on every turn that carried no context — a first question, small
+talk, a recall ("what SQL did you run"), a re-render ("as a pie chart"). Do not render
+an empty panel for those: the absence means "your words were taken at face value".
+
+Every field is read back from what the turn actually did. Nothing here is re-derived or
+generated, so it cannot describe an understanding the turn did not act on.
+
+Persisted in the assistant message's `metadata` and **replayed by the history endpoint**,
+so a reloaded conversation shows the same panel the live stream did.
 
 **Error codes** — the `message` is always a safe, user-displayable string;
 raw exception text / tracebacks are never sent (logged server-side only):
@@ -539,6 +580,7 @@ GET /api/v1/conversations/history?chat_id=42
 | ASSISTANT message `content` | object: `{response: [...], metadata: {...}}` — same shape as query endpoint's `data.response` / `data.metadata` |
 | ASSISTANT `metadata.usage` | same shape as the query endpoint, including `latency_ms`. Falls back to the zero-value object if the stored message predates this change (old rows have no `usage` in their saved `metadata`) |
 | ASSISTANT `metadata.explainability.confidence` | **persisted and replayed** — same value the turn originally produced, survives page reload |
+| ASSISTANT `metadata.context` | **persisted and replayed** when the turn carried context; absent otherwise. See §`metadata.context` |
 | `insights` / `follow_up_questions` | **not** included in history — they're only ever streamed live via the SSE `insights` event at the time the turn originally ran, never written into `metadata` |
 
 Messages are returned in the session's stored order (oldest first, matching
@@ -597,3 +639,5 @@ must not assume the answered-turn shape.
 | 2026-09-10 (sources) | `explainability.sources` — "where did this answer come from" — was built only from proof of participation: a per-source execution record, or a routing decision that actually drove execution. A plain single-source query produces **neither** (only the cross-source coordinator writes execution records, and the routing decision is observe-only under shadow mode), so the commonest query in the system shipped **no `sources` block at all** (measured: a Tier-1 relational answer, `sources: null`). It now falls back to the one source the request was scoped to, when there is exactly one — with two or more and no record of which answered, the list stays empty rather than naming a guess. Each entry may now carry `rows`, that source's own recorded contribution, omitted when never recorded. Source identifiers remain confined to `audit.sources`. |
 | 2026-09-11 (sql restored) | `explainability.sql` is **populated by default again**: `EXPLAIN_EXPOSE_SQL` returns to defaulting **on**, reversing the 2026-09-10 row's flip to off (decision D2). Restored at the user's explicit request — the generated SQL is what lets a reader verify an answer instead of trusting it, and that is worth the table/column names it discloses. No shape change: `sql` is still always present, and `EXPLAIN_EXPOSE_SQL=0` still yields `{enabled: false, query: null}`. |
 | 2026-09-11 (no-engine turns) | A turn the engine never saw — small talk, a canned greeting, a thank-you — now emits **neither** a `thinking` nor an `explainability` event. It previously shipped a progress frame reading "Finalizing the results…" when there were no results, and the fixed-shape empty `explainability` skeleton (`sql.enabled: false`, `validation.passed: null`, "No filters applied."), which a client renders as a panel explaining nothing. The four-step block was already suppressed on these turns for the same reason; the other two surfaces were left behind. A client must already tolerate a stream with zero `thinking` events. A FAILED turn with no progress (the outage path) still emits its frame — that is how the error code arrives. |
+| 2026-09-11 (steps persisted) | The four-step model is now SAVED with the turn and returned by history, as `metadata.steps` — the same object the live stream sends as `thinking.steps`. It was not saved at all before: `metadata.thinking` is a single legacy line and `metadata.timeline` is the raw backend phase list (audit-level), so a reloaded conversation could not rebuild the progress panel the user had just watched. Stored only when the turn produced progress — absent, not null, on a turn that bypassed the engine. Adds roughly 1-2 KB per turn. |
+| 2026-09-23 (what actually ran) | Each step's `details` now includes the phases that ran inside it, by the authored title the engine already ships on every progress event, with a `duration_ms` when the phase reported both a start and an end. The panel had been folding twelve real phases into four steps and showing none of them, so the longest stretch of a turn had nothing on screen — measured at 13.2s of a 26s turn for "Checking available data". Phase KEYS remain audit-only; only the titles are shown. Turn boundaries (`received`/`completed`) and the access check are excluded — the first are not work, the second already has its own timed sub-check. A document turn no longer shows "Running the query": that title is authored per phase, not per route, and no query ran. |
