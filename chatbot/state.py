@@ -165,6 +165,14 @@ class ChatState(TypedDict, total=False):
     # None on every other turn. Reset to None by memory_read_node at the start of EVERY
     # turn, so a route that skips classify's final return can never see a stale one.
     topic_restore: Optional[Dict[str, Any]]
+    # The source whose memory memory_read_node discarded THIS turn because it is no
+    # longer in the caller's scope (None otherwise). Lets a follow-up that points back
+    # at that memory be told the truth instead of being answered as smalltalk.
+    memory_revoked_source: Optional[Any]
+    # Earlier answered results the user can point back at by name ("the 1st one from
+    # the price list") — chatbot/memory/reference.py::remember_result. Filtered to this
+    # turn's authorised sources by memory_read_node.
+    result_history: Optional[List[Dict[str, Any]]]
     last_result: Dict[str, Any]        # the ANSWERED result the user is currently looking at,
                                        # kept across turns so a presentation-only follow-up can
                                        # redraw it — engine_result is cleared every turn

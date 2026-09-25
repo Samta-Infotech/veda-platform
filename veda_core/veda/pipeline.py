@@ -1756,6 +1756,20 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                             _arb_filters.append(_qf)
                             print(f"  [conversation] grounded {_qf['grounded_as']} qualifier "
                                   f"{_qf['column']} = {_qf['value']}")
+                    elif primary:
+                        # A FIRST question with a numeric threshold ("Which amenities have a
+                        # monthly fee above 200?") — the same grounding a follow-up gets
+                        # above, on the anchor this question chose. Measured 2026-09-26:
+                        # refused on 'above'. Only the numeric kind: flags and years on a
+                        # first question are already handled by the arbiter/temporal paths.
+                        from query.qualifier_grounding import ground_numeric
+                        for _qf in ground_numeric(query, primary, sm):
+                            _arb_filters = [f for f in _arb_filters
+                                            if f["column"] != _qf["column"]]
+                            _qual_consumed.update(_qf.get("consumed") or [])
+                            _arb_filters.append(_qf)
+                            print(f"  [L4c] grounded numeric qualifier {_qf['column']} "
+                                  f"{_qf['op']} {_qf['value']}")
                     if _arb.value_filters:
                         for _ln in _arb.explain().splitlines():
                             print("  [L4c] " + _ln)
@@ -2222,7 +2236,14 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         _gate_words = " ".join(w for w in re.findall(r"[A-Za-z0-9]+",
                                                      _conv_user_message or query)
                                if w.lower() not in _qual_consumed)
-    ok_q, missing = qualifier_completeness(query, sql, sm, user_message=_gate_words)
+    if _qual_consumed and not (_gate_words or "").strip():
+        # EVERY word the user typed was a pointer at a shown row ("the 3rd one from the
+        # earlier list"). Nothing is left to check — and an empty user_message makes the
+        # validator fall back to the WHOLE query, re-checking exactly the words just
+        # exempted (measured 2026-09-26: refused on 'earlier').
+        ok_q, missing = True, None
+    else:
+        ok_q, missing = qualifier_completeness(query, sql, sm, user_message=_gate_words)
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
         _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))

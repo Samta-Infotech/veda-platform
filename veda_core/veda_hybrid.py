@@ -2776,7 +2776,19 @@ def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_writte
     # STRICT: LLM-lane answers face the QSR-aware gate — an unaccounted token with a
     # referent anywhere in the schema is a dropped qualifier, closing the wrong-table
     # blind spot (SELECT * FROM assets_asset for "most expensive financial records").
-    ok_q, missing = qualifier_completeness(query, raw_sql, sm, strict=True)
+    # The words the user POINTED with ("the 3rd one from the earlier list") name a row they
+    # saw, not data — the same exemption Tier-1's gate applies (veda/pipeline.py, resolved
+    # terms held to words actually in the message). Measured 2026-09-26: Tier-1 exempted
+    # 'earlier', the turn fell through to Tier-2, and this gate refused it.
+    _pointed = {str(t).lower() for t in (_cv.get("resolved_terms") or []) if isinstance(t, str)}
+    _um = _cv.get("user_message") or query
+    _gate_words = (" ".join(w for w in _re_mod.findall(r"[A-Za-z0-9]+", _um)
+                            if w.lower() not in _pointed) if _pointed else None)
+    if _pointed and not (_gate_words or "").strip():
+        ok_q, missing = True, None          # nothing but pointer words (see pipeline.py)
+    else:
+        ok_q, missing = qualifier_completeness(query, raw_sql, sm, strict=True,
+                                               user_message=_gate_words)
     if not ok_q:
         return False, f"dropped qualifier {missing!r}"
     _tcols = ({k.split(".", 1)[1] for k, m in cols_meta.items()

@@ -178,7 +178,8 @@ def build_reference(engine_result: Dict[str, Any],
             if v is None:
                 return None                     # a row with no identity: not referable
             items.append(v)
-        extra = {"key_column": str(key["column"])}
+        extra = {"key_column": str(key["column"]),
+                 **_selectors(cols, rows[:_MAX_ITEMS], skip=cols[idx])}
     else:
         spec = [(str(c.get("column") or ""), _column_index(cols, str(c.get("result_column") or "")))
                 for c in (key.get("columns") or [])]
@@ -209,6 +210,243 @@ def build_reference(engine_result: Dict[str, Any],
         "created_at": int(time.time()),
         **extra,
     }
+
+
+# ── selectors: what else a displayed record can be picked BY ─────────────────────────────
+# A record is still re-queried by its KEY; these only decide WHICH key. Two kinds, both read
+# off the result the user saw, never off a word list:
+#   · labels — the values of the result's naming column ("One & Only House"), so "details of
+#     One & Only House" selects that row. The naming column is the first text column of the
+#     projection (other than the key) whose values tell the rows apart;
+#   · orderable values — each numeric or date column, so "the cheapest one" / "the latest
+#     one" can be answered from what was shown instead of asking a model to compute it.
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+_NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
+
+
+def _cell(r: Any, cols: List[Any], i: int) -> Any:
+    return r.get(cols[i]) if isinstance(r, dict) else (r[i] if i < len(r) else None)
+
+
+def _selectors(cols: List[Any], rows: List[Any], *, skip: Any) -> Dict[str, Any]:
+    out: Dict[str, Any] = {}
+    if not rows:
+        return out
+    values: Dict[str, List[Optional[float]]] = {}
+    dates: Dict[str, List[Optional[str]]] = {}
+    label_col = None
+    for i, c in enumerate(cols):
+        if c == skip:
+            continue
+        name = str(c).lower()
+        if name == "id" or name.endswith("_id"):
+            continue                           # an identifier is neither a label nor a measure
+        cells = [_cell(r, cols, i) for r in rows]
+        present = [x for x in cells if x is not None and str(x).strip()]
+        if not present:
+            continue
+        if all(isinstance(x, (int, float)) and not isinstance(x, bool)
+               or (isinstance(x, str) and _NUM_RE.match(x.strip())) for x in present):
+            values[str(c)] = [float(x) if x is not None and str(x).strip() else None
+                              for x in cells]
+        elif all(_DATE_RE.match(str(x)) for x in present):
+            dates[str(c)] = [str(x)[:32] if x is not None else None for x in cells]
+        elif (label_col is None and all(isinstance(x, str) for x in present)
+              and len({x.strip().lower() for x in present}) >= max(2, int(0.8 * len(rows)))
+              and sum(len(x.strip()) for x in present) / len(present) >= 3):
+            label_col = str(c)
+            out["label_column"] = label_col
+            out["labels"] = [_clean(x) for x in cells]
+    if values:
+        out["values"] = values
+    if dates:
+        out["dates"] = dates
+    return out
+
+
+def _words_of(text: Any) -> List[str]:
+    return re.findall(r"[a-z0-9]+", str(text or "").lower())
+
+
+def _find_words(hay: List[str], needle: List[str]) -> bool:
+    n = len(needle)
+    return n > 0 and any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
+
+
+def names_a_row(ref: Optional[Dict[str, Any]], message: str,
+                frame: Optional[Dict[str, Any]]) -> bool:
+    """Does the message name a displayed record by its label ("details of One & Only
+    House")? Evidence of a continuation in itself — the label came from the result on
+    screen — but only for a label of 2+ words or 6+ characters, so a common short word
+    that happens to be a label is not mistaken for one."""
+    if not (ref and ref.get("kind") == "rows" and ref.get("labels") and frame
+            and str(frame.get("entity") or "") == str(ref.get("entity") or "")):
+        return False
+    msg = _words_of(message)
+    return any(lab and (len(_words_of(lab)) >= 2 or len(lab) >= 6)
+               and _find_words(msg, _words_of(lab)) for lab in ref["labels"])
+
+
+_NUM_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+              "eight": 8, "nine": 9, "ten": 10}
+_SET_EDGE_RE = re.compile(
+    r"\b(?P<edge>first|last|top|bottom)\s+(?P<n>\d{1,2}|" + "|".join(_NUM_WORDS) + r")\b"
+    r"(?P<tail>(?:\s+(?:ones?|rows?|items?|results?|entries|records))?)\s*(?:of them)?"
+    r"\s*[.?!]*\s*$", re.IGNORECASE)
+_SET_ALL_RE = re.compile(
+    r"\b(?:those|these|all|the)\s+(?P<n>\d{1,2}|" + "|".join(_NUM_WORDS) + r")\b"
+    r"(?:\s+(?:ones?|rows?|items?|results?|entries|records|of them))?\s*[.?!]*\s*$",
+    re.IGNORECASE)
+
+
+def _count(tok: str) -> int:
+    t = tok.lower()
+    return _NUM_WORDS.get(t) or int(t)
+
+
+def _key_filters(ref: Dict[str, Any], picked: List[int]) -> List[Dict[str, Any]]:
+    col = ref.get("key_column")
+    return [{"field": col, "column": col, "operator": "equals",
+             "value": str(ref["items"][i]), "source": "result_reference"} for i in picked]
+
+
+def _set_reference(ref: Dict[str, Any], message: str) -> Optional[Tuple[Any, ...]]:
+    """"the first three", "the last two rows", "those three" — a SET of displayed records,
+    kept as their keys. A count that is not what was shown ("those five" after three rows)
+    is refused, never trimmed or padded."""
+    n = len(ref["items"])
+    m = _SET_EDGE_RE.search(message or "")
+    if m:
+        k = _count(m.group("n"))
+        if k < 1 or k > n:
+            return ("refuse", f"The previous answer showed {n} row{'s' if n != 1 else ''}, so "
+                              f"I can't pick {k} of them from the {m.group('edge').lower()}.")
+        picked = list(range(k)) if m.group("edge").lower() in ("first", "top") \
+            else list(range(n - k, n))
+        terms = [m.group("edge"), m.group("n")] + _words_of(m.group("tail"))
+        return ("filters", _key_filters(ref, picked), terms)
+    m = _SET_ALL_RE.search(message or "")
+    if m:
+        k = _count(m.group("n"))
+        if k != n:
+            return ("refuse", f"The previous answer showed {n} row{'s' if n != 1 else ''}, not "
+                              f"{k} — which ones do you mean?")
+        return ("filters", _key_filters(ref, list(range(n))), [m.group("n")])
+    return None
+
+
+def selects_rows(ref: Optional[Dict[str, Any]], message: str,
+                 frame: Optional[Dict[str, Any]]) -> bool:
+    """Does the message pick rows out of the current listing — a set ("the first three",
+    "those four") or a record by name? Used to keep such a message from being taken as a
+    request to redraw the whole result."""
+    if not (ref and ref.get("kind") == "rows" and frame
+            and str(frame.get("entity") or "") == str(ref.get("entity") or "")):
+        return False
+    if _SET_EDGE_RE.search(message or "") or _SET_ALL_RE.search(message or ""):
+        return True
+    if names_a_row(ref, message, frame):
+        return True
+    # "which one is the cheapest?", "the most expensive one": a superlative over the rows on
+    # screen, pointed at with "one(s)" and naming no other subject ("which CITY is the
+    # cheapest" does not qualify). Only when the extreme can actually be read off a shown
+    # column — otherwise it is left to the engine as before.
+    return bool(re.search(r"\bones?\b", message or "", re.I)
+                and _ranking_reference(ref, message, frame) is not None)
+
+
+_MIN_WORDS = frozenset({"cheapest", "lowest", "smallest", "least", "minimum", "fewest",
+                        "shortest"})
+_MAX_WORDS = frozenset({"highest", "largest", "biggest", "greatest", "maximum", "most",
+                        "costliest", "longest"})
+_DATE_MAX = frozenset({"latest", "newest", "recent"})
+_DATE_MIN = frozenset({"oldest", "earliest"})
+
+
+def _ranking_reference(ref: Dict[str, Any], message: str,
+                       frame: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, ...]]:
+    """"which one is the cheapest", "the most expensive one", "the latest one" — the
+    extreme of a column the user SAW, picked here from the remembered values. The column
+    is the one the message names; else the one the result was ranked by; else the result's
+    only numeric (or date) column. Several candidates and no way to choose, or a tie at the
+    extreme → not resolved / refused, never guessed."""
+    words = _words_of(message)
+    wset = set(words)
+    if wset & (_DATE_MAX | _DATE_MIN):
+        series, highest, word = ref.get("dates") or {}, bool(wset & _DATE_MAX), \
+            next(w for w in words if w in _DATE_MAX | _DATE_MIN)
+    elif wset & (_MIN_WORDS | _MAX_WORDS):
+        series, highest = ref.get("values") or {}, None
+        for w in words:                      # the first superlative decides ("most" > "least")
+            if w in _MIN_WORDS or w in _MAX_WORDS:
+                highest, word = w in _MAX_WORDS, w
+                break
+    else:
+        return None
+    if not series:
+        return None
+    # What the superlative is ABOUT: the words after it, up to "one(s)" or the end
+    # ("the lowest amount one" → amount). "most"/"least" take one quality word first
+    # ("most expensive", "least costly") that names no column. Anything left must name a
+    # SHOWN column — "the highest rating" over rows that never showed a rating is not
+    # answered from some other column.
+    i = words.index(word)
+    about = []
+    for w in words[i + 1:]:
+        if w in ("one", "ones"):
+            break
+        if w not in ("the", "a", "an", "of", "in", "is", "by", "with", "from", "them", "these",
+                     "those", "all"):
+            about.append(w)
+    if word in ("most", "least") and about:
+        about = about[1:]
+    named = [c for c in series if _find_words(words, _words_of(c.replace("_", " ")))]
+    if about and not any(set(_words_of(c.replace("_", " "))) & set(about) for c in named):
+        return None
+    ranked = [str(o.get("field")) for o in ((frame or {}).get("order_by") or [])
+              if isinstance(o, dict) and str(o.get("field")) in series]
+    col = (named[0] if len(named) == 1 else
+           ranked[0] if not named and ranked else
+           next(iter(series)) if not named and len(series) == 1 else None)
+    if col is None:
+        return None
+    vals = [(i, v) for i, v in enumerate(series[col]) if v is not None]
+    if not vals:
+        return None
+    best = (max if highest else min)(v for _, v in vals)
+    picked = [i for i, v in vals if v == best]
+    if len(picked) != 1:
+        return ("refuse", f"{len(picked)} of the rows shown share the "
+                          f"{'highest' if highest else 'lowest'} {col.replace('_', ' ')} — "
+                          f"which one do you mean?")
+    terms = [word] + words[i + 1:i + 2] if word in ("most", "least") else [word]
+    return ("filters", _key_filters(ref, picked), terms + (["one"] if "one" in wset else []))
+
+
+def _nth(n: int) -> str:
+    suffix = "th" if 10 <= n % 100 <= 20 else {1: "st", 2: "nd", 3: "rd"}.get(n % 10, "th")
+    return f"{n}{suffix}"
+
+
+def _name_reference(ref: Dict[str, Any], message: str) -> Optional[Tuple[Any, ...]]:
+    """"details of One & Only House" — the displayed record whose label the message names.
+    Two records with that label → a clarification, never the first one."""
+    labels = ref.get("labels") or []
+    msg = _words_of(message)
+    hits = [(i, lab) for i, lab in enumerate(labels)
+            if lab and (len(_words_of(lab)) >= 2 or len(lab) >= 6)
+            and _find_words(msg, _words_of(lab))]
+    if not hits:
+        return None
+    longest = max(len(_words_of(lab)) for _, lab in hits)
+    hits = [(i, lab) for i, lab in hits if len(_words_of(lab)) == longest]
+    if len({lab.strip().lower() for _, lab in hits}) > 1:
+        return None                          # names two different records: not a reference
+    if len(hits) > 1:
+        return ("refuse", f"{len(hits)} of the rows shown are called \"{hits[0][1]}\" — "
+                          f"which one do you mean? (for example \"the {_nth(hits[1][0] + 1)} "
+                          f"one\")")
+    return ("filters", _key_filters(ref, [hits[0][0]]), _words_of(hits[0][1]))
 
 
 # ── resolving ────────────────────────────────────────────────────────────────────────────
@@ -246,6 +484,16 @@ def resolve_reference(ref: Optional[Dict[str, Any]], message: str, *,
     terms: List[str] = []
     if hit:
         terms = [hit[1]] + ([hit[2]] if hit[2] in _POINTER_NOUNS else [])
+    if pos is None and referential and ref.get("kind") == "rows":
+        # A record picked by something other than its position — a set, the extreme of a
+        # shown column, or its name. Each returns None when it does not apply, so a message
+        # none of them recognises continues exactly as before.
+        for picker in (lambda: _set_reference(ref, message),
+                       lambda: _ranking_reference(ref, message, frame),
+                       lambda: _name_reference(ref, message)):
+            hit2 = picker()
+            if hit2 is not None:
+                return hit2
     if pos is None:
         if not referential:
             return None
@@ -280,3 +528,75 @@ def resolve_reference(ref: Optional[Dict[str, Any]], message: str, *,
                              "value": str(item), "source": "result_reference"}], terms)
     return ("filters", [{"field": c, "column": c, "operator": "equals", "value": str(v),
                          "source": "result_reference"} for c, v in item.items()], terms)
+
+
+# ── earlier results: "the 1st one from the price list" ───────────────────────────────────
+# Every answered result the user could point at is remembered in a short, bounded history
+# with the words of the question that produced it. A message that QUALIFIES its reference
+# by one of those results ("from the price list", "in the earlier result") is resolved
+# against that result instead of the current one. The qualifier is matched on the
+# remembered question's own words — never a word list — and two matches are a question to
+# the user, never a guess.
+_MAX_RESULTS = 5
+_FROM_RESULT_RE = re.compile(
+    r"\b(?:from|in|of|on)\s+(?:the|that|those)\s+(?P<q>(?:[a-z0-9]+\s+){0,5}?)"
+    r"(?P<noun>list|lists|result|results|answer|table|ranking)\b", re.IGNORECASE)
+_EARLIER_WORDS = frozenset({"previous", "earlier", "other", "last", "prior", "before"})
+_FIRST_WORDS = frozenset({"first", "original", "initial"})
+_QUALIFIER_FILLER = frozenset({"the", "a", "an", "one", "ones", "that", "this", "those",
+                               "these", "we", "saw", "you", "showed", "shown", "by"})
+
+
+def _fold(w: str) -> str:
+    return w[:-1] if len(w) > 3 and w.endswith("s") else w
+
+
+def remember_result(history: Optional[List[Dict[str, Any]]], ref: Optional[Dict[str, Any]],
+                    question: str) -> List[Dict[str, Any]]:
+    """`ref` at the front of the history, tagged with the question that produced it."""
+    kept = [h for h in (history or []) if isinstance(h, dict) and h.get("items")]
+    if not ref or not ref.get("items"):
+        return kept[:_MAX_RESULTS]
+    entry = {**ref, "question": str(question or "")[:300]}
+    return ([entry] + [h for h in kept if h.get("result_id") != ref.get("result_id")]
+            )[:_MAX_RESULTS]
+
+
+def _describes(entry: Dict[str, Any], words: List[str]) -> bool:
+    # The QUESTION's words (and the table's): results of one table share every column, so
+    # columns cannot tell "the price list" from "the area list" — the question can.
+    vocab = {_fold(w) for w in _words_of(entry.get("question"))}
+    vocab |= {_fold(w) for w in _words_of(str(entry.get("entity") or "").replace("_", " "))}
+    return all(_fold(w) in vocab for w in words)
+
+
+def earlier_result(history: Optional[List[Dict[str, Any]]], message: str,
+                   current: Optional[Dict[str, Any]]) -> Optional[Tuple[Any, ...]]:
+    """("ref", entry, qualifier words) | ("refuse", reason) | None (no qualifier: resolve
+    against the current result exactly as before)."""
+    m = _FROM_RESULT_RE.search(message or "")
+    if not m:
+        return None
+    q = [w for w in _words_of(m.group("q")) if w not in _QUALIFIER_FILLER]
+    terms = _words_of(m.group(0))
+    entries = [h for h in (history or []) if isinstance(h, dict) and h.get("items")]
+    if not entries:
+        return None
+    cur_id = (current or {}).get("result_id")
+    if q and set(q) <= _EARLIER_WORDS:
+        older = [h for h in entries if h.get("result_id") != cur_id]
+        if not older:
+            return ("refuse", "There's no earlier list in this conversation to pick from.")
+        return ("ref", older[0], terms)
+    if q and set(q) <= _FIRST_WORDS:
+        return ("ref", entries[-1], terms)
+    if not q:
+        return None                                   # "from the list": the current one
+    hits = [h for h in entries if _describes(h, q)]
+    if len(hits) == 1:
+        return ("ref", hits[0], terms)
+    if not hits:
+        return ("refuse", f"I don't have an earlier list about \"{' '.join(q)}\" in this "
+                          f"conversation. Which list do you mean?")
+    asked = "; or ".join(f"\"{h.get('question')}\"" for h in hits[:3])
+    return ("refuse", f"More than one earlier list fits \"{' '.join(q)}\" — do you mean {asked}?")

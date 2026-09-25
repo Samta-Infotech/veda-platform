@@ -69,10 +69,19 @@ def test_groups_keep_their_group_values():
                             {"facing": "NORTH", "corner_property": "False"}]
 
 
-def test_values_are_never_stored():
+def test_values_are_selectors_only_and_never_reach_the_engine():
+    """Changed deliberately 2026-09-26 (was test_values_are_never_stored): naming and
+    ranking references ("details of One & Only House", "the cheapest one") need the shown
+    labels/values to decide WHICH row. They are used for that alone — what goes to the
+    engine is still only the row's key, and the row is re-queried under the current
+    turn's authorisation."""
     ref = R.build_reference(_ROWS, 2)
-    flat = str(ref)
-    assert "4000" not in flat and "project_name" not in flat
+    assert ref["values"] == {"expected_price": [4000.0, 5000.0, 9000.0]}
+    kind, filters, _ = R.resolve_reference(ref, "which one is the cheapest",
+                                           frame=_FRAME_SL, referential=True)
+    assert kind == "filters"
+    assert [(f["column"], f["value"]) for f in filters] == [("id", "101")]
+    assert "values" not in R.build_reference(_GROUPS, 2)     # groups: identity only
 
 
 def test_bounded():
