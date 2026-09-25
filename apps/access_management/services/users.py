@@ -115,6 +115,18 @@ class UserService:
         so it is set here rather than through the role-assignment path. Written to
         the ``is_superuser`` column, which is what it actually is under the hood;
         ``is_admin`` is this API's public name for it, never the raw one.
+
+        ``is_staff`` is written to MATCH it. Those are two different columns but one
+        decision for this product, and letting them drift made every admin created
+        through the API unable to call a single admin endpoint: ``AdminView``
+        gates on ``IsAdminUser`` (i.e. ``is_staff``) alongside the RBAC check, and no
+        API writes ``is_staff`` — the serializers deliberately reject it. So an
+        account created with ``is_admin: true`` got the admin frontend at login and a
+        403 from every request that frontend then made. Observed on a real account
+        whose role granted user.manage / role.manage / source.manage in full: RBAC
+        said yes, ``is_staff=False`` said no, and only the bootstrap superuser could
+        use the product at all. Keeping the two in step here (and in ``update_user``)
+        fixes that without widening the gate itself.
         """
         user_model = get_user_model()
         try:
@@ -126,6 +138,7 @@ class UserService:
                     first_name=first_name,
                     last_name=last_name,
                     is_superuser=is_admin,
+                    is_staff=is_admin,
                 )
                 UserProfile.objects.create(user=user)
                 if role_ids is not None:
@@ -186,6 +199,10 @@ class UserService:
             # generic setattr loop below writes actual model columns, and
             # ``User`` has no ``is_admin`` attribute.
             fields["is_superuser"] = fields.pop("is_admin")
+            # Keep is_staff in step with is_admin — see create_user's docstring for
+            # why these two columns must not drift. Toggling admin OFF likewise
+            # withdraws staff, so a demotion actually takes effect on the API too.
+            fields["is_staff"] = fields["is_superuser"]
         if not fields and role_ids is None:  # the serializer rejects this; belt-and-braces for direct calls
             raise ValueError("update_user requires at least one field")
 
@@ -202,6 +219,15 @@ class UserService:
                     deactivating = fields["is_active"] is False
                     if deactivating and is_last_active_admin(user):
                         raise LastAdminProtected()
+                # Demotion is now as dangerous as deactivation. `is_staff` follows
+                # `is_admin` (above), and `active_admins()` counts exactly
+                # is_staff+is_active — so clearing is_admin on the last remaining
+                # admin would leave the platform with nobody who can call an admin
+                # endpoint, and no API able to put one back (no serializer accepts
+                # is_staff). Same guard, same error as deactivating them.
+                if (fields.get("is_staff") is False
+                        and user.is_staff and is_last_active_admin(user)):
+                    raise LastAdminProtected()
                 if fields:
                     for name, value in fields.items():
                         setattr(user, name, value)
