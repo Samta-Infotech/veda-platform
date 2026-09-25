@@ -525,7 +525,12 @@ def _partial_label_reference(ref: Dict[str, Any], message: str) -> Optional[Tupl
         lab_words = {_fold_word(w) for w in _words_of(hits[0][1])}
         return ("filters", _key_filters(ref, [hits[0][0]]),
                 [w for w in _words_of(message) if _fold_word(w) in lab_words])
-    names = "; or ".join(f"\"{lab}\"" for _, lab in hits[:4])
+    distinct = list(dict.fromkeys(lab for _, lab in hits))
+    if len(distinct) == 1:
+        return ("refuse", f"{len(hits)} of the rows shown are called \"{distinct[0]}\" — "
+                          f"which one do you mean? (for example \"the "
+                          f"{_nth(hits[1][0] + 1)} one\")")
+    names = "; or ".join(f"\"{lab}\"" for lab in distinct[:4])
     return ("refuse", f"More than one of the rows shown matches that — do you mean {names}?")
 
 
@@ -639,6 +644,13 @@ def resolve_reference(ref: Optional[Dict[str, Any]], message: str, *,
             return None
         if len(items) == 1 and ref.get("complete"):
             pos = 1                              # "its price" about a one-row answer
+        elif ref.get("kind") == "rows" and len(ref.get("picked") or []) == 1:
+            # The previous turn picked ONE record of this list ("details of Infotech
+            # Tower"): "its" is that record.
+            col = ref.get("key_column")
+            return ("filters", [{"field": col, "column": col, "operator": "equals",
+                                 "value": str(ref["picked"][0]),
+                                 "source": "result_reference"}], ["its"])
         elif ref.get("kind") == "rows" and len(items) > 1:
             # "what is its city?" with several records on screen: "its" means ONE of them
             # and nothing says which. Asked, not guessed — measured 2026-09-26, sent on as

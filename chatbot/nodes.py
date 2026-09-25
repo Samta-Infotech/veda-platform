@@ -2860,6 +2860,12 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         _picked = _ref_hit[1]
         _ref_terms = _ref_terms + list(_ref_hit[2] if len(_ref_hit) > 2 else [])
         _cols = {f["column"] for f in _picked}
+        if (_turn_ref or {}).get("kind") == "rows":
+            # A record picked by KEY replaces whatever an earlier pick left on the SHOWN
+            # columns ("details of Infotech Tower" → "and Shivsai Apartment?" kept
+            # project_name = infotech tower beside the new id → 0 rows, measured
+            # 2026-09-26). The key alone pins the row, so this can never widen it.
+            _cols |= set(((_turn_ref or {}).get("texts") or {}).keys())
         frame = {**frame, "filters": [f for f in (frame.get("filters") or [])
                                       if f.get("column") not in _cols] + _picked}
         if delta_type in ("new_topic", "ambiguous"):
@@ -3301,7 +3307,12 @@ def memory_write_node(state: ChatState) -> dict:
     if _picked_from_shown and state.get("result_reference"):
         # Written back, not just kept: when the pick was from an EARLIER result ("the 1st
         # one from the price list") that result is now the one on screen to point at.
-        _reference = state.get("result_reference")
+        # WHICH row(s) were picked is recorded too, so the next "what is its carpet area?"
+        # means that record — not "one of the N rows" (measured 2026-09-26).
+        _reference = dict(state.get("result_reference"))
+        _kc = _reference.get("key_column")
+        _reference["picked"] = [str(f.get("value")) for f in (state.get("frame") or {}).get("filters") or []
+                                if _kc and f.get("column") == _kc and f.get("value") is not None]
         MemoryStore.write_reference(tenant, session_id, _reference, source_id=_source_id)
     else:
         MemoryStore.write_reference(tenant, session_id, _reference, source_id=_source_id)

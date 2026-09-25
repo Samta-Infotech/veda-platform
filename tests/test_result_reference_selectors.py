@@ -163,8 +163,11 @@ def test_a_pick_keeps_the_list_as_the_reference(monkeypatch):
             "engine_result": er, "message": "details of the 3rd one",
             "result_reference": listing}
     out = N.memory_write_node({**base, "conversation_context": {"resolved_terms": ["3rd"]}})
-    # the LIST is (re)written — never the one-row answer the pick produced
-    assert out["result_reference"] is listing and written == [listing]
+    # the LIST is (re)written — never the one-row answer the pick produced — and it now
+    # records which of its rows the pick selected (so "its …" means that row)
+    kept = out["result_reference"]
+    assert kept["result_id"] == listing["result_id"] and kept["items"] == listing["items"]
+    assert written == [kept]
     out = N.memory_write_node({**base, "conversation_context": {}})   # not a pick
     assert written and written[-1]["items"] == ["103"]
 
@@ -359,3 +362,34 @@ def test_several_positions_are_evidence():
 def test_its_with_several_records_asks_which():
     hit = _p("what is its city?")
     assert hit[0] == "refuse" and "which one" in hit[1]
+
+
+def test_its_after_a_pick_is_that_record():
+    ref = dict(R.build_reference(PROPS, 2), picked=["5665"])
+    hit = R.resolve_reference(ref, "what is its carpet area?", frame=LF, referential=True)
+    assert hit[0] == "filters" and [f["value"] for f in hit[1]] == ["5665"]
+
+
+def test_a_name_many_rows_share_asks_with_a_position():
+    er = dict(PROPS, rows=[[1, "Electricity Bill Payment", "X", "Y"],
+                           [2, "Electricity Bill Payment", "X", "Y"],
+                           [3, "Plumbing repair fees", "X", "Y"]])
+    hit = R.resolve_reference(R.build_reference(er, 2), "the electricity bill one",
+                              frame=LF, referential=True)
+    assert hit[0] == "refuse" and "2 of the rows shown are called" in hit[1]
+
+
+def test_a_second_pick_replaces_the_first_picks_name_filter(monkeypatch):
+    import chatbot.nodes as N
+    ref = R.build_reference(PROPS, 2)
+    frame = {**LF, "filters": [{"field": "Project Name", "column": "project_name",
+                                "operator": "equals", "value": "infotech tower"},
+                               {"field": "id", "column": "id", "operator": "equals",
+                                "value": "5665"}]}
+    monkeypatch.setattr(N, "call_slm", lambda *a, **k: None)
+    out = N.context_resolve_node({"message": "and Shivsai Apartment?", "frame": frame,
+                                  "action": "followup", "delta_type": "refine",
+                                  "result_reference": ref, "history": [{"role": "user", "content": "x"}],
+                                  "drill_stack": []}, config={})
+    cols = [(f["column"], f["value"]) for f in out["conversation_context"]["filters"]]
+    assert cols == [("id", "3866")]
