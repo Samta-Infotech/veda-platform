@@ -149,8 +149,11 @@ def test_a_pronoun_about_a_one_row_answer_is_that_row():
 
 
 def test_a_pronoun_about_several_rows_is_not_guessed():
-    assert R.resolve_reference(R.build_reference(_ROWS, 2), "what is its location?",
-                               frame=_FRAME_SL, referential=True) is None
+    """Changed 2026-09-26: ASKED instead of passed on (passed on, "what is its city?" came
+    back as an unrelated federated answer). Still never guessed."""
+    hit = R.resolve_reference(R.build_reference(_ROWS, 2), "what is its location?",
+                              frame=_FRAME_SL, referential=True)
+    assert hit[0] == "refuse" and "which one" in hit[1]
 
 
 def test_not_referential_never_touches_the_reference():

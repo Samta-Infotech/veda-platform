@@ -307,3 +307,55 @@ def test_short_numeric_and_boolean_cells_are_never_names():
     er = {**LIST, "cols": LIST["cols"] + ["flag"], "rows": [r + ["True"] for r in LIST["rows"]]}
     ref = R.build_reference(er, 2)
     assert not R.names_a_row(ref, "is it true?", LF)
+
+
+# ── the edge-case matrix, 2026-09-26 ─────────────────────────────────────────────────
+PROPS = {"status": "answered", "table": "assets_asset",
+         "cols": ["id", "project_name", "city_name", "state_name"],
+         "rows": [[3844, "Friends Colony, KT Nagar, Nagpur, Maharashtra 440013, India", "Nagpur", "Maharashtra"],
+                  [3866, "Shivsai Apartment", "Pune", "Maharashtra"],
+                  [5665, "Infotech Tower", "Nagpur", "Maharashtra"],
+                  [5666, "Samta infotech", "Nagpur", "Maharashtra"],
+                  [4877, "Proptension India Pvt Ltd", "Bengaluru", "Karnataka"]],
+         "result_key": {"kind": "rows", "table": "assets_asset", "column": "id", "result_column": "id"}}
+
+
+def _p(msg):
+    hit = R.resolve_reference(R.build_reference(PROPS, 2), msg, frame=LF, referential=True)
+    return [f["value"] for f in hit[1]] if hit and hit[0] == "filters" else hit
+
+
+@pytest.mark.parametrize("msg,expected", [
+    ("details of the first and third", ["3844", "5665"]),
+    ("compare the 2nd, 4th and last", ["3866", "5666", "4877"]),
+    ("compare Infotech Tower and Shivsai Apartment", ["3866", "5665"]),   # display order
+    ("Infotech Towers", ["5665"]),                    # plural folded
+    ("tell me about Friends Colony", ["3844"]),       # part of the name
+])
+def test_matrix_picks(msg, expected):
+    assert _p(msg) == expected
+
+
+def test_a_partial_name_two_rows_share_asks():
+    hit = _p("details of infotech")                  # Infotech Tower / Samta infotech
+    assert hit[0] == "refuse" and "Infotech Tower" in hit[1] and "Samta infotech" in hit[1]
+
+
+@pytest.mark.parametrize("msg", ["only the Maharashtra ones",      # a shared exact value
+                                 "only the Nagpur ones",
+                                 "properties in india"])           # 'india' too short/common
+def test_shared_or_short_words_are_not_picks(msg):
+    assert _p(msg) is None
+
+
+def test_positions_out_of_range_are_refused():
+    assert _p("details of the first and 9th")[0] == "refuse"
+
+
+def test_several_positions_are_evidence():
+    assert R.selects_rows(R.build_reference(PROPS, 2), "details of the first and third", LF)
+
+
+def test_its_with_several_records_asks_which():
+    hit = _p("what is its city?")
+    assert hit[0] == "refuse" and "which one" in hit[1]

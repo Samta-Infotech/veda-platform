@@ -2244,6 +2244,39 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         ok_q, missing = True, None
     else:
         ok_q, missing = qualifier_completeness(query, sql, sm, user_message=_gate_words)
+    # A turn that PICKED shown rows ("where is Shivsai Apartment located?", "second wale ka
+    # detail batao") is pinned to those rows by key. A leftover word with no referent
+    # ANYWHERE in the schema cannot be a filter that was dropped — the rows are already
+    # fully identified — so it is set aside and the gate re-checked; a word that does name
+    # something in the schema is still held to the gate. Measured 2026-09-26: the row was
+    # picked correctly and the turn refused on 'located' / 'batao'.
+    _pick_tries = 0
+    while (not ok_q and missing and _conv.get("resolved_terms") and _pick_tries < 6):
+        try:
+            from query.resolution import referent_tables as _rt
+            _has_ref = bool(_rt(missing, sm))
+        except Exception:
+            _has_ref = True
+        if _has_ref:
+            break
+        print(f"  [L6b] '{missing}' names nothing in the schema on a picked-row turn — "
+              f"not a dropped filter")
+        try:
+            from retrieval.query_enrichment import _singularize as _sg
+        except Exception:
+            _sg = lambda w: w                                          # noqa: E731
+        _m = str(missing).lower()
+        _qual_consumed.update(w.lower() for w in re.findall(r"[A-Za-z0-9]+",
+                                                            _conv_user_message or query)
+                              if w.lower() == _m or _sg(w.lower()) == _m)
+        _qual_consumed.add(_m)
+        _gate_words = " ".join(w for w in re.findall(r"[A-Za-z0-9]+", _conv_user_message or query)
+                               if w.lower() not in _qual_consumed)
+        if not _gate_words.strip():
+            ok_q, missing = True, None
+        else:
+            ok_q, missing = qualifier_completeness(query, sql, sm, user_message=_gate_words)
+        _pick_tries += 1
     tr.check("qualifier_completeness", ok_q, "" if ok_q else str(missing))
     if not ok_q:
         _sql_tabs = set(re.findall(r'(?:FROM|JOIN)\s+"?([A-Za-z_][A-Za-z0-9_]*)', sql))
