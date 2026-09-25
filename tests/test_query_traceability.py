@@ -1640,6 +1640,44 @@ def test_document_evidence_names_the_documents_and_counts_passages(flags_on):
     assert ev["passages"] == 5, "five passages from two documents is still five"
 
 
+class TestDocumentConfidenceIsSurfacedNotFabricated:
+    """A document answer's `explain.confidence` used to be hardcoded None — there is
+    no SQL anchor/join gating to compute one from — even though run_rag_layer had
+    already computed the real signal (top chunk similarity) and used it ONLY to
+    gate its own >= 0.35 routing threshold before throwing it away."""
+
+    class _RagWithConfidence(_RagLike):
+        def __init__(self, cites, n, confidence):
+            super().__init__(cites, n)
+            self.confidence = confidence
+
+    def test_a_real_confidence_is_read_into_document_evidence(self):
+        import veda_hybrid as VH
+        ev = VH._document_evidence(self._RagWithConfidence(["a.pdf"], 1, 0.812345))
+        assert ev["confidence"] == 0.812, "rounded, not truncated to the input's own precision"
+
+    def test_no_confidence_attribute_is_not_an_error(self):
+        import veda_hybrid as VH
+        ev = VH._document_evidence(_RagLike(["a.pdf"], 1))
+        assert "confidence" not in ev, "no fabricated number when the head reported none"
+
+    def test_it_fills_the_none_build_explain_left_for_a_document_turn(self):
+        import veda_hybrid as vh
+        ex = {"confidence": None, "operations": []}
+        vh._apply_document_v1(ex, {"documents": ["a.pdf"], "passages": 3,
+                                   "confidence": 0.62})
+        assert ex["confidence"] == 0.62
+
+    def test_it_never_overwrites_a_real_value_another_path_already_set(self):
+        """A hybrid answer's confidence is the SQL head's anchor/join gating — that
+        genuinely ran and must not be replaced by the document half's own number."""
+        import veda_hybrid as vh
+        ex = {"confidence": 0.95, "operations": []}
+        vh._apply_document_v1(ex, {"documents": ["a.pdf"], "passages": 3,
+                                   "confidence": 0.20})
+        assert ex["confidence"] == 0.95
+
+
 def test_a_document_answer_reports_its_documents_and_operations(flags_on, trace):
     import veda_hybrid as VH
     from veda.explain import bind_trace

@@ -2156,6 +2156,17 @@ def _frame_still_authorised(frame: dict, state: ChatState) -> bool:
         return False
 
 
+def _authorised_results(tenant: str, session_id: str, state: ChatState) -> list:
+    """The earlier-result history, filtered to THIS turn's grants. Unlike a frame, an entry
+    with no recorded source is dropped, not kept: a result holds shown row labels and
+    values, and one whose source cannot be proven in scope is not shown to anything
+    (measured 2026-09-26 by test_memory_rbac_guard — source-less entries survived a
+    revocation)."""
+    return [e for e in MemoryStore.read_results(tenant, session_id)
+            if isinstance(e, dict) and e.get("source_id") is not None
+            and _frame_still_authorised(e, state)]
+
+
 def memory_read_node(state: ChatState) -> dict:
     """Loads the structured analytical memory (QueryFrame + DrillStack +
     episodic buffer) from Redis for this session — see
@@ -2252,8 +2263,7 @@ def memory_read_node(state: ChatState) -> dict:
         # hole in it.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": False,
                 "memory_revoked_source": _revoked,
-                "result_history": [e for e in MemoryStore.read_results(tenant, session_id)
-                                   if _frame_still_authorised(e, state)],
+                "result_history": _authorised_results(tenant, session_id, state),
                 "last_result": {}, "pending_clarification": {}, "result_reference": None,
                 "engine_result": {}, "sql": None, "rows": None, "status": None,
                 "topic_index": _topics, "topic_restore": None,
@@ -2290,8 +2300,7 @@ def memory_read_node(state: ChatState) -> dict:
         _active = MemoryStore.active_source(tenant, session_id)
         if _active is not None and str(_active) not in {str(x) for x in state["source_ids"]}:
             _revoked_active = _active
-    _results = [e for e in MemoryStore.read_results(tenant, session_id)
-                if _frame_still_authorised(e, state)]
+    _results = _authorised_results(tenant, session_id, state)
     return {"frame": frame, "drill_stack": stack, "episodic": episodic,
             "comparison": comparison, "memory_reset": False,
             "memory_revoked_source": _revoked_active, "result_history": _results,

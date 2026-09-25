@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from typing import Iterator
@@ -27,6 +28,18 @@ from .visualization import VisualizationRecommender
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONVERSATION_TITLE = "New Chat"
+
+# A document answer's own SLM (rag_layer.py's _RAG_SYSTEM_PROMPT) is instructed to
+# write "Sources: (document name, page N)." as its final line — needed so
+# chatbot/memory/frame.py's `_cited_first` can tell which document the answer
+# actually drew on (already consumed upstream in the graph, before this text ever
+# reaches here). The SAME fact is already a structured field the client can
+# render with real confidence — `explainability.sources` / `data_used.datasets` —
+# so restating it as trailing prose in the chat bubble is the source of truth
+# appearing twice, once as a citation the reader cannot click or verify. Stripped
+# only from what is DISPLAYED; the raw text `_cited_first` reads is untouched.
+_TRAILING_SOURCES_RE = re.compile(
+    r"\n?\s*Sources:\s*(?:\([^)]*\)[\s,]*)+\.?\s*$", re.IGNORECASE)
 
 # User-facing error copy for the `error` SSE event / 502 body. Raw exception text
 # and tracebacks are NEVER sent to the client (they leak internals like connection
@@ -857,7 +870,7 @@ class ConversationQueryService:
             # is_summary marks this as the primary answer (vs. supporting content like
             # the table below) so callers can surface it distinctly without a second
             # LLM call or re-deriving which block "is" the summary.
-            summary = str(reply_text)
+            summary = _TRAILING_SOURCES_RE.sub("", str(reply_text)).rstrip()
             # Fold the Insight-Engine observations into the SAME summary block
             # instead of a separate "insights" event (2026-07-17): one block, not
             # two. res0["insights"] is List[str] (0-3 factual observations); only
