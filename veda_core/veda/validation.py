@@ -571,6 +571,15 @@ def grouped_shape_ok(query, sql):
         return True                                  # an aggregate (COUNT/SUM/…) → legitimate shape
     if tree.find(exp.Where) is not None:
         return True                                  # a filter ("by <person>") → not a group mismatch
+    # A RANKING's "by" names the order, not a grouping: "top 10 sale listings by expected
+    # price" is ORDER BY expected_price DESC LIMIT 10, and was refused here as "lists rows
+    # without grouping them" (measured 2026-09-26, the result-reference acceptance query).
+    # An ordered SQL plus a ranking word in the question is that case; an unordered one is
+    # still caught (and ranked_shape_ok separately refuses a ranking that does not order).
+    if tree.find(exp.Order) is not None and re.search(
+            r"\b(top|bottom|highest|lowest|first|last|latest|newest|oldest|earliest|most|"
+            r"least|cheapest|costliest|largest|smallest|biggest|best|worst)\b", ql):
+        return True
     return False                                     # grouped intent, pure projection → refuse
 
 

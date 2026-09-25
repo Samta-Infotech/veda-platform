@@ -144,6 +144,13 @@ def _topics_key(tenant: str, session_id: str) -> str:
     return f"veda:mem:{tenant}:{session_id}:topics"
 
 
+def _results_key(tenant: str, session_id: str) -> str:
+    """SESSION level, like the topic index: the last few answered results the user can
+    still point at by name ("the 1st one from the price list"). Each entry records its own
+    source, so a read drops what the caller may no longer see."""
+    return f"veda:mem:{tenant}:{session_id}:results"
+
+
 def _sources_key(tenant: str, session_id: str) -> str:
     """A SET of every source this session has written a frame for. Kept so `reset` can
     delete them all without SCANning the keyspace, and so a caller can ask which topics
@@ -615,6 +622,36 @@ class MemoryStore:
             logger.warning("MemoryStore.push_episodic_turn failed for session=%s", session_id, exc_info=True)
 
     @staticmethod
+    def read_results(tenant: str, session_id: str) -> List[Dict[str, Any]]:
+        """Earlier result references, most recent first (chatbot/memory/reference.py
+        ::remember_result). Unfiltered, for the same reason read_topics is."""
+        try:
+            key = _results_key(tenant, session_id)
+            raw = _client().get(key)
+            if not raw:
+                return []
+            _client().expire(key, _TTL_SECS)
+            out = json.loads(raw)
+            return [e for e in out if isinstance(e, dict)] if isinstance(out, list) else []
+        except Exception:
+            logger.warning("MemoryStore.read_results failed for session=%s", session_id,
+                           exc_info=True)
+            return []
+
+    @staticmethod
+    def write_results(tenant: str, session_id: str,
+                      results: Optional[List[Dict[str, Any]]]) -> None:
+        try:
+            key = _results_key(tenant, session_id)
+            if not results:
+                _client().delete(key)
+                return
+            _client().set(key, json.dumps(results, default=str), ex=_TTL_SECS)
+        except Exception:
+            logger.warning("MemoryStore.write_results failed for session=%s", session_id,
+                           exc_info=True)
+
+    @staticmethod
     def reset(tenant: str, session_id: str, source_id: Optional[Any] = None) -> None:
         """Explicit wipe — used when a hard "start over" is detected (deterministic
         fast path, mirrors chatbot/nodes.py's _GREETING_RE-style instant matches), and
@@ -646,6 +683,10 @@ class MemoryStore:
                 _kept = without_source(_topics, source_id)
                 if len(_kept) != len(_topics):
                     MemoryStore.write_topics(tenant, session_id, _kept)
+                _res = MemoryStore.read_results(tenant, session_id)
+                _res_kept = [r for r in _res if str(r.get("source_id")) != str(source_id)]
+                if len(_res_kept) != len(_res):
+                    MemoryStore.write_results(tenant, session_id, _res_kept)
                 return
             keys = [_k(tenant, session_id, "frame"),
                     _k(tenant, session_id, "stack"),
@@ -658,7 +699,9 @@ class MemoryStore:
                     # lives in a source the user did not reset.
                     _comparison_key(tenant, session_id),
                     # Session-level too: "start over" forgets every earlier topic.
-                    _topics_key(tenant, session_id)]
+                    _topics_key(tenant, session_id),
+                    # ...and every earlier result it could point back at.
+                    _results_key(tenant, session_id)]
             for known in MemoryStore.known_sources(tenant, session_id):
                 keys.append(_k(tenant, session_id, "frame", known))
                 keys.append(_k(tenant, session_id, "stack", known))

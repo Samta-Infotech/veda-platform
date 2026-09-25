@@ -1171,16 +1171,34 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
         # A question that names a document this conversation already read (no return word
         # needed — see _match_named_document).
         topic_hit = _match_named_document(message, state.get("topic_index") or [], frame)
+    if (topic_hit is None and memory_frame.is_document_frame(frame)
+            and state.get("message_names_only_values") is True):
+        # Only data VALUES ("only the Nagpur ones", "Pune") while the conversation is on a
+        # document: a value narrows a table, never a PDF. The table topic the conversation
+        # was on most recently is what it narrows. Measured 2026-09-26: properties → Nagpur
+        # → a handbook question → "only the FULL ones" was asked of the handbook.
+        _table = next((e for e in (state.get("topic_index") or [])
+                       if isinstance(e, dict) and e.get("entity")
+                       and not e.get("entity_is_document")), None)
+        if _table is not None:
+            topic_hit = {"kind": "continue", "topic": _table}
 
     _pending_raw = state.get("pending_clarification")
     pending = (_pending_raw.get("original_query")
                if isinstance(_pending_raw, dict) else None)
+    # A message that picks rows of the answer on screen ("the 3rd one", "the first three",
+    # a shown record's name) is never the answer to a pending clarification. Measured
+    # 2026-09-26: after a refused "only the ones on the moon" armed one, "the 3rd one" was
+    # glued onto it and sent as "only the ones on the moon for the 3rd one".
+    _picks_shown_rows = bool(memory_reference.result_pointer(message)
+                             or memory_reference.selects_rows(
+                                 state.get("result_reference"), message, frame))
     is_smalltalk_or_fast_path = bool(
         deterministic_smalltalk or recall_kind or presentation_kind or shape_change
         or _RESET_RE.match(message) or _DRILL_UP_RE.match(message)
-        or _RUNTIME_CONTEXT_RE.match(message) or topic_hit)
+        or _RUNTIME_CONTEXT_RE.match(message) or topic_hit or _picks_shown_rows)
     if pending:
-        if not topic_hit and _is_clarification_answer(message, recall_kind, presentation_kind,
+        if not topic_hit and not _picks_shown_rows and _is_clarification_answer(message, recall_kind, presentation_kind,
                                                       deterministic_smalltalk,
                                                       bool(shape_change)):
             logger.info("classify_node: a clarification is pending and this message "
@@ -1196,6 +1214,7 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             logger.info("classify_node: a clarification was pending but %r took a "
                         "deterministic path — dropping the pending request", message)
             state = {**state, "pending_clarification": {}}
+            pending = None
         else:
             # Genuinely ambiguous. Leave the slot ARMED and let the classifier below
             # decide: if it returns "clarify_reply" the graph completes the pending
@@ -1250,6 +1269,20 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                     "answering from memory, engine not called: %r", message)
         return {"action": "recall", "resolved_query": None,
                 "recall_kind": "shape_not_applicable", "needs_clarification": False,
+                "clarification_question": None, "engine_unavailable": False,
+                "pending_clarification": {}, "engine_result": {}, "sql": None,
+                "rows": None, "status": None, "context_used": None}
+    elif (state.get("memory_revoked_source") is not None and not topic_hit
+            and (_REFERENTIAL_HINTS.search(message) or _picks_shown_rows)):
+        # The message points back at an earlier answer ("show me those results", "the 2nd
+        # one") whose source this caller can no longer see — memory_read_node just dropped
+        # it. Measured 2026-09-26 (audit P1): "Show me those results" was answered from the
+        # employee handbook, and "the 2nd one" as smalltalk. Neither said what happened.
+        logger.info("classify_node: follow-up points at memory from a source no longer in "
+                    "scope (%r) — answering from memory, engine not called: %r",
+                    state.get("memory_revoked_source"), message)
+        return {"action": "recall", "resolved_query": None,
+                "recall_kind": "access_revoked", "needs_clarification": False,
                 "clarification_question": None, "engine_unavailable": False,
                 "pending_clarification": {}, "engine_result": {}, "sql": None,
                 "rows": None, "status": None, "context_used": None}
@@ -1350,7 +1383,11 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
                                           str(model_render or "").lower())
         if (_render in _RENDER_KINDS and previous_result.get("rows")
                 and not memory_frame.is_document_frame(frame)
-                and state.get("message_mentions_data") is False):
+                and state.get("message_mentions_data") is False
+                # "show the first three" / "the last two" pick rows OUT of the result —
+                # a question, not a redraw of all of it (measured 2026-09-26).
+                and not memory_reference.selects_rows(state.get("result_reference"),
+                                                      message, frame)):
             logger.info("classify_node: model asked to re-render the previous result as "
                         "%s — engine not called: %r", _render, message)
             return {"action": "represent", "resolved_query": None,
@@ -1933,6 +1970,14 @@ def recall_node(state: ChatState) -> dict:
         return {"reply_text": _reply, "needs_clarification": False,
                 "resolved_query": "", "engine_unavailable": False,
                 "history": _turn_delta(state, _reply)}
+    if kind == "access_revoked":
+        _reply = ("I can't show that — the earlier answer came from data that is no longer "
+                  "in your access or in this question's scope, so I've set it aside. Ask a "
+                  "new question about the data you can see, or contact your Admin to "
+                  "request access.")
+        return {"reply_text": _reply, "needs_clarification": False,
+                "resolved_query": "", "engine_unavailable": False,
+                "history": _turn_delta(state, _reply)}
     if kind == "already_on_document":
         _what = frame.get("entity_display") or frame.get("entity") or "that document"
         _reply = (f"We're already on {_what} — ask me anything about it and I'll look "
@@ -2145,6 +2190,7 @@ def memory_read_node(state: ChatState) -> dict:
         # back at version 1 with an entity in it, so the reset had no lasting effect.
         # Sending "start over" to a SQL engine was never meaningful anyway.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": True,
+                "memory_revoked_source": None, "result_history": [],
                 "pending_clarification": {}, "last_result": {}, "comparison": {},
                 "result_reference": None, "topic_index": [], "topic_restore": None,
                 "previous_topics": [],
@@ -2205,6 +2251,9 @@ def memory_read_node(state: ChatState) -> dict:
         # data. Everything the revoked source produced goes together or the guard has a
         # hole in it.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": False,
+                "memory_revoked_source": _revoked,
+                "result_history": [e for e in MemoryStore.read_results(tenant, session_id)
+                                   if _frame_still_authorised(e, state)],
                 "last_result": {}, "pending_clarification": {}, "result_reference": None,
                 "engine_result": {}, "sql": None, "rows": None, "status": None,
                 "topic_index": _topics, "topic_restore": None,
@@ -2230,8 +2279,22 @@ def memory_read_node(state: ChatState) -> dict:
     # (clarify_reply, recall, represent) would otherwise hand memory_write_node the
     # PREVIOUS turn's restore.
     _previous = _previous_topics(state, tenant, session_id)
+    # The source the conversation was last ON, when it is not in this turn's scope. The
+    # frame read above is keyed by this turn's nominal source (apps/chat/views.py passes
+    # source_ids[0]), so a narrowed scope reads an EMPTY frame instead of the revoked one —
+    # nothing leaks, but nothing tells a "show me those results" why it has nothing to show.
+    # Flag only: that source's memory is not read, and not deleted either (a deliberately
+    # narrowed scope should get it back when widened again).
+    _revoked_active = None
+    if not frame.get("entity") and state.get("source_ids"):
+        _active = MemoryStore.active_source(tenant, session_id)
+        if _active is not None and str(_active) not in {str(x) for x in state["source_ids"]}:
+            _revoked_active = _active
+    _results = [e for e in MemoryStore.read_results(tenant, session_id)
+                if _frame_still_authorised(e, state)]
     return {"frame": frame, "drill_stack": stack, "episodic": episodic,
             "comparison": comparison, "memory_reset": False,
+            "memory_revoked_source": _revoked_active, "result_history": _results,
             "result_reference": reference or None,
             "topic_index": topics, "topic_restore": None,
             "previous_topics": _previous,
@@ -2342,6 +2405,8 @@ def _return_to_topic(state: ChatState, restore: dict) -> dict:
     base_query = str(candidate.get("base_query") or "").strip()
     if restore.get("kind") == "document" or memory_frame.is_document_frame(candidate):
         return _return_to_document(state, restore, entry, candidate, base_query)
+    if restore.get("kind") == "continue":
+        return _continue_table_topic(state, entry, candidate)
     if not candidate.get("entity") or not base_query \
             or not _frame_still_authorised(candidate, state):
         # memory_read_node only ever hands over authorised, replayable entries, so this is
@@ -2389,6 +2454,36 @@ def _return_to_topic(state: ChatState, restore: dict) -> dict:
     return {"resolved_query": base_query, "delta_type": _RESTORE_OPERATION,
             "frame": candidate, "drill_stack": stack,
             "conversation_context": conv_ctx.to_payload(), "context_used": used}
+
+
+def _continue_table_topic(state: ChatState, entry: dict, candidate: dict) -> dict:
+    """A values-only follow-up asked while the conversation sits on a document: it narrows
+    the most recent TABLE topic instead (see classify_node). The topic's snapshot becomes the
+    candidate frame and the message goes out as an ordinary refine of it — the same
+    structured context any follow-up on that table carries. Nothing is written here."""
+    message = state["message"]
+    if not candidate.get("entity") or not _frame_still_authorised(candidate, state):
+        return _reference_refusal(message, delta_type=None, reason=_NO_TOPIC_TO_RETURN_TO)
+    tenant = state.get("tenant") or "default"
+    session_id = state.get("session_id") or ""
+    live = MemoryStore.read_frame(tenant, session_id, candidate.get("source_id")) or {}
+    candidate.update({"version": live.get("version") or 0,
+                      "turn_index": live.get("turn_index") or 0,
+                      "tenant": tenant, "session_id": session_id})
+    stack = [dict(lvl) for lvl in (entry.get("drill_stack") or [])]
+    conv_ctx = ConversationContext.from_frame(candidate, message, operation="refine")
+    display = candidate.get("entity_display") or candidate.get("entity")
+    logger.info("context_resolve_node: values-only follow-up on a document — narrowing the "
+                "latest table topic %r instead", memory_topics.topic_key(entry))
+    return {"resolved_query": message, "delta_type": "refine",
+            "frame": candidate, "drill_stack": stack,
+            "conversation_context": conv_ctx.to_payload(),
+            "context_used": {"carried": {"entity": display, "source_id": candidate.get("source_id"),
+                                         "filters": [f"{f.get('field')} {f.get('operator', 'equals')} "
+                                                     f"{f.get('value')}"
+                                                     for f in candidate.get("filters") or []
+                                                     if f.get("value") is not None]},
+                             "changed": {"operation": "refine"}, "resolved_query": message}}
 
 
 def _return_to_document(state: ChatState, restore: dict, entry: dict, candidate: dict,
@@ -2693,14 +2788,52 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
     # it has no subject of its own — so it resolves whatever label the classifier gave it
     # (measured: "then the 2nd one" came back answer/ambiguous and was refused on "then").
     _ref_hit, _ref_terms = None, []
-    _pointer = memory_reference.result_pointer(message)
-    _the_one = memory_reference.points_at_the_one_row(
-        state.get("result_reference"), message, frame)
+    # WHICH result the reference is to. The current one — unless the message names an
+    # earlier one ("the 1st one from the price list", "in the earlier result"), matched on
+    # the words of the question that produced it (memory/reference.py::earlier_result).
+    _turn_ref = state.get("result_reference")
+    _switched_ref = None
+    _earlier = memory_reference.earlier_result(state.get("result_history"), message, _turn_ref)
+    if _earlier and _earlier[0] == "refuse":
+        return _reference_refusal(message, delta_type=delta_type, reason=_earlier[1])
+    if _earlier and _earlier[0] == "ref" and delta_type != "drill_up":
+        _entry = _earlier[1]
+        if (str(_entry.get("entity")) != str(frame.get("entity"))
+                or str(_entry.get("source_id")) != str(frame.get("source_id"))):
+            # An earlier result on ANOTHER topic: that topic becomes this turn's frame.
+            _topic = next((t for t in (state.get("topic_index") or [])
+                           if str(t.get("entity")) == str(_entry.get("entity"))
+                           and str(t.get("source_id")) == str(_entry.get("source_id"))), None)
+            if _topic is None:
+                return _reference_refusal(message, delta_type=delta_type,
+                                          reason="That earlier list is no longer available "
+                                                 "to pick from — could you ask it again?")
+            _live = MemoryStore.read_frame(state.get("tenant") or "default",
+                                           state.get("session_id") or "",
+                                           _topic.get("source_id")) or {}
+            frame = {**memory_topics.frame_from_entry(_topic),
+                     "version": _live.get("version") or 0,
+                     "turn_index": _live.get("turn_index") or 0,
+                     "tenant": state.get("tenant") or "default",
+                     "session_id": state.get("session_id") or ""}
+            drill_stack = [dict(lvl) for lvl in (_topic.get("drill_stack") or [])]
+        _turn_ref = _switched_ref = _entry
+        _ref_terms = list(_earlier[2])
+        logger.info("context_resolve_node: reference qualified to an earlier result %r (%s)",
+                    _entry.get("question"), _entry.get("entity"))
+    _pointer = memory_reference.result_pointer(message) or (
+        memory_reference.parse_ordinal(message) if _switched_ref else None)
+    _the_one = memory_reference.points_at_the_one_row(_turn_ref, message, frame)
+    # A record named by its label as shown ("details of One & Only House") is evidence in
+    # itself, like a pointer: the label came from the result on screen.
+    # So is a SET of shown rows ("the first three", "those four"): it names no subject of
+    # its own. Both are covered by selects_rows.
+    _named_row = memory_reference.selects_rows(_turn_ref, message, frame)
     # Never on a drill-up: "go back" navigates the drill path, it points at no row.
-    if ((referential or _pointer or _the_one) and delta_type != "drill_up"
+    if ((referential or _pointer or _the_one or _named_row) and delta_type != "drill_up"
             and not memory_frame.is_document_frame(frame)):
         _ref_hit = memory_reference.resolve_reference(
-            state.get("result_reference"), message, frame=frame, referential=True)
+            _turn_ref, message, frame=frame, referential=True)
         if _pointer and _ref_hit is None:
             # A pointer with nothing current to point at. Two different truths, told apart:
             # rows WERE shown but they are not individually pickable (the engine stated no
@@ -2715,7 +2848,8 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         # the reference survives untouched, so the user's next "the 2nd one" resolves.
         return _reference_refusal(message, delta_type=delta_type, reason=_ref_hit[1])
     if _ref_hit and _ref_hit[0] == "filters":
-        _picked, _ref_terms = _ref_hit[1], list(_ref_hit[2] if len(_ref_hit) > 2 else [])
+        _picked = _ref_hit[1]
+        _ref_terms = _ref_terms + list(_ref_hit[2] if len(_ref_hit) > 2 else [])
         _cols = {f["column"] for f in _picked}
         frame = {**frame, "filters": [f for f in (frame.get("filters") or [])
                                       if f.get("column") not in _cols] + _picked}
@@ -2752,8 +2886,9 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
     logger.info("context_resolve_node: delta_type=%s query=%r context=%s",
                 delta_type, resolved,
                 "none" if conv_ctx.is_empty() else conv_ctx.to_payload())
+    _out_extra = {"result_reference": _switched_ref} if _switched_ref else {}
     return {"resolved_query": resolved, "delta_type": delta_type,
-            "frame": frame, "drill_stack": drill_stack,
+            "frame": frame, "drill_stack": drill_stack, **_out_extra,
             "conversation_context": conv_ctx.to_payload(),
             "context_used": _context_used(frame, delta_type, delta_field, delta_value,
                                           resolved, message)}
@@ -3148,7 +3283,23 @@ def memory_write_node(state: ChatState) -> dict:
     # The identities of the rows now on screen — or None, which CLEARS the slot: whatever
     # the user saw before this answer is no longer what "the second one" can mean.
     _reference = memory_reference.build_reference(engine_result, _source_id)
-    MemoryStore.write_reference(tenant, session_id, _reference, source_id=_source_id)
+    # ...unless this turn PICKED from that answer ("details of the 3rd one", "the cheapest
+    # one", "the first three"). Its own result is the picked row(s); the list the user is
+    # still looking at is the one "which one is the cheapest?" or "the 5th one" points at
+    # next. Measured 2026-09-26: after "details of the 3rd one" the one-row answer replaced
+    # the 10-row list, and "which one has the highest amount?" was asked of that one row.
+    _picked_from_shown = bool((state.get("conversation_context") or {}).get("resolved_terms"))
+    if _picked_from_shown and state.get("result_reference"):
+        # Written back, not just kept: when the pick was from an EARLIER result ("the 1st
+        # one from the price list") that result is now the one on screen to point at.
+        _reference = state.get("result_reference")
+        MemoryStore.write_reference(tenant, session_id, _reference, source_id=_source_id)
+    else:
+        MemoryStore.write_reference(tenant, session_id, _reference, source_id=_source_id)
+        if _reference:
+            MemoryStore.write_results(tenant, session_id, memory_reference.remember_result(
+                MemoryStore.read_results(tenant, session_id), _reference,
+                state.get("message") or ""))
 
     # THE TOPIC INDEX. This topic's snapshot moves to the front; a topic the conversation
     # moved away from keeps the snapshot it had when last answered — that is what "go back

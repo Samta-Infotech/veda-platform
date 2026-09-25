@@ -80,3 +80,19 @@ if __name__ == "__main__":
             failed += 1; print("FAIL", name); traceback.print_exc()
     print(f"\n{len(fns) - failed}/{len(fns)} passed")
     sys.exit(1 if failed else 0)
+
+
+def test_a_ranking_by_a_measure_is_not_a_grouping(monkeypatch):
+    """2026-09-26: "top 10 sale listings by expected price" answered by ORDER BY … LIMIT 10
+    was refused as an ungrouped listing."""
+    import config
+    from veda.validation import grouped_shape_ok
+    monkeypatch.setattr(config, "GROUPED_SHAPE_GUARD_ENABLED", True, raising=False)
+    ranked = ('SELECT "id", "expected_price" FROM "assets_salelisting" '
+              'ORDER BY "expected_price" DESC LIMIT 10')
+    assert grouped_shape_ok("Show the top 10 sale listings by expected price", ranked)
+    assert grouped_shape_ok("cheapest 5 properties by price", ranked)
+    # still refused: a real grouping answered by a plain (even ordered) listing
+    assert not grouped_shape_ok("distribution of sale listings by city", ranked)
+    assert not grouped_shape_ok("sale listings by city",
+                                'SELECT "id" FROM "assets_salelisting" LIMIT 10')
