@@ -2056,6 +2056,24 @@ class TestASourceThatIsNamedIsNotAlsoDescribedVaguely:
         row = [r for r in c.details("finding") if r["type"] == ts.DETAIL_SOURCE][0]
         assert row["state"] == ts.STATE_WARNING
 
+    def test_a_named_source_also_states_its_own_row_count(self):
+        """`contributions` was already populated for every source (not just when 2+
+        took part), but only read by Analyzing's cross-source block — so a
+        single-source turn, the common case, never showed it anywhere at all."""
+        labels = self._labels(self._ctx(source_names=["homzhub"],
+                                        contributions={"homzhub": 7}))
+        assert "homzhub — 7 rows" in labels
+
+    def test_a_single_row_is_not_pluralised(self):
+        labels = self._labels(self._ctx(source_names=["homzhub"],
+                                        contributions={"homzhub": 1}))
+        assert "homzhub — 1 row" in labels
+
+    def test_the_bare_name_survives_when_no_count_is_known(self):
+        """A source with no `contributions` entry (still mid-stream, or a shape that
+        never reports one) must not gain a fabricated count."""
+        assert "homzhub" in self._labels(self._ctx(source_names=["homzhub"]))
+
 
 class TestTheSourceCountIsOnlyAPlaceholderForAName:
     """"1 relevant source found" is correctly superseded by the named source at the

@@ -145,3 +145,79 @@ def ground_year(message: str, table: str, sm: dict) -> Tuple[List[dict], Optiona
     col = cands[0][0]
     return [{"column": col, "op": "=", "value": year, "value_norm": year,
              "grounded_as": "year"}], None
+
+
+# ── NUMERIC comparisons ──────────────────────────────────────────────────────────────
+# "only the ones with carpet area above 1000" — the arbiter grounds sampled VALUES, and a
+# threshold is not one, so the completeness gate refused on "above" (measured 2026-09-26,
+# audit D1 level 5). A comparator is closed English grammar; the COLUMN comes from the
+# semantic model: a column of the anchor whose allowed aggregations make it numeric
+# (SUM/AVG), named in the message by its own words or one of its aliases.
+_COMPARATORS = [  # longest first, so "greater than or equal to" wins over "greater than"
+    (("greater", "than", "or", "equal", "to"), ">="), (("less", "than", "or", "equal", "to"), "<="),
+    (("at", "least"), ">="), (("at", "most"), "<="), (("no", "more", "than"), "<="),
+    (("no", "less", "than"), ">="), (("more", "than"), ">"), (("greater", "than"), ">"),
+    (("less", "than"), "<"), (("fewer", "than"), "<"), (("above",), ">"), (("over",), ">"),
+    (("exceeding",), ">"), (("below",), "<"), (("under",), "<"),
+]
+_NUMBER_RE = re.compile(r"^\d[\d,]*(?:\.\d+)?k?$", re.I)
+
+
+def _to_number(tok: str) -> Optional[str]:
+    t = tok.lower().replace(",", "")
+    mult = 1000 if t.endswith("k") else 1
+    t = t[:-1] if mult != 1 else t
+    try:
+        n = float(t) * mult
+    except ValueError:
+        return None
+    return str(int(n)) if n == int(n) else str(n)
+
+
+def numeric_columns(table: str, sm: dict) -> List[Tuple[str, List[List[str]]]]:
+    """(column, [its name words, and each alias as words]) for the anchor's numeric columns."""
+    out = []
+    for key, meta in ((sm or {}).get("columns") or {}).items():
+        t, _, col = str(key).partition(".")
+        if t != table or not isinstance(meta, dict):
+            continue
+        aggs = {str(a).upper() for a in (meta.get("allowed_aggregations") or [])}
+        if not aggs & {"SUM", "AVG"}:
+            continue
+        names = [_words(col.replace("_", " "))]
+        names += [_words(a) for a in (meta.get("aliases") or []) if _words(a)]
+        out.append((col, names))
+    return out
+
+
+def ground_numeric(message: str, table: str, sm: dict) -> List[dict]:
+    """`<column> <comparator> <number>` → [{column, op, value}]. The column must be the ONE
+    numeric column of the anchor whose name or alias appears in the words before the
+    comparator (the longest such name decides between columns that share a word); none or
+    several → [] and the turn is handled exactly as before this existed."""
+    # Numbers kept whole ("1,000", "2.5k"); _words would split "1,000" into "1", "000".
+    words = re.findall(r"\d[\d,]*(?:\.\d+)?k?\b|[a-z]+", (message or "").lower())
+    for i in range(len(words)):
+        for phrase, op in _COMPARATORS:
+            n = len(phrase)
+            if tuple(words[i:i + n]) != phrase or i + n >= len(words):
+                continue
+            num_tok = words[i + n]
+            if not _NUMBER_RE.match(num_tok):
+                continue
+            value = _to_number(num_tok)
+            before = words[:i]
+            best, best_len, tie = None, 0, False
+            for col, names in numeric_columns(table, sm):
+                for nm in names:
+                    if nm and _find_phrase(before, nm) is not None:
+                        if len(nm) > best_len:
+                            best, best_len, tie = (col, nm), len(nm), False
+                        elif len(nm) == best_len and best and best[0] != col:
+                            tie = True
+            if value is None or best is None or tie:
+                return []
+            return [{"column": best[0], "op": op, "value": value, "value_norm": value,
+                     "grounded_as": "numeric",
+                     "consumed": list(best[1]) + list(phrase) + [num_tok]}]
+    return []

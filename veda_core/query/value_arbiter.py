@@ -414,7 +414,20 @@ def where_clause(filters: List[dict], alias: Optional[str] = None) -> str:
     (pipeline, tests) composes identically. Deterministic: column order follows first
     appearance; values within a column are sorted."""
     by_col: "OrderedDict[str, dict]" = OrderedDict()
+    _pfx0 = f'{alias}.' if alias else ''
+    numeric: List[str] = []
     for f in filters:
+        # A numeric comparison ("carpet area above 1000", query/qualifier_grounding.py).
+        # Compared as a number on the raw column — lower()/text would compare "900" >
+        # "1000" as strings. The value is re-parsed here, so only a number reaches SQL.
+        if f.get("op") in (">", ">=", "<", "<="):
+            try:
+                num = float(str(f["value"]).replace(",", ""))
+            except (TypeError, ValueError):
+                continue
+            lit = str(int(num)) if num == int(num) else repr(num)
+            numeric.append(f'{_pfx0}"{f["column"]}" {f["op"]} {lit}')
+            continue
         col = f["column"]
         if col not in by_col:
             by_col[col] = {"pos": [], "neg": []}
@@ -439,4 +452,4 @@ def where_clause(filters: List[dict], alias: Optional[str] = None) -> str:
         if buckets["neg"]:
             sub.append(_eq(lc, sorted(buckets["neg"]), "NOT IN", "!="))
         col_clauses.append(" AND ".join(sub))
-    return " AND ".join(col_clauses)
+    return " AND ".join(col_clauses + numeric)
