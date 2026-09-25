@@ -263,3 +263,47 @@ def test_an_unknown_or_ambiguous_qualifier_asks():
     h, _p, area = _history()
     assert R.earlier_result(h, "the 1st one from the rent list", area)[0] == "refuse"
     assert R.earlier_result(h, "the 1st one from the sale listings list", area)[0] == "refuse"
+
+
+# ── a record named by ANY shown value, not only its naming column (2026-09-26) ────────
+LIST = {"status": "answered", "table": "assets_asset",
+        "cols": ["id", "project_name", "city_name", "furnishing", "carpet_area"],
+        "rows": [[1, "Shivsai Apartment", "Nagpur", "FULL", 900],
+                 [2, "Infotech Tower", "Nagpur", "SEMI", 1200],
+                 [3, "Samta infotech", "Pune", "FULL", 700],
+                 [4, "Green Valley", "Mumbai", "NONE", 1500]],
+        "result_key": {"kind": "rows", "table": "assets_asset", "column": "id",
+                       "result_column": "id"}}
+LF = {"entity": "assets_asset", "source_id": 2}
+
+
+@pytest.mark.parametrize("msg,expected", [
+    ("give me details of Shivsai Apartment", ["1"]),     # naming column
+    ("tell me more about the Mumbai one", ["4"]),         # another column, one row has it
+    ("what about Pune?", ["3"]),
+])
+def test_a_value_only_one_row_has_picks_that_row(msg, expected):
+    ref = R.build_reference(LIST, 2)
+    hit = R.resolve_reference(ref, msg, frame=LF, referential=True)
+    assert hit[0] == "filters" and [f["value"] for f in hit[1]] == expected
+    assert R.names_a_row(ref, msg, LF)
+
+
+def test_a_value_several_rows_share_is_left_to_the_engine():
+    """"only the Nagpur ones" / "the FULL ones" narrow the listing — a filter, not a pick."""
+    ref = R.build_reference(LIST, 2)
+    assert R.resolve_reference(ref, "only the Nagpur ones", frame=LF, referential=True) is None
+    assert R.resolve_reference(ref, "details of the FULL ones", frame=LF, referential=True) is None
+
+
+def test_a_longer_named_value_wins():
+    er = dict(LIST, rows=LIST["rows"] + [[5, "Green Valley Phase 2", "Pune", "FULL", 800]])
+    ref = R.build_reference(er, 2)
+    hit = R.resolve_reference(ref, "details of Green Valley Phase 2", frame=LF, referential=True)
+    assert [f["value"] for f in hit[1]] == ["5"]
+
+
+def test_short_numeric_and_boolean_cells_are_never_names():
+    er = {**LIST, "cols": LIST["cols"] + ["flag"], "rows": [r + ["True"] for r in LIST["rows"]]}
+    ref = R.build_reference(er, 2)
+    assert not R.names_a_row(ref, "is it true?", LF)

@@ -220,6 +220,8 @@ def build_reference(engine_result: Dict[str, Any],
 #     projection (other than the key) whose values tell the rows apart;
 #   · orderable values — each numeric or date column, so "the cheapest one" / "the latest
 #     one" can be answered from what was shown instead of asking a model to compute it.
+_MAX_TEXT_COLUMNS = 8
+_MAX_TEXT_LEN = 80
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
 _NUM_RE = re.compile(r"^-?\d+(?:\.\d+)?$")
 
@@ -251,12 +253,18 @@ def _selectors(cols: List[Any], rows: List[Any], *, skip: Any) -> Dict[str, Any]
                               for x in cells]
         elif all(_DATE_RE.match(str(x)) for x in present):
             dates[str(c)] = [str(x)[:32] if x is not None else None for x in cells]
-        elif (label_col is None and all(isinstance(x, str) for x in present)
-              and len({x.strip().lower() for x in present}) >= max(2, int(0.8 * len(rows)))
-              and sum(len(x.strip()) for x in present) / len(present) >= 3):
-            label_col = str(c)
-            out["label_column"] = label_col
-            out["labels"] = [_clean(x) for x in cells]
+        elif all(isinstance(x, str) for x in present):
+            # Every shown TEXT column is kept (bounded), so a record can be named by any
+            # value the user saw in it — not only by its naming column.
+            texts = out.setdefault("texts", {})
+            if len(texts) < _MAX_TEXT_COLUMNS:
+                texts[str(c)] = [(_clean(x) or "")[:_MAX_TEXT_LEN] or None for x in cells]
+            if (label_col is None
+                    and len({x.strip().lower() for x in present}) >= max(2, int(0.8 * len(rows)))
+                    and sum(len(x.strip()) for x in present) / len(present) >= 3):
+                label_col = str(c)
+                out["label_column"] = label_col
+                out["labels"] = [_clean(x) for x in cells]
     if values:
         out["values"] = values
     if dates:
@@ -273,18 +281,49 @@ def _find_words(hay: List[str], needle: List[str]) -> bool:
     return n > 0 and any(hay[i:i + n] == needle for i in range(len(hay) - n + 1))
 
 
+def _nameable(v: Any) -> bool:
+    """A shown value long and specific enough to be NAMED: 4+ characters, not a number,
+    not a boolean. Short or generic cells ("A", "12", "True") are never matched."""
+    t = str(v or "").strip()
+    return (len(t) >= 4 and not _NUM_RE.match(t)
+            and t.lower() not in ("true", "false", "none", "null"))
+
+
+def _shown_value_hits(ref: Dict[str, Any], message: str) -> List[Tuple[int, str, str]]:
+    """(row/group index, column, value) for every SHOWN value the message names as a whole
+    phrase — only the longest phrase(s) named, so "Green Valley Phase 2" beats "Green
+    Valley". Rows: every remembered text column; groups: their group values."""
+    msg = _words_of(message)
+    hits: List[Tuple[int, str, str]] = []
+    if ref.get("kind") == "rows":
+        for col, vals in (ref.get("texts") or {}).items():
+            for i, v in enumerate(vals or []):
+                if v and _nameable(v) and _find_words(msg, _words_of(v)):
+                    hits.append((i, col, v))
+    elif ref.get("kind") == "groups":
+        for i, item in enumerate(ref.get("items") or []):
+            for col, v in (item or {}).items():
+                if v and _nameable(v) and _find_words(msg, _words_of(v)):
+                    hits.append((i, col, v))
+    if not hits:
+        return []
+    longest = max(len(_words_of(v)) for _, _, v in hits)
+    return [h for h in hits if len(_words_of(h[2])) == longest]
+
+
 def names_a_row(ref: Optional[Dict[str, Any]], message: str,
                 frame: Optional[Dict[str, Any]]) -> bool:
     """Does the message name a displayed record by its label ("details of One & Only
     House")? Evidence of a continuation in itself — the label came from the result on
     screen — but only for a label of 2+ words or 6+ characters, so a common short word
     that happens to be a label is not mistaken for one."""
-    if not (ref and ref.get("kind") == "rows" and ref.get("labels") and frame
+    # Record listings only. On a GROUPED result a named value ("only the EAST ones") is a
+    # drill the engine grounds itself, and treating it as a pick would pin the reference to
+    # the old list and could steal a clarification answer ("EAST").
+    if not (ref and ref.get("kind") == "rows" and frame
             and str(frame.get("entity") or "") == str(ref.get("entity") or "")):
         return False
-    msg = _words_of(message)
-    return any(lab and (len(_words_of(lab)) >= 2 or len(lab) >= 6)
-               and _find_words(msg, _words_of(lab)) for lab in ref["labels"])
+    return bool(_shown_value_hits(ref, message))
 
 
 _NUM_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
@@ -429,24 +468,29 @@ def _nth(n: int) -> str:
 
 
 def _name_reference(ref: Dict[str, Any], message: str) -> Optional[Tuple[Any, ...]]:
-    """"details of One & Only House" — the displayed record whose label the message names.
-    Two records with that label → a clarification, never the first one."""
-    labels = ref.get("labels") or []
-    msg = _words_of(message)
-    hits = [(i, lab) for i, lab in enumerate(labels)
-            if lab and (len(_words_of(lab)) >= 2 or len(lab) >= 6)
-            and _find_words(msg, _words_of(lab))]
+    """"details of One & Only House", "what about EAST?" — the ONE shown record (or group)
+    whose value the message names. A value several rows share is not a pick but a filter
+    (the engine grounds it as before) — except on the naming column, where two records
+    with the same name are a question, never the first one."""
+    hits = _shown_value_hits(ref, message)
     if not hits:
         return None
-    longest = max(len(_words_of(lab)) for _, lab in hits)
-    hits = [(i, lab) for i, lab in hits if len(_words_of(lab)) == longest]
-    if len({lab.strip().lower() for _, lab in hits}) > 1:
-        return None                          # names two different records: not a reference
-    if len(hits) > 1:
-        return ("refuse", f"{len(hits)} of the rows shown are called \"{hits[0][1]}\" — "
-                          f"which one do you mean? (for example \"the {_nth(hits[1][0] + 1)} "
+    rows = sorted({i for i, _, _ in hits})
+    terms = _words_of(hits[0][2])
+    if len(rows) == 1:
+        if ref.get("kind") == "rows":
+            return ("filters", _key_filters(ref, rows), terms)
+        item = (ref.get("items") or [None])[rows[0]]
+        if not item:
+            return None
+        return ("filters", [{"field": c, "column": c, "operator": "equals", "value": str(v),
+                             "source": "result_reference"} for c, v in item.items()], terms)
+    if (ref.get("kind") == "rows" and all(c == ref.get("label_column") for _, c, _ in hits)
+            and len({v.strip().lower() for _, _, v in hits}) == 1):
+        return ("refuse", f"{len(rows)} of the rows shown are called \"{hits[0][2]}\" — "
+                          f"which one do you mean? (for example \"the {_nth(rows[1] + 1)} "
                           f"one\")")
-    return ("filters", _key_filters(ref, [hits[0][0]]), _words_of(hits[0][1]))
+    return None
 
 
 # ── resolving ────────────────────────────────────────────────────────────────────────────

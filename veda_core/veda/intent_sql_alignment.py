@@ -255,17 +255,28 @@ def _filter_presence_enabled() -> bool:
         return True
 
 
-def _boolean_flag_named(query, sm):
-    """A BOOLEAN/FLAG column whose own distinctive name-word the query uses, e.g. "gated" for
-    `is_gated`. Schema-driven (the column's words), no vocabulary list."""
+def _boolean_flag_named(query, sm, tables=None):
+    """A BOOLEAN/FLAG column the query NAMES, e.g. "gated" for `is_gated`. Schema-driven (the
+    column's words), no vocabulary list.
+
+    Two conditions, both learned the hard way (measured 2026-09-26): "What is the distribution
+    of properties by city?" was refused because the single word "city" matched
+    `services_valuebundlepricing.is_city_dependent` — a flag of an unrelated table.
+      * only columns of the tables the SQL actually reads (`tables`, when given);
+      * EVERY distinctive word of the column's name must be in the query ("city dependent"),
+        not any one of them."""
     ql = " " + re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()) + " "
     for k, c in (sm or {}).get("columns", {}).items():
         st = (c.get("semantic_type") or "").upper()
         if st not in ("BOOLEAN", "FLAG", "BOOL"):
             continue
-        for w in k.split(".", 1)[1].lower().split("_"):
-            if len(w) > 3 and w not in ("flag", "is", "has") and (" " + w + " ") in ql:
-                return k
+        tbl, _, col = k.partition(".")
+        if tables is not None and tbl not in tables:
+            continue
+        words = [w for w in col.lower().split("_")
+                 if len(w) > 3 and w not in ("flag", "is", "has")]
+        if words and all((" " + w + " ") in ql for w in words):
+            return k
     return None
 
 
@@ -291,7 +302,9 @@ def filter_presence_ok(query, sql, sm):
     wants = False
     if any(w in ql for w in _CMP_WORDS) and re.search(r"\d", ql):
         wants = True                                     # "above 4.0" / "over 250"
-    elif _boolean_flag_named(query, sm):
+    elif _boolean_flag_named(query, sm, tables=set(re.findall(
+            r'(?:FROM|JOIN)\s+(?:[A-Za-z0-9_]+\.)*"?([A-Za-z_][A-Za-z0-9_]*)"?', sql or "",
+            re.I))):
         wants = True                                     # "gated" -> is_gated
     if not wants:
         return True, ""
