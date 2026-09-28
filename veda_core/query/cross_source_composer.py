@@ -132,9 +132,11 @@ def should_federate(selected_columns, query=None, tenant="default") -> bool:
     182-query benchmark whose ground truth is homzhub-only for ALL 182, the presence test
     federated 182/182, because a 4-column datalake source landed in every selected column
     set at cosine 0.28-0.36 against a homzhub top of ~0.63 — "never competitive, merely
-    present". That flag was supposed to fix this; it is defined in config.py and read
-    NOWHERE in the engine (verified across every commit on this branch and master), so the
-    presence test has been the whole decision all along. Measured consequence: unpinned
+    present". That flag was supposed to fix this; at the time it was defined in config.py
+    and read NOWHERE in the engine, so the presence test was the whole decision. It is now
+    read by `qualified_source_ids` below — a separate, score-margin-based qualification gate
+    — but THIS function's own presence test is untouched by that flag; the fix here is the
+    question-level rule described next. Measured consequence (before either fix): unpinned
     question.txt questions were answered by the federated planner — with its own anchoring
     and none of the single-source grounding — while the SAME questions pinned to source 2
     went through pipeline.run_query.
@@ -164,9 +166,18 @@ def should_federate(selected_columns, query=None, tenant="default") -> bool:
     # of the cross-source battery.
     #
     # A real federation names TWO DIFFERENT entities that a cross_source_fk edge
-    # connects ("which ASSETS have MAINTENANCE tickets"). That is precisely
-    # source_coordinator._edge_multi_pair's rule, so this calls it rather than growing a
-    # second, subtly different copy — per the instruction not to write one twice.
+    # connects ("which ASSETS have MAINTENANCE tickets"). The entities are grounded by
+    # the entity cards (grounded_edge_pair) — not by table-token substrings, which never
+    # see "property" in `assets_asset` or "amenity" in "amenities" (measured 2026-09-27:
+    # "total maintenance amount per property" stayed single-source and was answered as
+    # SUM(total_floors) per building). The coordinator's substring rule stays only as the
+    # fallback for when the cards cannot be loaded.
+    try:
+        pair = grounded_edge_pair(query, sids, tenant=tenant)
+        if pair is not None:
+            return bool(pair)
+    except Exception:
+        pass
     try:
         from query.source_coordinator import _edge_multi_pair
         return _edge_multi_pair(query, sids) is not None
@@ -177,10 +188,97 @@ def should_federate(selected_columns, query=None, tenant="default") -> bool:
         return False
 
 
-# Bound into this module's namespace so the qualification gate below calls it as a module
-# global — that is what makes the evidence layer substitutable (the guard test swaps it, and
-# nothing here has to reach across into query.source_evidence at call time).
-from query.source_evidence import group_evidence_by_source   # noqa: E402
+def _high_cross_source_edges():
+    """[(src_a, table_a, src_b, table_b)] of every HIGH-tier cross_source_fk edge — the same
+    edge set source_coordinator._edge_multi_pair reads."""
+    from ingestion.db_abstraction import get_internal_connection, release_internal_connection
+    conn = get_internal_connection()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT ns.source_id, ns.table_name, nd.source_id, nd.table_name "
+                "FROM graph_edges e "
+                "JOIN graph_nodes ns ON ns.node_id = e.src_node_id "
+                "JOIN graph_nodes nd ON nd.node_id = e.dst_node_id "
+                "WHERE e.edge_type = 'cross_source_fk' "
+                "AND (e.attrs::jsonb->>'tier') = 'HIGH'")
+            return [(str(a), ta, str(b), tb) for a, ta, b, tb in cur.fetchall()]
+    finally:
+        release_internal_connection(conn)
+
+
+class _CardNames:
+    """The scope's entity-card name index (business name / plural / aliases), plus each
+    business name / plural with its generic row-nouns removed: the `maintenance` card is
+    named "maintenance record", and a user asking about "maintenance" means it. Quacks like
+    ScopeVocab for frame_grounding.name_hits, which only reads name_index()."""
+
+    def __init__(self, vocab):
+        from veda.understanding.vocabulary import norm_phrase
+        generic = _generic_nouns()
+        idx = {k: list(v) for k, v in vocab.name_index().items()}
+        for t, c in vocab.cards.items():
+            for p in (c.get("business_name"), c.get("plural")):
+                words = norm_phrase(p or "").split()
+                head = " ".join(w for w in words if w not in generic)
+                if head and head != " ".join(words) and (t, "business_name") not in idx.get(head, []):
+                    idx.setdefault(head, []).append((t, "business_name"))
+        self._idx = idx
+
+    def name_index(self):
+        return self._idx
+
+
+def grounded_edge_pair(query, source_ids, tenant="default"):
+    """Ground the question's entity nouns through the entity cards and return the
+    [source_a, source_b] pair when two DIFFERENT nouns ground in two different in-scope
+    sources AND a HIGH cross_source_fk edge connects those two tables. [] when the cards
+    loaded but no such pair exists; None when the cards could not be loaded (caller falls
+    back).
+
+    Two tables grounded by the SAME noun ("amenities" → assets_amenity (2) and
+    amenities_catalog (5)) are ambiguity about which source answers, not a join — even
+    though an edge connects them — so they never count. That keeps "list all amenities" and
+    "how many amenities does each property have" (homzhub has its own amenity→property
+    chain) on the single-source path."""
+    scope = {str(s) for s in (source_ids or [])}
+    if len(scope) < 2:
+        return []
+    try:
+        from veda_hybrid import _load_semantic_model
+        from veda.understanding.vocabulary import scope_vocab
+        from veda.understanding.frame_grounding import name_hits
+        sm, _cols = _load_semantic_model()
+        vocab = scope_vocab(sm, sorted(scope), tenant)
+        if not vocab.cards:
+            return None
+        hits = name_hits(_CardNames(vocab), query)
+    except Exception:
+        return None
+    grounded = []                                   # (span, source, bare table)
+    for h in hits:
+        sid = str(vocab.source_of.get(h["table"]) or "")
+        if sid in scope:
+            bare = (vocab.cards.get(h["table"]) or {}).get("_bare_table") or h["table"]
+            grounded.append(((h["start"], h["end"]), sid, bare))
+    if len({g[1] for g in grounded}) < 2:
+        return []
+    try:
+        edges = _high_cross_source_edges()
+    except Exception:
+        return None
+    for sa, ta, sb, tb in edges:
+        if sa not in scope or sb not in scope or sa == sb:
+            continue
+        for span_a, s1, t1 in grounded:
+            if (s1, t1) != (sa, ta):
+                continue
+            for span_b, s2, t2 in grounded:
+                if (s2, t2) == (sb, tb) and span_b != span_a \
+                        and (span_b[1] < span_a[0] or span_a[1] < span_b[0]):
+                    return sorted([sa, sb])
+    return []
+
 
 
 def _clean_source_scores(query: str, source_ids) -> Dict[str, float]:
@@ -195,10 +293,8 @@ def _clean_source_scores(query: str, source_ids) -> Dict[str, float]:
     """
     try:
         from query import source_coordinator as SC
-        cols, chunks = SC._default_evidence_provider(query, list(source_ids))
-        ev = group_evidence_by_source(cols, chunks) or {}
-        SC._apply_item_prior(query, list(source_ids), ev)
-        SC._dominance_retier(ev)
+        # the request's one routing-evidence pass (shared with the coordinator and classify)
+        ev = SC.routing_evidence(query, list(source_ids)) or {}
     except Exception:
         return {}
     out: Dict[str, float] = {}

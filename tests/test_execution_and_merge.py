@@ -1,4 +1,4 @@
-"""Tests for Phase 4 — execution planner, result orchestrator, cross-source guard, MULTI dispatch.
+"""Tests for Phase 4 — execution planner, result orchestrator, MULTI dispatch.
 
 Pure / injected delegates, no DB. Run: `pytest tests/test_execution_and_merge.py`.
 """
@@ -17,7 +17,6 @@ from query.execution_planner import (  # noqa: E402
     plan_execution, STRATEGY_SINGLE, STRATEGY_FEDERATED, STRATEGY_INDEPENDENT, MODE_PARALLEL)
 from query.result_orchestrator import (  # noqa: E402
     merge_results, POLICY_APPEND, POLICY_CANONICAL_PRIORITY, POLICY_CONFLICT_DETECTED)
-from query.cross_source_guard import guard_cross_source_answer  # noqa: E402
 from query.agents import AgentResult  # noqa: E402
 import query.agents as A  # noqa: E402
 import query.source_coordinator as SC  # noqa: E402
@@ -71,19 +70,6 @@ def test_merge_same_value_is_append():
 
 def test_merge_drops_failed():
     assert merge_results([_R("5", [[100]]), _R("7", [[120]], status="failed")]).source_ids == ["5"]
-
-
-# ── cross-source grounding guard ──────────────────────────────────────────────
-def test_guard_passes_grounded_numbers():
-    m = merge_results([_R("5", [[100]]), _R("7", [[4200]])])
-    ok, _ = guard_cross_source_answer("100 revenue, 4200 events", m)
-    assert ok
-
-
-def test_guard_flags_fabricated_number():
-    m = merge_results([_R("5", [[100]]), _R("7", [[4200]])])
-    ok, reason = guard_cross_source_answer("revenue jumped to 999999", m)
-    assert not ok and reason
 
 
 # ── MULTI dispatch via coordinator ────────────────────────────────────────────

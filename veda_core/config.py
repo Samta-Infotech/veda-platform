@@ -10,6 +10,39 @@
 # Auto-load the repo-root .env so this module gives correct values regardless
 # of cwd or whether the shell manually exported them. Real env vars (already
 # set) always win — this only fills in what's missing.
+#
+# DECISION (2026-09-26, wiring-fix pass D.1): stays OFF. It was added already
+# commented out (e138bad, "enhance the performance", 2026-07-09) and has never been
+# live, so there is no prior breakage to point to — but turning it on now would
+# create one. `.env` is docker's env_file for THIS repo (docker-compose.yml
+# `x-app-env`), so most of its values are docker-internal hostnames that only
+# resolve inside the compose network:
+#   OLLAMA_URL=http://host.docker.internal:11434   — host.docker.internal is a
+#     Docker-Desktop-injected DNS name; it does not resolve for a process running
+#     directly on the host OS. The host's OWN correct address for the same Ollama
+#     is this module's default, http://localhost:11434 (SLM_OLLAMA_BASE_URL below).
+#   REDIS_BROKER_URL=redis://redis-broker:6379/0, REDIS_CACHE_URL=redis://redis-cache:…
+#     — compose service names, unresolvable outside veda_net.
+# A blind `load_dotenv()` on a bare host run would overwrite those already-correct
+# host-side defaults with unresolvable docker-only ones — regressing exactly the
+# host scripts (scripts/eval_*.py "grade" halves, retrieval_eval.py, etc.) this
+# would supposedly help, and in a way that fails at connect time rather than
+# loudly. `override=False` (load_dotenv's default) does not save this: the failure
+# isn't env vars being clobbered, it's `.env` filling in a value that is wrong for
+# where the process actually runs. Enabling it would also need each of the ~200
+# `.env` keys individually re-checked for the same host/container split, which is
+# out of scope for this pass and belongs with a real settings-bridge redesign, not
+# a one-line uncomment.
+#
+# The chosen mitigation instead: make the split OBVIOUS rather than trying to erase
+# it. Every harness in scripts/ prints and records `scripts/_flags.py::effective_flags()`
+# — config.py's actual attribute values, not os.environ — at the top of its run and
+# in its results file, and supports `--expect KEY=VALUE` to hard-abort instead of
+# silently grading the wrong pipeline. In-process harnesses that need docker's live
+# values already set them explicitly before importing the engine (e.g.
+# `scripts/agent_e2e.py`'s `os.environ.setdefault("FRAME_PATH_ENABLED", "1")`) —
+# that pattern composes safely with load_dotenv staying off; a blind repo-wide
+# load would not.
 # from pathlib import Path as _Path_dotenv
 # try:
 #     from dotenv import load_dotenv as _load_dotenv
@@ -448,11 +481,6 @@ COL_ID_IDX_PATH = "schema/col_id_to_idx.pkl"
 # -----------------------------------------------------------------------------
 
 # -----------------------------------------------------------------------------
-# NL Simplifier — Layer 0
-# -----------------------------------------------------------------------------
-NL_SIMPLIFIER_ENABLED = False
-
-# -----------------------------------------------------------------------------
 # Runtime Context Provider — Layer 0 (query/runtime_context.py)
 # -----------------------------------------------------------------------------
 # Pure system-value questions ("what's the current date", "what time is it") need
@@ -507,6 +535,15 @@ SLM_TEMPERATURE      = _env_float("SLM_TEMPERATURE", 0.0)
 # federated_struct_plan, semi_join_classify, doc_data_ground, multi_summary) are 45-60s,
 # all >3x their measured latency.
 SLM_TIMEOUT_SECS     = _env_int("SLM_TIMEOUT_SECS", 60)
+# Multi-table JOIN skeleton fill (veda/generation.py::generate_join_sql) was a bare
+# hardcoded `timeout=120` (§10.7, 2026-09-26) — the one SLM call site with no env knob of
+# its own, so a slow join fill couldn't be tuned without editing code. 120s (not
+# SLM_TIMEOUT_SECS's 60s) stays the default deliberately: filling a fixed JOIN skeleton's
+# SELECT/WHERE/GROUP BY is legitimately heavier than a single-table call, and the ladder
+# above it has room — INFERENCE_TIMEOUT_S 150s < GUNICORN_TIMEOUT 170s < nginx's
+# proxy_read_timeout 180s (docker/nginx.conf) all sit above it. Still env-overridable like
+# every other SLM timeout here.
+SLM_JOIN_TIMEOUT_SECS = _env_int("SLM_JOIN_TIMEOUT_SECS", 120)
 # Routing is a PRE-answer decision with a safe deterministic fallback (routing_slm
 # degrades an unusable/slow answer to a clarification), so it gets its own short
 # budget instead of the shared SLM_TIMEOUT_SECS: a hung router stalls the turn before
@@ -921,6 +958,10 @@ ROUTING_AUTHORITATIVE_MODES = tuple(
     m.strip().upper() for m in _env_str("ROUTING_AUTHORITATIVE_MODES", "").split(",")
     if m.strip()
 )
+# With SHADOW on and ROUTING_AUTHORITATIVE_MODES empty nothing the coordinator decides can drive
+# the answer, so veda_hybrid._run_coordinator skips plan_route entirely (only the permission
+# pre-check runs). Set 1 to compute and trace the observe-only decision anyway (routing evals).
+ROUTING_SHADOW_OBSERVE = _env_bool("ROUTING_SHADOW_OBSERVE", False)
 # decision is discarded, and federation is decided solely by `should_federate(cols)` — "did the
 # RETRIEVED columns come from >=2 sources". That is a PRESENCE test, not a relevance test, and
 # there is no score floor anywhere before it. Measured over the 182-query benchmark (whose ground
@@ -2205,15 +2246,6 @@ JOIN_CONTENT_BRIDGES = True
 ER_COVERAGE_MIN = 0.5     # min name-coverage of the winning entity to call it RESOLVED
 ER_MARGIN_MIN = 0.4       # a same-count competitor within this coverage gap → AMBIGUOUS (fallback)
 ER_PIN_CONFIDENCE = 0.7   # min confidence to PIN the primary (bypass vet_primary); else influence only
-# ── ER_GROUNDED_REFUSAL (RC3 grounded clarification, flag-gated, default OFF) ──
-# When entity resolution finds two candidates genuinely tied for the SAME entity
-# slot (status == AMBIGUOUS: identical matched-token set within _AMB_EPS), ask the
-# user which entity they mean instead of coin-flipping into a confident wrong
-# answer. Scoped to AMBIGUOUS ONLY — UNGROUNDED is left to the existing
-# retrieval/vet_primary fallback (retrieval may still hold the right table), so
-# this cannot regress answerable single-table queries. Targets the "Ambiguous"
-# query class (measured 0% — answered when it should have clarified).
-ER_GROUNDED_REFUSAL = False
 # ── JOIN_SEMANTIC_BRIDGE (ownership/relationship bridge selector, flag-gated, OFF) ──
 # When two entities have MULTIPLE structurally-identical bridge tables (assets_asset↔
 # users_user can go via assets_assetuser OR assets_assetdocument OR assets_assetkey —
@@ -2313,6 +2345,95 @@ FASTPATH_ENTITY_GLOSSARY = True
 # process without editing source; the default stays OFF.
 QUERY_UNDERSTANDING_ENABLED = _os.environ.get("QUERY_UNDERSTANDING_ENABLED", "0") == "1"
 QUERY_UNDERSTANDING_MIN_CONFIDENCE = float(_os.environ.get("QUERY_UNDERSTANDING_MIN_CONFIDENCE", "0.5"))   # below this, degrade to existing path (don't refuse)
+# ── MEANING-FIRST PASS (2026-09-24): vocabulary → frame → grounding → verification → SQL ──
+# FRAME_PATH_ENABLED: run the frame path FIRST (veda/understanding/frame_path.py). A
+# fully grounded frame compiles through the deterministic builders and is authoritative;
+# an unresolved slot is a typed clarify naming the slot; a frame that cannot be extracted
+# or grounded at all degrades to the existing chain unchanged. Default OFF.
+FRAME_PATH_ENABLED = _env_bool("FRAME_PATH_ENABLED", False)
+# Stage 2 extractor knobs. The frame is decoded under a JSON schema (constrained).
+FRAME_EXTRACTOR_TIMEOUT = _env_int("FRAME_EXTRACTOR_TIMEOUT", 45)   # plan: 20 s; the local 7B needs more on a cold prefix
+FRAME_EXTRACTOR_NUM_PREDICT = _env_int("FRAME_EXTRACTOR_NUM_PREDICT", 200)
+FRAME_FEWSHOT_K = _env_int("FRAME_FEWSHOT_K", 5)
+FRAME_MAX_CONCEPTS = _env_int("FRAME_MAX_CONCEPTS", 40)
+# Stage 2.4 self-consistency: N samples at T=0.2; a disagreeing slot is `uncertain`.
+FRAME_SELF_CONSISTENCY = _env_bool("FRAME_SELF_CONSISTENCY", False)
+FRAME_SELF_CONSISTENCY_N = _env_int("FRAME_SELF_CONSISTENCY_N", 3)
+# Stage 2.5 frame producers disabled by name (comma list) — the Stage 6 ablation knob.
+FRAME_PRODUCERS_DISABLED = frozenset(p.strip() for p in _env_str("FRAME_PRODUCERS_DISABLED", "").split(",") if p.strip())
+# Stage 4 verification probes (read-only COUNT(*) on the source) and their timeout.
+FRAME_PROBES_ENABLED = _env_bool("FRAME_PROBES_ENABLED", True)
+FRAME_PROBE_TIMEOUT_MS = _env_int("FRAME_PROBE_TIMEOUT_MS", 2000)
+# Below this frame confidence a 0-row answer is a clarify, never "No results found".
+FRAME_MIN_CONFIDENCE = _env_float("FRAME_MIN_CONFIDENCE", 0.5)
+# Stage 3.7 decision heads: a model backend runs in SHADOW beside the rules; it flips a
+# slot only when enabled AND its calibrated confidence >= the threshold.
+FRAME_DECISION_BACKEND = _env_str("FRAME_DECISION_BACKEND", "rules")
+FRAME_DECISION_FLIP_ENABLED = _env_bool("FRAME_DECISION_FLIP_ENABLED", False)
+FRAME_DECISION_FLIP_THRESHOLD = _env_float("FRAME_DECISION_FLIP_THRESHOLD", 0.9)
+# ── Front-door decomposition (2026-09-25, rides FRAME_PATH_ENABLED) ──
+# One message → {intents: [Frame…], relation}: one constrained SLM call over the WHOLE
+# scope's cards + one card per document (veda/understanding/frame_extractor.extract_intents).
+FRAME_INTENTS_TIMEOUT = _env_int("FRAME_INTENTS_TIMEOUT", 30)
+# B.1 (2026-09-27): reuse the compound front door's single-intent frame in the SQL head instead
+# of a second extraction. Built, measured, and OFF by default: the front-door intents prompt is
+# coarser than extract_frame's, and on the per-source battery the reused frame dropped value
+# filters the head's own extraction keeps ("vendors in Kochi" -> count GROUP BY city, no WHERE;
+# also "amenities in the Sports category", "how many properties are gated"). question.txt was
+# even (12/20 both ways). Raw: reports/raw/integration/{E_battery.log,qtxt_reuse*.graded.json}.
+# Re-enable only with a front-door prompt that carries filters as faithfully as extract_frame.
+FRONT_DOOR_FRAME_REUSE = _env_bool("FRONT_DOOR_FRAME_REUSE", False)
+FRAME_INTENTS_NUM_PREDICT = _env_int("FRAME_INTENTS_NUM_PREDICT", 700)
+# Each part of a compound message runs under its own budget; over it the part is a typed
+# `timeout` AT the deadline (veda_hybrid._run_part_budgeted) and the other parts still run.
+# The whole message is budgeted inside the inference request (INFERENCE_TIMEOUT_S, read by
+# the api tier) with room to reply:
+#     part 100s  <  message 240s (INFERENCE_TIMEOUT_S-20)  <  inference request 260s
+#                <  gunicorn GUNICORN_TIMEOUT 280s  <  nginx proxy_read_timeout 300s
+# 100 s per part (2026-09-26, wiring pass C.2): a part that falls to the planner agent spends
+# the frame extraction (~15-45 s) and then the agent (p50 ≈ 61 s) — 30 s cut every such part.
+COMPOUND_PART_BUDGET_S = _env_float("COMPOUND_PART_BUDGET_S", 100.0)
+COMPOUND_TOTAL_BUDGET_S = _env_float(
+    "COMPOUND_TOTAL_BUDGET_S", max(30.0, _env_float("INFERENCE_TIMEOUT_S", 260.0) - 20.0))
+# ── Planner agent (2026-09-26, rides FRAME_PATH_ENABLED; veda/agent/) ──
+# When the frame path's compiler declines, clarifies, or snaps a multi-entity / two-key
+# question to a narrower shape, the SLM plans over VEDA's own semantics with read-only
+# tools (veda/agent/tools.py); the plan is validated against the run's tool log and
+# compiled by the existing builders, then judged by the existing firewall. Default OFF.
+AGENT_PLANNER_ENABLED = _env_bool("AGENT_PLANNER_ENABLED", False)
+AGENT_MAX_STEPS = _env_int("AGENT_MAX_STEPS", 10)            # SLM steps per part
+AGENT_MAX_TOOL_CALLS = _env_int("AGENT_MAX_TOOL_CALLS", 8)   # incl. the automatic first calls
+# Set from the v3 in-process measurement on the home profile (2026-09-26, 30 agent runs):
+# the loop's wall is p50 ≈ 61 s, p90 ≈ 87 s; the 40 s first guess cut 10 of 12 battery runs.
+# 90 s covers the p90. It is a CEILING: at run time the agent gets
+#     min(AGENT_PART_BUDGET_S, part deadline − now − AGENT_TAIL_RESERVE_S)
+# (frame_path._agent_wall — the part's slm_deadline, so the frame time already spent is
+# counted), and is skipped when that is under AGENT_MIN_WALL_S.
+AGENT_PART_BUDGET_S = _env_float("AGENT_PART_BUDGET_S", 90.0)
+AGENT_TAIL_RESERVE_S = _env_float("AGENT_TAIL_RESERVE_S", 10.0)   # execution + summary after the plan
+AGENT_MIN_WALL_S = _env_float("AGENT_MIN_WALL_S", 8.0)
+AGENT_NUM_PREDICT = _env_int("AGENT_NUM_PREDICT", 240)   # 160 truncated final plans on the dev set (2026-09-26 pass 2)
+# The agent's own SLM server (2026-09-26 pass 2): an OpenAI-compatible llama-server on the
+# SAME GGUF with its own prompt-cache slot, so the extractor's calls (on Ollama) never evict
+# the agent's cached prefix. Empty = the agent uses the shared SLM backend (Ollama).
+AGENT_SLM_URL = _env_str("AGENT_SLM_URL", "")
+AGENT_SLM_SLOT = _env_int("AGENT_SLM_SLOT", 1)
+AGENT_NUM_CTX = _env_int("AGENT_NUM_CTX", 8192)
+# The first observation is the retrieval spine on the part's text (top columns).
+AGENT_SEED_RETRIEVAL = _env_bool("AGENT_SEED_RETRIEVAL", True)
+AGENT_SEED_K = _env_int("AGENT_SEED_K", 15)
+# The meaning judge (plan verbalisation vs the question, and the nearest known plan):
+# enforce | shadow (record only) | off. Thresholds set on evaluation/agent_dev_questions.txt.
+AGENT_JUDGE_MODE = _env_str("AGENT_JUDGE_MODE", "enforce")
+AGENT_JUDGE_TAU_PLAN = _env_float("AGENT_JUDGE_TAU_PLAN", 0.55)
+AGENT_JUDGE_TAU_NEAR = _env_float("AGENT_JUDGE_TAU_NEAR", 0.80)
+# Set on the DEV set (evaluation/agent_dev_questions.txt, shadow run 2026-09-26): the
+# bi-encoder similarity did not separate right from wrong plans; the cross-encoder did —
+# the lowest-scoring correct dev plan scored 0.456 → τ_ce 0.40; the lowest correct sim_q
+# was 0.594 → τ_plan 0.55.
+AGENT_JUDGE_TAU_CE = _env_float("AGENT_JUDGE_TAU_CE", 0.40)      # cross-encoder(question, plan text)
+# Stage 1: publish the business vocabulary as an L5 stage on every ingest.
+VOCABULARY_BUILD_ENABLED = _env_bool("VOCABULARY_BUILD_ENABLED", True)
 # Glossary must explain the WHOLE concept, not one token of it (grounding.ground_entity).
 # The curated business-noun glossary is consulted BEFORE the name-token match, so a
 # human-verified mapping out-prioritizes a coincidental token hit ("tenant" -> users_user, not

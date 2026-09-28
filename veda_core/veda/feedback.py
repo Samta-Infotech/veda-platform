@@ -95,6 +95,81 @@ def _restricted_match(term, sm) -> bool:
     return any(t == n.lower() for n in names)
 
 
+# ── business names in refusal copy ──────────────────────────────────────────────────
+# Internal messages name tables ("assets_asset and vendors are not directly related") and
+# scores ("join confidence 0.35 < 0.55"); neither may reach a user. The entity cards hold
+# the business name of every table — the same vocabulary the frame path grounds with.
+_IDENT = re.compile(r"\b(?:src\d+\.)?[a-z][a-z0-9]*(?:_[a-z0-9]+)+\b")
+_JOIN_CONF = re.compile(r"join confidence\s+[\d.]+\s*<\s*[\d.]+(?:\s*\((.+?)\s*↔\s*(.+?)\))?", re.I)
+_NOT_REL = re.compile(r"^\s*(.+?)\s+and\s+(.+?)\s+are not (?:directly )?related\b.*$", re.I | re.S)
+
+
+def _business_names() -> dict:
+    """bare table → business plural, over every source in the ambient scope (the cards are
+    cached by the vocabulary loader). {} when nothing is available."""
+    out = {}
+    try:
+        try:
+            from veda_core.context import try_current
+        except Exception:
+            from context import try_current                    # type: ignore
+        ctx = try_current()
+        sids = [str(s) for s in (ctx.source_ids or (ctx.source_id,))] if ctx else []
+        tenant = ctx.tenant if ctx else "default"
+        from veda.understanding.vocabulary import load_source
+        for sid in sids:
+            for t, c in (load_source(sid, tenant).cards or {}).items():
+                name = c.get("plural") or c.get("business_name")
+                if name:
+                    out.setdefault(t, name)
+    except Exception:
+        pass
+    return out
+
+
+def business_name(table: str, names: dict = None) -> str:
+    t = str(table or "").strip().strip("'\"`")
+    bare = t.split(".", 1)[1] if t.startswith("src") and "." in t else t
+    names = names if names is not None else _business_names()
+    if bare in names:
+        return names[bare]
+    try:
+        from ingestion.vocabulary import table_phrase
+        return table_phrase(bare) or bare.replace("_", " ")
+    except Exception:
+        return bare.replace("_", " ")
+
+
+def humanize_refusal(msg: str) -> str:
+    """An internal refusal message → user copy: table identifiers become business names,
+    and a join-confidence score or 'not directly related' becomes "I couldn't find a
+    reliable link between <A> and <B>". Anything else passes through with identifiers
+    renamed. Never raises."""
+    try:
+        s = str(msg or "")
+        if not s:
+            return s
+        names = _business_names()
+
+        def _list(x):
+            return " and ".join(business_name(p, names) for p in re.split(r",\s*|\s+and\s+", x) if p.strip())
+        m = _JOIN_CONF.search(s)
+        if m:
+            if m.group(1) and m.group(2):
+                return (f"I couldn't find a reliable link between {business_name(m.group(1), names)} "
+                        f"and {_list(m.group(2))}.")
+            return "I couldn't find a reliable link between the kinds of records this question names."
+        m = _NOT_REL.match(s)
+        if m and (_IDENT.search(m.group(1)) or _IDENT.search(m.group(2)) or m.group(1).strip() in names):
+            return (f"I couldn't find a reliable link between {business_name(m.group(1), names)} "
+                    f"and {_list(m.group(2))}.")
+        return _IDENT.sub(lambda mm: business_name(mm.group(0), names)
+                          if (mm.group(0).split(".", 1)[-1] in names or mm.group(0).startswith("src"))
+                          else mm.group(0), s)
+    except Exception:
+        return str(msg or "")
+
+
 def explain_failure(status, sm, *, column=None, value=None, missing=None,
                     candidates=None, msg=None, error=None, what=None):
     """Return {why, what_needed, suggestions, text} for a non-answered status.
@@ -154,8 +229,10 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
         # A caller that knows its own next step passes `what`; the ambiguity default stands.
         what = what or "Could you tell me which one you mean?"
     elif status == "refuse":
-        why = msg or "I can't answer this correctly with the available schema."
-        what = "Rephrase, or ask about entities that are related in the schema."
+        why = humanize_refusal(msg) if msg else "I can't answer this correctly with the available schema."
+        what = ("Ask about each of them separately, or name how they relate."
+                if why.startswith("I couldn't find a reliable link")
+                else "Rephrase, or ask about entities that are related in the schema.")
     elif status == "ir_mismatch":
         _m = (msg or "").lower()
         if "filter" in _m:
@@ -187,7 +264,7 @@ def explain_failure(status, sm, *, column=None, value=None, missing=None,
         why = "I built a query but it didn't pass the safety/validity checks."
         what = "Try rephrasing more simply, or split a complex request into parts."
     else:
-        why = msg or "I couldn't answer this query."
+        why = humanize_refusal(msg) if msg else "I couldn't answer this query."
         what = "Try rephrasing it."
 
     lines = [f"{why}"]

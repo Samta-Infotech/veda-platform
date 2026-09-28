@@ -43,6 +43,8 @@ import time
 import uuid
 
 sys.path.insert(0, "/app")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _flags  # noqa: E402
 
 # Django must be initialised BEFORE apps.query.scope is imported, or that import raises
 # and run_script's try/except silently falls back to `profiles = {}`. Empty profiles are
@@ -215,8 +217,48 @@ def _slm_calls_since(path, offset):
     return n, purposes
 
 
+def _integration_since(path, offset):
+    """(classify_lane, routing_consumed, frame_source) from the LAST compact trace record
+    written after `offset` — the engine-side integration facts of the turn (2026-09-27)."""
+    last = {}
+    try:
+        with open(path) as f:
+            for i, line in enumerate(f):
+                if i < offset:
+                    continue
+                try:
+                    last = json.loads(line)
+                except ValueError:
+                    continue
+    except OSError:
+        pass
+    return last.get("classify_lane"), last.get("routing_consumed"), last.get("frame_source")
+
+
+# Every call the chat tier makes to the engine, per turn: the flags it SENT. This is the
+# wire contract under test — `conversation_context` used to be dropped by LangGraph before it
+# ever reached the engine (docs/QUERY_PIPELINE_FLOW.md §2.3), so asserting on the engine's
+# behaviour alone could not tell "context ignored" from "context never sent".
+_SENT: list = []
+
+
+def _install_wire_capture():
+    from apps.query.inference_client import InferenceClient
+    if getattr(InferenceClient.stream_hybrid_query, "_eval_wrapped", False):
+        return
+    _orig = InferenceClient.stream_hybrid_query
+
+    def _wrapped(self, query, *a, **kw):
+        _SENT.append({"query": query, "flags": kw.get("flags"),
+                      "source_ids": kw.get("source_ids"), "source_id": kw.get("source_id")})
+        return _orig(self, query, *a, **kw)
+    _wrapped._eval_wrapped = True
+    InferenceClient.stream_hybrid_query = _wrapped
+
+
 def run_script(name, turns, source_ids, trace_path, verbose=False, pin_first=False):
     from chatbot.run import run_chat_turn
+    _install_wire_capture()
     try:
         from apps.query.scope import source_profiles_for
         profiles = source_profiles_for(source_ids)
@@ -238,6 +280,7 @@ def run_script(name, turns, source_ids, trace_path, verbose=False, pin_first=Fal
             events.append((phase, message, extra or {}))
 
         before = _trace_len(trace_path)
+        _SENT.clear()
         t0 = time.time()
         # --pin-first pins ONLY the opening turn, never the follow-ups. This deployment
         # cannot currently answer an UNPINNED multi-source question from the chat path at
@@ -249,13 +292,16 @@ def run_script(name, turns, source_ids, trace_path, verbose=False, pin_first=Fal
         # on that scope without being told to. Pinning any later turn would mask it.
         _pin = (t["expect_source"] if (pin_first and i == 1 and t["expect_source"]) else None)
         try:
+            # an unpinned turn gets source_ids[0] as its primary, exactly as the chat view
+            # does (apps/chat/views.py: source_id = source_ids[0]); passing None here filed
+            # every document answer's memory under source None, which no turn reads back
             res = run_chat_turn(t["msg"], session, tenant="default",
-                                source_id=_pin,
+                                source_id=_pin if _pin else (int(source_ids[0]) if source_ids else None),
                                 source_ids=([int(_pin)] if _pin else list(source_ids)),
                                 source_profiles=profiles, on_event=_on_event)
         except Exception as exc:
             failures.append(f"[{name} t{i}] raised {type(exc).__name__}: {exc}")
-            rows.append((i, t, "EXC", None, None, 0, time.time() - t0, ""))
+            rows.append((i, t, "EXC", None, None, 0, time.time() - t0, "", [], {}))
             continue
         secs = time.time() - t0
         slm, slm_purposes = _slm_calls_since(trace_path, before)
@@ -283,7 +329,19 @@ def run_script(name, turns, source_ids, trace_path, verbose=False, pin_first=Fal
         answered_by = (res.get("engine_result") or {}).get("source_id")
         answer = str(res.get("answer_text") or "")
 
+        sent = _SENT[-1] if _SENT else None
+        conv = ((sent or {}).get("flags") or {}).get("conversation_context")
+        lane, consumed, fsrc = _integration_since(trace_path, before)
+
         # ---- assertions ----
+        # the wire contract: turn 1 sends no conversation context; every follow-up that
+        # reached the engine sends one (a document frame need not name an entity_table)
+        if sent is not None:
+            if t["first"] and conv:
+                failures.append(f"[{name} t{i}] opening turn sent a conversation_context")
+            if not t["first"] and not conv:
+                failures.append(f"[{name} t{i}] follow-up reached the engine WITHOUT a "
+                                f"conversation_context — the chat thread was not transmitted")
         if t["first"]:
             if route_source == "inherited":
                 failures.append(f"[{name} t{i}] topic-opening turn inherited scope "
@@ -322,12 +380,24 @@ def run_script(name, turns, source_ids, trace_path, verbose=False, pin_first=Fal
         if cap is not None and slm > cap:
             failures.append(f"[{name} t{i}] turn_slm_calls={slm} > {cap} {slm_purposes}")
 
-        rows.append((i, t, status, route_source, scope, slm, secs, answer, overhead))
+        rows.append((i, t, status, route_source, scope, slm, secs, answer, overhead,
+                     {"sent": sent is not None,
+                      "context_keys": sorted((conv or {}).keys()) if conv else None,
+                      "entity_table": (conv or {}).get("entity_table") if conv else None,
+                      "context_source_id": (conv or {}).get("source_id") if conv else None,
+                      "agent_plan": bool((conv or {}).get("agent_plan")) if conv else False,
+                      "classify_lane": lane, "routing_consumed": consumed,
+                      "frame_source": fsrc, "answered_by": answered_by,
+                      "supervisor_calls": len(overhead)}))
         if verbose:
             print(f"  t{i:<2} {status:<10} route={str(route_source):<12} "
                   f"by={answered_by} scope={scope} "
                   f"slm={slm}{('/' + str(len(overhead)) + 'ovh') if overhead else ''} "
                   f"{secs:>5.1f}s  {t['msg'][:44]}")
+            _x = rows[-1][9]
+            print(f"       ctx={_x['entity_table'] if conv else None!s:<22} "
+                  f"lane={_x['classify_lane']} consumed={_x['routing_consumed']} "
+                  f"frame={_x['frame_source']}")
             print(f"       → {answer[:110]}")
 
     return rows, failures
@@ -344,17 +414,30 @@ def main() -> int:
                     help="pin only turn 1 to its expected source, so follow-up inheritance "
                          "is measured in isolation from unpinned multi-source routing")
     ap.add_argument("-v", "--verbose", action="store_true")
+    ap.add_argument("--json", default=None, help="write per-turn rows + flags to this file")
+    _flags.add_expect_arg(ap)
     args = ap.parse_args()
+
+    flags = _flags.effective_flags()
+    _flags.print_flags_header(flags, title="eval_sessions (api tier): effective engine flags")
+    _flags.enforce_expect(flags, args.expect)
 
     names = sorted(SCRIPTS) if "all" in args.script else args.script
     source_ids = [int(s) for s in args.sources.split(",") if s.strip()]
 
-    all_fail, summary = [], []
+    all_fail, summary, dump = [], [], []
     for name in names:
         print(f"\n=== session script: {name} ({len(SCRIPTS[name])} turns) ===")
         rows, failures = run_script(name, SCRIPTS[name], source_ids, args.trace,
                                     verbose=args.verbose, pin_first=args.pin_first)
         all_fail += failures
+        for r in rows:
+            _tf = [f for f in failures if f.startswith(f"[{name} t{r[0]}]")]
+            dump.append({"script": name, "turn": r[0], "msg": r[1]["msg"], "status": r[2],
+                         "route_source": r[3], "scope": r[4], "turn_slm_calls": r[5],
+                         "secs": round(r[6], 1), "answer": (r[7] or "")[:300],
+                         **(r[9] if len(r) > 9 else {}),
+                         "verdict": "FAIL" if _tf else "ok", "failures": _tf})
         inherited = sum(1 for r in rows if r[3] == "inherited")
         answered = sum(1 for r in rows if r[2] == "answered")
         deterministic = sum(1 for r in rows[1:] if not r[8])   # follow-ups with 0 overhead
@@ -365,6 +448,9 @@ def main() -> int:
               f"   no-classify follow-ups {deterministic}/{max(0, len(rows) - 1)}"
               f"   median SLM {med}   failures {len(failures)}")
 
+    if args.json:
+        with open(args.json, "w") as f:
+            json.dump({"flags": flags, "turns": dump}, f, indent=1, default=str)
     print("\n" + "=" * 78)
     for name, n, answered, inh, det, nf in summary:
         print(f"  {name:<8} turns {n:<3} answered {answered:<3} inherited {inh:<3} "

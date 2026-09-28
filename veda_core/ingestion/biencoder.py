@@ -142,23 +142,50 @@ def _load_table_purposes(source_id=None, tenant: str = "default") -> dict:
     return {}
 
 
-def _passage_text(col, rdocs: dict) -> str:
+def _passage_text(col, rdocs: dict, link_phrases: Optional[dict] = None) -> str:
     """Build the BGE passage text per config.EMBED_TEXT_STRATEGY. Always falls back
-    to the structural string when no retrieval_document exists for the column."""
+    to the structural string when no retrieval_document exists for the column.
+    `link_phrases` (ingestion/link_text.fk_phrases): an FK column's passage ends with
+    the relationship it carries — "RELATIONSHIP: the user this ticket is assigned to"."""
     from config import EMBED_TEXT_STRATEGY
     structural = build_enriched_column_text(
         col_name=col.col_name, table_name=col.table_name,
         semantic_type=col.semantic_type, is_pk=col.is_pk, is_fk=col.is_fk,
         style="minilm",
     )
+    rel = (link_phrases or {}).get(f"{col.table_name}.{col.col_name}")
+    tail = f"\nRELATIONSHIP: {rel}" if rel else ""
     if EMBED_TEXT_STRATEGY == "structural":
-        return structural
+        return structural + tail
     doc = rdocs.get(f"{col.table_name}.{col.col_name}")
     if not doc:
-        return structural                      # no doc → grounded fallback
+        return structural + tail               # no doc → grounded fallback
     if EMBED_TEXT_STRATEGY == "doc":
-        return doc
-    return doc + "\n" + structural             # "hybrid" — rich NL + grounding tokens
+        return doc + tail
+    return doc + "\n" + structural + tail      # "hybrid" — rich NL + grounding tokens
+
+
+def _link_semantics(source_id, tenant: str):
+    """(links, fk phrases) for this source — {} on any failure (then passages are as before)."""
+    try:
+        from ingestion.link_text import for_source
+        sm = _scoped_sm(source_id, tenant)
+        return for_source(source_id, tenant, sm=sm)
+    except Exception:
+        return {}, {}
+
+
+def table_passage(table_name: str, col_names, purpose: Optional[str], links: Optional[dict] = None) -> str:
+    """The table passage (dense + sparse share it). A link table adds its link sentence."""
+    col_list = ", ".join(list(col_names)[:20])
+    base = (f"{table_name}: {purpose}. columns {col_list}" if purpose
+            else f"{table_name}: columns {col_list}")
+    try:
+        from ingestion.link_text import table_sentence
+        extra = table_sentence(table_name, links or {})
+    except Exception:
+        extra = ""
+    return base + (f". {extra}" if extra else "")
 
 
 def run_biencoder_ingestion(
@@ -193,8 +220,9 @@ def run_biencoder_ingestion(
         # the structural passage only.
         _tenant = _ctx_tenant()
         _rdocs = _load_retrieval_docs(source_id, _tenant)
+        _links, _phrases = _link_semantics(source_id, _tenant)
         for col in inference_result.typed_columns:
-            text = BIENCODER_PASSAGE_PREFIX + _passage_text(col, _rdocs)
+            text = BIENCODER_PASSAGE_PREFIX + _passage_text(col, _rdocs, _phrases)
             col_texts.append(text)
             col_metas.append({
                 "col_id":        col.col_id,
@@ -242,15 +270,14 @@ def run_biencoder_ingestion(
         tbl_metas = []
         _tbl_purposes = _load_table_purposes(source_id, _tenant)
         for tid, info in table_map.items():
-            col_list = ", ".join(info["col_names"][:20])
             purpose = _tbl_purposes.get(info["table_name"])
             # Bare column names retrieve poorly for a semantic query ("who's overdue on
             # rent" never lexically matches `columns tenant_id, due_date, amount`) — the
             # one-sentence business purpose gives the table embedding an actual semantic
-            # anchor. Falls back to the old bare passage when the model has none.
-            text = BIENCODER_PASSAGE_PREFIX + (
-                f"{info['table_name']}: {purpose}. columns {col_list}" if purpose
-                else f"{info['table_name']}: columns {col_list}")
+            # anchor. Falls back to the old bare passage when the model has none. A link
+            # table's passage also says what it links (ingestion/link_text.py).
+            text = BIENCODER_PASSAGE_PREFIX + table_passage(
+                info["table_name"], info["col_names"], purpose, _links)
             tbl_texts.append(text)
             tbl_metas.append({
                 "col_id":     tid,

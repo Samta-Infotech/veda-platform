@@ -20,7 +20,8 @@ from typing import Optional
 from config import (
     COLUMN_SPARSE_TABLE, TABLE_SPARSE_TABLE, BIENCODER_PASSAGE_PREFIX,
 )
-from ingestion.biencoder import _load_retrieval_docs, _passage_text, _get_pg_conn
+from ingestion.biencoder import (_load_retrieval_docs, _passage_text, _get_pg_conn,
+                                 _link_semantics, table_passage, _ctx_tenant)
 from ingestion import m3_encoder
 
 
@@ -74,10 +75,11 @@ def build_sparse_index(inference_result, source_id: str, verbose: bool = False) 
         _ensure_tables(conn)
 
         rdocs = _load_retrieval_docs()
+        _links, _phrases = _link_semantics(source_id, _ctx_tenant())
         col_ids, col_tids, col_texts = [], [], []
         table_map: dict = {}
         for col in inference_result.typed_columns:
-            text = BIENCODER_PASSAGE_PREFIX + _passage_text(col, rdocs)
+            text = BIENCODER_PASSAGE_PREFIX + _passage_text(col, rdocs, _phrases)
             # Key by the fusion identity "table.col" (same key space BM25 used via
             # retrieval_documents), NOT the UUID col.col_id — so sparse_ranker returns
             # keys the RRF merger fuses with the subgraph/fk/value signals. table_id
@@ -109,7 +111,8 @@ def build_sparse_index(inference_result, source_id: str, verbose: bool = False) 
             col_list = ", ".join(info["col_names"][:20])
             tbl_ids.append(tid)
             tbl_names.append(info["table_name"])
-            tbl_texts.append(BIENCODER_PASSAGE_PREFIX + f"{info['table_name']}: columns {col_list}")
+            tbl_texts.append(BIENCODER_PASSAGE_PREFIX + table_passage(
+                info["table_name"], info["col_names"], None, _links))
 
         n_tables = 0
         if tbl_texts:

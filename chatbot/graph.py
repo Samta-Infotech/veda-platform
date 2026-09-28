@@ -5,12 +5,21 @@
        v
     classify
        |-- smalltalk ------------------------------------> smalltalk_node -> END
-       |-- runtime_context -------------------------------------------.
-       |-- (else) history non-empty -> context_resolve_node -.        |
-       |-- (else) history empty --------------------------------------+--> call_engine_node
+       |-- represent -------------------------------------> represent_node -> END
+       |-- recall ----------------------------------------> recall_node -> END
+       |-- no_match --------------------------------------> no_match_node -> END
+       |-- reset -----------------------------------------> reset_node -> END
+       |-- clarify_reply ---------------------------------> clarify_reply_node -.
+       |-- runtime_context -------------------------------------------.        |
+       |-- (else) history non-empty -> context_resolve_node -.        |        |
+       |-- (else) history empty --------------------------------------+--------+--> call_engine_node
                                                                        |-- answered -> memory_write_node
                                                                        |               -> format_reply_node -> END
                                                                        `-- (else)   -> ask_clarification_node -> END
+
+represent/recall/no_match/reset answer from existing state (no engine call) and route
+straight to END — they skip format_reply_node entirely (each builds its own final reply
+shape; see their own docstrings in chatbot/nodes.py).
 
 Routing after classify is based on HISTORY, not the LLM's exact action label
 (followup vs. clarify_reply vs. answer) — the LLM only needs to reliably tell

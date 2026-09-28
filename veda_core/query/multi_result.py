@@ -25,6 +25,14 @@ STATUS_REFUSED = "refused"
 STATUS_ERROR = "error"
 _STATUSES = frozenset({STATUS_OK, STATUS_REFUSED, STATUS_ERROR})
 
+# Typed outcome of one PART of a compound message. Maps onto the closed status enum
+# (clarify → refused, timeout → error) so nothing that reads `status` changes.
+OUTCOME_ANSWERED, OUTCOME_CLARIFY, OUTCOME_REFUSED = "answered", "clarify", "refused"
+OUTCOME_TIMEOUT, OUTCOME_ERROR = "timeout", "error"
+OUTCOME_STATUS = {OUTCOME_ANSWERED: STATUS_OK, OUTCOME_CLARIFY: STATUS_REFUSED,
+                  OUTCOME_REFUSED: STATUS_REFUSED, OUTCOME_TIMEOUT: STATUS_ERROR,
+                  OUTCOME_ERROR: STATUS_ERROR}
+
 
 @dataclass
 class SubResult:
@@ -33,6 +41,15 @@ class SubResult:
     route: str                           # deterministic | rag | hybrid | nosql | none
     result: Optional[Any] = None         # the existing head result, untouched
     refuse_reason: Optional[str] = None  # populated when status != ok
+    # ── one PART of a compound message (front-door decomposition) ──
+    # `status` stays in the closed enum above so every existing consumer keeps working;
+    # `outcome` is the typed part result the compound reply and the chat tier read.
+    part: Optional[str] = None           # the part text this item answers (its label)
+    outcome: Optional[str] = None        # answered | clarify | refused | timeout | error
+    lane: Optional[str] = None           # sql | tabular | rag
+    source_id: Optional[str] = None      # the source this part ran on
+    depends_on: Optional[int] = None     # index of the part whose result this one used
+    elapsed_ms: Optional[float] = None
 
     def __post_init__(self):
         if self.status not in _STATUSES:
@@ -49,6 +66,10 @@ class MultiResult:
     trace_id: Optional[str] = None       # the ONE query-trace correlation id (observability);
                                          # set by run_hybrid_query, surfaced to the API caller
                                          # so a client can grep the full trace by this id
+    # True when the items are the PARTS of one compound message (one intent each, labelled
+    # with its part text) rather than one question answered by several sources.
+    compound: bool = False
+    relation: Optional[str] = None       # independent | dependent (compound only)
 
     @property
     def is_compound(self) -> bool:

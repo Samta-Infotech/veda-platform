@@ -61,6 +61,21 @@ def build_rerank_docs(source_id: str = "", tenant: str = "default", verbose: boo
         col_names = [c for c in col_names if c][:20]
         table_docs[tid] = f"{name}: columns {', '.join(col_names)}" if col_names else str(name)
 
+    # the relationship sentences the embedded passages carry (ingestion/link_text.py), so
+    # the cross-encoder reads what the bi-encoder read
+    try:
+        from ingestion.link_text import for_source, table_sentence
+        _links, _phrases = for_source(source_id or None, tenant, sm=sm)
+        for k, ph in _phrases.items():
+            if k in col_docs:
+                col_docs[k] = f"{col_docs[k]}\nRELATIONSHIP: {ph}"
+        for tid, txt in list(table_docs.items()):
+            name = str(txt).split(":", 1)[0]
+            extra = table_sentence(name, _links)
+            if extra:
+                table_docs[tid] = f"{txt}. {extra}"
+    except Exception:
+        pass
     out = {"columns": col_docs, "tables": table_docs}
     path = _index_path(source_id or None, tenant)
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)

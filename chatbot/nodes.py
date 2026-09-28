@@ -26,7 +26,7 @@ from .llm import CHATBOT_CLASSIFY_MODEL, call_slm
 from .memory import delta as memory_delta
 from .memory import frame as memory_frame
 from .memory.classify import DELTA_TYPES, classify_delta, parse_delta_response
-from .memory.context import ConversationContext
+from .memory.context import ConversationContext, wire_delta
 from .memory.store import MemoryStore
 from .prompts import (
     CAPABILITY_REPLY,
@@ -1365,8 +1365,14 @@ def classify_with_entry_gate(state: ChatState, config: RunnableConfig) -> dict:
                 "classification_latency_ms=%.1f action=%s",
                 path, decision["requires_context"], decision["requires_veda"],
                 elapsed_ms, action or "?")
+    # conversation_context is cleared on EVERY classify exit, not only the final return:
+    # the clarify_reply early return also reaches call_engine, and without this it
+    # re-sent the checkpointed context of whatever turn last ran context_resolve.
+    # `parts` likewise: only a compound turn sets it, and the checkpoint would otherwise
+    # hand the last compound turn's parts to every turn after it.
     return {**result, "entry_path": path,
-            "classification_latency_ms": round(elapsed_ms, 2), **decision}
+            "classification_latency_ms": round(elapsed_ms, 2), **decision,
+            "conversation_context": None, "parts": None}
 
 
 def _fmt_filters(frame: dict) -> str:
@@ -1438,8 +1444,9 @@ def recall_node(state: ChatState) -> dict:
     re-derived and nothing is generated, so this can neither invent a number nor
     disagree with the answer the user is looking at. Memory is not written: nothing was
     executed this turn, so there is no new evidence and the frame must not advance
-    (memory_write_node's evidence-only rule) — the graph routes this node to
-    format_reply directly."""
+    (memory_write_node's evidence-only rule) — the graph routes this node straight
+    to END (see chatbot/graph.py); it builds its own final `reply_text` here rather
+    than going through format_reply_node."""
     kind = state.get("recall_kind") or "trail"
     frame = state.get("frame") or {}
     if kind == "presentation_not_applicable":
@@ -1564,7 +1571,9 @@ def represent_node(state: ChatState) -> dict:
     too), so "chart that" could redraw something other than "that". Memory is
     deliberately NOT written here — nothing new was executed, so there is no new
     evidence and the QueryFrame must not advance a turn (see memory_write_node's
-    evidence-only rule); the graph routes this node straight to format_reply.
+    evidence-only rule); the graph routes this node straight to END (see
+    chatbot/graph.py), building its own final `reply_text` here rather than going
+    through format_reply_node.
 
     `viz_override` rides along on the result dict so the api tier renders the format
     the user named instead of its own recommendation (apps/chat/services.py)."""
@@ -1656,7 +1665,8 @@ def memory_read_node(state: ChatState) -> dict:
         # back at version 1 with an entity in it, so the reset had no lasting effect.
         # Sending "start over" to a SQL engine was never meaningful anyway.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": True,
-                "pending_clarification": {}, "last_result": {}, "comparison": {}}
+                "pending_clarification": {}, "last_result": {}, "comparison": {},
+                "memory_source_id": None}
 
     # Type-guarded, not just falsiness-guarded: a Redis key holding a JSON string or
     # list (a bad write, a manual edit, a format change) previously raised
@@ -1667,8 +1677,7 @@ def memory_read_node(state: ChatState) -> dict:
     # this, one session-wide frame meant the newer source silently erased the older one.
     # A turn that names no source reads whichever source answered last (the store's
     # active pointer), which is what a single-source deployment and the CLI both get.
-    source_id = state.get("source_id")
-    frame = MemoryStore.read_frame(tenant, session_id, source_id)
+    source_id, frame = _read_newest_frame(tenant, session_id, state)
     frame = frame if isinstance(frame, dict) else {}
     if not isinstance(frame.get("filters"), list):
         frame = {**frame, "filters": []}
@@ -1709,14 +1718,57 @@ def memory_read_node(state: ChatState) -> dict:
         # data. Everything the revoked source produced goes together or the guard has a
         # hole in it.
         return {"frame": {}, "drill_stack": [], "episodic": [], "memory_reset": False,
-                "last_result": {}, "pending_clarification": {},
+                "last_result": {}, "pending_clarification": {}, "comparison": {},
+                "memory_source_id": None,
                 "engine_result": {}, "sql": None, "rows": None, "status": None}
     # Cleared EXPLICITLY on every non-reset turn. The checkpointer persists the whole
     # state across turns, so a flag only ever set True stays True: live test
     # 2026-09-17, the turn after "start over" was itself answered as a reset, and so
     # would every turn after that until the session ended.
     return {"frame": frame, "drill_stack": stack, "episodic": episodic,
-            "comparison": comparison, "memory_reset": False}
+            "comparison": comparison, "memory_reset": False,
+            "memory_source_id": None if source_id is None else str(source_id)}
+
+
+def _read_newest_frame(tenant: str, session_id: str, state: ChatState):
+    """(source key it was read from, frame) — the NEWEST frame among the turn's sources.
+
+    Memory is WRITTEN under the source that answered (memory_write_node), which in a
+    multi-source scope is often not source_ids[0]. Reading only source_ids[0] therefore
+    missed the frame the previous turn had just written: turn 1 answered from source 3,
+    turn 2 (scope [2, 3]) read source 2's key and saw no topic at all.
+
+    So every source in the turn's scope is tried, primary first, and the most recently
+    written frame wins (`written_at`, stamped by MemoryStore.write_frame). Frames from
+    before that stamp existed carry none; among those the session's active pointer (the
+    source that answered last) wins, and failing that the primary — which is exactly what
+    this read did before. A turn with no scope at all reads the active pointer, as before.
+    """
+    source_id = state.get("source_id")
+    scope = [s for s in (state.get("source_ids") or []) if s is not None]
+    candidates = []
+    for s in ([source_id] if source_id is not None else []) + scope:
+        if str(s) not in {str(c) for c in candidates}:
+            candidates.append(s)
+    if len(candidates) <= 1:
+        only = candidates[0] if candidates else None
+        return only, MemoryStore.read_frame(tenant, session_id, only)
+
+    found = []
+    for s in candidates:
+        f = MemoryStore.read_frame(tenant, session_id, s)
+        if isinstance(f, dict) and f:
+            found.append((s, f))
+    if not found:
+        return source_id, None
+    if len(found) == 1:
+        return found[0]
+    stamped = [(s, f) for s, f in found if isinstance(f.get("written_at"), (int, float))]
+    if stamped:
+        return max(stamped, key=lambda p: p[1]["written_at"])
+    active = MemoryStore.active_source(tenant, session_id)
+    return next(((s, f) for s, f in found if active is not None and str(s) == str(active)),
+                found[0])
 
 
 def _context_used(frame: dict, delta_type: str, delta_field: str, delta_value: str,
@@ -1824,6 +1876,21 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         logger.exception("context_resolve_node: deterministic delta failed — falling back to SLM")
         _rule_delta = None
 
+    if _rule_delta is not None and _rule_delta.get("target_frame_index") is not None:
+        # A reference to one PART of the latest compound turn ("the vendor one — top 3"):
+        # the conversation moves onto that part — cursor, entity and source — and the rest
+        # of the message applies to it.
+        frame = memory_frame.switch_to_entry(frame, int(_rule_delta["target_frame_index"]))
+        _entry = memory_frame.stack_top(frame)
+        drill_stack = []
+        logger.info("context_resolve_node: part reference -> stack entry %s (%s, source %s)",
+                    _rule_delta["target_frame_index"], (_entry or {}).get("entity"),
+                    (_entry or {}).get("source_id"))
+
+    # Which delta THIS node has already applied into `frame` (the continuity lane in the
+    # engine then compiles the context as-is instead of applying it a second time — see
+    # chatbot/memory/context.py::wire_delta).
+    _chat_applied = False
     delta_type = state.get("delta_type")
     # `_entry is not None` is part of the gate, not an optimisation. With no stack entry
     # memory_delta.detect() returns `new_topic` at confidence 1.0 under the rule
@@ -1879,6 +1946,7 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         delta_type = "ambiguous"
 
     if delta_type == "drill_up":
+        _chat_applied = True
         if drill_stack:
             drill_stack = memory_frame.pop_drill(drill_stack)
             frame = memory_frame.rebuild_frame_from_stack(frame, drill_stack)
@@ -1947,6 +2015,7 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         # slot: a shape delta ("don't sort by amount" -> order_by) leaves the filter
         # count untouched and was therefore reported as having matched nothing.
         _applied = frame is not _before
+        _chat_applied = _chat_applied or _applied
         logger.info("context_resolve_node: %s field=%r value=%r — %s",
                     delta_type, delta_field, delta_value,
                     "applied" if _applied else "declined, context carried unchanged")
@@ -2053,6 +2122,9 @@ def context_resolve_node(state: ChatState, config: RunnableConfig) -> dict:
         # the same rule the previous rendering applied when it returned the message
         # unchanged for both.
         carry_state=(delta_type not in ("new_topic", "ambiguous") or referential),
+        delta=wire_delta(_rule_delta, delta_type, delta_field, delta_value,
+                         chat_applied=_chat_applied,
+                         comparison=bool(_comparison) and not shape_delta),
     )
 
     logger.info("context_resolve_node: delta_type=%s query=%r context=%s",
@@ -2078,6 +2150,27 @@ def _extract_engine_result(payload: dict) -> tuple[dict, str]:
     """
     result = (payload or {}).get("result") or {}
     items = result.get("items") or []
+    if result.get("compound") and len(items) >= 2:
+        # ONE message, several intents (front-door decomposition): the items are its PARTS,
+        # each labelled with its part text. One turn: the reply is the composed text (parts
+        # in order, then a summary line); each part keeps its own table / citations.
+        parts = memory_frame.compound_parts_from_payload(result)
+        answered = [p for p in parts if p["outcome"] == "answered"]
+        res0 = {
+            "answer": str(result.get("summary") or "\n\n".join(
+                f"{p['part']}: {p['answer']}" for p in parts)),
+            "is_compound": True,
+            "compound_parts": parts,
+            "relation": result.get("relation"),
+            "_route": "compound",
+        }
+        if answered:
+            status = "answered"
+        else:
+            status = "clarify"
+            res0["feedback"] = {"text": res0["answer"], "why": res0["answer"]}
+        res0["status"] = status
+        return res0, status
     item0 = items[0] if items and isinstance(items[0], dict) else {}
     res0 = item0.get("result") or {}
     if not isinstance(res0, dict):
@@ -2356,6 +2449,65 @@ def _templated_gist(engine_result: dict) -> str:
     return "answered"
 
 
+def _expected_version(state: ChatState, prev_frame: dict, target_source) -> "int | None":
+    """The optimistic-lock version for writing this turn's frame under `target_source`.
+
+    prev_frame's version describes the key memory_read_node loaded it FROM. When the
+    answer came from a different source in the scope, the write lands on another key,
+    whose stored version is unrelated — checking against it aborted every such write,
+    so the source that just answered never got a frame. Different key, no check; the
+    session turn lock (run.py) already serialises the turns themselves."""
+    if not prev_frame:
+        return None
+    read_from = state.get("memory_source_id")
+    if read_from is not None and target_source is not None and str(read_from) != str(target_source):
+        return None
+    return prev_frame.get("version")
+
+
+def _write_compound_memory(state: ChatState, engine_result: dict, tenant: str,
+                           session_id: str) -> dict:
+    """A compound turn is ONE turn with several answers. The IR stack gets one entry per
+    ANSWERED part (each with its own source_id), so "the second one — top 3" can resolve
+    to a part; the flat frame follows the LAST answered part, the one the reply ends on.
+    Evidence only, as for a single turn: nothing here comes from anything but the parts'
+    own already-validated results."""
+    prev_frame = state.get("frame") or {}
+    parts = engine_result.get("compound_parts") or []
+    turn_index = int(prev_frame.get("turn_index") or 0) + 1
+    entries = memory_frame.harvest_compound_entries(parts, turn_index)
+    last_flat = next((e.get("flat") for e in reversed(entries) if e.get("flat")), None)
+    if last_flat:
+        new_frame = memory_frame.merge_frame_post_execution(
+            prev_frame, dict(last_flat), "new_topic", tenant, session_id)
+    else:
+        new_frame = {**memory_frame.empty_frame(tenant, session_id),
+                     "version": (prev_frame.get("version") or 0) + 1}
+    new_frame["turn_index"] = turn_index
+    new_frame["stack"] = memory_frame.push_entries(list(prev_frame.get("stack") or []), entries)
+    new_frame["cursor"] = -1
+    new_frame["compound_parts"] = [{"index": p.get("index"), "part": p.get("part"),
+                                    "outcome": p.get("outcome"), "source_id": p.get("source_id")}
+                                   for p in parts]
+    _sid = None
+    if entries:
+        _sid = entries[-1].get("source_id")
+    _source_id = _sid or new_frame.get("source_id") or state.get("source_id")
+    try:
+        MemoryStore.write_frame(tenant, session_id, new_frame,
+                                expected_version=_expected_version(state, prev_frame, _source_id),
+                                source_id=_source_id)
+        MemoryStore.write_stack(tenant, session_id, [], source_id=_source_id)
+        MemoryStore.push_episodic_turn(tenant, session_id, state.get("message", ""),
+                                       _templated_gist(engine_result), source_id=_source_id)
+    except Exception:
+        logger.exception("memory_write_node: compound memory write failed")
+    logger.info("memory_write_node: compound turn — %d/%d parts pushed to the IR stack",
+                len(entries), len(parts))
+    return {"frame": new_frame, "drill_stack": [], "last_result": engine_result,
+            "comparison": {}, "pending_clarification": {}}
+
+
 def memory_write_node(state: ChatState) -> dict:
     """Writes the structured analytical memory AFTER a successful engine
     execution — evidence only, never on refuse/error/clarify/unavailable
@@ -2377,6 +2529,9 @@ def memory_write_node(state: ChatState) -> dict:
     # was no longer looking at. The hazard is staleness, not failure: this node only
     # runs on an answered turn either way.
     _last_result = engine_result
+
+    if engine_result.get("is_compound"):
+        return _write_compound_memory(state, engine_result, tenant, session_id)
 
     harvested = memory_frame.harvest_frame(engine_result)
     if harvested:
@@ -2418,6 +2573,12 @@ def memory_write_node(state: ChatState) -> dict:
                               if isinstance(s, dict) and s.get("id")}
         if len(_engine_source_ids) == 1:
             harvested["source_id"] = next(iter(_engine_source_ids))
+        elif not _engine_source_ids and engine_result.get("source_id") is not None:
+            # explain.sources names sources by display name only (no "id" key — measured
+            # 2026-09-27), so the set above is empty on every live answer; the result's own
+            # source_id is the source the head executed on. Without this an unpinned session
+            # filed every frame under source None and sent the engine no source_id.
+            harvested["source_id"] = str(engine_result.get("source_id"))
         else:
             harvested["source_id"] = state.get("source_id")
     if not harvested:
@@ -2563,7 +2724,7 @@ def memory_write_node(state: ChatState) -> dict:
     # episodic entry this turn contributes) is filed under and stamped with it.
     _source_id = new_frame.get("source_id") or state.get("source_id")
     MemoryStore.write_frame(tenant, session_id, new_frame,
-                            expected_version=prev_frame.get("version") if prev_frame else None,
+                            expected_version=_expected_version(state, prev_frame, _source_id),
                             source_id=_source_id)
     MemoryStore.write_stack(tenant, session_id, new_stack, source_id=_source_id)
     MemoryStore.push_episodic_turn(tenant, session_id, state.get("message", ""),
@@ -2794,6 +2955,29 @@ def format_reply_node(state: ChatState) -> dict:
         "engine_unavailable": False,
         "history": _turn_delta(state, answer),
     }
+    if res0.get("is_compound"):
+        # parts in order, each with its own table (the composed text already lists the
+        # answers; the tables ride beside it so the UI can render one per part)
+        _parts = res0.get("compound_parts") or []
+        out["parts"] = [{"index": p.get("index"), "part": p.get("part"),
+                         "outcome": p.get("outcome"), "source_id": p.get("source_id"),
+                         "answer": p.get("answer"),
+                         "cols": (p.get("result") or {}).get("cols"),
+                         "rows": (p.get("result") or {}).get("rows"),
+                         "sql": (p.get("result") or {}).get("sql"),
+                         "citations": (p.get("result") or {}).get("citations")}
+                        for p in _parts]
+        try:
+            _fr = state.get("frame") or {}
+            _ct = [e for e in (_fr.get("stack") or [])
+                   if e.get("compound_turn") is not None
+                   and e.get("compound_turn") == ((_fr.get("stack") or [{}])[-1]).get("compound_turn")]
+            _strip = memory_frame.describe_parts(_ct)
+            if _strip:
+                out["context_strip"] = _strip
+        except Exception:
+            logger.exception("format_reply_node: compound context strip skipped")
+        return out
     try:
         _entry = memory_frame.stack_top(state.get("frame") or {})
         if _entry:

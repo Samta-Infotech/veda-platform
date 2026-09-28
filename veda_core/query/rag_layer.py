@@ -45,6 +45,19 @@ from config import (
 from slm import call_slm
 
 
+def _answering_source_id(chunks, source_ids: Optional[List[str]]) -> Optional[str]:
+    """The document SOURCE that answered: the top citation's chunk.source_id (chunks are
+    already ranked, so `chunks[0]` is the top citation), or the scope's single doc source
+    when retrieval found nothing to read it from (access-denied / no-passages paths).
+    None when the scope has several doc sources and nothing narrowed the answer to one —
+    filing under the wrong source would be worse than filing under none."""
+    if chunks:
+        return chunks[0].source_id
+    if source_ids and len(source_ids) == 1:
+        return str(source_ids[0])
+    return None
+
+
 def _emit(on_event, phase, message, **extra):
     """Fire the optional SSE progress callback — same contract as
     veda_hybrid.py's own _emit (self-contained copy, not a shared import:
@@ -89,6 +102,15 @@ class RAGResult:
     #: `dataclasses.asdict()` keeps only declared ones, and that trap already ate
     #: `explain` once.
     no_answer:    bool = False
+    #: The document SOURCE that answered — the top citation's chunk.source_id, or
+    #: the scope's single doc source when there is exactly one and no chunk to read
+    #: it from (e.g. the access-denied / no-passages paths). None when the scope has
+    #: several doc sources and nothing narrowed it. Chat memory (chatbot/nodes.py
+    #: memory_write_node) reads this to file the frame under the SOURCE that
+    #: actually answered instead of the request-level default — without it, every
+    #: unpinned RAG turn filed its frame under source `None` (measured 2026-09-27).
+    #: DECLARED for the same asdict() reason as `explain`/`no_answer` above.
+    source_id:    Optional[str] = None
 
 
 @dataclass
@@ -573,6 +595,7 @@ def run_rag_layer(
                 duration_ms=round((time.time() - t0) * 1000, 2),
                 stats={"chunks_retrieved": 0, "chunks_denied": _dropped,
                        "access_denied": True},
+                source_id=_answering_source_id([], source_ids),
             )
         msg = "No relevant document passages found"
         if temporal_filter is not None:
@@ -581,6 +604,7 @@ def run_rag_layer(
             answer=msg, chunks=[], citations=[], confidence=0.0,
             duration_ms=round((time.time() - t0) * 1000, 2),
             stats={"chunks_retrieved": 0},
+            source_id=_answering_source_id([], source_ids),
         )
 
     confidence = chunks[0].similarity if chunks else 0.0
@@ -620,6 +644,7 @@ def run_rag_layer(
         citations   = citations,
         confidence  = round(confidence, 4),
         duration_ms = duration_ms,
+        source_id   = _answering_source_id(chunks, source_ids),
         stats       = {
             "chunks_retrieved":  len(chunks),
             "citations":         len(citations),

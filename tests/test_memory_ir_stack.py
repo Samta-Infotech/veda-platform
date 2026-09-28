@@ -1,4 +1,4 @@
-"""The M4 IR-stack memory: deterministic delta detection, delta application, and the
+"""The M4 IR-stack memory: deterministic delta detection and the
 IR-derived surfaces (Checkpoint C.1-C.3/C.5/C.7).
 
 These are pure-function tests — chatbot/memory/{delta,frame}.py do no I/O, make no LLM
@@ -10,9 +10,6 @@ What each group is actually guarding:
                    `ambiguous` rather than a guess.
   grounding      — that a filter value is only ever one the previous result contained.
                    This is the anti-hallucination property the whole design rests on.
-  apply_delta    — that editing one slot leaves every other slot intact; the failure the
-                   pre-M4 text-restatement path had was silently dropping an applied
-                   filter when the question was reworded.
   ir_partial     — that an unstructured IR is NOT edited slot-wise but falls back.
 """
 from __future__ import annotations
@@ -122,36 +119,6 @@ def test_ambiguous_pronoun_without_a_resolvable_slot():
     assert d["op"] == D.OP_AMBIGUOUS
 
 
-# ── apply_delta: edit one slot, preserve the rest ────────────────────────────
-def test_add_filter_preserves_existing_filters_and_grouping():
-    ir = {"anchor": "maintenance", "measure": {"aggregation": "count", "column": None},
-          "filters": [{"column": "category", "op": "=", "value": "Repair"}],
-          "group_keys": ["status"], "order": None, "limit": None, "ir_partial": False}
-    nxt = F.apply_delta(ir, {"op": "add_filter", "concept": "city", "value": "Kochi"})
-    cols = {f["column"] for f in nxt["filters"]}
-    assert cols == {"category", "city"}            # the earlier filter SURVIVES
-    assert nxt["group_keys"] == ["status"]         # unrelated slot untouched
-    assert ir["filters"] == [{"column": "category", "op": "=", "value": "Repair"}]  # no mutation
-
-
-def test_change_group_replaces_rather_than_appends():
-    """"by city instead" means instead — appending would group by both."""
-    ir = {"anchor": "a", "filters": [], "group_keys": ["status"], "ir_partial": False}
-    assert F.apply_delta(ir, {"op": "change_group", "concept": "city"})["group_keys"] == ["city"]
-
-
-def test_repeated_filter_on_same_column_replaces_not_duplicates():
-    ir = {"anchor": "a", "filters": [{"column": "city", "op": "=", "value": "Kochi"}],
-          "group_keys": [], "ir_partial": False}
-    nxt = F.apply_delta(ir, {"op": "add_filter", "concept": "city", "value": "Pune"})
-    assert nxt["filters"] == [{"table": "a", "column": "city", "op": "=", "value": "Pune",
-                               "grounding": "session_top_values", "concept": "city"}]
-
-
-def test_unknown_op_returns_none_so_caller_falls_back():
-    assert F.apply_delta({"anchor": "a"}, {"op": "switch_frame"}) is None
-
-
 # ── ir_partial gating ────────────────────────────────────────────────────────
 def test_partial_ir_is_not_structured():
     """A reverse-engineered IR (veda/ir.from_sql_facts) has real slots but unknown
@@ -182,25 +149,7 @@ def test_stack_top_follows_the_cursor():
     assert F.stack_top({"stack": [], "cursor": -1}) is None
 
 
-def test_compact_stack_is_prompt_sized():
-    """The classifier prompt gets the stack; each entry must stay small enough that ten
-    of them fit the plan's ~250-tokens-per-entry budget."""
-    frame = {"stack": [_entry(question="how many maintenance records are there")] * 10}
-    import json
-    per_entry = len(json.dumps(F.compact_stack(frame))) / 10 / 4      # ~4 chars/token
-    assert per_entry < 250
-
-
 # ── IR-derived surfaces (C.7) ────────────────────────────────────────────────
-def test_ir_to_question_is_built_from_slots():
-    ir = {"anchor": "maintenance", "measure": {"aggregation": "sum", "column": "amount"},
-          "filters": [{"column": "category", "op": "=", "value": "Repair"}],
-          "group_keys": ["status"], "limit": 3, "order": {"column": "amount"},
-          "ir_partial": False}
-    q = F.ir_to_question(ir)
-    assert "total amount" in q and "category is Repair" in q and "per status" in q and "top 3" in q
-
-
 def test_context_strip_names_the_current_slice():
     ir = {"anchor": "vendors", "measure": {"aggregation": "count"},
           "filters": [{"column": "city", "op": "=", "value": "Kochi"}],

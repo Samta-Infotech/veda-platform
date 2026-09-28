@@ -23,6 +23,7 @@ Exit code 1 on any divergence.
 """
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import re
@@ -31,6 +32,9 @@ import time
 
 sys.path.insert(0, "/app")
 sys.path.insert(0, "/app/veda_core")
+sys.path.insert(0, "/app/scripts")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _flags  # noqa: E402
 
 TYPED = {"clarify", "refuse", "qualifier_dropped", "ungrounded", "ir_mismatch", "tier2_rejected",
          "refused_federated", "not_federated", "exec_error", "access_denied", "not_materialized",
@@ -72,8 +76,15 @@ def _run(q, ctx):
 
 
 def main() -> int:
+    ap = argparse.ArgumentParser()
+    _flags.add_expect_arg(ap)
+    args = ap.parse_args()
+
     from veda_core.context import RequestContext
     from eval_per_source_battery import BATTERY   # same questions, same shapes
+    flags = _flags.effective_flags()
+    _flags.print_flags_header(flags, title="eval_cross_source_battery: effective engine flags")
+    _flags.enforce_expect(flags, args.expect)
     failures = 0
     rows_out = []
     for sid in (4, 5):
@@ -148,7 +159,7 @@ def main() -> int:
     for r in rows_out:
         verdicts[r.get("verdict")] = verdicts.get(r.get("verdict"), 0) + 1
     print(json.dumps({"summary": "FAIL" if failures else "OK", "pairs": len(rows_out),
-                      "divergent": failures, "verdicts": verdicts,
+                      "divergent": failures, "verdicts": verdicts, "flags": flags,
                       "seq_9_2": seq.get("verdict")}))
     return 1 if failures else 0
 

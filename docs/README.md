@@ -10,6 +10,7 @@ FastAPI inference tier wrapping the preserved `veda_core` engine.
 |-----|----------------|
 | [INGESTION_AND_QUERY_PIPELINES.md](INGESTION_AND_QUERY_PIPELINES.md) | **One self-contained walkthrough of both pipelines end-to-end** — ingestion's five layers through every artifact, then the query front door through the firewall and every answering head. Start here if you want the whole system in one read. |
 | [ARCHITECTURE.md](ARCHITECTURE.md) | The two process tiers, the request flow, every answering head, the substrate, tenancy & security — the map of the whole system |
+| [QUERY_PIPELINE_FLOW.md](QUERY_PIPELINE_FLOW.md) | **Start here (2026-09-26):** one chat question end to end — HTTP → chat graph/memory → inference → front door → SQL head → reply; live flags, SLM budget, known gaps |
 | [QUERY_ENGINE.md](QUERY_ENGINE.md) | The deterministic SQL head in depth: the escalation ladder, the ~10-gate firewall, the planners, Tier-1 → Tier-2 |
 | [DEPLOYMENT.md](DEPLOYMENT.md) | Stand the whole stack up on one VM |
 

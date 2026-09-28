@@ -93,10 +93,15 @@ _NOSQL_KEYWORDS = {
 
 
 def _count_signal_hits(query_lower: str, keywords: set) -> int:
-    """Returns the number of keyword matches in the query."""
+    """Returns the number of keyword matches in the query — whole words only.
+
+    A bare substring test counted "spec" in "respective" and "file" in "profile": inert while
+    the router scored the config registry (one relational source → always sql), but once it
+    scores the request scope a data question over a scope with a document source became
+    HYBRID on such a hit (measured: "sort our recent payments by their respective currency")."""
     count = 0
     for kw in keywords:
-        if kw in query_lower:
+        if re.search(r"\b" + re.escape(kw) + r"\b", query_lower):
             count += 1
     return count
 
@@ -125,6 +130,60 @@ def _check_value_filter(query_lower: str) -> bool:
 
 def _source_ids_by_type(sources: List[dict], source_type: str) -> List[str]:
     return [s["id"] for s in sources if s.get("type") == source_type and s.get("enabled", True)]
+
+
+# The router's type vocabulary; source profiles name documents "filesystem" too.
+_PROFILE_TYPES = {"relational": "relational", "datalake": "datalake", "nosql": "nosql",
+                  "document": "document", "filesystem": "document", "docs": "document",
+                  "doc": "document",
+                  # dialect names (apps.sources.models.Source._DIALECT_TO_ENGINE) — callers
+                  # that pass the dialect instead of source_kind() must not lose the source
+                  "s3_docs": "document", "csv_lake": "datalake", "parquet": "datalake",
+                  "delta": "datalake", "iceberg": "datalake", "mongo": "nosql", "es": "nosql",
+                  "dynamo": "nosql"}
+
+
+def _request_scope_sources() -> Optional[List[dict]]:
+    """The REQUEST's sources as router source dicts — ctx.source_ids typed by the source
+    profiles the api tier set — or None when there is no request context (CLI).
+
+    The config registry holds one injected source (the env's), not the scope the caller is
+    asking over, so scoring it ignored a document source in scope. A scope source whose type
+    no profile names falls back to the registry's type for the same id; when no source in the
+    scope can be typed at all, None (→ the registry) keeps the old behaviour."""
+    ctx = None
+    for modname in ("veda_core.context", "context"):
+        try:
+            import importlib
+            ctx = importlib.import_module(modname).try_current()
+            if ctx is not None:
+                break
+        except Exception:
+            continue
+    if ctx is None:
+        return None
+    try:
+        from veda_core.context import current_source_profiles
+    except Exception:
+        try:
+            from context import current_source_profiles       # type: ignore
+        except Exception:
+            current_source_profiles = lambda: {}                # noqa: E731
+    profiles = current_source_profiles() or {}
+    try:
+        from config import get_enabled_sources
+        registry = {str(s.get("id")): s for s in get_enabled_sources()}
+    except Exception:
+        registry = {}
+    out = []
+    for sid in (getattr(ctx, "source_ids", ()) or ()):
+        prof = profiles.get(str(sid)) or {}
+        t = _PROFILE_TYPES.get(str(prof.get("source_type") or "").strip().lower())
+        if t is None and str(sid) in registry:
+            t = registry[str(sid)].get("type")
+        if t:
+            out.append({"id": str(sid), "type": t, "enabled": True})
+    return out or None
 
 
 # =============================================================================
@@ -170,6 +229,9 @@ def route_query(
         return result
 
     if available_sources is None:
+        available_sources = _request_scope_sources()
+    if available_sources is None:
+        # no request context (CLI / bare-metal): the config registry's injected source
         from config import get_enabled_sources
         available_sources = get_enabled_sources()
 

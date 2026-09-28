@@ -205,4 +205,24 @@ def run(ctx: SourceContext, state: Dict, verbose: bool = False) -> List[StageOut
     except Exception as e:
         out.append(StageOutcome("value_aliases", False, fatal=False, error=str(e)))
 
+    # business vocabulary (meaning-first pass, Stage 1) — entity cards, value + measure
+    # glossaries and synthetic questions, then the routing card is rebuilt FROM the cards.
+    # Runs after value_aliases because the value glossary layers the same tracked seed.
+    # SLM drafting honours skip_llm (deterministic cards + seeds only); non-fatal — a
+    # source without a vocabulary grounds exactly as it did before (degrade path).
+    try:
+        from config import VOCABULARY_BUILD_ENABLED as _vb_on
+    except Exception:
+        _vb_on = True
+    if _vb_on:
+        try:
+            from ingestion.vocabulary import publish_from_state as _vocab_publish
+            _vr = _vocab_publish(ctx, state, verbose=verbose)
+            out.append(StageOutcome("vocabulary", True, detail=(
+                _vr.get("skipped") or
+                f"{_vr['cards']} cards, {_vr['value_columns']} value columns, "
+                f"{_vr['measures']} measures, {_vr['questions']} questions")))
+        except Exception as e:
+            out.append(StageOutcome("vocabulary", False, fatal=False, error=str(e)))
+
     return out

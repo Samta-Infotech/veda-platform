@@ -52,6 +52,87 @@ def _query_embedding(query: str):
 from query.source_evidence import group_evidence_by_source
 
 
+# ── request-scoped routing EVIDENCE (one evidence pass per request) ──────────────────────────────
+# The coordinator's evidence (per-source column/table/chunk cosine → item prior → dominance
+# retier) used to be computed twice per turn: once by plan_route, then again by veda_hybrid's
+# classify() for its doc-intent check. Both now go through routing_evidence(), which computes it
+# once per (query, scope) and hands every later consumer the same objects. A consumer whose scope
+# is a SUBSET of a cached pass (an authoritative SINGLE narrowed the request to one source) gets
+# that pass restricted to its sources and re-tiered among them — never a second retrieval.
+# The cache is reset at the request entry (veda_hybrid._run_hybrid_query_inner) via
+# reset_evidence_cache(); `passes` counts real retrievals and is written to trace.routing.
+_EVIDENCE: ContextVar[Optional[dict]] = ContextVar("veda_routing_evidence", default=None)
+
+
+def reset_evidence_cache() -> None:
+    _EVIDENCE.set({"entries": {}, "passes": 0, "reused": 0})
+
+
+def _evidence_state() -> dict:
+    """The request's cache — or, OUTSIDE a request (no reset_evidence_cache() ran: tests,
+    scripts, a bare plan_route call), a throwaway one. Persisting a lazily-created cache here
+    made every later call in the same context reuse the first call's evidence (test-order-
+    dependent NO_MATCH vs CLARIFICATION_REQUIRED in tests/test_source_coordinator.py)."""
+    st = _EVIDENCE.get()
+    if st is None:
+        return {"entries": {}, "passes": 0, "reused": 0}
+    return st
+
+
+def evidence_passes() -> int:
+    """Real evidence retrievals made in this request so far."""
+    return int(_evidence_state()["passes"])
+
+
+def _trace_evidence(st: dict) -> None:
+    try:
+        from veda.explain import current_trace
+        current_trace().set("routing", evidence_passes=st["passes"], evidence_reused=st["reused"])
+    except Exception:
+        pass
+
+
+def routing_evidence(query: str, source_ids, *, evidence_provider: Callable = None,
+                     item_prior_provider: Callable = None, compute: bool = True):
+    """{source_id: SourceEvidence} after item prior + dominance retier, for ``query`` over
+    ``source_ids`` — from this request's cache when an earlier consumer already paid for it.
+
+    ``compute=False`` returns None instead of retrieving on a miss. Injected providers (tests,
+    callers with their own stores) bypass the cache entirely."""
+    if evidence_provider is not None or item_prior_provider is not None:
+        cols, chunks = (evidence_provider or _default_evidence_provider)(query, source_ids)
+        ev = group_evidence_by_source(cols, chunks)
+        _apply_item_prior(query, source_ids, ev, item_prior_provider)
+        _dominance_retier(ev)
+        return ev
+    st = _evidence_state()
+    sids = frozenset(str(s) for s in (source_ids or []))
+    hit = st["entries"].get((query, sids))
+    if hit is not None:
+        st["reused"] += 1
+        _trace_evidence(st)
+        return hit
+    for (q, cached_sids), ev in st["entries"].items():
+        if q == query and sids and sids < cached_sids:
+            import copy as _copy
+            sub = {sid: _copy.copy(e) for sid, e in ev.items() if str(sid) in sids}
+            _dominance_retier(sub)
+            st["entries"][(query, sids)] = sub
+            st["reused"] += 1
+            _trace_evidence(st)
+            return sub
+    if not compute:
+        return None
+    cols, chunks = _default_evidence_provider(query, list(source_ids or []))
+    ev = group_evidence_by_source(cols, chunks)
+    _apply_item_prior(query, list(source_ids or []), ev)
+    _dominance_retier(ev)
+    st["entries"][(query, sids)] = ev
+    st["passes"] += 1
+    _trace_evidence(st)
+    return ev
+
+
 # ── semantic decision boundary (P1) ─────────────────────────────────────────────────────────────
 def _attach_item_summaries(query, candidates, per_source=3):
     """For the boundary candidates only, fetch each source's top-matching ITEM summaries (name +
@@ -597,10 +678,12 @@ def plan_route(query: str, source_ids, *,
     profile_provider = profile_provider or _default_profile_provider
     _ROUTING_QV.set((None, None))   # reset embed-once cache for this routing request
 
-    columns, chunks = evidence_provider(query, source_ids)
-    evidence_by_source = group_evidence_by_source(columns, chunks)
-    _apply_item_prior(query, source_ids, evidence_by_source, item_prior_provider)
-    _dominance_retier(evidence_by_source)
+    # one evidence pass per request, shared with classify()'s doc-intent check (routing_evidence)
+    evidence_by_source = routing_evidence(
+        query, source_ids,
+        evidence_provider=(evidence_provider if evidence_provider is not _default_evidence_provider
+                           else None),
+        item_prior_provider=item_prior_provider)
     profiles = profile_provider(source_ids)
     candidates = build_candidates(evidence_by_source, profiles)
 
@@ -617,14 +700,16 @@ def plan_route(query: str, source_ids, *,
     # `candidates` object when nothing is filtered (flag off, non-aggregation query, nothing
     # incompatible, or the all-incompatible fallback); only a genuine removal produces a new list.
     # See docs/architecture/VEDA_PHASE_C1_UNBLOCKED_BENCHMARK.md.
-    # GUARDED 2026-09-23. capability_filter.py is NOT in this tree (it was never written),
-    # and this import sat OUTSIDE its own flag check — so plan_route() raised
+    # GUARDED 2026-09-23. At the time, capability_filter.py was not yet in this tree, and
+    # this import sat OUTSIDE its own flag check — so plan_route() raised
     # ModuleNotFoundError on EVERY call. The caller swallows that as
     # "[routing] skipped (...)" and carries on, which means `decide()` below, the ambiguity
-    # handling and all source narrowing have never actually run: every query fell through to
+    # handling and all source narrowing never actually ran: every query fell through to
     # a merged all-source scope. Observed live: "how many vendors are there" planned the
     # correct SELECT COUNT(*) FROM "vendors" against a merged 181-table model and then
     # executed it against homzhub, where that table does not exist.
+    # capability_filter.py exists now (2026-09-24) and this import runs behind its own
+    # flag check below, so the crash can't recur even if the file goes missing again.
     try:
         from config import CAPABILITY_FILTERING_ENABLED as _cap_filter_on
     except Exception:
@@ -778,10 +863,10 @@ def _dominance_retier(evidence_by_source, gap=None, floor=None):
     several tie. Both cosines are BGE-M3, so cross-kind comparison here is the same metric."""
     try:
         import config as _cfg
-        gap = float(getattr(_cfg, "ROUTING_DOMINANCE_GAP", 0.12)) if gap is None else gap
+        gap = float(getattr(_cfg, "ROUTING_DOMINANCE_GAP", 0.03)) if gap is None else gap
         floor = float(getattr(_cfg, "ROUTING_DOMINANCE_FLOOR", 0.35)) if floor is None else floor
     except Exception:
-        gap = 0.12 if gap is None else gap
+        gap = 0.03 if gap is None else gap
         floor = 0.35 if floor is None else floor
     # Prefer the item-prior as the tiering signal when it's present for the field: item-description
     # cosines are directly comparable across sources (all query↔summary), whereas raw column vs chunk
@@ -993,12 +1078,10 @@ def dispatch(decision: RoutingDecision, query: str, *, sm=None, cols=None,
     """Execute a SINGLE-mode routing decision via its source agent, returning the AgentResult.
     NO_MATCH / CLARIFICATION_REQUIRED / MULTI return None (use execute_decision for MULTI).
 
-    Phase B2 (EXECUTION_REQUEST_DISPATCH_ENABLED, default OFF): when on, this function's own
-    legacy kwargs are unchanged — no caller has to change — but internally it normalizes them into
-    ONE query/execution_request.py::ExecutionRequest and calls the resolved SourceAdapter's
-    execute_request(request) instead of the legacy agent.execute(...) call. execute_request() is a
-    pure unpack-and-delegate back to execute(...) (Phase B1, proven equivalent by test), so this is
-    a boundary-shape change only — never a behavior change."""
+    The Phase B2 ExecutionRequest normalization this docstring used to describe is GONE, same
+    fix as `_resolve_executable` below (2026-09-23): EXECUTION_REQUEST_DISPATCH_ENABLED no
+    longer affects this function at all. `_resolve_executable` always returns the bare agent
+    from query.agents.resolve_agent(), and this calls its legacy `.execute(...)` directly."""
     from query.reliability import execute_reliably
     if decision.status != STATUS_ROUTED or decision.mode != MODE_SINGLE:
         return None

@@ -611,7 +611,13 @@ def build_explain(*, sql: str, table: str, sm: Optional[dict],
         # summary, so a drill-down into a grouped answer could not re-apply the grouping —
         # it was a label, not a column, and the column check dropped it (measured
         # 2026-09-23: 0 of 8 aggregated bases kept their shape).
-        operations.append({"type": "group", "column": g, "summary": f"Group by {field_of(g)}"})
+        _op = {"type": "group", "column": g, "summary": f"Group by {field_of(g)}"}
+        # which table the grouping column belongs to: a JOINED parent's display column
+        # ("name" of the asset type) is ambiguous as a bare name once remembered — several
+        # parents have a `name` — and a follow-up could not rebuild the grouping (2026-09-27)
+        if ir.get("column_tables", {}).get(g):
+            _op["table"] = ir["column_tables"][g]
+        operations.append(_op)
     for col, desc in ir["orderings"]:
         operations.append({"type": "sort", "summary": f"Sort by {label_of(col)} ({'highest' if desc else 'lowest'} first)"})
     if ir["limit"] is not None:

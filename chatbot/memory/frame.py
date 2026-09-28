@@ -24,7 +24,6 @@ Nothing here is ever an LLM's free invention.
 from __future__ import annotations
 
 import datetime as _dt
-import json
 import logging
 import re
 from typing import Any, Dict, List, Optional, TypedDict
@@ -284,6 +283,15 @@ def harvest_frame(engine_result: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     group_by = [op.get("column") or op["summary"][len("Group by "):]
                 for op in operations
                 if op.get("type") == "group" and op.get("summary", "").startswith("Group by ")]
+    # A grouping on a JOINED table is remembered qualified ("assets_assettype.name"): a bare
+    # parent display column is ambiguous when replayed (the continuity lane declined
+    # "top 3" after "break that down by property type", 2026-09-27). Anchor columns stay bare.
+    _answered = engine_result.get("table")
+    group_by = [
+        (f"{op['table']}.{op['column']}" if op.get("table") and op.get("column")
+         and _answered and op["table"] != _answered else g)
+        for op, g in zip([o for o in operations if o.get("type") == "group"
+                          and o.get("summary", "").startswith("Group by ")], group_by)]
 
     # WHICH aggregate the previous turn computed. Without it, replaying a remembered shape
     # has to assume one, and assuming SUM turned a COUNT(DISTINCT id) distribution into
@@ -438,6 +446,26 @@ def _harvest_scope(engine_result: Dict[str, Any]) -> List[int]:
 
 
 # ── M4: the IR stack ──────────────────────────────────────────────────────────
+def _harvest_agent(engine_result: Dict[str, Any], question: str) -> Optional[Dict[str, Any]]:
+    """The agent section of an agent-planned answer → {plan, log, question}.
+
+    Over the wire it arrives as `agent_memory` (inference/routes/hybrid.py::_agent_memory
+    lifts it out of the debug trace, which that boundary strips); an in-process result
+    still carries the trace itself."""
+    try:
+        sec = engine_result.get("agent_memory")
+        if not isinstance(sec, dict):
+            sec = (((engine_result.get("trace") or {}).get("sections") or {}).get("agent") or {})
+    except Exception:
+        return None
+    if sec.get("kind") != "sql" or not sec.get("draft"):
+        return None
+    log = [{"tool": c.get("tool"), "args": c.get("args") or {}, "result": c.get("result") or {}}
+           for c in (sec.get("tool_calls") or []) if isinstance(c, dict) and c.get("tool")]
+    return {"plan": sec["draft"], "log": log[-12:],
+            "question": str(sec.get("question") or question or "")[:300]}
+
+
 def harvest_entry(engine_result: Dict[str, Any], question: str,
                   turn_index: int) -> Optional[FrameEntry]:
     """One answered engine_result → a FrameEntry. Pure extraction, no LLM.
@@ -479,6 +507,9 @@ def harvest_entry(engine_result: Dict[str, Any], question: str,
     cols = list(engine_result.get("cols") or [])
     return {
         "ir": engine_result.get("ir"),
+        # a turn the planner agent answered: its plan (draft form) + tool log, so the
+        # next turn edits the plan instead of re-planning (veda/agent/, frame_path)
+        **({"agent": _ag} if (_ag := _harvest_agent(engine_result, question)) else {}),
         "scope": _harvest_scope(engine_result),
         "result": {
             "row_count": (len(rows) if isinstance(rows, list) else an.get("row_count")),
@@ -498,6 +529,108 @@ def harvest_entry(engine_result: Dict[str, Any], question: str,
         "question": str(question or "")[:300],
         "sql": engine_result.get("sql"),
     }
+
+
+# ── compound turns: one message, N parts, one stack entry per ANSWERED part ───────
+def compound_parts_from_payload(result: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """The parts of a compound MultiResult as it crossed the wire ({compound: true,
+    items: [{part, outcome, lane, source_id, result: {...}}]}). One dict per part, in
+    part order: {index, part, outcome, lane, source_id, answer, result}."""
+    out: List[Dict[str, Any]] = []
+    for i, it in enumerate((result or {}).get("items") or []):
+        if not isinstance(it, dict):
+            continue
+        res = it.get("result") if isinstance(it.get("result"), dict) else {}
+        fb = res.get("feedback") if isinstance(res.get("feedback"), dict) else {}
+        out.append({
+            "index": i,
+            "part": it.get("part") or it.get("sub_query") or "",
+            "outcome": it.get("outcome") or ("answered" if it.get("status") == "ok" else "refused"),
+            "lane": it.get("lane"),
+            "source_id": it.get("source_id") or res.get("source_id"),
+            "answer": res.get("answer") or fb.get("text") or it.get("refuse_reason") or "",
+            "result": res,
+        })
+    return out
+
+
+def _part_as_engine_result(p: Dict[str, Any]) -> Dict[str, Any]:
+    """One answered part in the single-turn engine_result shape harvest_* reads."""
+    res = dict(p.get("result") or {})
+    res["status"] = "answered"
+    if p.get("source_id") is not None:
+        res.setdefault("source_id", p["source_id"])
+    return res
+
+
+def harvest_compound_entries(parts: List[Dict[str, Any]], turn_index: int) -> List[FrameEntry]:
+    """One FrameEntry per ANSWERED part of a compound turn, in part order. Each entry
+    carries its own `source_id`, the part it answered, and `flat` — the flat-frame facts
+    of that part — so a later "the vendor one — top 3" can move the whole conversation
+    onto that part (its entity, its source), not just the cursor."""
+    out: List[FrameEntry] = []
+    for p in parts:
+        if p.get("outcome") != "answered":
+            continue
+        er = _part_as_engine_result(p)
+        e = harvest_entry(er, p.get("part") or "", turn_index)
+        if e is None:
+            continue
+        flat = harvest_frame(er) or {}
+        e["source_id"] = p.get("source_id")
+        e["part_index"] = p.get("index")
+        e["compound_turn"] = turn_index
+        e["lane"] = p.get("lane")
+        e["entity"] = flat.get("entity") or er.get("table")
+        e["entity_display"] = flat.get("entity_display")
+        if flat:
+            flat = dict(flat)
+            flat["source_id"] = p.get("source_id")
+            e["flat"] = flat
+        out.append(e)
+    return out
+
+
+def push_entries(stack: List[FrameEntry], entries: List[FrameEntry]) -> List[FrameEntry]:
+    out = list(stack or [])
+    for e in entries:
+        out = push_entry(out, e)
+    return out
+
+
+def describe_parts(entries: List[FrameEntry]) -> str:
+    """The context strip for a compound turn: one short label per answered part."""
+    bits = []
+    for e in entries:
+        lab = describe_ir(e.get("ir") or {}) or str(e.get("entity_display") or e.get("document")
+                                                     or e.get("question") or "")[:60]
+        if lab:
+            bits.append(f"{(e.get('part_index') or 0) + 1}: {lab}")
+    return " | ".join(bits)
+
+
+def switch_to_entry(frame: QueryFrame, index: int) -> QueryFrame:
+    """Point the conversation at stack entry `index`: the cursor moves there, and when
+    the entry carries its own flat facts (a compound part) the flat frame follows — its
+    entity, filters and SOURCE — so the next turn runs on that part, not on the last."""
+    st = list((frame or {}).get("stack") or [])
+    if not st or not (-len(st) <= index < len(st)):
+        return frame
+    e = st[index]
+    out = {**(frame or {}), "cursor": index}
+    flat = e.get("flat") or {}
+    for k in ("entity", "entity_display", "filters", "group_by", "aggregation", "measures",
+              "available_measures", "order_by", "limit", "route", "understanding"):
+        if k in flat:
+            out[k] = flat[k]
+    if e.get("source_id") is not None:
+        try:
+            sid = int(e["source_id"])
+            out["source_id"], out["source_ids"], out["primary_source_id"] = sid, [sid], sid
+        except (TypeError, ValueError):
+            pass
+    out["base_query"] = e.get("question") or out.get("base_query")
+    return out
 
 
 def _compact_entry(entry: FrameEntry) -> FrameEntry:
@@ -575,115 +708,6 @@ def describe_ir(ir: Optional[Dict[str, Any]]) -> str:
     if ir.get("limit"):
         parts.append(f"top {ir['limit']}" + (f" by {order['column']}" if order.get("column") else ""))
     return " · ".join(p for p in parts if p)
-
-
-def compact_stack(frame: Optional[QueryFrame], max_entries: int = 10) -> List[Dict[str, Any]]:
-    """The stack as the SLM classifier sees it — ≤ ~250 tokens per entry.
-
-    Only what a classifier needs to pick a TARGET and an OP: what each turn asked, which
-    slots it has, and which dimensions/measures are available to move to. Never rows,
-    never SQL, never the prose answer."""
-    out = []
-    for i, e in enumerate(list((frame or {}).get("stack") or [])[-max_entries:]):
-        ir = e.get("ir") or {}
-        opts = e.get("drill_options") or {}
-        out.append({
-            "index": i,
-            "asked": e.get("question"),
-            "about": describe_ir(ir) or (ir.get("anchor") or ""),
-            "rows": (e.get("result") or {}).get("row_count"),
-            "can_group_by": list(opts.get("dimensions") or [])[:6],
-            "can_measure": list(opts.get("measures") or [])[:4],
-        })
-    return out
-
-
-def apply_delta(ir: Optional[Dict[str, Any]], delta: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    """The previous turn's IR + one delta → the NEXT turn's IR. Pure dict surgery.
-
-    This is the core of M4: a follow-up edits a SLOT of a structured question, instead of
-    the server re-deriving the whole intent from a restated English sentence. Only the
-    named slot changes; every other slot — anchor, scope, the filters already applied —
-    carries forward untouched, which is exactly the property the sentence-restatement
-    path could not guarantee.
-
-    Returns None when there is nothing to edit; the caller then falls back.
-    """
-    if not ir:
-        return None
-    nxt = json.loads(json.dumps(ir, default=str))     # deep copy, JSON-safe throughout
-    op = delta.get("op")
-    concept, value = delta.get("concept"), delta.get("value")
-
-    if op == "add_filter" and concept:
-        fs = [f for f in (nxt.get("filters") or []) if f.get("column") != concept]
-        fs.append({"table": nxt.get("anchor"), "column": concept, "op": "=",
-                   "value": value, "grounding": "session_top_values", "concept": concept})
-        nxt["filters"] = fs
-    elif op == "change_group" and concept:
-        # REPLACES the grouping rather than appending: "by city instead" means instead.
-        nxt["group_keys"] = [concept]
-    elif op == "change_measure":
-        agg = value or "count"
-        nxt["measure"] = {"aggregation": agg, "column": concept,
-                          "table": nxt.get("anchor"), "distinct": False}
-    elif op == "change_order":
-        if isinstance(value, int):
-            nxt["limit"] = value
-        if concept:
-            nxt["order"] = {"column": concept,
-                            "direction": (nxt.get("order") or {}).get("direction") or "desc"}
-    else:
-        return None
-    nxt["head"] = "session_delta"
-    return nxt
-
-
-_AGG_PHRASE = {"count": "how many", "sum": "total", "avg": "average",
-               "min": "minimum", "max": "maximum"}
-
-
-def ir_to_question(ir: Optional[Dict[str, Any]]) -> str:
-    """A modified IR → an English question the engine can answer.
-
-    The engine has no compile-from-IR entry point yet (M3 checkpoint 2), so the IR is
-    restated as text and the engine re-grounds it exactly as it would any question. That
-    is deliberate: this changes WHERE the next question's structure comes from — the
-    previous turn's validated slots rather than a paraphrase of its English — without
-    bypassing a single one of the engine's own grounding or firewall checks.
-
-    Built purely from slots; it never copies the user's sentence, so it cannot carry a
-    pronoun the engine would have to resolve.
-    """
-    if not ir:
-        return ""
-    anchor = str(ir.get("anchor") or "").replace("_", " ").strip()
-    m = ir.get("measure") or {}
-    agg = str(m.get("aggregation") or "").lower()
-    col = m.get("column")
-
-    if agg in ("count", "") or not agg:
-        head = f"how many {anchor}" if anchor else "how many"
-    else:
-        phrase = _AGG_PHRASE.get(agg, agg)
-        head = (f"{phrase} {str(col).replace('_', ' ')}" if col else f"{phrase}")
-        if anchor:
-            head += f" of {anchor}"
-
-    parts = [head]
-    fs = [f for f in (ir.get("filters") or []) if f.get("column") and f.get("value") is not None]
-    if fs:
-        parts.append("where " + " and ".join(
-            f"{str(f['column']).replace('_', ' ')} is {f['value']}" for f in fs[:4]))
-    if ir.get("group_keys"):
-        parts.append("per " + ", ".join(str(g).replace("_", " ") for g in ir["group_keys"][:2]))
-    order = ir.get("order") or {}
-    if ir.get("limit"):
-        q = f"top {ir['limit']}"
-        if order.get("column"):
-            q += f" by {str(order['column']).replace('_', ' ')}"
-        parts.append(q)
-    return " ".join(parts).strip()
 
 
 def follow_up_questions(entry: Optional[FrameEntry], limit: int = 3) -> List[str]:

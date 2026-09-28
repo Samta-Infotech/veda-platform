@@ -1,0 +1,624 @@
+[
+ {
+  "id": "12a",
+  "label": "wrong",
+  "source": "2",
+  "question": "show recent ticket activities and updates with their ticket categories and numbers",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "worklists_ticket",
+    "assets_assetgroup",
+    "worklists_ticketupdate",
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "joins": [
+    {
+     "from": "worklists_ticket",
+     "to": "assets_asset",
+     "on": [
+      [
+       "asset_id",
+       "id"
+      ]
+     ],
+     "via": "r1",
+     "kind": "declared",
+     "cardinality": "N:1"
+    },
+    {
+     "from": "assets_asset",
+     "to": "assets_assettype",
+     "on": [
+      [
+       "asset_type_id",
+       "id"
+      ]
+     ],
+     "via": "r1",
+     "kind": "declared",
+     "cardinality": "N:1"
+    },
+    {
+     "from": "assets_assettype",
+     "to": "assets_assetgroup",
+     "on": [
+      [
+       "asset_group_id",
+       "id"
+      ]
+     ],
+     "via": "r1",
+     "kind": "declared",
+     "cardinality": "N:1"
+    },
+    {
+     "from": "worklists_ticketupdate",
+     "to": "worklists_ticket",
+     "on": [
+      [
+       "ticket_id",
+       "id"
+      ]
+     ],
+     "via": "r2",
+     "kind": "declared",
+     "cardinality": "N:1"
+    }
+   ],
+   "projection": [
+    {
+     "table": "worklists_ticket",
+     "column": "title"
+    },
+    {
+     "table": "worklists_ticket",
+     "column": "id"
+    },
+    {
+     "table": "assets_assetgroup",
+     "column": "name"
+    },
+    {
+     "table": "worklists_ticketupdate",
+     "column": "title"
+    },
+    {
+     "table": "worklists_ticketupdate",
+     "column": "end_date"
+    },
+    {
+     "table": "worklists_ticket",
+     "column": "updated_by_id"
+    }
+   ],
+   "filters": [],
+   "group_by": [],
+   "aggregates": [],
+   "order": [
+    {
+     "expr": "worklists_ticket.updated_by_id",
+     "dir": "desc"
+    }
+   ],
+   "limit": null,
+   "distinct": false,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c2",
+     "c3",
+     "c4",
+     "c5",
+     "c7"
+    ],
+    "slots": {
+     "table:worklists_ticket": "c1",
+     "table:assets_assetgroup": "c1",
+     "table:worklists_ticketupdate": "c1",
+     "table:assets_asset": "c2",
+     "table:assets_assettype": "c4",
+     "join:r1": "c4",
+     "join:r2": "c7",
+     "select:worklists_ticket.title": "c2",
+     "select:worklists_ticket.id": "c2",
+     "select:assets_assetgroup.name": "c3",
+     "select:worklists_ticketupdate.title": "c5",
+     "select:worklists_ticketupdate.end_date": "c5"
+    }
+   },
+   "confidence": 0.75,
+   "open_questions": [],
+   "notes": [
+    "joined through assets_asset",
+    "joined through assets_assettype",
+    "row limit 5 not in the question \u2014 dropped"
+   ]
+  },
+  "sql": "SELECT t0.\"title\", t0.\"id\", t3.\"name\", t4.\"title\" AS \"ticketupdate_title\", t4.\"end_date\", t0.\"updated_by_id\" FROM \"worklists_ticket\" t0 JOIN \"assets_asset\" t1 ON t1.\"id\" = t0.\"asset_id\" JOIN \"assets_assettype\" t2 ON t2.\"id\" = t1.\"asset_type_id\" JOIN \"assets_assetgroup\" t3 ON t3.\"id\" = t2.\"asset_group_id\" JOIN \"worklists_ticketupdate\" t4 ON t4.\"ticket_id\" = t0.\"id\" ORDER BY t0.\"updated_by_id\" DESC NULLS LAST, t0.\"id\" DESC LIMIT 100"
+ },
+ {
+  "id": "15a",
+  "label": "wrong",
+  "source": "2",
+  "question": "What are the total space counts and furnishing details for different asset types across properties",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "assets_asset",
+    "assets_assettype"
+   ],
+   "joins": [
+    {
+     "from": "assets_asset",
+     "to": "assets_assettype",
+     "on": [
+      [
+       "asset_type_id",
+       "id"
+      ]
+     ],
+     "via": "r1",
+     "kind": "declared",
+     "cardinality": "N:1"
+    }
+   ],
+   "projection": [],
+   "filters": [],
+   "group_by": [
+    {
+     "table": "assets_assettype",
+     "column": "name"
+    }
+   ],
+   "aggregates": [
+    {
+     "fn": "sum",
+     "table": "assets_asset",
+     "column": "carpet_area",
+     "alias": "sum_carpet_area",
+     "ref": "agg1"
+    }
+   ],
+   "order": [
+    {
+     "expr": "sum_carpet_area",
+     "dir": "desc"
+    }
+   ],
+   "limit": null,
+   "distinct": false,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c3",
+     "c4"
+    ],
+    "slots": {
+     "table:assets_asset": "c1",
+     "table:assets_assettype": "c1",
+     "join:r1": "c4",
+     "group_by:assets_assettype.name": "c3"
+    }
+   },
+   "confidence": 0.9,
+   "open_questions": [],
+   "notes": []
+  },
+  "sql": "SELECT t1.\"name\", SUM(t0.\"carpet_area\") AS \"sum_carpet_area\" FROM \"assets_asset\" t0 JOIN \"assets_assettype\" t1 ON t1.\"id\" = t0.\"asset_type_id\" GROUP BY t1.\"name\" ORDER BY \"sum_carpet_area\" DESC NULLS LAST LIMIT 100"
+ },
+ {
+  "id": "16a",
+  "label": "wrong",
+  "source": "2",
+  "question": "who are the assigned users handling tickets across different ticket categories",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "users_user",
+    "worklists_ticket"
+   ],
+   "joins": [
+    {
+     "from": "worklists_ticket",
+     "to": "users_user",
+     "on": [
+      [
+       "created_by_id",
+       "id"
+      ]
+     ],
+     "via": "r1",
+     "kind": "declared",
+     "cardinality": "N:1"
+    }
+   ],
+   "projection": [
+    {
+     "table": "users_user",
+     "column": "email"
+    },
+    {
+     "table": "worklists_ticket",
+     "column": "title"
+    }
+   ],
+   "filters": [],
+   "group_by": [
+    {
+     "table": "users_user",
+     "column": "id"
+    }
+   ],
+   "aggregates": [
+    {
+     "fn": "count",
+     "table": "worklists_ticket",
+     "column": "id",
+     "alias": "count_id",
+     "ref": "agg1"
+    }
+   ],
+   "order": [
+    {
+     "expr": "count_id",
+     "dir": "desc"
+    }
+   ],
+   "limit": null,
+   "distinct": false,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c2",
+     "c3",
+     "c4"
+    ],
+    "slots": {
+     "table:users_user": "c1",
+     "table:worklists_ticket": "c1",
+     "join:r1": "c4",
+     "select:users_user.email": "c2",
+     "select:worklists_ticket.title": "c3",
+     "group_by:users_user.id": "c2"
+    }
+   },
+   "confidence": 0.9,
+   "open_questions": [],
+   "notes": []
+  },
+  "sql": "SELECT t0.\"id\", COUNT(t1.\"id\") AS \"count_id\" FROM \"users_user\" t0 JOIN \"worklists_ticket\" t1 ON t1.\"created_by_id\" = t0.\"id\" GROUP BY t0.\"id\" ORDER BY \"count_id\" DESC NULLS LAST LIMIT 100"
+ },
+ {
+  "id": "17a",
+  "label": "wrong",
+  "source": "2",
+  "question": "What are the banking and employment details for registered users with verified addresses",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "users_user"
+   ],
+   "joins": [],
+   "projection": [
+    {
+     "table": "users_user",
+     "column": "email"
+    },
+    {
+     "table": "users_user",
+     "column": "first_name"
+    },
+    {
+     "table": "users_user",
+     "column": "last_name"
+    },
+    {
+     "table": "users_user",
+     "column": "phone_code"
+    },
+    {
+     "table": "users_user",
+     "column": "phone_number"
+    },
+    {
+     "table": "users_user",
+     "column": "emergency_contact_phone_code"
+    }
+   ],
+   "filters": [],
+   "group_by": [],
+   "aggregates": [],
+   "order": [],
+   "limit": null,
+   "distinct": true,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c2",
+     "c5"
+    ],
+    "slots": {
+     "table:users_user": "c1",
+     "select:users_user.email": "c2",
+     "select:users_user.first_name": "c2",
+     "select:users_user.last_name": "c2",
+     "select:users_user.phone_code": "c5",
+     "select:users_user.phone_number": "c5",
+     "select:users_user.emergency_contact_phone_code": "c5"
+    }
+   },
+   "confidence": 0.75,
+   "open_questions": [],
+   "notes": []
+  },
+  "sql": "SELECT DISTINCT t0.\"email\", t0.\"first_name\", t0.\"last_name\", t0.\"phone_code\", t0.\"phone_number\", t0.\"emergency_contact_phone_code\" FROM \"users_user\" t0 LIMIT 100"
+ },
+ {
+  "id": "19a",
+  "label": "wrong",
+  "source": "2",
+  "question": "which service plans have the highest subscriber counts among users",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "services_serviceplan",
+    "users_user"
+   ],
+   "joins": [
+    {
+     "from": "services_serviceplan",
+     "to": "users_user",
+     "on": [
+      [
+       "created_by_id",
+       "id"
+      ]
+     ],
+     "via": "r1",
+     "kind": "declared",
+     "cardinality": "N:1"
+    }
+   ],
+   "projection": [
+    {
+     "table": "services_serviceplan",
+     "column": "name"
+    },
+    {
+     "table": "users_user",
+     "column": "email"
+    },
+    {
+     "table": "users_user",
+     "column": "id"
+    }
+   ],
+   "filters": [],
+   "group_by": [
+    {
+     "table": "services_serviceplan",
+     "column": "name"
+    }
+   ],
+   "aggregates": [
+    {
+     "fn": "count",
+     "table": "services_serviceplan",
+     "column": null,
+     "alias": "count",
+     "ref": "agg1"
+    }
+   ],
+   "order": [
+    {
+     "expr": "count",
+     "dir": "desc"
+    }
+   ],
+   "limit": null,
+   "distinct": true,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c2",
+     "c3",
+     "c4"
+    ],
+    "slots": {
+     "table:services_serviceplan": "c1",
+     "table:users_user": "c1",
+     "join:r1": "c4",
+     "select:services_serviceplan.name": "c3",
+     "select:users_user.email": "c2",
+     "select:users_user.id": "c2",
+     "group_by:services_serviceplan.name": "c3"
+    }
+   },
+   "confidence": 0.9,
+   "open_questions": [],
+   "notes": [
+    "row limit 5 not in the question \u2014 dropped"
+   ]
+  },
+  "sql": "SELECT t0.\"name\", COUNT(*) AS \"count\" FROM \"services_serviceplan\" t0 JOIN \"users_user\" t1 ON t1.\"id\" = t0.\"created_by_id\" GROUP BY t0.\"name\" ORDER BY \"count\" DESC NULLS LAST LIMIT 100"
+ },
+ {
+  "id": "20c",
+  "label": "wrong",
+  "source": "2",
+  "question": "how many amenity categories are there",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "assets_amenitycategory"
+   ],
+   "joins": [],
+   "projection": [
+    {
+     "table": "assets_amenitycategory",
+     "column": "id"
+    }
+   ],
+   "filters": [],
+   "group_by": [
+    {
+     "table": "assets_amenitycategory",
+     "column": "id"
+    }
+   ],
+   "aggregates": [
+    {
+     "fn": "count_distinct",
+     "table": "assets_amenitycategory",
+     "column": "id",
+     "alias": "count_distinct_id",
+     "ref": "agg1"
+    }
+   ],
+   "order": [],
+   "limit": null,
+   "distinct": true,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c5"
+    ],
+    "slots": {
+     "table:assets_amenitycategory": "c1",
+     "select:assets_amenitycategory.id": "c5",
+     "group_by:assets_amenitycategory.id": "c5"
+    }
+   },
+   "confidence": 0.9,
+   "open_questions": [],
+   "notes": []
+  },
+  "sql": "SELECT t0.\"id\", COUNT(DISTINCT t0.\"id\") AS \"count_distinct_id\" FROM \"assets_amenitycategory\" t0 GROUP BY t0.\"id\" ORDER BY \"count_distinct_id\" DESC NULLS LAST LIMIT 100"
+ },
+ {
+  "id": "13a",
+  "label": "correct",
+  "source": "2",
+  "question": "What is the total general ledger accounting amount recorded per property project and ledger category",
+  "plan": {
+   "kind": "sql",
+   "source_id": "2",
+   "tables": [
+    "assets_project",
+    "accounts_generalledgercategory",
+    "assets_asset",
+    "accounts_generalledger"
+   ],
+   "joins": [
+    {
+     "from": "assets_asset",
+     "to": "assets_project",
+     "on": [
+      [
+       "project_id",
+       "id"
+      ]
+     ],
+     "via": "r4",
+     "kind": "declared",
+     "cardinality": "N:1"
+    },
+    {
+     "from": "accounts_generalledger",
+     "to": "assets_asset",
+     "on": [
+      [
+       "asset_id",
+       "id"
+      ]
+     ],
+     "via": "r4",
+     "kind": "declared",
+     "cardinality": "N:1"
+    },
+    {
+     "from": "accounts_generalledger",
+     "to": "accounts_generalledgercategory",
+     "on": [
+      [
+       "account_type_id",
+       "id"
+      ]
+     ],
+     "via": "r4",
+     "kind": "declared",
+     "cardinality": "N:1"
+    }
+   ],
+   "projection": [],
+   "filters": [],
+   "group_by": [
+    {
+     "table": "assets_project",
+     "column": "name"
+    },
+    {
+     "table": "accounts_generalledgercategory",
+     "column": "name"
+    }
+   ],
+   "aggregates": [
+    {
+     "fn": "sum",
+     "table": "accounts_generalledger",
+     "column": "amount",
+     "alias": "sum_amount",
+     "ref": "agg1"
+    }
+   ],
+   "order": [
+    {
+     "expr": "sum_amount",
+     "dir": "desc"
+    }
+   ],
+   "limit": null,
+   "distinct": false,
+   "time": null,
+   "evidence": {
+    "tool_call_ids": [
+     "c1",
+     "c2",
+     "c3",
+     "c4",
+     "c6"
+    ],
+    "slots": {
+     "table:assets_project": "c1",
+     "table:accounts_generalledgercategory": "c3",
+     "table:assets_asset": "c1",
+     "table:accounts_generalledger": "c1",
+     "join:r4": "c6",
+     "group_by:assets_project.name": "c2",
+     "group_by:accounts_generalledgercategory.name": "c4"
+    }
+   },
+   "confidence": 0.9,
+   "open_questions": [],
+   "notes": [
+    "joined through assets_asset",
+    "joined through accounts_generalledger"
+   ]
+  },
+  "sql": "SELECT t0.\"name\", t3.\"name\" AS \"generalledgercategory_name\", SUM(t2.\"amount\") AS \"sum_amount\" FROM \"assets_project\" t0 JOIN \"assets_asset\" t1 ON t1.\"project_id\" = t0.\"id\" JOIN \"accounts_generalledger\" t2 ON t2.\"asset_id\" = t1.\"id\" JOIN \"accounts_generalledgercategory\" t3 ON t3.\"id\" = t2.\"account_type_id\" GROUP BY t0.\"name\", t3.\"name\" ORDER BY \"sum_amount\" DESC NULLS LAST LIMIT 100"
+ }
+]

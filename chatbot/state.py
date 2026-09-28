@@ -75,7 +75,9 @@ class ChatState(TypedDict, total=False):
                                        # list_of_values_listofvalue at 0.1503 vs 0.1502, then an
                                        # "ambiguous subject" clarify). {} / None = same as before.
     # ── supervisor decision ─────────────────────────────────────────────────
-    action: str                        # "smalltalk" | "answer" | "clarify" | "followup"
+    action: str                        # "smalltalk" | "answer" | "followup" | "clarify_reply" |
+                                       # "recall" | "represent" | "reset" | "no_match" |
+                                       # "runtime_context" — see chatbot/graph.py::_route_after_classify
     resolved_query: str                # the query actually sent to the engine
                                        # (== message, or message merged with prior context)
 
@@ -140,3 +142,29 @@ class ChatState(TypedDict, total=False):
     # evidence). Previously written every turn but never read anywhere —
     # dead code; now actually consumed.
     episodic: List[Dict[str, str]]
+    # Session-wide ComparisonContext (MemoryStore.read_comparison), loaded by
+    # memory_read_node, continued by context_resolve_node, rebuilt by memory_write_node.
+    comparison: Dict[str, Any]
+    # The source whose Redis key memory_read_node actually loaded `frame` from — NOT
+    # necessarily source_ids[0] (see memory_read_node). memory_write_node applies the
+    # frame's optimistic version check only when it writes back to this same key.
+    memory_source_id: Optional[str]
+
+    # ── chat → engine contract ──────────────────────────────────────────────
+    # The structured context (chatbot/memory/context.py::ConversationContext.to_payload)
+    # that call_engine_node sends as flags["conversation_context"]. Built by
+    # context_resolve_node; reset to None every turn by classify, so a route that skips
+    # context_resolve (first turn, clarify_reply, runtime_context) sends none rather than
+    # the previous turn's. Undeclared, LangGraph dropped it and every turn sent flags=None.
+    conversation_context: Optional[Dict[str, Any]]
+
+    # ── Turn Entry Gate reporting (nodes.py::classify_with_entry_gate) ───────
+    # Read by chatbot/run.py into the turn response and from there into
+    # apps/chat/services.py's last_audit.
+    entry_path: str                    # "L0_DIRECT" | "L0_FASTPATH" | "SLM_GATE"
+    classification_latency_ms: float
+    requires_veda: bool
+    requires_context: bool
+
+    # A compound turn's parts, one per sub-question, set by format_reply_node.
+    parts: List[Dict[str, Any]]

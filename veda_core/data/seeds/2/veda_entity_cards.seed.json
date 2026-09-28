@@ -1,0 +1,114 @@
+{
+  "_about": "TRACKED seed: human-curated entity-card fields for source 2 (homzhub), layered OVER the SLM/deterministic draft by ingestion/vocabulary.py (seed wins per field; aliases are unioned, seed first). Edit THIS file, not data/default/2/veda_entity_cards.json (a reingest rewrites that one).",
+  "_why_payments": "REVERTED 2026-09-25 (validation pass, Step 3.1): 'payment(s)' is the vocabulary of accounts_paymenttransaction; the ledger is 'ledger / accounting entry, posting, financial record'. The external set's ground truth answers its 'payments' questions (Q1, Q4, Q10, Q12, Q16, Q19) from accounts_generalledger \u2014 that is recorded in reports/VEDA_FRAME_VALIDATION_2026-09-25.md as a DISAGREEMENT WITH THE TEST, not encoded as vocabulary. When a question genuinely says 'payments' and both tables could host it, the grounding's ambiguity rule clarifies.",
+  "_why_no_active": "'active' is deliberately NOT an APPROVED phrase (see veda_value_aliases.seed.json and question 13 of the external set): the honest answer to 'listings with an active status' names the real domain APPROVED / DRAFT / CANCELLED.",
+  "accounts_generalledger": {
+    "business_name": "ledger entry",
+    "plural": "ledger entries",
+    "aliases": [
+      "accounting entry",
+      "accounting entries",
+      "ledger record",
+      "ledger records",
+      "financial record",
+      "financial records",
+      "financial log",
+      "financial logs",
+      "ledger",
+      "posting",
+      "postings",
+      "transaction entry"
+    ],
+    "one_row_is": "one debit or credit posted to the general ledger for a property",
+    "business_date_column": "transaction_date",
+    "lifecycle_column": "entry_type",
+    "key_measures": [
+      "amount",
+      "base_amount"
+    ],
+    "display_column": "label",
+    "distinguishes_from": {
+      "accounts_paymenttransaction": "a ledger entry is a debit or credit posted in the accounts; a payment transaction is a gateway payment"
+    }
+  },
+  "assets_salelisting": {
+    "business_name": "sale listing",
+    "plural": "sale listings",
+    "aliases": [
+      "listing",
+      "listings",
+      "property for sale",
+      "properties for sale",
+      "property on the market",
+      "properties on the market",
+      "sale listing"
+    ],
+    "one_row_is": "one property put up for sale, with its asking price and listing status",
+    "business_date_column": "created_at",
+    "lifecycle_column": "status",
+    "key_measures": [
+      "expected_price",
+      "expected_booking_amount",
+      "total_views"
+    ],
+    "display_column": null,
+    "distinguishes_from": {
+      "assets_saletransaction": "a sale listing is the advert putting a property up for sale; a sale transaction is the completed deal"
+    }
+  },
+  "assets_asset": {
+    "business_name": "property",
+    "plural": "properties",
+    "aliases": [
+      "asset",
+      "assets",
+      "unit",
+      "units",
+      "building",
+      "buildings"
+    ],
+    "one_row_is": "one property (a building, flat or unit) managed on the platform",
+    "business_date_column": "created_at",
+    "display_column": "project_name",
+    "lifecycle_column": null,
+    "key_measures": [
+      "carpet_area",
+      "total_floors"
+    ]
+  },
+  "accounts_paymenttransaction": {
+    "business_name": "payment transaction",
+    "plural": "payment transactions",
+    "aliases": [
+      "payment",
+      "payments",
+      "payment record",
+      "payment records",
+      "gateway payment",
+      "online payment",
+      "payment attempt"
+    ],
+    "business_date_column": "payment_date",
+    "key_measures": [
+      "paid_amount",
+      "expected_amount",
+      "balance_amount",
+      "late_fee"
+    ],
+    "lifecycle_column": null,
+    "distinguishes_from": {
+      "accounts_paymenttransactionsettlement": "a payment transaction is an attempt to pay; a settlement is the money actually received",
+      "accounts_generalledger": "a payment transaction is a gateway payment; a ledger entry is a debit or credit posted in the accounts"
+    }
+  },
+  "assets_saletransaction": {
+    "distinguishes_from": {
+      "assets_salelisting": "a sale transaction is the completed deal; a sale listing is only the advert"
+    }
+  },
+  "accounts_paymenttransactionsettlement": {
+    "distinguishes_from": {
+      "accounts_paymenttransaction": "a settlement is the money actually received; a payment transaction is the attempt"
+    }
+  }
+}

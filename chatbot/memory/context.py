@@ -77,11 +77,20 @@ class ConversationContext:
     aggregation: str = ""          # which aggregate the previous turn computed
     route: str = ""
     drill_depth: int = 0
+    # the planner agent's remembered plan (draft form), its tool log and the question it
+    # answered — only when the previous turn was agent-planned (veda/agent/)
+    agent_plan: Optional[Dict[str, Any]] = None
+    agent_log: List[Dict[str, Any]] = _dc_field(default_factory=list)
+    agent_question: str = ""
+    # THIS turn's delta on the previous query, as the chat tier decided it (wire_delta) —
+    # the engine's continuity lane applies it structurally (veda/understanding/continuity.py)
+    delta: Optional[Dict[str, Any]] = None
 
     # ── construction ────────────────────────────────────────────────────────────────
     @classmethod
     def from_frame(cls, frame: Optional[Dict[str, Any]], user_message: str,
-                   *, carry_state: bool = True) -> "ConversationContext":
+                   *, carry_state: bool = True,
+                   delta: Optional[Dict[str, Any]] = None) -> "ConversationContext":
         """Build from the frame AS IT STANDS AFTER the delta was applied.
 
         `carry_state=False` is the new-topic case: the message is self-contained, so no
@@ -130,7 +139,20 @@ class ConversationContext:
         except (TypeError, ValueError):
             src = None
 
+        _ag = None
+        try:
+            _stack = list(frame.get("stack") or [])
+            _cur = frame.get("cursor", -1)
+            _top = (_stack[_cur] if isinstance(_cur, int) and -len(_stack) <= _cur < len(_stack)
+                    else (_stack[-1] if _stack else None))
+            _ag = (_top or {}).get("agent") if isinstance(_top, dict) else None
+        except Exception:
+            _ag = None
         return cls(
+            delta=dict(delta) if delta else None,
+            agent_plan=(_ag or {}).get("plan") if isinstance(_ag, dict) else None,
+            agent_log=list((_ag or {}).get("log") or []) if isinstance(_ag, dict) else [],
+            agent_question=str((_ag or {}).get("question") or "") if isinstance(_ag, dict) else "",
             user_message=user_message,
             entity_table=(frame.get("entity") or None),
             source_id=src,
@@ -173,9 +195,76 @@ class ConversationContext:
             payload["route"] = self.route
         if self.drill_depth:
             payload["drill_depth"] = self.drill_depth
+        if self.delta and self.entity_table:
+            payload["delta"] = dict(self.delta)
+        if self.agent_plan:
+            payload["agent_plan"] = dict(self.agent_plan)
+            payload["agent_log"] = list(self.agent_log)
+            payload["agent_question"] = self.agent_question
         return payload
 
     def is_empty(self) -> bool:
         """True when nothing but the message travels — i.e. there is no context to send."""
         return not (self.entity_table or self.filters or self.filter_values or self.group_by
                     or self.measures or self.order_by or self.limit is not None)
+
+
+# ── the delta on the wire ────────────────────────────────────────────────────────────
+#: ops the engine's continuity lane understands (veda/understanding/continuity.py::WIRE_OPS)
+WIRE_OPS = ("add_filter", "remove_filter", "change_group", "change_measure", "change_order",
+            "drill_up", "switch_frame", "replace", "ambiguous", "new_topic", "compare")
+
+# the classifier's delta_type vocabulary → a wire op, for turns the rule layer did not place
+_SHAPE_SLOTS = ("limit", "order_by", "group_by", "measures")
+_FROM_DELTA_TYPE = {"drill_up": "drill_up", "replace": "replace", "remove": "remove_filter",
+                    "new_topic": "new_topic", "compare": "compare"}
+
+
+def wire_delta(rule_delta: Optional[Dict[str, Any]], delta_type: Optional[str],
+               delta_field: str = "", delta_value: str = "", *, chat_applied: bool = False,
+               comparison: bool = False) -> Dict[str, Any]:
+    """THIS turn's delta, for the engine: {op, slot, concept, value, confidence, applied}.
+
+    `applied` is the double-application rule. context_resolve_node MUTATES the frame for
+    some deltas before the context is built from it — drill_up pops the drill stack,
+    switch_frame moves onto another stack entry, replace / remove (and the deterministic
+    shape deltas) go through apply_context_delta. For those the context already IS the new
+    state: `applied=True`, and the engine compiles it as-is. Every other op — the rule
+    layer's add_filter / change_group / change_measure / change_order, or `ambiguous` when
+    nothing placed the message — arrives `applied=False` and the engine applies it once.
+
+    The rule layer's own op wins when it was confident (it is grounded in the previous
+    result's values and dimensions); otherwise the classifier's delta_type is mapped, and a
+    refine / drill_down the classifier could not break into slots is `ambiguous` — the
+    engine spends its one constrained call on exactly that.
+    """
+    rd = rule_delta or {}
+    rule_ok = (rd.get("op") not in (None, "ambiguous")
+               and float(rd.get("confidence") or 0.0) >= 0.75)
+    if comparison or delta_type == "compare":
+        op = "compare"
+    elif delta_type in ("drill_up", "new_topic"):
+        op = delta_type
+    elif delta_type in ("replace", "remove") and chat_applied:
+        # a remembered FILTER removed, or any slot replaced / a shape slot (limit, order,
+        # grouping) removed: the frame already holds the result either way
+        op = ("remove_filter" if delta_type == "remove" and delta_field not in _SHAPE_SLOTS
+              else "replace")
+    elif rule_ok:
+        op = rd["op"]
+    else:
+        op = _FROM_DELTA_TYPE.get(str(delta_type or ""), "ambiguous")
+    out: Dict[str, Any] = {"op": op}
+    if op == rd.get("op") and rule_ok:
+        slot, concept, value = rd.get("slot"), rd.get("concept"), rd.get("value")
+        conf = float(rd.get("confidence") or 0.0)
+    else:
+        slot, concept, value = None, (delta_field or None), (delta_value or None)
+        conf = float(rd.get("confidence") or 0.0) if op == rd.get("op") else 0.0
+    for k, v in (("slot", slot), ("concept", concept), ("value", value)):
+        if v not in (None, ""):
+            out[k] = v if isinstance(v, (int, float)) and not isinstance(v, bool) else str(v)[:_MAX_VALUE_LEN]
+    out["confidence"] = round(conf, 3)
+    out["applied"] = bool(op in ("drill_up", "switch_frame")
+                          or (op in ("replace", "remove_filter") and chat_applied))
+    return out

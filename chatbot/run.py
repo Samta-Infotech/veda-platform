@@ -158,6 +158,8 @@ def run_chat_turn(
         "requires_veda": result.get("requires_veda"),
         "requires_context": result.get("requires_context"),
         "engine_unavailable": result.get("engine_unavailable", False),
+        # A compound turn's parts (format_reply_node), in part order; None otherwise.
+        "parts": result.get("parts"),
         "engine_result": engine_result,
     }
 

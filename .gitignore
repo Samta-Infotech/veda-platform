@@ -20,6 +20,9 @@ demo_bundle/
 .env.*
 !.env.example
 docker/userlist.txt
+reports/
+evaluation/
+logs/
 
 # Model weights & heavy artifacts — belong on a mounted volume (plan §9, §6.5)
 # (kept out of source control; mount at deploy time)

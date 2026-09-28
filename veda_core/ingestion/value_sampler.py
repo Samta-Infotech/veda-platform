@@ -693,7 +693,7 @@ def rebuild_value_index_from_db(force: bool = False) -> int:
     Returns number of terms loaded.
 
     Idempotent: once the index is loaded, repeat calls are a no-op (return the cached
-    size) — callers (nl_simplifier, retrieval_v2, …) guard on _VALUE_STORE, which this
+    size) — callers (retrieval_v2, …) guard on _VALUE_STORE, which this
     function never fills, so without this guard the column_values table was re-read on
     every query. Pass force=True to re-read after a fresh ingestion.
     """

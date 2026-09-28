@@ -1,0 +1,21 @@
+question
+Can you list the latest payments made for our properties, including whether they were debited or credited and the exact amounts?
+Show me the cheapest properties currently on the market for sale, along with their current market status.
+Which properties have the most expensive financial records logged to date?
+What were the smallest payments processed across our real estate portfolio recently?
+What are the oldest properties we put up for sale, and what is their current status?
+Give me a quick breakdown of the most recent accounting entries for our assets.
+Can I get a quick alphabetical list of our properties and the recent payments associated with them?
+Please show the financial logs ordered by property name in reverse alphabetical order.
+Which of our properties on the market are priced above 10,000?
+Are there any recent payments processed that fall between 100 and 50,000?
+Show me the top 5 most recently dated accounting entries for our assets.
+Could you pull the last 5 payment records based on their internal system processing ID?
+Which properties available for sale currently have an active status defined in the system?
+List our top most expensive properties that are currently on the market for sale.
+What were the absolute smallest financial records we've ever logged?
+Can you sort our recent payments by their respective currency configurations?
+Group our properties for sale based on their currency configuration in descending order.
+What are the oldest financial records we have on file by date?
+Which property payments were most recently modified or updated in our database?
+Show me the properties on the market that had their statuses updated most recently.

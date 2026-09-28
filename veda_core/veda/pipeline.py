@@ -209,6 +209,25 @@ def _anchor_from_sql(sql: str) -> str:
 
 def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None,
               _reentry=False, summarise=True):
+    """Run one NL→SQL→result (_run_query). The request scope the caller had is restored on
+    return: a frame-path answer owned by one source of a multi-source scope narrows the
+    ambient scope to that source for its execution, and that must not leak to the caller."""
+    _scope = _ambient_ctx()
+    try:
+        return _run_query(query, sm, all_cols, return_result=return_result,
+                          anchor_hint=anchor_hint, on_event=on_event, _reentry=_reentry,
+                          summarise=summarise)
+    finally:
+        if _scope is not None and _ambient_ctx() is not _scope:
+            try:
+                from veda_core.context import set_context as _sc
+                _sc(_scope)
+            except Exception:
+                pass
+
+
+def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_event=None,
+               _reentry=False, summarise=True):
     """Run one NL→SQL→result. Reuses the shared engine; never closes it.
 
     Returns an int status code (0 ok / 1 error) by default — backward-compatible.
@@ -828,6 +847,351 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # already has its own deterministic path. Conservative match → falls through on miss.
     from config import FAST_PATH_ENABLED
     fp = None
+
+    def _run_on_statement_source(_fsid, _tag):
+        """A compiled lane's statement whose tables all live in ONE source of a multi-source
+        scope runs there. narrowed() carries RBAC allowed_resources + cache_back; run_query
+        restores the caller's scope."""
+        _fcx = _ambient_ctx()
+        if _fsid and _fcx is not None and (str(_fcx.source_id) != str(_fsid)
+                                           or len(_fcx.source_ids or ()) > 1):
+            from veda_core.context import set_context as _set_ctx_fp
+            _set_ctx_fp(_fcx.narrowed(int(_fsid)))
+            print(f"  [{_tag}] statement runs on source {_fsid} (scope narrowed from "
+                  f"{list(_fcx.source_ids)})")
+
+    # ── CONTINUITY LANE (a chat follow-up) ───────────────────────────────────────────
+    # The ONE entry point for a turn that carries the previous turn's state
+    # (veda/understanding/continuity.py): the prior query is rebuilt from the context, the
+    # chat tier's delta is applied to the slot it changes, and the frame compiler compiles
+    # it — a COMPLETE IR (head continuity.<op>) riding the fast-path slot exactly as a
+    # frame-path answer does. A typed clarify returns here; a decline (the delta is about
+    # something outside the prior entity, or the prior cannot be rebuilt) leaves the turn
+    # to the existing chain below, unchanged. Not on re-entry / salvage retries.
+    _continuity_lane = False
+    try:
+        from veda.understanding.continuity import is_active as _cont_active
+        _cont_on = (not _reentry and _cont_active(_conv))
+    except Exception:
+        _cont_on = False
+    if _cont_on:
+        try:
+            from veda.understanding.continuity import run_continuity
+            from veda.understanding.frame_path import FrameLane
+            _cres = run_continuity(query, sm, _conv)
+            tr.set("continuity", **(_cres.trace or {}), kind=_cres.kind, reason=_cres.reason)
+            print(f"  [Continuity] {_cres.kind} ({_cres.reason})")
+            if _cres.kind == "clarify" and _cres.message:
+                fb = _feedback("clarify", msg=_cres.message)
+                log_route("continuity.clarify", query, (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_cres.message, feedback=fb)
+            if _cres.kind == "sql" and _cres.frame_result is not None:
+                fp = FrameLane(_cres.frame_result)
+                _continuity_lane = True
+                _run_on_statement_source(_cres.frame_result.source_id, "Continuity")
+        except Exception as _ce:
+            print(f"  [Continuity] skipped: {type(_ce).__name__}: {str(_ce)[:120]}")
+            tr.set("continuity", kind="decline", reason="exception",
+                   declined=f"{type(_ce).__name__}: {str(_ce)[:120]}")
+            fp, _continuity_lane = None, False
+    # Retrieval → graph expansion → RBAC / scope filter → primary rerank → the router's
+    # primary, as ONE memoised step. The frame path asks for it first when it needs the
+    # router's opinion (a MODEL / SYNTHETIC / RETRIEVAL anchor is used only when it agrees
+    # with this primary); the full pipeline below then reuses the same result instead of
+    # retrieving twice. Nothing calls it on a turn the frame path answers by name.
+    _retr_memo: dict = {}
+
+    def _retrieve_rank():
+        if _retr_memo:
+            return _retr_memo["v"]
+        from config import QUERY_ENHANCEMENT_ENABLED
+        enh = None
+        if QUERY_ENHANCEMENT_ENABLED:
+            try:
+                from veda.query_enhancement import enhance_query
+                enh = enhance_query(query, sm)
+            except Exception:
+                enh = None
+        _search = enh.search_query if enh else query
+        tr.set("query_understanding", enhancement=(enh.to_dict() if enh else None))
+        if enh and _search != query:
+            print(f"  [L2+] Enhance      +{len(enh.search_terms) + len(enh.expanded_aliases)} "
+                  f"search terms  ({'; '.join(enh.enhancement_trace[:3])})")
+        print("  [L2] Retrieval     6-signal (BGE-M3 dense+sparse + FK subgraph/path + "
+              "value + table-prior) → weighted RRF")
+        try:
+            from config import RETRIEVAL_CACHE_ENABLED as _RC
+        except Exception:
+            _RC = False
+        # Pass THIS (source, tenant)'s semantic model so the engine for this scope is built
+        # from the right source's BM25/signals (P5 multi-source); Signal-1 store is source-scoped.
+        # `_retrieval_intent` (P1-2), not `intent` — see its computation above for why they
+        # deliberately differ.
+        results = get_engine(sm).retrieve(query=_search, intent=_retrieval_intent, top_k=15, use_cache=_RC)
+
+        # ── Unified-graph recall booster (Phase 4): ADD columns the 5-signal engine may
+        # have missed, via synonym/alias resolution + FK-neighbour reach. Purely additive
+        # (the cross-encoder rerank below re-scores everything), flag-guarded, and fully
+        # try/except'd → on ANY failure retrieval is byte-identical to before. col_id here
+        # is the "table.col" string the engine already uses, so no UUID lookup is needed.
+        try:
+            from config import GRAPH_EXPAND_ENABLED, GRAPH_EXPAND_MAX
+        except Exception:
+            GRAPH_EXPAND_ENABLED, GRAPH_EXPAND_MAX = False, 12
+        if GRAPH_EXPAND_ENABLED and results is not None:
+            try:
+                from graph.query_graph import suggest_expansions
+                from retrieval.retrieval_engine_phase3 import RetrievalResult as _RR
+                _have_cols = {r.col_id for r in results}
+                _have_tabs = {r.table_name for r in results}
+                _seeds, _added, _syn = suggest_expansions(
+                    query, _have_cols, _have_tabs, max_add=GRAPH_EXPAND_MAX)
+                # Source isolation (marker-gated, default OFF): suggest_expansions reaches over the
+                # GLOBAL unified FK/synonym graph, so on an isolated single-source sm it re-admits
+                # other sources' tables (a datalake "vendors" pulls homzhub worklists_quote/reviews_*).
+                # Drop additions outside this sm's tables. No marker (normal path) → untouched.
+                if sm.get("__source_isolated__"):
+                    _iso_tabs = set((sm.get("tables") or {}).keys())
+                    _added = [n for n in _added if n.split(".", 1)[0] in _iso_tabs]
+                for _name in _added:
+                    _tt, _cc = _name.split(".", 1)
+                    results.append(_RR(col_id=_name, column_name=_cc,
+                                       table_name=_tt, final_score=0.0))
+                if _added:
+                    print(f"  [L2g] Graph expand  +{len(_added)} cols "
+                          f"(seeds={_seeds[:4]}): {_added[:5]}")
+                tr.set("graph_expansion", seeds=_seeds, synonyms=_syn, added=_added)
+            except Exception as _ge:
+                print(f"  [L2g] graph expand skipped: {type(_ge).__name__}: {str(_ge)[:80]}")
+
+        # ── Gate 1 (User Story 3, Task 16) RBAC candidate filter. Applied to the
+        # per-request CANDIDATE LIST only — NEVER to `sm` before get_engine(sm)
+        # above, which would bake this request's permissions into the shared,
+        # per-scope-cached retrieval engine (see veda.rbac_filter's module
+        # docstring). A no-op when the ambient context carries no
+        # allowed_resources (RBAC off, staff, or a pre-Gate-1 caller).
+        _before_rbac = len(results) if results else 0
+        results = filter_retrieval_results(results, sm, _ambient_ctx())
+        # Fail-closed SCOPE filter (M1 close-out, 2026-09-15), independent of RBAC: a
+        # candidate whose table is not in THIS scope's semantic model cannot be planned
+        # against, whichever retrieval signal produced it. Found live: a source-5
+        # (parquet, one table) query retrieved `maintenance` (source 4) and homzhub
+        # tables, and routing anchored on a table the source doesn't have. Whatever
+        # signal leaks is a bug to fix on its own; this guard makes the leak harmless
+        # in the meantime — the same "never plan against another source's schema"
+        # contract the artifact resolver now enforces. Multi-source scopes carry
+        # `src{ID}.<table>` keys for collisions; both spellings are admitted.
+        if results and _ambient_ctx() is not None:
+            _scope_tables = set((sm.get("tables") or {}).keys())
+            _scope_tables |= {k.split(".", 1)[1] for k in _scope_tables if k.startswith("src") and "." in k}
+            _before = len(results)
+            results = [r for r in results if getattr(r, "table_name", "") in _scope_tables]
+            if len(results) != _before:
+                print(f"  [L2s] Scope filter  dropped {_before - len(results)} candidate(s) "
+                      f"from tables outside this source's model")
+                tr.note("retrieval", f"scope filter dropped {_before - len(results)} foreign candidates")
+        if results is not None and len(results) != _before_rbac:
+            tr.set("rbac_filter", before=_before_rbac, after=len(results))
+            # Part 3: RBAC narrowing was SILENT before this — a user could get a
+            # quietly narrower answer with no indication anything was withheld.
+            #
+            # Raised HERE, and only when the count actually CHANGED, because that is
+            # the one honest signal available: candidates this query's retrieval
+            # considered relevant were removed for access reasons. Merely running the
+            # filter is not newsworthy; removing a relevant candidate is.
+            #
+            # The warning states only THAT data was excluded — never which table,
+            # column or source, since naming it would be exactly the disclosure the
+            # restriction exists to prevent. `before`/`after` counts stay in the
+            # internal trace and are NOT projected (veda/safe_projection.py has no
+            # reader for the rbac_filter section) because the COUNT of hidden things
+            # is itself a disclosure.
+            try:
+                from veda import warnings as _vw
+                _vw.add(_vw.RESTRICTED_DATA)
+            except Exception:
+                pass
+
+        # ── PRIMARY cross-encoder rerank (Step 2): the precision ranker now runs on the
+        # PRIMARY path (not only Tier-2). Reorders candidates + updates final_score so anchor
+        # selection ranks off reranked scores — directly tightening the near-tie RRF margins
+        # that caused mis-anchoring. Generic: reranker no longer carries a hardcoded business
+        # map (it uses the generated domain_synonyms). Graceful: any failure keeps RRF order.
+        try:
+            from config import (PRIMARY_RERANK_ENABLED, RERANKER_BATCH_SIZE,
+                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES, RERANKER_MAX_TEXT_LEN)
+        except Exception:
+            PRIMARY_RERANK_ENABLED = False
+
+        def _rrf_gap_unambiguous(_results) -> bool:
+            """True when candidate #1 clearly leads #2 AND both are the same table —
+            reranking would not change the anchor, so skip it (F4)."""
+            if len(_results) < 2:
+                return True
+            s0, s1 = _results[0].final_score, _results[1].final_score
+            same_table = _results[0].col_id.split(".")[0] == _results[1].col_id.split(".")[0]
+            return same_table and (s0 - s1) >= RERANK_SKIP_GAP
+
+        _rk_before = _rk_after = None   # top-5 col_ids around the rerank (trace only)
+        if PRIMARY_RERANK_ENABLED and results and not _rrf_gap_unambiguous(results):
+            try:
+                from query.reranker import _get_reranker, _precomputed_rerank_text
+                _rk = _get_reranker()
+                if _rk is not None:
+                    # F4: cap candidate width — the tail never wins anchor selection.
+                    _head = results[:RERANK_MAX_CANDIDATES]
+                    _tail = results[RERANK_MAX_CANDIDATES:]
+                    # Same enriched cross-encoder text query/reranker.py's own _col_text()
+                    # uses (business definition/aliases/role/etc., precomputed at ingestion,
+                    # WP7) — not bare column_name+table_name. This is the SAME model as
+                    # rerank_columns()/rerank_tables(); it was just seeing less context here
+                    # than at that other call site. Falls back to the bare name pair when no
+                    # precomputed doc exists for a column (identical fallback _col_text uses).
+                    _pairs = [
+                        [_search, (_precomputed_rerank_text(r.col_id, is_table=False)
+                                   or f"{r.column_name} {r.table_name}")[:RERANKER_MAX_TEXT_LEN]]
+                        for r in _head
+                    ]
+                    _enriched_n = sum(1 for r in _head
+                                      if _precomputed_rerank_text(r.col_id, is_table=False) is not None)
+                    print(f"  [L2b] Enriched rerank input: {_enriched_n}/{len(_head)} candidates "
+                          f"used precomputed metadata, {len(_head) - _enriched_n} fell back to bare name")
+                    _sc = _rk.predict(_pairs, batch_size=RERANKER_BATCH_SIZE)
+                    # NOISE FLOOR: the cross-encoder's output is calibrated (sigmoid) — when
+                    # its BEST pair is near zero it is affirmatively saying NO candidate is
+                    # relevant to this query. Overwriting final_score then replaces the RRF
+                    # consensus (BM25+embedding+graph) with pure noise that downstream anchor
+                    # normalization stretches to 1.0 — mis-anchoring on garbage. Keep the RRF
+                    # order instead; the floor is in the model's own output space, no schema
+                    # or vocabulary assumption.
+                    try:
+                        from config import RERANK_NOISE_FLOOR
+                    except Exception:
+                        RERANK_NOISE_FLOOR = 0.0
+                    _smax = max((float(s) for s in _sc), default=0.0)
+                    if _smax < RERANK_NOISE_FLOOR:
+                        print(f"  [L2b] Primary rerank UNINFORMATIVE (max {_smax:.5f} < "
+                              f"{RERANK_NOISE_FLOOR}) — keeping RRF order")
+                        tr.set("reranking", input_candidate_count=len(_head),
+                               reranker_skipped=True, skip_reason="noise_floor",
+                               score_max=round(_smax, 5), noise_floor=RERANK_NOISE_FLOOR)
+                    else:
+                        _rk_before = [r.col_id for r in results[:5]]   # pre-rerank order (trace)
+                        _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
+                        for _s, _r in _ranked:
+                            _r.cross_encoder_score = float(_s)   # keep the CE score visible (trace)
+                            _r.final_score = float(_s)   # anchor reads final_score → now reranked
+                        # SCALE GUARD (H-0): reranked head carries cross-encoder scores, the tail
+                        # keeps RRF scores — incomparable, so floor the tail below the head to keep
+                        # it from hijacking anchor selection. (Verified NOT the count-for-sale
+                        # regression culprit; the anchor ambiguity there is pre-existing.)
+                        if _ranked and _tail:
+                            _floor = min(float(_s) for _s, _ in _ranked)
+                            for _i, _r in enumerate(_tail):
+                                _r.final_score = _floor - 1.0 - _i * 1e-6
+                        results = [_r for _, _r in _ranked] + _tail
+                        _rk_after = [r.col_id for r in results[:5]]   # post-rerank order (trace)
+                        print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
+                        # RERANK observability — enough to diagnose noisy/compressed
+                        # reranker scores (score spread + top1/top2 gap). Uses the _sc
+                        # already predicted above; no re-scoring.
+                        try:
+                            _scores = sorted((float(s) for s in _sc), reverse=True)
+                            _n = len(_scores)
+                            tr.set("reranking",
+                                   input_candidate_count=len(_head),
+                                   output_candidate_count=len(results),
+                                   reranker_skipped=False,
+                                   score_min=round(_scores[-1], 5) if _n else None,
+                                   score_max=round(_scores[0], 5) if _n else None,
+                                   score_mean=round(sum(_scores) / _n, 5) if _n else None,
+                                   top1_top2_gap=round(_scores[0] - _scores[1], 5) if _n >= 2 else None)
+                            tr.cand("reranking", "top_before", _rk_before)
+                            tr.cand("reranking", "top_after", _rk_after)
+                        except Exception:
+                            pass
+            except Exception as _rr_e:
+                print(f"  [L2b] primary rerank skipped: {type(_rr_e).__name__}: {str(_rr_e)[:100]}")
+        elif PRIMARY_RERANK_ENABLED and results:
+            print(f"  [L2b] Primary rerank SKIPPED (unambiguous RRF gap) → top: {results[0].col_id}")
+            tr.set("reranking", reranker_skipped=True, skip_reason="rrf_gap_unambiguous")
+
+        _cand_tabs = []
+        for r in results:
+            _t = r.col_id.split(".")[0]
+            if _t not in _cand_tabs:
+                _cand_tabs.append(_t)
+        _router_primary = select_primary_table(results, query, sm, trace=tr)
+        _retr_memo["v"] = (results, _search, _rk_after, _cand_tabs, _router_primary)
+        return _retr_memo["v"]
+
+    def _router_hint():
+        """(router primary, [(table, best column score)…]) for the frame path."""
+        _res, _s, _ra, _ct, _rp = _retrieve_rank()
+        _best: dict = {}
+        for _r in _res or []:
+            _tn = getattr(_r, "table_name", "") or _r.col_id.split(".")[0]
+            _best[_tn] = max(_best.get(_tn, 0.0), float(getattr(_r, "final_score", 0.0) or 0.0))
+        return _rp, [(t, round(s, 4)) for t, s in sorted(_best.items(), key=lambda kv: -kv[1])[:5]]
+
+    # ── MEANING-FIRST PASS (FRAME_PATH_ENABLED, default OFF) ─────────────────────────
+    # The question's MEANING is settled once, as a typed frame, grounded against the
+    # business vocabulary, verified against the data, and only then compiled
+    # (veda/understanding/frame_path.py). A compiled frame rides the fast-path lane below
+    # with its own COMPLETE IR; a typed clarify returns here; anything else degrades to
+    # the existing chain unchanged. Not on re-entry, and not on a follow-up turn that
+    # carries remembered state (the frame path does not yet apply conversation deltas).
+    _frame_res = None
+    try:
+        from config import FRAME_PATH_ENABLED as _FRAME_ON
+    except Exception:
+        _FRAME_ON = False
+    # (…except a follow-up to a turn the planner agent answered: its remembered plan is
+    # the agent's draft — veda/understanding/frame_path.py::_agent_follow_up)
+    try:
+        from config import AGENT_PLANNER_ENABLED as _AGENT_ON
+    except Exception:
+        _AGENT_ON = False
+    if _FRAME_ON and not _reentry and fp is None and (
+            (not _conv_filters and not _conv.get("entity_table"))
+            or (_AGENT_ON and _conv.get("agent_plan"))):
+        try:
+            from veda.understanding.frame_path import run_frame_path, FrameLane
+            _frame_res = run_frame_path(query, sm, router_hint=_router_hint)
+            try:
+                tr.set("frame_path", kind=_frame_res.kind, reason=_frame_res.reason,
+                       **{k: v for k, v in (_frame_res.trace or {}).items()})
+            except Exception:
+                pass
+            print(f"  [Frame] {_frame_res.kind} ({_frame_res.reason})"
+                  + (f" anchor={_frame_res.anchor}" if _frame_res.anchor else ""))
+            if _frame_res.kind == "clarify" and _frame_res.message:
+                fb = _feedback("clarify", msg=_frame_res.message)
+                log_route("frame.clarify", query, (time.time() - start) * 1000)
+                return _done(0, "clarify", msg=_frame_res.message, feedback=fb)
+            if _frame_res.kind == "split" and _frame_res.parts:
+                # the planner agent read several questions into this one: veda_hybrid runs
+                # each sub-question as its own part (status "split" is a hand-off, never an
+                # answer and never Tier-2 eligible)
+                fb = _feedback("clarify", msg=_frame_res.message)
+                log_route("frame.agent_split", query, (time.time() - start) * 1000)
+                return _done(0, "split", msg=_frame_res.message, split_parts=list(_frame_res.parts),
+                             feedback=fb)
+            if _frame_res.kind == "rag" and _frame_res.rag_sources:
+                # a document question: veda_hybrid answers it with the RAG layer over these
+                # document sources (a hand-off, like "split")
+                _m = "This is a question about the documents."
+                log_route("frame.agent_rag", query, (time.time() - start) * 1000)
+                return _done(0, "agent_rag", msg=_m, rag_source_ids=list(_frame_res.rag_sources),
+                             feedback=_feedback("clarify", msg=_m))
+            if _frame_res.kind == "sql" and _frame_res.sql:
+                fp = FrameLane(_frame_res)
+                # a multi-source scope: the statement's tables all live in ONE source
+                # (frame_path settled that) — run it there
+                _run_on_statement_source(_frame_res.source_id, "Frame")
+        except Exception as _fre:
+            print(f"  [Frame] skipped: {type(_fre).__name__}: {str(_fre)[:120]}")
+            _frame_res = None
     # A drill-UP replays the user's original question with the levels that REMAIN carried
     # structurally. Both deterministic short-circuits below — this fast path and the
     # grouped planner — build their SQL straight from the registries and never look at the
@@ -840,7 +1204,9 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # instead, which applies them and rebuilds the remembered GROUP BY around them.
     # `_conv_filters` is empty for every non-chat caller and every first turn, so this is
     # byte-identical outside a live drill.
-    if FAST_PATH_ENABLED and not is_existence and not _reentry and _conv_filters:
+    if fp is not None:
+        pass                                       # the frame path answered
+    elif FAST_PATH_ENABLED and not is_existence and not _reentry and _conv_filters:
         print(f"  [conversation] {len(_conv_filters)} remembered filter(s) still apply — "
               f"skipping the fast path, which cannot carry them")
     elif FAST_PATH_ENABLED and not is_existence and not _reentry:   # re-entry: fast path off (M2)
@@ -940,7 +1306,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # pipeline, which has anchor vetting and its own gates. (Measured on the golden
     # baseline: refusing here flipped good answers on descriptor words; demotion
     # only costs latency on the rare zero-evidence picks.)
-    if fp is not None and not isinstance(fp, dict):
+    if fp is not None and not isinstance(fp, dict) and getattr(fp, "route", "") != "frame":
         try:
             from config import FASTPATH_EVIDENCE_GUARD, QSR_FP_EVIDENCE_FLOOR
             if FASTPATH_EVIDENCE_GUARD and fp.tables:
@@ -1184,224 +1550,7 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         allowed_columns = [k.split(".", 1)[1] for k in all_cols
                            if k.split(".", 1)[0] in allowed_tables]
     else:
-        from config import QUERY_ENHANCEMENT_ENABLED
-        enh = None
-        if QUERY_ENHANCEMENT_ENABLED:
-            try:
-                from veda.query_enhancement import enhance_query
-                enh = enhance_query(query, sm)
-            except Exception:
-                enh = None
-        _search = enh.search_query if enh else query
-        tr.set("query_understanding", enhancement=(enh.to_dict() if enh else None))
-        if enh and _search != query:
-            print(f"  [L2+] Enhance      +{len(enh.search_terms) + len(enh.expanded_aliases)} "
-                  f"search terms  ({'; '.join(enh.enhancement_trace[:3])})")
-        print("  [L2] Retrieval     6-signal (BGE-M3 dense+sparse + FK subgraph/path + "
-              "value + table-prior) → weighted RRF")
-        try:
-            from config import RETRIEVAL_CACHE_ENABLED as _RC
-        except Exception:
-            _RC = False
-        # Pass THIS (source, tenant)'s semantic model so the engine for this scope is built
-        # from the right source's BM25/signals (P5 multi-source); Signal-1 store is source-scoped.
-        # `_retrieval_intent` (P1-2), not `intent` — see its computation above for why they
-        # deliberately differ.
-        results = get_engine(sm).retrieve(query=_search, intent=_retrieval_intent, top_k=15, use_cache=_RC)
-
-        # ── Unified-graph recall booster (Phase 4): ADD columns the 5-signal engine may
-        # have missed, via synonym/alias resolution + FK-neighbour reach. Purely additive
-        # (the cross-encoder rerank below re-scores everything), flag-guarded, and fully
-        # try/except'd → on ANY failure retrieval is byte-identical to before. col_id here
-        # is the "table.col" string the engine already uses, so no UUID lookup is needed.
-        try:
-            from config import GRAPH_EXPAND_ENABLED, GRAPH_EXPAND_MAX
-        except Exception:
-            GRAPH_EXPAND_ENABLED, GRAPH_EXPAND_MAX = False, 12
-        if GRAPH_EXPAND_ENABLED and results is not None:
-            try:
-                from graph.query_graph import suggest_expansions
-                from retrieval.retrieval_engine_phase3 import RetrievalResult as _RR
-                _have_cols = {r.col_id for r in results}
-                _have_tabs = {r.table_name for r in results}
-                _seeds, _added, _syn = suggest_expansions(
-                    query, _have_cols, _have_tabs, max_add=GRAPH_EXPAND_MAX)
-                # Source isolation (marker-gated, default OFF): suggest_expansions reaches over the
-                # GLOBAL unified FK/synonym graph, so on an isolated single-source sm it re-admits
-                # other sources' tables (a datalake "vendors" pulls homzhub worklists_quote/reviews_*).
-                # Drop additions outside this sm's tables. No marker (normal path) → untouched.
-                if sm.get("__source_isolated__"):
-                    _iso_tabs = set((sm.get("tables") or {}).keys())
-                    _added = [n for n in _added if n.split(".", 1)[0] in _iso_tabs]
-                for _name in _added:
-                    _tt, _cc = _name.split(".", 1)
-                    results.append(_RR(col_id=_name, column_name=_cc,
-                                       table_name=_tt, final_score=0.0))
-                if _added:
-                    print(f"  [L2g] Graph expand  +{len(_added)} cols "
-                          f"(seeds={_seeds[:4]}): {_added[:5]}")
-                tr.set("graph_expansion", seeds=_seeds, synonyms=_syn, added=_added)
-            except Exception as _ge:
-                print(f"  [L2g] graph expand skipped: {type(_ge).__name__}: {str(_ge)[:80]}")
-
-        # ── Gate 1 (User Story 3, Task 16) RBAC candidate filter. Applied to the
-        # per-request CANDIDATE LIST only — NEVER to `sm` before get_engine(sm)
-        # above, which would bake this request's permissions into the shared,
-        # per-scope-cached retrieval engine (see veda.rbac_filter's module
-        # docstring). A no-op when the ambient context carries no
-        # allowed_resources (RBAC off, staff, or a pre-Gate-1 caller).
-        _before_rbac = len(results) if results else 0
-        results = filter_retrieval_results(results, sm, _ambient_ctx())
-        # Fail-closed SCOPE filter (M1 close-out, 2026-09-15), independent of RBAC: a
-        # candidate whose table is not in THIS scope's semantic model cannot be planned
-        # against, whichever retrieval signal produced it. Found live: a source-5
-        # (parquet, one table) query retrieved `maintenance` (source 4) and homzhub
-        # tables, and routing anchored on a table the source doesn't have. Whatever
-        # signal leaks is a bug to fix on its own; this guard makes the leak harmless
-        # in the meantime — the same "never plan against another source's schema"
-        # contract the artifact resolver now enforces. Multi-source scopes carry
-        # `src{ID}.<table>` keys for collisions; both spellings are admitted.
-        if results and _ambient_ctx() is not None:
-            _scope_tables = set((sm.get("tables") or {}).keys())
-            _scope_tables |= {k.split(".", 1)[1] for k in _scope_tables if k.startswith("src") and "." in k}
-            _before = len(results)
-            results = [r for r in results if getattr(r, "table_name", "") in _scope_tables]
-            if len(results) != _before:
-                print(f"  [L2s] Scope filter  dropped {_before - len(results)} candidate(s) "
-                      f"from tables outside this source's model")
-                tr.note("retrieval", f"scope filter dropped {_before - len(results)} foreign candidates")
-        if results is not None and len(results) != _before_rbac:
-            tr.set("rbac_filter", before=_before_rbac, after=len(results))
-            # Part 3: RBAC narrowing was SILENT before this — a user could get a
-            # quietly narrower answer with no indication anything was withheld.
-            #
-            # Raised HERE, and only when the count actually CHANGED, because that is
-            # the one honest signal available: candidates this query's retrieval
-            # considered relevant were removed for access reasons. Merely running the
-            # filter is not newsworthy; removing a relevant candidate is.
-            #
-            # The warning states only THAT data was excluded — never which table,
-            # column or source, since naming it would be exactly the disclosure the
-            # restriction exists to prevent. `before`/`after` counts stay in the
-            # internal trace and are NOT projected (veda/safe_projection.py has no
-            # reader for the rbac_filter section) because the COUNT of hidden things
-            # is itself a disclosure.
-            try:
-                from veda import warnings as _vw
-                _vw.add(_vw.RESTRICTED_DATA)
-            except Exception:
-                pass
-
-        # ── PRIMARY cross-encoder rerank (Step 2): the precision ranker now runs on the
-        # PRIMARY path (not only Tier-2). Reorders candidates + updates final_score so anchor
-        # selection ranks off reranked scores — directly tightening the near-tie RRF margins
-        # that caused mis-anchoring. Generic: reranker no longer carries a hardcoded business
-        # map (it uses the generated domain_synonyms). Graceful: any failure keeps RRF order.
-        try:
-            from config import (PRIMARY_RERANK_ENABLED, RERANKER_BATCH_SIZE,
-                                 RERANK_SKIP_GAP, RERANK_MAX_CANDIDATES, RERANKER_MAX_TEXT_LEN)
-        except Exception:
-            PRIMARY_RERANK_ENABLED = False
-
-        def _rrf_gap_unambiguous(_results) -> bool:
-            """True when candidate #1 clearly leads #2 AND both are the same table —
-            reranking would not change the anchor, so skip it (F4)."""
-            if len(_results) < 2:
-                return True
-            s0, s1 = _results[0].final_score, _results[1].final_score
-            same_table = _results[0].col_id.split(".")[0] == _results[1].col_id.split(".")[0]
-            return same_table and (s0 - s1) >= RERANK_SKIP_GAP
-
-        _rk_before = _rk_after = None   # top-5 col_ids around the rerank (trace only)
-        if PRIMARY_RERANK_ENABLED and results and not _rrf_gap_unambiguous(results):
-            try:
-                from query.reranker import _get_reranker, _precomputed_rerank_text
-                _rk = _get_reranker()
-                if _rk is not None:
-                    # F4: cap candidate width — the tail never wins anchor selection.
-                    _head = results[:RERANK_MAX_CANDIDATES]
-                    _tail = results[RERANK_MAX_CANDIDATES:]
-                    # Same enriched cross-encoder text query/reranker.py's own _col_text()
-                    # uses (business definition/aliases/role/etc., precomputed at ingestion,
-                    # WP7) — not bare column_name+table_name. This is the SAME model as
-                    # rerank_columns()/rerank_tables(); it was just seeing less context here
-                    # than at that other call site. Falls back to the bare name pair when no
-                    # precomputed doc exists for a column (identical fallback _col_text uses).
-                    _pairs = [
-                        [_search, (_precomputed_rerank_text(r.col_id, is_table=False)
-                                   or f"{r.column_name} {r.table_name}")[:RERANKER_MAX_TEXT_LEN]]
-                        for r in _head
-                    ]
-                    _enriched_n = sum(1 for r in _head
-                                      if _precomputed_rerank_text(r.col_id, is_table=False) is not None)
-                    print(f"  [L2b] Enriched rerank input: {_enriched_n}/{len(_head)} candidates "
-                          f"used precomputed metadata, {len(_head) - _enriched_n} fell back to bare name")
-                    _sc = _rk.predict(_pairs, batch_size=RERANKER_BATCH_SIZE)
-                    # NOISE FLOOR: the cross-encoder's output is calibrated (sigmoid) — when
-                    # its BEST pair is near zero it is affirmatively saying NO candidate is
-                    # relevant to this query. Overwriting final_score then replaces the RRF
-                    # consensus (BM25+embedding+graph) with pure noise that downstream anchor
-                    # normalization stretches to 1.0 — mis-anchoring on garbage. Keep the RRF
-                    # order instead; the floor is in the model's own output space, no schema
-                    # or vocabulary assumption.
-                    try:
-                        from config import RERANK_NOISE_FLOOR
-                    except Exception:
-                        RERANK_NOISE_FLOOR = 0.0
-                    _smax = max((float(s) for s in _sc), default=0.0)
-                    if _smax < RERANK_NOISE_FLOOR:
-                        print(f"  [L2b] Primary rerank UNINFORMATIVE (max {_smax:.5f} < "
-                              f"{RERANK_NOISE_FLOOR}) — keeping RRF order")
-                        tr.set("reranking", input_candidate_count=len(_head),
-                               reranker_skipped=True, skip_reason="noise_floor",
-                               score_max=round(_smax, 5), noise_floor=RERANK_NOISE_FLOOR)
-                    else:
-                        _rk_before = [r.col_id for r in results[:5]]   # pre-rerank order (trace)
-                        _ranked = sorted(zip(_sc, _head), key=lambda x: float(x[0]), reverse=True)
-                        for _s, _r in _ranked:
-                            _r.cross_encoder_score = float(_s)   # keep the CE score visible (trace)
-                            _r.final_score = float(_s)   # anchor reads final_score → now reranked
-                        # SCALE GUARD (H-0): reranked head carries cross-encoder scores, the tail
-                        # keeps RRF scores — incomparable, so floor the tail below the head to keep
-                        # it from hijacking anchor selection. (Verified NOT the count-for-sale
-                        # regression culprit; the anchor ambiguity there is pre-existing.)
-                        if _ranked and _tail:
-                            _floor = min(float(_s) for _s, _ in _ranked)
-                            for _i, _r in enumerate(_tail):
-                                _r.final_score = _floor - 1.0 - _i * 1e-6
-                        results = [_r for _, _r in _ranked] + _tail
-                        _rk_after = [r.col_id for r in results[:5]]   # post-rerank order (trace)
-                        print(f"  [L2b] Primary rerank (cross-encoder, top {RERANK_MAX_CANDIDATES}) → top: {results[0].col_id}")
-                        # RERANK observability — enough to diagnose noisy/compressed
-                        # reranker scores (score spread + top1/top2 gap). Uses the _sc
-                        # already predicted above; no re-scoring.
-                        try:
-                            _scores = sorted((float(s) for s in _sc), reverse=True)
-                            _n = len(_scores)
-                            tr.set("reranking",
-                                   input_candidate_count=len(_head),
-                                   output_candidate_count=len(results),
-                                   reranker_skipped=False,
-                                   score_min=round(_scores[-1], 5) if _n else None,
-                                   score_max=round(_scores[0], 5) if _n else None,
-                                   score_mean=round(sum(_scores) / _n, 5) if _n else None,
-                                   top1_top2_gap=round(_scores[0] - _scores[1], 5) if _n >= 2 else None)
-                            tr.cand("reranking", "top_before", _rk_before)
-                            tr.cand("reranking", "top_after", _rk_after)
-                        except Exception:
-                            pass
-            except Exception as _rr_e:
-                print(f"  [L2b] primary rerank skipped: {type(_rr_e).__name__}: {str(_rr_e)[:100]}")
-        elif PRIMARY_RERANK_ENABLED and results:
-            print(f"  [L2b] Primary rerank SKIPPED (unambiguous RRF gap) → top: {results[0].col_id}")
-            tr.set("reranking", reranker_skipped=True, skip_reason="rrf_gap_unambiguous")
-
-        _cand_tabs = []
-        for r in results:
-            _t = r.col_id.split(".")[0]
-            if _t not in _cand_tabs:
-                _cand_tabs.append(_t)
-        _router_primary = select_primary_table(results, query, sm, trace=tr)
+        results, _search, _rk_after, _cand_tabs, _router_primary = _retrieve_rank()
         _er = None
         _analytical_sql = None          # Phase 1 ANALYTICAL_SQL_V2 (set in understanding block)
         _analytical_primary = None
@@ -1528,31 +1677,6 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             except Exception as _ere:
                 print(f"  [ER] entity resolution skipped: {type(_ere).__name__}: {str(_ere)[:120]}")
                 _er = None
-        # ── RC3: grounded clarification (flag-gated, default OFF) ───────────────
-        # AMBIGUOUS = two candidates tied for the SAME entity slot. Ask the user
-        # which one instead of coin-flipping into a confident wrong answer. Scoped
-        # to AMBIGUOUS only (UNGROUNDED keeps the retrieval fallback) so answerable
-        # single-table queries are never regressed.
-        if _er is not None and _er.status == "AMBIGUOUS":
-            try:
-                from config import ER_GROUNDED_REFUSAL as _ER_REFUSE
-            except Exception:
-                _ER_REFUSE = False
-            if _ER_REFUSE:
-                _cands = _er.evidence.get("candidates") or []
-                _opts = [c.get("master") or c.get("table") for c in _cands[:2]]
-                _opts = [o for o in _opts if o]
-                if _opts:
-                    _cmsg = ("This question is ambiguous — it could refer to "
-                             + " or ".join(repr(o) for o in _opts)
-                             + ". Please specify which one you mean.")
-                else:
-                    _cmsg = ("This question is ambiguous between multiple entities. "
-                             "Please specify which one you mean.")
-                fb = _feedback("clarify", msg=_cmsg)
-                tr.set("entity_resolution", grounded_clarify=True, clarify_options=_opts)
-                log_route("clarify", query, (time.time() - start) * 1000)
-                return _done(0, "clarify", msg=_cmsg, feedback=fb)
         if (_er is not None and _er.status == "RESOLVED"
                 and _er.evidence.get("pin_eligible") and _er.anchor):
             primary = _er.anchor
@@ -2115,7 +2239,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
             # select list — the WHO/distinct-name branch below projects only the display
             # column, so it can honor an explicit count but not an ORDER BY on a column
             # (the temporal/metric column) that isn't part of that projection.
-            _limit_only_tail = f' LIMIT {_rank.top_n if _rank.top_n is not None else 100}'
+            # Was `... else 100` — the same silent population cap _rank_order_limit_sql's
+            # docstring documents (§10.7, 2026-09-26): "no LIMIT unless the user asked"
+            # applies here too, not just to the ORDER BY+LIMIT tail.
+            _limit_only_tail = f' LIMIT {_rank.top_n}' if _rank.top_n is not None else ''
             # Which column the ranking actually sorted by — passed to the L7b NL
             # summarizer (query/result_explainer.py) so it narrates the right field
             # (e.g. "amount") instead of guessing (e.g. an id column) for "top N"/
@@ -2159,8 +2286,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 if not _analytical_sql:
                     _lp_cols = recommended_projection(primary, _anchor_cols_re, results, sm, query)
                     _lp = ", ".join(f't0."{c}"' for c in (_lp_cols or [])) or "t0.*"
+                    # Was a hardcoded 'LIMIT 100' regardless of what was asked — same
+                    # "no LIMIT unless the user asked" policy as _rank_order_limit_sql (§10.7).
                     _analytical_sql = (f'SELECT {_lp} FROM "{primary}" t0 '
-                                       f'WHERE {_analytical_spec.where_sql} LIMIT 100')
+                                       f'WHERE {_analytical_spec.where_sql}'
+                                       + (f' LIMIT {_rank.top_n}' if _rank.top_n is not None else ''))
                 sql = _analytical_sql
                 _analytical_used = True
                 allowed_columns = list(dict.fromkeys(list(allowed_columns) + _anchor_cols_re))
@@ -2482,8 +2612,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 tr.set("sql_planning", action="ranked_temporal_only", table=primary,
                        temporal=_tcol, top_n=_rank.top_n, direction=_rank.direction)
                 _tick("sql_planning", "Sorting and picking the top results")
+                # Was "LIMIT {_rank.top_n or 100}" — claimed a LIMIT 100 that _rank_tail
+                # (built by _rank_order_limit_sql) never actually emits when the user
+                # asked for no count (§10.7, 2026-09-26): the print disagreed with the SQL.
+                _lim_str = f" LIMIT {_rank.top_n}" if _rank.top_n is not None else ""
                 print(f"  [L4e] Ranked       {primary} ORDER BY {_tcol} "
-                      f"{_rank.direction.upper()} LIMIT {_rank.top_n or 100}"
+                      f"{_rank.direction.upper()}{_lim_str}"
                       "  — deterministic, no LLM")
             elif _rank.ranked and _rank.basis == "metric" and _rank_sort_col \
                     and _rank_tail:
@@ -2554,8 +2688,11 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                         and getattr(_analytical_spec, "aggregation", None) == "list"
                         and _analytical_spec.anchor == primary and _analytical_spec.where_sql):
                     _lp = ", ".join(f't0."{c}"' for c in (_proj_cols or [])) or "t0.*"
+                    # Was a hardcoded 'LIMIT 100' regardless of what was asked — same
+                    # "no LIMIT unless the user asked" policy as _rank_order_limit_sql (§10.7).
                     _analytical_sql = (f'SELECT {_lp} FROM "{primary}" t0 '
-                                       f'WHERE {_analytical_spec.where_sql} LIMIT 100')
+                                       f'WHERE {_analytical_spec.where_sql}'
+                                       + (f' LIMIT {_rank.top_n}' if _rank.top_n is not None else ''))
                     _wcols = [c for c in allowed_columns] + [f.column for f in []]
                 sql = _analytical_sql or generate_sql(query, primary, allowed_columns, tf,
                                    col_glossary=_gloss, term_map=_term_map, time_col=_tcol,
@@ -2653,6 +2790,8 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         from_branch_state as _ir_from_branch, partial as _ir_partial
     if _analytical_used and _analytical_spec is not None and getattr(_u, 'anchor', None):
         _ir = _ir_from_gi(_u, _analytical_spec, head=("understanding.reentry" if _reentry else "understanding"))
+    elif fp is not None and getattr(fp, "route", "") == "frame":
+        _ir = fp.result.ir                         # complete, compiled from grounded slots
     elif fp is not None:
         # the fast path stashes its QueryIntent on a request-scoped ContextVar
         # (query.fast_path._capture_intent / get_preserved_intent) — the IR reads it there
@@ -2976,7 +3115,10 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     # remembered filters. A turn that keeps some of them is a legitimate replacement
     # ("what about Mumbai" swaps a value), and a turn on a different table is a topic
     # change, which is allowed to drop everything.
-    if sql and _conv_filters and _anchor_from_sql(sql) == _conv.get("entity_table"):
+    # (The continuity lane is exempt: it drops a remembered filter only when the delta says
+    # so — "remove the city filter", "go back" — and its IR is the record of that.)
+    if (sql and _conv_filters and not _continuity_lane
+            and _anchor_from_sql(sql) == _conv.get("entity_table")):
         _kept = {c for c in (f.get("column") for f in _conv_filters) if c and f'"{c}"' in sql}
         if not _kept:
             _lost = ", ".join(sorted({str(f.get("column")) for f in _conv_filters
@@ -3167,7 +3309,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
         print(f"    -- params: {params}")
     print("  " + "-" * 74)
 
-    print("  [L7] Execute       read-only connection · 30s timeout · fetch ≤20")
+    # Was hardcoded "fetch ≤20" — stale even before the DuckDB cap fix below: the
+    # psycopg2 path here has always fetched EXECUTION_RESULT_LIMIT (1000), never 20;
+    # only the DuckDB/parquet path (veda/execution.py::_execute_duckdb) was really
+    # capped at 20, and that is now the same EXECUTION_RESULT_LIMIT too (§10.7).
+    from config import EXECUTION_RESULT_LIMIT as _exec_limit_print
+    print(f"  [L7] Execute       read-only connection · 30s timeout · fetch ≤{_exec_limit_print}")
     # Live-verification finding: the deterministic single-source path never reached
     # source_coordinator.execute_decision, so it produced NO data_retrieval phase and
     # NO per-source record — on the most common path of all. Both are opened here, at
@@ -3305,6 +3452,18 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
                 "temporal": (f"{tf.start} to {tf.end}" if (tf and (tf.start or tf.end)) else None),
                 "explicit_identifier": _uri(query),
             }
+            if fp is not None and getattr(fp, "route", "") == "frame":
+                _g = fp.result.grounded
+                _analytical_ctx.update({
+                    "frame_filters": "; ".join(f"{f.column} {f.op} {f.value}" for f in _g.filters) or "none",
+                    "frame_order": (f"{_g.order[1]} {_g.order[2]}" if _g.order else None),
+                    "frame_mappings": "; ".join(_g.notes) or None,
+                    "frame_scope": ("these rows are a page of the sorted list; a max/min among "
+                                    "them is not a global fact unless the list is complete"
+                                    if not _g.measure else None),
+                })
+                if _g.order:
+                    _analytical_ctx["ranking"] = _analytical_ctx.get("ranking") or _g.order[1]
         except Exception:
             _analytical_ctx = None
         _slm_wove_patterns = False   # did a summary SLM already phrase the findings?
@@ -3429,5 +3588,12 @@ def run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_eve
     print("\n" + "=" * 78)
     print(f"✅ Done in {time.time()-start:.1f}s   |   intent={intent}   |   {tag}")
     print("=" * 78 + "\n")
+    if fp is not None and getattr(fp, "route", "") == "frame":
+        # the frame's interpretations are part of the answer, not only of the explain panel:
+        # "'on the market' read as status APPROVED" — a reader must be able to see what a
+        # business phrase was taken to mean
+        _fnotes = list(getattr(fp.result.grounded, "notes", None) or [])
+        if _fnotes and nl_answer_text:
+            nl_answer_text = f"{nl_answer_text} (Interpretation: {'; '.join(_fnotes)}.)"
     return _done(0, "answered", cols=list(cols) if cols else [], rows=rows,
                  answer=nl_answer_text, sql=param_sql, table=str(primary), **_insight_extra)

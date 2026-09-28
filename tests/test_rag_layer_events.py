@@ -56,6 +56,33 @@ def test_run_rag_layer_on_event_none_never_raises(monkeypatch):
     assert result.answer == "The answer is X."
 
 
+# ---------------------------------------------------------------------------
+# B.1 (2026-09-27): the rag head sets result.source_id — the answering DOCUMENT
+# source — so chat memory files the frame under the source that actually
+# answered instead of source `None` on every unpinned turn.
+# ---------------------------------------------------------------------------
+
+def test_run_rag_layer_sets_source_id_from_top_citation(monkeypatch):
+    rag_mod = _stub_rag_deps(monkeypatch)
+    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["1", "2"])
+    assert result.source_id == "s1"        # _fake_chunk()'s source_id, the top citation
+
+
+def test_run_rag_layer_sets_source_id_from_single_scope_source_when_no_chunks(monkeypatch):
+    monkeypatch.setattr(rag_mod, "_encode_rag_query", lambda query, verbose=False: [0.1, 0.2])
+    monkeypatch.setattr(rag_mod, "retrieve_top_k_chunks", lambda **k: [])
+    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["7"])
+    assert result.answer == "No relevant document passages found"
+    assert result.source_id == "7"
+
+
+def test_run_rag_layer_source_id_none_when_scope_is_ambiguous_and_no_chunks(monkeypatch):
+    monkeypatch.setattr(rag_mod, "_encode_rag_query", lambda query, verbose=False: [0.1, 0.2])
+    monkeypatch.setattr(rag_mod, "retrieve_top_k_chunks", lambda **k: [])
+    result = rag_mod.run_rag_layer("what does the contract say", source_ids=["7", "8"])
+    assert result.source_id is None
+
+
 def test_run_rag_layer_on_event_callback_exception_never_propagates(monkeypatch):
     """A broken UI callback must never fail the actual query — same
     contract as veda_hybrid.py's own _emit."""

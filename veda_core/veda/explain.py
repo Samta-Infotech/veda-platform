@@ -112,6 +112,13 @@ _SECTIONS = [
     # ran, per-source execution, federation shape, user-safe warnings, artifact versions.
     "lifecycle", "execution_plan", "source_execution", "federation", "warnings",
     "versions",
+    # meaning-first pass (2026-09-24): the frame, its grounding, probes and compile.
+    "frame_path",
+    # planner agent (2026-09-26): steps, tool calls, final plan, validation, budget.
+    "agent",
+    # chat continuity lane (2026-09-27): {op, slot, grounded_to, method, prior_ir_hash,
+    # applied, declined} — veda/understanding/continuity.py
+    "continuity",
 ]
 
 
@@ -264,6 +271,16 @@ class ExplainTrace:
             "anchor_conf": s.get("anchor_selection", {}).get("confidence"),
             "join_conf": s.get("join_planning", {}).get("confidence"),
             "action": s.get("sql_planning", {}).get("action"),
+            # which classify rule chose the head (continuity/doc_ref/doc_evidence/router/…),
+            # whether the routing decision drove the answer, and where the frame came from —
+            # the per-turn integration facts the session eval asserts.
+            "classify_lane": s.get("classify", {}).get("lane"),
+            "routing_consumed": s.get("routing", {}).get("decision_consumed"),
+            "frame_source": ((s.get("frame_path", {}) or {}).get("frame") or {}).get("source"),
+            # the chat continuity lane (veda/understanding/continuity.py): which delta op this
+            # follow-up applied, and why it declined to the existing path when it did
+            "continuity_op": (s.get("continuity", {}) or {}).get("op"),
+            "continuity_declined": (s.get("continuity", {}) or {}).get("declined"),
             "status": out.get("status"),
             "confidence": out.get("confidence"),
             "refusal": out.get("refusal"),

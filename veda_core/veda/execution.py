@@ -46,6 +46,10 @@ def _execute_duckdb(sql, params, surfaces):
         import duckdb
     except Exception as e:
         return None, None, f"duckdb unavailable: {e}"
+    # Same cap as the psycopg2 path below (§10.7, 2026-09-26): this used to be a bare
+    # fetchmany(20), so a tabular (parquet) source silently truncated every result to 20
+    # rows regardless of what was asked for — no other source in the platform did that.
+    from config import EXECUTION_RESULT_LIMIT
     conn = duckdb.connect()
     try:
         try:
@@ -58,7 +62,7 @@ def _execute_duckdb(sql, params, surfaces):
                              f"SELECT * FROM read_parquet('{path}');")
         rel = conn.execute(sql.replace("%s", "?"), params or [])
         cols = [d[0] for d in rel.description]
-        rows = rel.fetchmany(20)
+        rows = rel.fetchmany(EXECUTION_RESULT_LIMIT)
         return cols, rows, None
     except Exception as e:
         return None, None, str(e)
@@ -117,7 +121,7 @@ def _param_mismatch(sql, params):
     return len(re.findall(r"%s", (sql or "").replace("%%", ""))) != len(params or [])
 
 
-def execute_sql(sql, params=None):
+def execute_sql(sql, params=None, timeout_ms=None):
     # Placeholder/param consistency FIRST — never hand psycopg2 (or DuckDB, after the
     # %s→? rewrite) SQL whose placeholders can't all bind. Degrade to a clean error.
     if _param_mismatch(sql, params):
@@ -158,7 +162,9 @@ def execute_sql(sql, params=None):
     try:
         conn.set_session(readonly=True, autocommit=True)
         with conn.cursor() as cur:
-            cur.execute("SET statement_timeout = 30000")
+            # timeout_ms: the frame path's verification probes run with a 2 s budget;
+            # every other caller keeps the 30 s default.
+            cur.execute(f"SET statement_timeout = {int(timeout_ms) if timeout_ms else 30000}")
             # Make the configured schema authoritative for this connection instead of
             # depending on the DB role's server-side search_path — sql_builder emits
             # unqualified table names, so whichever schema resolves first is where the

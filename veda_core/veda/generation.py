@@ -2,7 +2,7 @@
 import contextvars
 import os, re, sys, time, json, logging, threading
 from config import (SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL, SLM_NUM_CTX,
-                    SLM_TIMEOUT_SECS, SQL_DEFAULT_LIMIT)
+                    SLM_TIMEOUT_SECS, SLM_JOIN_TIMEOUT_SECS, SQL_DEFAULT_LIMIT)
 from query.ranking_parser import parse_ranking
 import urllib.request
 from slm import call_slm
@@ -511,7 +511,8 @@ def generate_join_sql(query, skeleton, alias_map, sm, tf, results=None):
                if recommended_lines else ""))
     sql = call_slm(
         user, system=system, purpose="sql_join",
-        temperature=0, seed=0, num_predict=320, num_ctx=SLM_NUM_CTX, timeout=120,
+        temperature=0, seed=0, num_predict=320, num_ctx=SLM_NUM_CTX,
+        timeout=SLM_JOIN_TIMEOUT_SECS,
     ).strip()
     if sql.startswith("```"):
         sql = sql.strip("`")

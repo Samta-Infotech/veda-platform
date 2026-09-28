@@ -63,15 +63,17 @@ def test_clarify_refuses_with_question():
     assert mr.items[0].status == STATUS_REFUSED and "Which source" in mr.items[0].refuse_reason
 
 
-def test_single_dispatches_and_answers():
+def test_single_is_a_scope_decision_not_an_agent_dispatch():
+    """B.2 (2026-09-26): an authoritative SINGLE narrows the request to the routed source and
+    falls through to the NORMAL path (classify → head → Tier-2); the source agent is not run."""
     _setup()
     SC.plan_route = lambda q, sids, **k: RoutingDecision(status=STATUS_ROUTED, mode=MODE_SINGLE,
                                                          source_ids=["5"])
-    SC.execute_decision = lambda dec, q, **k: {"kind": "single", "result": AgentResult(
-        "5", "relational", "ok", engine="deterministic_sql",
-        data={"cols": ["rev"], "rows": [[100]], "answer": "Revenue is 100"})}
-    mr = veda_hybrid._run_coordinator("revenue")
-    assert mr.items[0].status == STATUS_OK and mr.items[0].result.get("rows") == [[100]]
+    ran = []
+    SC.execute_decision = lambda dec, q, **k: ran.append(1)
+    assert veda_hybrid._run_coordinator("revenue") is None
+    assert ran == []
+    assert tuple(veda_hybrid._current_ctx().source_ids) == (5,)
 
 
 def test_single_no_result_constrains_scope_not_federated():
@@ -103,7 +105,7 @@ def test_is_datalake_source_detects_by_profile_and_candidate():
 
 def test_single_datalake_augments_sm_and_scopes_relational_does_not():
     """A datalake SINGLE route constrains scope + augments the sm (so parquet columns pass the SQL
-    validator); a relational SINGLE route does NEITHER (homzhub path stays byte-identical)."""
+    validator); a relational SINGLE route only constrains scope (B.2)."""
     _setup()
     calls = {"constrain": [], "augment": []}
     _orig_constrain = veda_hybrid._constrain_scope_to
@@ -127,13 +129,17 @@ def test_single_datalake_augments_sm_and_scopes_relational_does_not():
         veda_hybrid._run_coordinator("catalog q")
         assert calls["constrain"] == ["5"] and calls["augment"] == ["5"]
 
-        # relational route → neither fires (byte-identical homzhub behaviour)
+        assert veda_hybrid._ROUTED_SM.get()[0] == "5"      # the head reads this model
+
+        # relational route → scope narrowed (B.2: SINGLE is a scope decision), no datalake model
         calls["constrain"].clear(); calls["augment"].clear()
+        veda_hybrid._ROUTED_SM.set(None)
         SC.plan_route = lambda q, sids, **k: RoutingDecision(
             status=STATUS_ROUTED, mode=MODE_SINGLE, source_ids=["2"],
             candidate_sources=[CandidateSource("2", source_type="relational")])
         veda_hybrid._run_coordinator("db q")
-        assert calls["constrain"] == [] and calls["augment"] == []
+        assert calls["constrain"] == ["2"] and calls["augment"] == []
+        assert veda_hybrid._ROUTED_SM.get() is None
     finally:
         veda_hybrid._constrain_scope_to = _orig_constrain
         veda_hybrid._augment_sm_for_datalake = _orig_augment

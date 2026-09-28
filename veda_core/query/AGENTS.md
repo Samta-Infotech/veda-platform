@@ -33,7 +33,6 @@ Full walkthrough: [../../docs/QUERY_ENGINE.md](../../docs/QUERY_ENGINE.md),
 | `retrieval_v2.py` | V2 retrieval: bi-encoder + cross-encoder rerank + bidirectional merge. `RETRIEVAL_V2_ENABLED` (default true). |
 | `reranker.py` | Cross-encoder reranker: `rerank_columns` / `rerank_tables` / `rerank_chunks`. Precomputed pair text (`_get_rerank_docs`). |
 | `schema_linker.py` | `run_schema_linker()` — spaCy + deterministic schema linking when the query names its objects. |
-| `nl_simplifier.py` | Pre-L1 verbose-NL rewrite using sampled value hints. **Not on the hot path** (`NL_SIMPLIFIER_ENABLED=False`). |
 | `temporal_parser.py` | **L1** `run_temporal_parser()` → `TemporalFilter{start,end}`. Deterministic. |
 
 ## SQL generation / resolvers (called by `../veda/pipeline.py`)
@@ -59,7 +58,7 @@ Full walkthrough: [../../docs/QUERY_ENGINE.md](../../docs/QUERY_ENGINE.md),
 | `rag_layer.py` | `run_rag_layer()` (doc synthesis) + `run_hybrid_layer()` (SQL rows ⊕ doc chunks, one SLM call). **BGE-M3** encode (not MiniLM). Value-expansion for RAG was removed (stale `stats["value_expanded"]`). Still holds a direct-Ollama call. |
 | `nosql_builder.py` | `run_nosql_builder()` — deterministic NL → native Mongo/ES/DynamoDB query dict. NO LLM. The `ir_json` path is future/unused. |
 | `graph_retriever.py` | `run_graph_retrieval()` — **Personalized PageRank** walk over the unified graph (Tier-2 / datalake / cross-source). The `# BFS expansion` comment is stale. |
-| `federated_route.py` / `federated_executor.py` / `cross_source_composer.py` / `cross_source_guard.py` | Cross-source federated NL route (scope ≥ 2 sources, hits > 1 → generate + run a federated DuckDB query), aggregate-then-join execution, hybrid answer composition, and a grounding guard blocking numbers in neither source. |
+| `federated_route.py` / `federated_executor.py` / `cross_source_composer.py` | Cross-source federated NL route (scope ≥ 2 sources, hits > 1 → generate + run a federated DuckDB query), aggregate-then-join execution, and hybrid answer composition. |
 | `doc_data_planner.py` / `datalake_values.py` | Bounded DOCUMENT_FACT ∩ DATA_GROUNDING; query-time datalake parquet value grounding. |
 
 ## Result / answer

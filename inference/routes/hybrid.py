@@ -22,9 +22,12 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import threading
 from decimal import Decimal
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 try:
     from fastapi import APIRouter, Request
@@ -120,6 +123,30 @@ def _verbose() -> bool:
     return os.environ.get("VEDA_INFERENCE_VERBOSE", "1") not in ("0", "false", "False")
 
 
+def _agent_memory(trace) -> "dict | None":
+    """The one part of the (stripped) debug trace the NEXT chat turn needs: when the
+    planner agent answered, its plan in draft form, its tool log and the question.
+
+    chatbot/memory/frame.py::_harvest_agent records these on the IR stack so a follow-up
+    edits the plan instead of re-planning (veda/understanding/frame_path.py::
+    _agent_follow_up). They lived only in `trace.sections.agent`, which this module strips
+    from every result — so over the wire the harvest never found them and agent
+    follow-ups could not happen from chat at all. Lifted here as a named, bounded field;
+    the rest of the trace stays internal."""
+    try:
+        if not isinstance(trace, dict) and hasattr(trace, "to_dict"):
+            trace = trace.to_dict()
+        sec = ((trace or {}).get("sections") or {}).get("agent") or {}
+        if not isinstance(sec, dict) or sec.get("kind") != "sql" or not isinstance(sec.get("draft"), dict):
+            return None
+        calls = [{"tool": c.get("tool"), "args": c.get("args") or {}, "result": c.get("result") or {}}
+                 for c in (sec.get("tool_calls") or []) if isinstance(c, dict) and c.get("tool")]
+        return _serialize({"kind": "sql", "draft": sec["draft"], "tool_calls": calls[-12:],
+                           "question": str(sec.get("question") or "")[:300]})
+    except Exception:
+        return None
+
+
 def _serialize(obj: Any) -> Any:
     """Best-effort JSON-safe conversion that preserves the MultiResult shape.
     Strips _INTERNAL_ONLY_KEYS from any dict encountered, at any nesting depth —
@@ -129,6 +156,10 @@ def _serialize(obj: Any) -> Any:
         return _serialize(dataclasses.asdict(obj))
     if isinstance(obj, dict):
         out = {}
+        if "trace" in obj and "agent_memory" not in obj:
+            _am = _agent_memory(obj.get("trace"))
+            if _am:
+                out["agent_memory"] = _am
         for k, v in obj.items():
             if k in _INTERNAL_ONLY_KEYS:
                 continue
@@ -316,7 +347,244 @@ def _validated_conversation_context(flags) -> "dict | None":
     um = raw.get("user_message")
     if isinstance(um, str):
         out["user_message"] = um
+
+    # The planner agent's remembered turn (chatbot/memory/frame.py::_harvest_agent):
+    # its plan in draft form, its tool log and the question it answered. Consumed by
+    # veda/understanding/frame_path.py::_agent_follow_up -> veda/agent/planner.run_planner.
+    # All three travel together or not at all — a log without its plan is noise.
+    plan = _agent_plan(raw.get("agent_plan")) if "agent_plan" in raw else None
+    if plan is not None:
+        out["agent_plan"] = plan
+        out["agent_log"] = _agent_log(raw.get("agent_log"))
+        aq = raw.get("agent_question")
+        if isinstance(aq, str) and aq.strip():
+            out["agent_question"] = aq.strip()[:300]
+
+    # THIS turn's delta on the previous query (chatbot/memory/context.py::wire_delta) —
+    # applied structurally by the engine's continuity lane (veda/understanding/continuity.py).
+    dl = _delta(raw.get("delta")) if "delta" in raw else None
+    if dl is not None:
+        out["delta"] = dl
+
+    cmp_ = _comparison(raw.get("comparison")) if "comparison" in raw else None
+    if cmp_:
+        out["comparison"] = cmp_
+    ep = raw.get("entry_path")
+    if isinstance(ep, str) and ep.strip():
+        out["entry_path"] = ep.strip()[:32]
+    elif ep is not None:
+        _drop("entry_path", ep)
+    lat = raw.get("classification_latency_ms")
+    if isinstance(lat, (int, float)) and not isinstance(lat, bool) and 0 <= lat <= 3_600_000:
+        out["classification_latency_ms"] = float(lat)
+    elif lat is not None:
+        _drop("classification_latency_ms", lat)
+    for k, lo, hi in (("target_frame_index", -_MAX_STACK_REF, _MAX_STACK_REF),
+                      ("part_index", 0, _MAX_STACK_REF)):
+        v = raw.get(k)
+        if isinstance(v, int) and not isinstance(v, bool) and lo <= v <= hi:
+            out[k] = v
+        elif v is not None:
+            _drop(k, v)
     return out or None
+
+
+# ── shape checks for the structured (non-scalar) context keys ─────────────────
+# Bounds, not business rules: the engine is never handed an unbounded structure, and
+# a value of the wrong shape is DROPPED with a log line — never a 500, never passed
+# through for a consumer to trip over halfway through a pipeline run.
+_MAX_STACK_REF = 20
+_MAX_PLAN_BYTES = 16_000
+_MAX_LOG_ENTRIES = 12
+_MAX_LOG_ENTRY_BYTES = 16_000
+_MAX_LOG_BYTES = 64_000
+_SCALAR = (str, int, float, bool, type(None))
+
+
+def _drop(key, value, why: str = "wrong shape") -> None:
+    logger.warning("conversation_context: dropped %s (%s): %.200r", key, why, value)
+
+
+def _is_str_list(v, cap=20) -> bool:
+    return (isinstance(v, list) and len(v) <= cap
+            and all(isinstance(x, str) and 0 < len(x) <= 200 for x in v))
+
+
+def _json_size(v) -> "int | None":
+    try:
+        return len(json.dumps(v, separators=(",", ":"), ensure_ascii=False))
+    except (TypeError, ValueError):
+        return None
+
+
+_DELTA_OPS = ("add_filter", "remove_filter", "change_group", "change_measure", "change_order",
+              "drill_up", "switch_frame", "replace", "ambiguous", "new_topic", "compare")
+
+
+def _delta(v) -> "dict | None":
+    """{op, slot?, concept?, value?, confidence?, applied?} — the op from the closed set,
+    strings capped, value a scalar, confidence in [0, 1]. Anything else rejects the WHOLE
+    delta (the engine then declines the continuity lane and answers as before)."""
+    if not isinstance(v, dict):
+        if v is not None:
+            _drop("delta", v)
+        return None
+    unknown = set(v) - {"op", "slot", "concept", "value", "confidence", "applied"}
+    if unknown:
+        _drop("delta", v, f"unknown keys {sorted(unknown)}")
+        return None
+    if v.get("op") not in _DELTA_OPS:
+        _drop("delta", v, "unknown op")
+        return None
+    out = {"op": v["op"]}
+    for k in ("slot", "concept"):
+        x = v.get(k)
+        if x is None:
+            continue
+        if not isinstance(x, str) or len(x) > 200:
+            _drop("delta", v, f"malformed {k}")
+            return None
+        if x.strip():
+            out[k] = x.strip()
+    val = v.get("value")
+    if val is not None:
+        if isinstance(val, bool) or not isinstance(val, (str, int, float)) \
+                or (isinstance(val, str) and len(val) > 200):
+            _drop("delta", v, "malformed value")
+            return None
+        out["value"] = val.strip() if isinstance(val, str) else val
+    conf = v.get("confidence")
+    if conf is not None:
+        if isinstance(conf, bool) or not isinstance(conf, (int, float)) or not 0 <= conf <= 1:
+            _drop("delta", v, "malformed confidence")
+            return None
+        out["confidence"] = float(conf)
+    ap = v.get("applied")
+    if ap is not None and not isinstance(ap, bool):
+        _drop("delta", v, "malformed applied")
+        return None
+    out["applied"] = bool(ap)
+    return out
+
+
+def _agent_plan(v) -> "dict | None":
+    """veda/understanding/frame_path.py::_draft_of's shape, exactly. The planner puts the
+    draft in its prompt and edits it; frame_path only requires a non-empty `tables`. Any
+    unknown or malformed key rejects the WHOLE draft — a plan with a filter silently
+    removed is a different question — and the engine plans afresh, which is exactly what
+    it did before drafts crossed this boundary."""
+    def scalar(x):
+        return isinstance(x, _SCALAR) and not (isinstance(x, str) and len(x) > 500)
+
+    def filt(f):
+        val = f.get("value") if isinstance(f, dict) else None
+        return (isinstance(f, dict) and set(f) <= {"col", "op", "value"}
+                and isinstance(f.get("col"), str) and isinstance(f.get("op"), str)
+                and len(f["op"]) <= 32
+                and (scalar(val) or (isinstance(val, list) and len(val) <= 50
+                                     and all(scalar(x) for x in val))))
+    checks = {
+        "tables": lambda x: _is_str_list(x) and len(x) > 0,
+        "joins": _is_str_list,
+        "select": lambda x: _is_str_list(x, 50),
+        "filters": lambda x: isinstance(x, list) and len(x) <= 20 and all(filt(f) for f in x),
+        "group_by": _is_str_list,
+        "aggregates": lambda x: isinstance(x, list) and len(x) <= 20 and all(
+            isinstance(a, dict) and set(a) <= {"fn", "col"}
+            and isinstance(a.get("fn"), str) and isinstance(a.get("col"), str) for a in x),
+        "order": lambda x: isinstance(x, list) and len(x) <= 10 and all(
+            isinstance(o, dict) and set(o) <= {"by", "dir"}
+            and isinstance(o.get("by"), str) and o.get("dir") in ("asc", "desc") for o in x),
+        "limit": lambda x: isinstance(x, int) and not isinstance(x, bool) and 0 < x <= 100_000,
+        "distinct": lambda x: isinstance(x, bool),
+        "time": lambda x: (isinstance(x, dict) and set(x) <= {"col", "from", "to"}
+                           and isinstance(x.get("col"), str)
+                           and all(isinstance(x.get(k), (str, type(None))) for k in ("from", "to"))),
+    }
+    if not isinstance(v, dict):
+        if v is not None:
+            _drop("agent_plan", v)
+        return None
+    unknown = set(v) - set(checks)
+    if unknown:
+        _drop("agent_plan", v, f"unknown keys {sorted(unknown)}")
+        return None
+    if "tables" not in v:
+        _drop("agent_plan", v, "no tables")
+        return None
+    bad = [k for k, ok in checks.items() if k in v and not ok(v[k])]
+    if bad:
+        _drop("agent_plan", v, f"malformed {bad}")
+        return None
+    size = _json_size(v)
+    if size is None or size > _MAX_PLAN_BYTES:
+        _drop("agent_plan", v, f"size {size}")
+        return None
+    return json.loads(json.dumps(v))
+
+
+def _agent_log(v) -> list:
+    """{tool, args, result} per call, as the planner's ToolBox log records it. `result`
+    is replayed as an observation; a join-path result's `routes` are also re-read
+    structurally (veda/agent/plan.py::route_edges needs each route's `id` and `path`), so
+    a malformed route drops its entry rather than raising inside the planner."""
+    if v is None:
+        return []
+    if not isinstance(v, list):
+        _drop("agent_log", v)
+        return []
+    out, total = [], 0
+    for e in v[-_MAX_LOG_ENTRIES:]:
+        ok = (isinstance(e, dict) and isinstance(e.get("tool"), str) and 0 < len(e["tool"]) <= 64
+              and isinstance(e.get("args", {}), dict) and isinstance(e.get("result", {}), dict))
+        routes = (e.get("result") or {}).get("routes") if ok else None
+        if ok and routes is not None:
+            ok = isinstance(routes, list) and all(
+                isinstance(r, dict) and isinstance(r.get("id"), (str, int))
+                and _is_str_list(r.get("path") or [], 10) for r in routes)
+        entry = ({"tool": e["tool"], "args": e.get("args") or {}, "result": e.get("result") or {}}
+                 if ok else None)
+        size = _json_size(entry) if entry is not None else None
+        if entry is None or size is None or size > _MAX_LOG_ENTRY_BYTES or total + size > _MAX_LOG_BYTES:
+            _drop("agent_log entry", e, "wrong shape or too large")
+            continue
+        total += size
+        out.append(json.loads(json.dumps(entry)))
+    return out
+
+
+def _comparison(v) -> "dict | None":
+    """chatbot/memory/frame.py::build_comparison, reduced to what has execution meaning:
+    each side's table, label and source, and the dimension compared on. `entity_display`
+    is excluded for the same reason as everywhere else in this payload."""
+    if not isinstance(v, dict):
+        if v is not None:
+            _drop("comparison", v)
+        return None
+
+    def side(s):
+        if not isinstance(s, dict):
+            return None
+        o = {}
+        for k in ("entity", "label"):
+            if isinstance(s.get(k), str) and s[k].strip():
+                o[k] = s[k].strip()[:200]
+        sid = s.get("source_id")
+        try:
+            if sid is not None:
+                o["source_id"] = int(sid)
+        except (TypeError, ValueError):
+            pass
+        return o or None
+
+    a, b = side(v.get("primary")), side(v.get("comparison"))
+    if not (a and b):
+        _drop("comparison", v, "needs both sides")
+        return None
+    out = {"primary": a, "comparison": b}
+    if isinstance(v.get("dimension"), str) and v["dimension"].strip():
+        out["dimension"] = v["dimension"].strip()[:200]
+    return out
 
 
 if APIRouter is not None:
@@ -380,6 +648,16 @@ if APIRouter is not None:
         # Validated on the request thread, before the worker starts — a malformed payload
         # must fail here, not halfway through a pipeline run.
         _conv_ctx = _validated_conversation_context(req.flags)
+        # the chat→engine contract, observable per request: WHICH keys arrived (never the
+        # filter values) — "context never sent" and "context ignored" look identical otherwise
+        # print, like the engine's own stage lines: nothing configures app loggers in this
+        # process, so logger.info() would be dropped at the root's WARNING level
+        print(f"[inference] conversation_context trace_id={_tid} "
+              f"keys={sorted((_conv_ctx or {}).keys()) or None} "
+              f"entity_table={(_conv_ctx or {}).get('entity_table')} "
+              f"source_id={(_conv_ctx or {}).get('source_id')} "
+              f"agent_plan={bool((_conv_ctx or {}).get('agent_plan'))} "
+              f"delta={((_conv_ctx or {}).get('delta') or {}).get('op')}", flush=True)
 
         def on_event(phase: str, message: str, extra: dict):
             loop.call_soon_threadsafe(

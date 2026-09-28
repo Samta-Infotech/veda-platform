@@ -1,0 +1,6 @@
+{
+  "_about": "TRACKED seed: business phrase -> measure column for source 2, layered over the derived measure glossary by ingestion/vocabulary.py (seed phrases first, seed type wins).",
+  "assets_salelisting.expected_price": {"type": "MONETARY", "phrases": ["price", "priced", "asking price", "expected price", "listing price", "cost", "expensive", "cheap", "cheapest"]},
+  "accounts_generalledger.amount": {"type": "MONETARY", "phrases": ["amount", "value", "entry size", "payment amount", "expensive", "smallest", "largest", "size"]},
+  "accounts_paymenttransaction.paid_amount": {"type": "MONETARY", "phrases": ["paid amount", "amount paid"]}
+}

@@ -63,10 +63,13 @@ from apps.query.audit import CACHED_TABLE_SENTINEL  # noqa: E402
 def _thinking_steps_enabled() -> bool:
     """Whether to fold the internal phase stream into the four user-facing steps.
 
-    Default OFF: with it off, every `thinking` event is byte-identical to before, so
-    an existing client is untouched. With it on the SAME events are emitted, each
-    additionally carrying a `steps` block — the legacy `phase`/`message` fields never
-    change, so old and new clients can both read the same stream.
+    Default ON (config/settings/base.py: VEDA_THINKING_STEPS=1 unless the env
+    overrides it to 0). With it on, every `thinking` event additionally carries a
+    `steps` block — the legacy `phase`/`message` fields never change, so old and new
+    clients can both read the same stream. With it off, every `thinking` event is
+    byte-identical to the pre-steps stream. The `False` fallback below only matters
+    if the settings attribute is missing entirely (e.g. a stripped-down settings
+    module), not the real default.
     """
     from django.conf import settings
     return bool(getattr(settings, "VEDA_THINKING_STEPS", False))
@@ -819,6 +822,21 @@ class ConversationQueryService:
             if insights:
                 summary = summary.rstrip() + "\n\n" + "\n".join(f"- {i}" for i in insights)
             blocks.append({"type": "markdown", "content": summary, "is_summary": True})
+        if res0.get("is_compound"):
+            # one message, several parts: each answered part's table, in part order,
+            # labelled with its part (the summary block above already carries the text)
+            for p in res0.get("compound_parts") or []:
+                pr = p.get("result") or {}
+                pc, prw = pr.get("cols"), pr.get("rows")
+                if p.get("outcome") != "answered" or not pc or not prw:
+                    continue
+                prw = _positional_rows(pc, prw)
+                tc, tr = _project_display_columns(pc, prw, (pr.get("analytics") or {}).get("display_columns"))
+                label = str(p.get("part") or "").strip().rstrip("?.")
+                blocks.append({"type": "markdown", "part_index": p.get("index"),
+                               "content": f"**{(p.get('index') or 0) + 1}. {label}**\n\n"
+                                          + _rows_to_markdown_table(tc, tr)})
+            return blocks
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
             rows = _positional_rows(cols, rows)

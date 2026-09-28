@@ -92,6 +92,10 @@ def _sql_facts(sql: str) -> Dict[str, Any]:
             out["limit"] = int(lim.expression.this)
         except Exception:
             pass
+    for o in tree.find_all(exp.Ordered):
+        c = o.this if isinstance(o.this, exp.Column) else o.this.find(exp.Column)
+        out.setdefault("order", []).append(
+            ((c.name.lower() if c is not None else str(o.this).lower()), bool(o.args.get("desc"))))
     out["distinct"] = tree.find(exp.Distinct) is not None
     out["has_where"] = tree.find(exp.Where) is not None
     out["having"] = tree.find(exp.Having) is not None
@@ -122,6 +126,15 @@ def _ir_vs_sql(ir: QueryIR, sql: str) -> Optional[FirewallVerdict]:
             if flt.op in ("IS NULL", "IS NOT NULL") and "IS" not in f["ops"]:
                 return FirewallVerdict(QUALIFIER_DROPPED, slot=f"filter:{flt.column}",
                                        reason=f"IR existence predicate on {flt.column} not in SQL")
+            if _compiled_head(ir) and flt.op in ("=", "!=", "IN"):
+                # a compiled head's categorical filter is a LITERAL in the statement: the
+                # column alone is no proof — it is also the group key of "Mumbai, by city",
+                # and a SQL that lost its WHERE still names it in SELECT / GROUP BY
+                vals = flt.value if isinstance(flt.value, (list, tuple)) else [flt.value]
+                want = [str(x).lower() for x in vals if isinstance(x, str)]
+                if want and not all(w in f["literals"] for w in want):
+                    return FirewallVerdict(QUALIFIER_DROPPED, slot=f"filter:{flt.column}",
+                                           reason=f"IR filter value on {flt.column} absent from SQL")
     if ir.knows("group_keys"):
         for g in ir.group_keys:
             gcol = g.split(".")[-1].lower()
@@ -143,6 +156,20 @@ def _ir_vs_sql(ir: QueryIR, sql: str) -> Optional[FirewallVerdict]:
     if ir.knows("distinct") and ir.distinct and not f["distinct"]:
         return FirewallVerdict(SHAPE_MISMATCH, slot="distinct", shape_kind="distinct",
                                reason="IR asks DISTINCT, SQL has none")
+    if (_compiled_head(ir) and ir.knows("order") and ir.order
+            and ir.order.get("column")):
+        # frame / continuity heads only (checkpoint-1 heads carry order dicts they never
+        # promised to honour)
+        obs = f.get("order") or []
+        want_col = str(ir.order["column"]).split(".")[-1].lower()
+        want_desc = str(ir.order.get("direction") or "desc").lower() == "desc"
+        if not obs or obs[0][0] not in (want_col, str(ir.order.get("alias") or "").lower()):
+            return FirewallVerdict(SHAPE_MISMATCH, slot="order", shape_kind="order",
+                                   reason=f"IR orders by {ir.order['column']}, SQL orders by "
+                                          f"{obs[0][0] if obs else 'nothing'}")
+        if obs[0][1] != want_desc:
+            return FirewallVerdict(SHAPE_MISMATCH, slot="order", shape_kind="order",
+                                   reason=f"IR order direction {'DESC' if want_desc else 'ASC'} not in SQL")
     if ir.knows("time_window") and ir.time_window and ir.time_window.get("column"):
         tc = ir.time_window["column"].lower()
         if tc not in f["columns"] or not ({"BETWEEN", ">=", "<=", ">", "<"} & f["ops"]):
@@ -167,6 +194,26 @@ def qualifier_only(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
 
 
 # ── the entry point ───────────────────────────────────────────────────────────
+#: heads whose SQL the frame compiler built from grounded slots: the meaning-first frame
+#: path / planner agent ("frame…") and the chat continuity lane ("continuity.<op>",
+#: veda/understanding/continuity.py — the prior turn's IR with one slot changed)
+_COMPILED_HEADS = ("frame", "continuity")
+
+
+def _compiled_head(ir) -> Optional[str]:
+    h = str(getattr(ir, "head", "") or "")
+    return next((k for k in _COMPILED_HEADS if h.startswith(k)), None)
+
+
+def _frame_complete(ir) -> bool:
+    """A complete IR built by the frame compiler (head 'frame…' or 'continuity…'): its
+    slots were grounded and the SQL was compiled from them, so structure — not wording —
+    is what to check. A continuity IR above all: the user's words ("only Mumbai") are a
+    delta on the previous question, and judging the SQL against them lexically refused
+    every follow-up whose remembered slots the message does not repeat."""
+    return bool(ir is not None and not ir.ir_partial and _compiled_head(ir))
+
+
 def check(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
           allowed_tables, allowed_columns, ctx=None,
           resolve_table: Optional[Callable] = None, skip_values=(),
@@ -242,8 +289,15 @@ def check(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
             if v is not None and v.verdict == QUALIFIER_DROPPED:
                 v.detail = [v.slot]
                 return _verdict(v)
-        ok_q, missing = qualifier_completeness(query, sql, sm, strict=strict_qualifier,
-                                               user_message=user_message)
+        # A complete FRAME IR was compiled from grounded slots: its structural check above
+        # is the qualifier gate. The lexical token heuristic runs only for partial heads
+        # (meaning-first pass, Stage 5.2) — reported so the trace says which gate decided.
+        if _frame_complete(ir):
+            checks.append(f"qualifier:lexical_skipped({_compiled_head(ir)}_ir_complete)")
+            ok_q, missing = True, None
+        else:
+            ok_q, missing = qualifier_completeness(query, sql, sm, strict=strict_qualifier,
+                                                   user_message=user_message)
         if not ok_q:
             return _verdict(FirewallVerdict(QUALIFIER_DROPPED, reason=f"dropped qualifier {missing!r}",
                                             slot="qualifier", detail=missing))
@@ -257,6 +311,11 @@ def check(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
             v = _ir_vs_sql(ir, sql)
             if v is not None:
                 return _verdict(v)
+        if _frame_complete(ir):
+            checks.append(f"alignment:text_guards_skipped({_compiled_head(ir)}_ir_complete)")
+            run_ir_equivalence = False
+            run_alignment = False
+    if run_alignment:
         from veda.intent_sql_alignment import (alignment_ok, aggregate_presence_ok,
                                                filter_presence_ok, dimension_alignment,
                                                DIM_REFUSE, DIM_CLARIFY)
@@ -284,7 +343,12 @@ def check(ir: Optional[QueryIR], sql: str, sm: dict, *, query: str,
                 return _verdict(FirewallVerdict(SHAPE_MISMATCH, reason=why, shape_kind="dimension",
                                                 slot="group_keys", dim_out=dim_out))
 
-    # 4. IR equivalence — LLM SQL must not add semantics the question never asked for
+    # 4. IR equivalence — LLM SQL must not add semantics the question never asked for.
+    #    A complete frame IR's predicates ARE the question's grounded slots (a glossary-
+    #    mapped 'on the market' → status = APPROVED is not an invented predicate).
+    if run_ir_equivalence and _frame_complete(ir):
+        checks.append(f"ir_equivalence:skipped({_compiled_head(ir)}_ir_complete)")
+        run_ir_equivalence = False
     if run_ir_equivalence:
         checks.append("ir_equivalence")
         from veda.ir_equivalence import validate_ir_equivalence

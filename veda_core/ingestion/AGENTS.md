@@ -37,6 +37,7 @@ and the non-relational dispatcher. Full reference: [../../docs/INGESTION.md](../
 | `value_referents.py` | L5 (non-fatal) | `write_value_referents()` — LLM-free: for every sampled value emit direct + FK-closure referents → `veda_value_referents.json`. |
 | `value_mirror.py` | L5 (non-fatal) | `mirror_values_to_redis()` — `column_values` → Redis hashes `value:{tenant}:{source}:{norm}`. |
 | `cross_source_graph.py` | L5 (non-fatal) | `discover_and_persist(tenant)` — compares `column_sketches` across sources → `cross_source_fk` col→col edges (Jaccard + containment). No-op until ≥ 2 sources have sketches. |
+| `vocabulary.py` | L5 (non-fatal, last) | `publish_vocabulary()` — the business vocabulary for the meaning-first pass: `veda_entity_cards.json` (SLM-drafted, schema-validated), `veda_value_glossary.json`, `veda_measure_glossary.json`, `veda_questions.jsonl` (+ `.emb.npy`), each with a tracked seed in `data/seeds/<sid>/` that wins; then REBUILDS `veda_routing_card.json` from the cards (first rewrite keeps `.pre_vocab`). Offline: `scripts/build_vocabulary.py`. Gate `VOCABULARY_BUILD_ENABLED`. |
 
 ## Document / cross-source ingest
 | File | Role |

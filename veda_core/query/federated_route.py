@@ -1052,6 +1052,34 @@ def run_federated(query: str, tenant: str, source_ids, verbose: bool = False) ->
         if verbose:
             logger.info("federated_route: semi-join attempt skipped (%s)", _sje)
 
+    # PLANNER AGENT (AGENT_PLANNER_ENABLED, default OFF → skipped): the SLM plans over the
+    # whole scope's semantics with read-only tools; a plan whose tables span two sources over
+    # a cross_source_fk edge is compiled by the existing builders (catalog-qualified) and goes
+    # through the same _fed_compose gate (question gate → check_federated → executor). A plan
+    # inside one source, or none, falls through to the planners below unchanged.
+    try:
+        from config import AGENT_PLANNER_ENABLED as _agent_on
+    except Exception:
+        _agent_on = False
+    if _agent_on:
+        try:
+            from veda.agent.federated import plan_federated
+            _fa = plan_federated(query, tenant, list(by_source), kinds)
+            if _fa is not None:
+                _sql_a, _ir_a, _cols_a = _fa
+                payload = _fed_compose(query, _sql_a, _cols_a, chunks, tenant, ir=_ir_a,
+                                       head="federated.agent", focused=focused)
+                if isinstance(payload, dict) and payload.get("status") == "ok":
+                    payload["answer"] = _nl_answer(query, payload.get("result") or {})
+                    payload["operation"] = "AGENT_PLAN"
+                    return payload
+                if verbose:
+                    logger.info("federated_route: agent plan did not execute (%s) — falling through",
+                                payload.get("status") if isinstance(payload, dict) else payload)
+        except Exception as _ae:
+            if verbose:
+                logger.info("federated_route: agent attempt skipped (%s)", _ae)
+
     # PREFERRED: DETERMINISTIC join-path planner. The SLM only picks the group column + each
     # metric's aggregate/table/column; CODE assembles the joins (BFS over the edge graph), so
     # even deep-indirect metrics (4-hop many-to-many) join correctly.

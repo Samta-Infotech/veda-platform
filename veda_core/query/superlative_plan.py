@@ -249,8 +249,8 @@ def _glossary_anchor(query, sm):
     """The table a curated alias in the query names outright, or None.
 
     ONE ANCHOR POLICY (2026-09-23): `query/entity_resolver` already treats this glossary
-    as the first authority and pins its answer silently (ER_GROUNDED_REFUSAL=False),
-    while this planner used to reach its own verdict from typed evidence alone. The two
+    as the first authority and pins its answer silently, while this planner used to
+    reach its own verdict from typed evidence alone. The two
     disagreed on exactly the questions the glossary exists for: "payments" resolved to
     accounts_paymenttransaction over there, and clarified across five payment tables
     over here. The longest alias wins, so "payment transaction" beats "payment"."""

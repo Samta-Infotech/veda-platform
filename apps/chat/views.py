@@ -243,9 +243,7 @@ class ConversationQueryView(APIView):
             logger.exception("turn metadata failed chat_id=%s — persisting the answer "
                              "without it", chat.pk)
             metadata = {}
-        _action = getattr(service, "last_action", "")
-        if _action:
-            metadata["action"] = _action
+        _annotate_turn_metadata(service, metadata)
         assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
         _audit_chat_turn(service, service.user, message, service.source_ids, rid)
         logger.info("conversation query persistence completed chat_id=%s message_id=%s",
@@ -311,9 +309,7 @@ class ConversationQueryView(APIView):
             logger.exception("turn metadata failed chat_id=%s — persisting the answer "
                              "without it", chat.pk)
             metadata = {}
-        _action = getattr(service, "last_action", "")
-        if _action:
-            metadata["action"] = _action
+        _annotate_turn_metadata(service, metadata)
         assistant_msg = service.save_assistant_message(chat, turn.content_blocks, metadata)
         # Same audit row as the JSON path, from the same shared writer. Placed after
         # persistence and BEFORE the terminal "completed" frame, so a client that
@@ -426,6 +422,21 @@ class ConversationHistoryView(APIView):
             "created_at": _iso_z(chat.created_at),
             "messages": [_serialize_history_message(m) for m in messages],
         })
+
+
+def _annotate_turn_metadata(service, metadata: dict) -> None:
+    """The conversation-layer facts for this turn, onto the assistant message's metadata
+    (a JSONField — no migration): which path the chat graph took, and the Turn Entry
+    Gate's report of which tier settled it and what classifying it cost. QueryLog has no
+    columns for the gate, so this is where "which paths are we spending latency on"
+    becomes a query."""
+    _action = getattr(service, "last_action", "")
+    if _action:
+        metadata["action"] = _action
+    audit = getattr(service, "last_audit", None) or {}
+    if audit.get("entry_path"):
+        metadata["entry_gate"] = {k: audit.get(k) for k in (
+            "entry_path", "classification_latency_ms", "requires_veda", "requires_context")}
 
 
 def _audit_chat_turn(service, user, message, source_ids, rid) -> None:

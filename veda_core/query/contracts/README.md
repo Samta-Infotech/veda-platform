@@ -44,12 +44,11 @@ the deterministic SQL head is a seven-stage pipeline **L1→L7**.
 - **Trace:** every stage records to a `trace` object (`veda/explain.py`) surfaced in
   the result for explainability.
 
-## Pre-L1 arbitration & simplification
+## Pre-L1 arbitration
 
 | Concern | Module | Contract |
 |---|---|---|
 | Value-vs-column arbitration (runs before retrieval) | `query/value_arbiter.py` | classifies spans as SCHEMA_REF / VALUE / NEGATED_VALUE / ENTITY / UNKNOWN, grounded only by the `column_values` store. |
-| Query simplification | `query/nl_simplifier.py` | rewrites verbose NL using sampled value hints before retrieval. |
 
 ## The non-SQL heads
 

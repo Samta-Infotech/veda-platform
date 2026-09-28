@@ -206,8 +206,81 @@ def _frame_reference(message: str, stack_questions: List[str]) -> Optional[int]:
     return best if best_score >= 2 else None
 
 
+# "the vendor one", "the second one", "part 2", "the handbook answer" — a reference to
+# ONE PART of the latest compound turn.
+_PART_NAMED = re.compile(r"\bthe\s+([a-z][a-z \-]{1,40}?)\s+(one|ones|part|question|answer)\b", re.I)
+_PART_NUM = re.compile(r"\bpart\s+(\d)\b", re.I)
+_ORDINALS = {"first": 0, "1st": 0, "second": 1, "2nd": 1, "third": 2, "3rd": 2,
+             "fourth": 3, "4th": 3, "fifth": 4, "5th": 4}
+
+
+def _compound_members(stack: List[Dict[str, Any]]) -> List[Tuple[int, Dict[str, Any]]]:
+    if not stack:
+        return []
+    ct = stack[-1].get("compound_turn")
+    if ct is None:
+        return []
+    mem = [(i, e) for i, e in enumerate(stack) if e.get("compound_turn") == ct]
+    return sorted(mem, key=lambda p: (p[1].get("part_index") or 0)) if len(mem) >= 2 else []
+
+
+def part_reference(message: str, stack: Optional[List[Dict[str, Any]]]) -> Optional[Tuple[int, Tuple[int, int]]]:
+    """(stack index, message span) of the compound PART the message points at, or None.
+    Only the parts of the LATEST compound turn are candidates, and a named reference must
+    match exactly one of them (by its entity / document / the part's own words)."""
+    mem = _compound_members(list(stack or []))
+    if not mem:
+        return None
+    msg = str(message or "")
+    m = _PART_NUM.search(msg)
+    if m:
+        k = int(m.group(1)) - 1
+        hit = [i for i, e in mem if (e.get("part_index") or 0) == k]
+        return (hit[0], m.span()) if hit else None
+    m = _PART_NAMED.search(msg)
+    if not m:
+        return None
+    words = m.group(1).strip().lower()
+    if words in _ORDINALS or words == "last":
+        k = len(mem) - 1 if words == "last" else _ORDINALS[words]
+        return (mem[k][0], m.span()) if 0 <= k < len(mem) else None
+    want = {_stem(t) for t in _norm(words).split() if t not in _STOP}
+    if not want:
+        return None
+    hits = []
+    for i, e in mem:
+        names = " ".join(str(x or "") for x in (e.get("entity"), e.get("entity_display"),
+                                                  e.get("document"), e.get("question")))
+        have = {_stem(t) for t in _norm(names.replace("_", " ")).split()}
+        if want <= have:
+            hits.append(i)
+    return (hits[0], m.span()) if len(hits) == 1 else None
+
+
 def detect(message: str, entry: Optional[Dict[str, Any]],
            stack: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+    """A reference to one PART of the latest compound turn ("the vendor one — top 3")
+    moves the cursor there (`target_frame_index`) and the rest of the message is
+    classified against THAT part's entry."""
+    pr = None
+    try:
+        pr = part_reference(message, stack)
+    except Exception:
+        pr = None
+    if pr is not None:
+        idx, (a, b) = pr
+        target = (stack or [])[idx]
+        rest = (str(message)[:a] + " " + str(message)[b:]).strip(" -—–,:;.")
+        sub = _detect(rest, target, None) if _tokens(rest) or _LIMIT_N.search(rest) else None
+        if sub and sub.get("op") not in (OP_AMBIGUOUS, OP_NEW_TOPIC):
+            return {**sub, "target_frame_index": idx, "rule": f"part_reference+{sub.get('rule')}"}
+        return {"op": OP_SWITCH_FRAME, "slot": None, "concept": None, "value": None,
+                "target_frame_index": idx, "confidence": 0.9, "rule": "part_reference"}
+    return _detect(message, entry, stack)
+
+
+def _detect(message: str, entry: Optional[Dict[str, Any]],
+            stack: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Classify one follow-up against the CURRENT stack entry, deterministically.
 
     Returns {op, slot, concept, value, target_frame_index, confidence, rule} — the same
@@ -366,42 +439,6 @@ def has_back_reference(message: str) -> bool:
     engine re-grounds either way); losing it costs the whole turn when it is wrong.
     """
     return bool(_ANAPHORA.search(str(message or "")))
-
-
-def sources_named(message: str, entities_by_source: Dict[str, List[str]],
-                  exclude: Optional[List[int]] = None) -> List[int]:
-    """Source ids whose OWN entities this message names, excluding `exclude`.
-
-    The question a session-sticky scope cannot answer on its own: has the user moved to
-    subject matter that lives somewhere else? "which properties do they belong to" asked
-    of a maintenance session names `properties`, which is source 2's entity, not source
-    4's — and answering it from source 4 alone produces a confident answer to a different
-    question (measured: source 4's maintenance table has no city column, yet a Mumbai
-    follow-up reported "8 maintenances are recorded in Mumbai").
-
-    Entity names come from each source's routing card via the api tier
-    (apps/query/scope.py::_routing_card_entities) — this module reads no files and
-    imports no veda_core. Stem-matched, so "properties" matches the entity "property".
-    """
-    ms = _stems(message)
-    excl = {int(s) for s in (exclude or [])}
-    hits = []
-    for sid, names in (entities_by_source or {}).items():
-        try:
-            sid_i = int(sid)
-        except (TypeError, ValueError):
-            continue
-        if sid_i in excl:
-            continue
-        for n in (names or []):
-            nn = _norm(n)
-            # single-token entity names must be real words, not ids/codes
-            if len(nn) < 4:
-                continue
-            if _phrase_in(nn, ms) and sid_i not in hits:
-                hits.append(sid_i)
-                break
-    return hits
 
 
 def continues_thread(delta: Optional[Dict[str, Any]], message: str) -> bool:

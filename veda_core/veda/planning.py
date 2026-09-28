@@ -1243,7 +1243,8 @@ def _plan_and_build(query, sm, all_cols, tf, *, graph, junctions, anchor, target
         return {"action": "fallback"}
     if plan["confidence"] < JOIN_CONFIDENCE_FLOOR and not _defer_unreachable:
         return {"action": "refuse",
-                "msg": f"join confidence {plan['confidence']} < {JOIN_CONFIDENCE_FLOOR}"}
+                "msg": f"join confidence {plan['confidence']} < {JOIN_CONFIDENCE_FLOOR} "
+                       f"({anchor} ↔ {', '.join(targets)})"}
 
     # Existence semantics (with / without / how-many-have): deterministic EXISTS /
     # NOT EXISTS — no LLM, no fan-out, returns each anchor once (fixes the duplicate-

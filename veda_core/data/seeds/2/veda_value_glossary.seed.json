@@ -1,0 +1,32 @@
+{
+  "_about": "TRACKED seed: business PHRASE -> stored VALUE for source 2, layered over the derived value glossary by ingestion/vocabulary.py (together with the older veda_value_aliases.seed.json, same shape; this file wins).",
+  "accounts_generalledger.entry_type": {
+    "DEBIT": [
+      "debit",
+      "debits",
+      "debited",
+      "money out",
+      "outgoing"
+    ],
+    "CREDIT": [
+      "credit",
+      "credits",
+      "credited",
+      "money in",
+      "incoming"
+    ],
+    "Credit": []
+  },
+  "assets_salelisting.status": {
+    "_drop": [
+      "listed",
+      "for sale",
+      "up for sale",
+      "ready to sell",
+      "pending"
+    ],
+    "APPROVED": [],
+    "DRAFT": [],
+    "CANCELLED": []
+  }
+}

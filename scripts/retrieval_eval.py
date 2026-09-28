@@ -40,6 +40,9 @@ from ingestion.db_abstraction import get_internal_connection, release_internal_c
 from query.retrieval_select import select_retrieval
 from context import RequestContext, set_context
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import _flags  # noqa: E402
+
 
 def _git_sha() -> str:
     try:
@@ -314,6 +317,9 @@ def eval_federated_e2e(tenant: str) -> dict:
 def run_cross_source(args) -> int:
     _setup_django()
     set_context(RequestContext(source_id=int(args.source_id), tenant=args.tenant, cache_back=False))
+    flags = _flags.effective_flags()
+    _flags.print_flags_header(flags, title="retrieval_eval --cross-source: effective engine flags")
+    _flags.enforce_expect(flags, args.expect)
 
     golden_path = Path(args.golden)
     if not golden_path.exists():
@@ -343,6 +349,7 @@ def run_cross_source(args) -> int:
         "golden_set": str(golden_path.relative_to(_REPO)) if golden_path.is_relative_to(_REPO)
                       else str(golden_path),
         "ready_sources": {sid: name_by_id.get(sid) for sid in ready_ids},
+        "flags": flags,
         "join_precision": eval_join_precision(golden, discovered),
         "entity_linking": eval_entity_linking(
             _REPO / "evaluation" / "cross_source_entity_labels.jsonl"),
@@ -384,6 +391,7 @@ def main() -> int:
     ap.add_argument("--label", default="")
     ap.add_argument("--cross-source", action="store_true",
                     help="run the Phase 6 cross-source metric suite instead of WP0 column recall")
+    _flags.add_expect_arg(ap)
     args = ap.parse_args()
 
     if args.cross_source:
@@ -391,6 +399,9 @@ def main() -> int:
 
     _setup_django()
     set_context(RequestContext(source_id=args.source_id, tenant=args.tenant, cache_back=False))
+    flags = _flags.effective_flags()
+    _flags.print_flags_header(flags, title="retrieval_eval: effective engine flags")
+    _flags.enforce_expect(flags, args.expect)
 
     golden_path = Path(args.golden)
     if not golden_path.exists():
@@ -482,6 +493,7 @@ def main() -> int:
         "tenant": args.tenant,
         "golden_set": str(golden_path.relative_to(_REPO)) if golden_path.is_relative_to(_REPO)
                       else str(golden_path),
+        "flags": flags,
         "summary": summary,
         "per_class": per_class,
         # graded numbers above are timestamp-free & deterministic; wall-clock stamp is

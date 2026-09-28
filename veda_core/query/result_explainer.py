@@ -648,7 +648,11 @@ def _analytical_context_block(ctx: Optional[dict]) -> str:
     order = [("intent", "intent"), ("operation", "operation"), ("measure", "measure"),
              ("dimension", "dimension"), ("display", "display field"),
              ("ranking", "ranking"), ("temporal", "time range"),
-             ("explicit_identifier", "explicit id requested")]
+             ("explicit_identifier", "explicit id requested"),
+             # meaning-first pass (Stage 5.4): the grounded frame's own account of what
+             # the rows are — so a window's max is never narrated as a global fact
+             ("frame_filters", "filters applied"), ("frame_order", "sorted by"),
+             ("frame_mappings", "interpretation"), ("frame_scope", "scope")]
     bits = [f"{label}={ctx.get(k)}" for k, label in order if ctx.get(k)]
     return ("\n\nResolved analytical context: " + "; ".join(bits)) if bits else ""
 

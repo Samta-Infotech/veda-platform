@@ -48,6 +48,9 @@ import time
 import urllib.error
 import urllib.request
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _flags  # noqa: E402
+
 API = os.environ.get("VEDA_QTXT_API", "http://localhost:8080/api/v1/conversations/query")
 TOKEN = os.environ.get("VEDA_QTXT_TOKEN", "f1212a9cb5fde18680911174187136feaa9028fb")
 DSN = dict(host=os.environ.get("HOMZHUB_HOST", "localhost"),
@@ -160,13 +163,16 @@ SPECS = [
 
 # Which real columns satisfy each semantic ordering kind, per anchor table.
 ORDER_COLS = {
-    GL: {"date": ["transaction_date", "created_at", "updated_at"],
+    # Hardened 2026-09-25: "latest / oldest / most recently dated" means the entity's
+    # BUSINESS date — transaction_date for a ledger entry, created_at for a listing — not
+    # any date-typed column (Q11 on created_at used to pass).
+    GL: {"date": ["transaction_date"],
          "money": ["amount"],
          "updated": ["updated_at"],
          "id": ["id"],
          "currency": ["currency_id"],
          "name": ["project_name", "building_name", "label"]},
-    SL: {"date": ["created_at", "available_from_date", "updated_at"],
+    SL: {"date": ["created_at"],
          "money": ["expected_price"],
          "updated": ["updated_at"],
          "id": ["id"],
@@ -306,6 +312,77 @@ def _explicit_limit(sql):
     return int(m.group(1)) if m else None
 
 
+def _where_predicates(sql):
+    """Top-level AND-ed WHERE predicates of the outer SELECT, as lowercase SQL text."""
+    try:
+        import sqlglot
+        from sqlglot import exp
+        tree = sqlglot.parse_one(sql, read="postgres")
+        w = tree.args.get("where")
+        if w is None:
+            return []
+        out, stack = [], [w.this]
+        while stack:
+            n = stack.pop()
+            if isinstance(n, exp.And):
+                stack += [n.left, n.right]
+            else:
+                out.append(n.sql(dialect="postgres").lower())
+        return out
+    except Exception:
+        return []
+
+
+_MAPPING_WORDS = re.compile(r"\b(read as|interpreted|interpreting|mapped|taken to mean|treated as|means)\b")
+
+
+def _unrequested_filters(spec, sql, summary):
+    """Hardened 2026-09-25: every WHERE predicate must be LICENSED — matched by one of the
+    spec's `where` markers (the qualifier the question names) or `allowed_filters`; an
+    `IS NOT NULL` on the ORDER BY column is allowed (it only drops rows with no sort key);
+    a value-glossary predicate is allowed when the answer STATES the mapping ('… read as
+    status APPROVED'). Returns the offending predicates."""
+    markers = list(spec.get("where") or []) + list(spec.get("allowed_filters") or [])
+    ob = [c for c, _ in _order_by(sql)]
+    low_sum = (summary or "").lower()
+    bad = []
+    for p in _where_predicates(sql):
+        if any(re.search(m, p) for m in markers):
+            continue
+        if re.search(r"\bis not null\b", p) and any(re.search(rf'\b"?{re.escape(c)}"?\s+is not null', p) for c in ob):
+            continue
+        lits = [x.lower() for x in re.findall(r"'([^']*)'", p)]
+        if lits and _MAPPING_WORDS.search(low_sum) and all(l in low_sum for l in lits):
+            continue
+        bad.append(p)
+    return bad
+
+
+def _inline_from_explain(sql, exp):
+    """The HTTP payload carries parameterised SQL and no params (its schema is pinned to
+    {enabled, query}); its filters.applied values are in predicate order. Inline them only
+    when their count equals the placeholder count — else leave the SQL as is (the grader
+    then reports rows as unverified rather than guessing)."""
+    if "%s" not in (sql or ""):
+        return sql
+    vals = [f.get("value") for f in ((exp.get("filters") or {}).get("applied") or []) if isinstance(f, dict)]
+    flat = []
+    for v in vals:
+        if isinstance(v, (list, tuple)):
+            flat += list(v)
+        elif isinstance(v, str) and re.fullmatch(r"-?[\d.]+ and -?[\d.]+", v.strip()):
+            flat += v.split(" and ")
+        else:
+            flat.append(v)
+    if len(flat) != sql.count("%s"):
+        return sql
+    try:
+        return _conn().cursor().mogrify(sql, [(float(x) if isinstance(x, str) and re.fullmatch(r"-?\d+(\.\d+)?", x) else x)
+                                            for x in flat]).decode()
+    except Exception:
+        return sql
+
+
 def grade(spec, resp):
     """-> (verdict, detail, emitted_sql, returned_rows, gt_rows)"""
     if resp.get("_http_error") or resp.get("_error"):
@@ -316,6 +393,7 @@ def grade(spec, resp):
     data = resp.get("data") or {}
     exp = (data.get("metadata") or {}).get("explainability") or {}
     sql = ((exp.get("sql") or {}).get("query") or "").strip()
+    sql = _inline_from_explain(sql, exp)
     summary = (data.get("summary") or "").strip()
     n_ret = ((exp.get("result") or {}).get("row_count"))
 
@@ -358,10 +436,17 @@ def grade(spec, resp):
             return "ignored_qualifier", f"SQL never projects /{marker}/", sql, n_ret, gt_n
 
     # ordering the question named
+    # hardened: no predicate the question does not license
+    bad = _unrequested_filters(spec, sql, summary)
+    if bad:
+        return "wrong_answer", f"unrequested filter(s): {bad}", sql, n_ret, gt_n
+
     want = spec.get("order")
     if want:
         kind, want_dir = want
-        ok_cols = ORDER_COLS.get(spec["table"], {}).get(kind, [])
+        # held-out specs list their acceptable columns directly: [["col", ...], "desc"]
+        ok_cols = (list(kind) if isinstance(kind, (list, tuple))
+                   else ORDER_COLS.get(spec["table"], {}).get(kind, []))
         obs = _order_by(sql)
         if not obs:
             return "wrong_answer", f"ranked question, no ORDER BY (wanted {kind} {want_dir})", \
@@ -447,7 +532,17 @@ def main():
     ap.add_argument("--only", default="", help="comma-separated question numbers")
     ap.add_argument("--source-ids", default="",
                     help="pin the request scope, e.g. 2 or 2,3,4,5 (default: unpinned)")
+    _flags.add_expect_arg(ap)
     args = ap.parse_args()
+
+    # This harness talks to the live api/inference stack over HTTP; there is no endpoint
+    # that reports ITS effective flags (adding one would touch inference/**, out of scope
+    # for this pass), so what follows is this HOST process's own config.py read — it may
+    # not match the container answering these requests. See _flags.local_flags_note().
+    flags = _flags.effective_flags()
+    print(_flags.local_flags_note())
+    _flags.print_flags_header(flags, title="eval_question_txt (LOCAL, not the live stack)")
+    _flags.enforce_expect(flags, args.expect)
 
     global PIN_SOURCE_IDS
     if args.source_ids.strip():
@@ -498,6 +593,7 @@ def main():
         os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
         with open(args.out, "w") as f:
             json.dump({"label": args.label, "source_ids": PIN_SOURCE_IDS,
+                       "flags_local_only": flags,
                        "counts": counts, "correct": correct,
                        "total": total, "results": rows}, f, indent=1)
         print(f"wrote {args.out}")

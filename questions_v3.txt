@@ -1,0 +1,45 @@
+Here are the combined questions extracted from the file:
+
+**Easy Combined Questions**
+
+1. Can you list the latest payments made for our properties (including debits/credits and exact amounts), what are the normal working days and office timings, and which vendor has the highest rating?
+
+2. Show me the cheapest properties currently on the market for sale, how many days of work from home can I take in a quarter, and which vendors have a rating above 4.2?
+
+3. Which properties have the most expensive financial records logged to date, do I need HR approval before taking WFH, and which vendors have a rating below 4.0?
+
+4. What were the smallest payments processed across our real estate portfolio recently, can I carry my unused WFH days to the next quarter, and which vendors have a rating of exactly 4.2?
+
+5. What are the oldest properties we put up for sale (and their current status), how many earned leaves do I get in a year, and which city has the highest-rated vendor?
+
+6. Give me a quick breakdown of the most recent accounting entries for our assets, how many sick leaves are available each year, and what is the rating spread between the best and worst vendor?
+
+7. Can I get a quick alphabetical list of our properties and the recent payments associated with them, what happens if I take sick leave for more than two days, and which maintenance records are unpaid?
+
+8. Please show the financial logs ordered by property name in reverse alphabetical order, how much sick leave can I take during probation, and can you list all maintenance records with their amounts?
+
+9. Which of our properties on the market are priced above 10,000, do earned leaves expire at the end of the year, and which category has the highest total maintenance amount?
+
+10. Are there any recent payments processed that fall between 100 and 50,000, how early should I apply if I want more than three days of leave, and how many vendors are rated 4 or above?
+
+**Medium Combined Questions**
+
+11. What are the latest lease transactions with their asset project name, rent amounts, and tenant start dates, what happens if I take leave without getting approval, and how many distinct cities have vendors?
+
+12. Show recent ticket activities and updates with their ticket categories and numbers, how early should I apply for leave of less than three days, and how many maintenance records are repairs?
+
+13. What is the total general ledger accounting amount recorded per property project and ledger category, can I take leave during my notice period, and how many maintenance records are paid?
+
+14. Which sale listings have active negotiations and what are their proposed purchase prices and creators, how many days of paternity leave are available, and which category has the highest total maintenance amount?
+
+15. What are the total space counts and furnishing details for different asset types across properties, how much bereavement leave can I take, and what is the distribution of maintenance records by status?
+
+16. Who are the assigned users handling tickets across different ticket categories, who is considered immediate family for bereavement leave, and can you list all maintenance records with their amounts?
+
+17. What are the banking and employment details for registered users with verified addresses, do full-time employees get birthday leave, and what is the average monthly fee of catalog amenities?
+
+18. What is the average rating given for each review pillar across different review types, is there any wellness benefit for employees, and which amenity has the highest monthly fee?
+
+19. Which service plans and pricing packages have the highest subscriber counts among users, how much maternity leave is available, and which category has the most amenities?
+
+20. List prospective leads interested in property lease units along with lead contact details, can I work part-time after maternity leave, and how many amenity categories are there?

@@ -127,13 +127,7 @@ def test_glossary_does_not_break_named_detail():
     assert r.anchor == "users_userpreference"
 
 
-# ── RC3 grounded clarification (ER_GROUNDED_REFUSAL) ─────────────────────────
-def test_rc3_flag_default_off():
-    # default OFF → production pipeline byte-identical (no forced clarifications)
-    import config
-    assert config.ER_GROUNDED_REFUSAL is False
-
-
+# ── RC3 grounded clarification — resolver evidence shape ─────────────────────
 def test_rc3_ambiguous_exposes_clarify_options():
     # When AMBIGUOUS, evidence must carry the tied candidates so the pipeline can
     # name them in the clarify message ("did you mean X or Y?"). Only exercised

@@ -65,6 +65,13 @@ except Exception:  # pragma: no cover - importable outside the engine cwd too
 _USAGE_ACC: ContextVar[Optional[dict]] = ContextVar("veda_slm_usage", default=None)
 _PENDING: ContextVar[Optional[tuple]] = ContextVar("veda_slm_pending", default=None)
 
+# A wall-clock DEADLINE (time.time() seconds) for every SLM call made in this context —
+# set around one part of a compound message (veda_hybrid._run_part). A call made after
+# it has passed raises TimeoutError at once; a call made before it is capped to the time
+# left. This is what stops a part the front door has already given up on from holding
+# the one SLM host while the next part waits. None (the default) changes nothing.
+slm_deadline: ContextVar[Optional[float]] = ContextVar("veda_slm_deadline", default=None)
+
 
 def reset_usage() -> None:
     """Start a fresh per-query accumulator (called at query start)."""
@@ -264,7 +271,7 @@ class OllamaBackend:
 
     def call(self, user_message, *, system=None, timeout=None, temperature=0.0,
              num_predict=None, num_ctx=None, seed=None, json_format=False,
-             endpoint="chat", model=None) -> tuple:
+             endpoint="chat", model=None, json_schema=None) -> tuple:
         timeout = timeout or self.default_timeout
         options = {"temperature": temperature}
         if num_predict is not None:
@@ -293,7 +300,11 @@ class OllamaBackend:
         messages.append({"role": "user", "content": user_message})
         payload = {"model": model or self.model, "stream": False,
                    "keep_alive": "24h", "messages": messages, "options": options}
-        if json_format:
+        if json_schema:
+            # Constrained decoding: Ollama (>= 0.5) compiles a JSON schema passed as
+            # `format` into a grammar, so the reply cannot leave the schema or its enums.
+            payload["format"] = json_schema
+        elif json_format:
             payload["format"] = "json"
         body = _post_json(f"{self.base_url}/api/chat", payload, timeout)
         _note_usage(body)
@@ -325,7 +336,7 @@ class VLLMBackend:
 
     def call(self, user_message, *, system=None, timeout=None, temperature=0.0,
              num_predict=None, num_ctx=None, seed=None, json_format=False,
-             endpoint="chat", model=None) -> tuple:
+             endpoint="chat", model=None, json_schema=None) -> tuple:
         timeout = timeout or self.default_timeout
         messages = []
         if system:
@@ -337,7 +348,10 @@ class VLLMBackend:
             payload["max_tokens"] = num_predict
         if seed is not None:
             payload["seed"] = seed
-        if json_format:
+        if json_schema:
+            payload["response_format"] = {"type": "json_schema",
+                                          "json_schema": {"name": "frame", "schema": json_schema}}
+        elif json_format:
             payload["response_format"] = {"type": "json_object"}
         # num_ctx is an Ollama runtime knob; vLLM's context is fixed at serve time.
         body = _post_json(f"{self.base_url}/v1/chat/completions", payload, timeout)
@@ -391,11 +405,18 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
              temperature: float = 0.0, num_predict: Optional[int] = None,
              num_ctx: Optional[int] = None, seed: Optional[int] = None,
              json_format: bool = False, endpoint: str = "chat",
-             model: Optional[str] = None) -> str:
+             model: Optional[str] = None, json_schema: Optional[dict] = None) -> str:
     """The one SLM entry point. `purpose` is a label for tracing/metrics only
     (e.g. "ir_emit", "nl_answer", "decompose") — it never changes routing.
     Return contract is unchanged (plain str); token usage is recorded on the
     side into whatever collect_usage() scope is currently open, if any."""
+    _dl = slm_deadline.get()
+    if _dl is not None:
+        import time as _time
+        _left = _dl - _time.time()
+        if _left <= 0.5:
+            raise TimeoutError(f"SLM deadline passed before '{purpose}'")
+        timeout = int(max(1, min(float(timeout or _config()["timeout"]), _left)))
     backend = get_backend()
     _mdl = model or backend.model
     if num_ctx is None:
@@ -417,7 +438,8 @@ def call_slm(user_message: str, *, system: Optional[str] = None,
             content, usage = backend.call(
                 user_message, system=system, timeout=timeout, temperature=temperature,
                 num_predict=num_predict, num_ctx=num_ctx, seed=seed,
-                json_format=json_format, endpoint=endpoint, model=model)
+                json_format=json_format, endpoint=endpoint, model=model,
+                **({"json_schema": json_schema} if json_schema else {}))
     except Exception as exc:
         _ok = False
         _err = f"{type(exc).__name__}: {exc}"

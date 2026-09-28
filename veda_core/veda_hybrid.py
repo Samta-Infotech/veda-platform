@@ -48,7 +48,6 @@ except Exception:  # pragma: no cover
 import importlib
 from slm._call_slm import collect_usage, usage_totals
 from veda.explain import new_trace, use_trace
-from slm._call_slm import collect_usage as _collect_usage_l0, usage_totals as _usage_totals_l0
 import io, contextlib
 from query.slm_layer import run_decomposer, DECOMP_DEPENDENT
 from slm._call_slm import collect_usage as _collect_usage_dc, usage_totals as _usage_totals_dc
@@ -61,7 +60,6 @@ from veda.explain import (current_trace as _cur_trace, bind_trace as _bind_trace
 # value_grounding / qualifier_completeness now run inside veda.firewall (M3 checkpoint 1);
 # ranked_shape_ok has no firewall equivalent and is still called directly below.
 from veda.validation import ranked_shape_ok as _ranked_ok
-from veda.ir_equivalence import validate_ir_equivalence
 import sqlglot
 from sqlglot import exp
 from connectors.base import build_connector
@@ -301,14 +299,12 @@ def _doc_intent_by_evidence(query) -> bool:
     if not sids:
         return False
     try:
-        import query.source_coordinator as _SC
-        from query.source_evidence import group_evidence_by_source
-        cols, chunks = _SC._default_evidence_provider(query, sids)
-        ev = group_evidence_by_source(cols, chunks)
+        # the coordinator's evidence for this request when it already ran (or its restriction
+        # to a narrowed scope) — one evidence pass per request; computed and cached otherwise
+        from query.source_coordinator import routing_evidence
+        ev = routing_evidence(query, sids)
         if not ev:
             return False
-        _SC._apply_item_prior(query, sids, ev)
-        _SC._dominance_retier(ev)
         strong = [e for e in ev.values() if getattr(e, "presence_tier", "") == "STRONG"]
         if not strong:
             return False
@@ -344,7 +340,20 @@ def _primary_is_document_source() -> bool:
 
 
 def classify(query, verbose=False):
-    """Return (intent, source_ids). Falls back to 'sql' if the router is off/unavailable
+    """(intent, source_ids) — see _classify_lane. Records which rule decided in the trace as
+    ``classify.lane`` (continuity | doc_ref | doc_evidence | router | default_sql, or guard_rag
+    when _guard_sql_head demoted a sql intent) so the lane choice is checkable per turn."""
+    intent, sids, lane = _classify_lane(query, verbose)
+    try:
+        from veda.explain import current_trace
+        current_trace().set("classify", lane=lane, intent=intent)
+    except Exception:
+        pass
+    return intent, sids
+
+
+def _classify_lane(query, verbose=False):
+    """Return (intent, source_ids, lane). Falls back to 'sql' if the router is off/unavailable
     — the deterministic SQL head is the safe default.
 
     R2 guard (benchmark finding §8.2, 2026-09-23): that "safe default" is not safe when
@@ -392,7 +401,7 @@ def classify(query, verbose=False):
         if verbose:
             print(f"  [router] continuing the conversation's SQL lane "
                   f"(remembered table {_conv['entity_table']})")
-        return "sql", None
+        return "sql", None, "continuity"
 
     if _DOC_REF_RE.search(q) and _scope_has_doc_source():
         # Prefer the fast RAG lane (retrieve chunks + one synthesis call, ~6-8s). Only take
@@ -405,7 +414,7 @@ def classify(query, verbose=False):
                   else "rag")
         if verbose:
             print(f"  [router] doc-intent override → {intent}")
-        return intent, None
+        return intent, None, "doc_ref"
 
     # Evidence-based doc-intent (flag-gated): catches document questions the fixed word list misses,
     # by consulting the coordinator's cosine evidence. OFF ⇒ this is False ⇒ byte-identical.
@@ -417,22 +426,33 @@ def classify(query, verbose=False):
                   else "rag")
         if verbose:
             print(f"  [router] doc-intent (evidence) → {intent}")
-        return intent, None
+        return intent, None, "doc_evidence"
 
     try:
         from config import QUERY_ROUTER_ENABLED
     except Exception:
         QUERY_ROUTER_ENABLED = False
     if not QUERY_ROUTER_ENABLED:
-        return _guard_sql_head("sql", verbose), None
+        return _guarded("sql", None, "default_sql", verbose)
     try:
         from query.query_router import route_query
         r = route_query(query, verbose=verbose)
-        return _guard_sql_head(r.intent, verbose), r.source_ids
+        return _guarded(r.intent, r.source_ids, "router", verbose)
     except Exception as e:
         if verbose:
             print(f"  [router] unavailable ({type(e).__name__}: {e}) — defaulting to sql")
-        return _guard_sql_head("sql", verbose), None
+        return _guarded("sql", None, "default_sql", verbose)
+
+
+def _guarded(intent, sids, lane, verbose=False):
+    """_guard_sql_head plus the lane label: a demoted sql intent is lane ``guard_rag``."""
+    g = _guard_sql_head(intent, verbose)
+    if g != intent:
+        # the router's ids were chosen for the SQL head (relational/datalake sources); handing
+        # them to the RAG head searched a source with no documents ("No relevant document
+        # passages found" for FS1, 2026-09-27) — the demoted lane searches the scope's own docs
+        return g, None, "guard_rag"
+    return g, sids, lane
 
 
 def _guard_sql_head(intent, verbose=False):
@@ -558,10 +578,17 @@ def _with_summary(mr):
     return mr
 
 
-def _summarise_multi_answers(query, items):
+def _summarise_multi_answers(query, items, compound=False, timeout=45):
     """One sentence-or-three over the per-source answers (APPEND merge). The SLM sees only
     the answers already produced (with their source ids) and must not add figures; the
-    numeric guard the explainer uses applies. Falls back to a labelled join."""
+    numeric guard the explainer uses applies. Falls back to a labelled join.
+
+    compound=True (one message, several intents): the reply is composed IN PART ORDER —
+    each part's label, its answer sentence (or its clarify / refusal / timeout note) and
+    its citation — then ONE summary line, under the same numeric guard, and never a
+    "the documents do not contain …" about a part that was answered from the data."""
+    if compound:
+        return _compose_compound(query, items, timeout=timeout)
     parts = []
     for it in items:
         if it.status != STATUS_OK or not isinstance(it.result, dict):
@@ -597,6 +624,521 @@ def _summarise_multi_answers(query, items):
     except Exception:
         pass
     return fallback
+
+
+def _part_view(it):
+    """{part, outcome, answer, citations, lane} for one compound item — what the reply
+    composer and the summary line see. Business text only: a refusal's internal message
+    is rendered through the feedback layer's business-name pass."""
+    res = it.result
+    ans, cites = "", []
+    if isinstance(res, dict):
+        fb = res.get("feedback") if isinstance(res.get("feedback"), dict) else {}
+        ans = (res.get("answer") or fb.get("text") or fb.get("why") or res.get("msg")
+               or it.refuse_reason or "")
+        cites = list(res.get("citations") or [])
+    elif res is not None:
+        ans = getattr(res, "answer", "") or ""
+        cites = list(getattr(res, "citations", None) or [])
+        if getattr(res, "error", None) and not ans:
+            ans = it.refuse_reason or ""
+    else:
+        ans = it.refuse_reason or ""
+    if it.outcome in ("clarify", "refused", "error"):
+        try:
+            from veda.feedback import humanize_refusal
+            ans = humanize_refusal(str(ans))
+        except Exception:
+            pass
+    return {"part": it.part or it.sub_query, "outcome": it.outcome or (
+                "answered" if it.status == STATUS_OK else "refused"),
+            "answer": str(ans).strip(), "citations": cites, "lane": it.lane}
+
+
+def _compose_compound(query, items, timeout=15):
+    from veda.understanding.compound import (compose_reply, summary_is_safe,
+                                             fallback_summary, strip_sources)
+    parts = [_part_view(it) for it in items]
+    line = None
+    answered = [p for p in parts if p["outcome"] == "answered" and p["answer"]]
+    if len(answered) >= 2 and timeout and timeout > 3:
+        try:
+            from slm import call_slm
+            from query.result_explainer import _nl_model
+            prompt = ("Below are the answers to the parts of ONE user message. Write ONE short "
+                      "sentence that sums them up for the user. Do not add, compute or change any "
+                      "number; do not say any document lacks information.\n\n"
+                      + "\n".join(f"- {p['part']}: {strip_sources(p['answer'])[:300]}" for p in answered)
+                      + "\n\nSummary sentence:")
+            out = call_slm(prompt, purpose="multi_summary", temperature=0.0, num_predict=80,
+                           endpoint="chat", timeout=int(timeout), model=_nl_model()).strip()
+            out = next((ln.strip() for ln in out.split("\n") if ln.strip()), "")
+            if summary_is_safe(out, parts):
+                line = out
+        except Exception:
+            line = None
+    return compose_reply(parts, line or fallback_summary(parts))
+
+
+def _source_names(profiles):
+    return {str(k): str((v or {}).get("name") or "") for k, v in (profiles or {}).items()
+            if (v or {}).get("name")}
+
+
+def _maybe_compound(query, verbose=False, on_event=None):
+    """Front-door decomposition. Returns a compound MultiResult, or None → the single path
+    runs unchanged (flag off, a follow-up carrying remembered state, one intent, or an
+    extractor failure). Never raises."""
+    try:
+        from config import FRAME_PATH_ENABLED
+    except Exception:
+        FRAME_PATH_ENABLED = False
+    if not FRAME_PATH_ENABLED:
+        return None
+    try:
+        _conv = _cur_conv() or {}
+    except Exception:
+        _conv = {}
+    if isinstance(_conv, dict) and (_conv.get("entity_table") or _conv.get("filters")):
+        return None            # a follow-up edits the remembered frame — the single path's job
+    t0 = time.time()
+    try:
+        ctx = _current_ctx()
+        sids = [str(s) for s in (getattr(ctx, "source_ids", ()) or ())] if ctx else []
+        if not sids:
+            return None
+        tenant = str(getattr(ctx, "tenant", "default"))
+        try:
+            from veda_core.context import current_source_profiles as _csp
+        except Exception:
+            from context import current_source_profiles as _csp      # type: ignore
+        profiles = _csp() or {}
+        from veda.understanding.vocabulary import front_door_vocab, doc_cards_of
+        from veda.understanding.frame_extractor import extract_intents
+        from veda.understanding.compound import ground_intents, plan_compound
+        vocab = front_door_vocab(sids, tenant, profiles)
+        docs = doc_cards_of(vocab)
+        if not vocab.cards and not docs:
+            return None
+        stats = {}
+        _emit(on_event, "decompose", "Reading the question…")
+        its = extract_intents(query, vocab, doc_cards=docs, stats=stats)
+        tr = _cur_trace()
+        if its is None or len(its) <= 1:
+            inject = "skipped:no_intent"
+            if its is not None and len(its) == 1:
+                g1 = ground_intents(its, vocab, source_names=_source_names(profiles))[0]
+                inject = _keep_front_door_frame(query, its.intents[0], g1)
+            try:
+                tr.set("compound", decision="single", n=(len(its) if its else 0), inject=inject,
+                       extract={k: v for k, v in stats.items() if k != "reconcile"})
+                tr.set("frame_path", front_door={"decision": "single", "n": (len(its) if its else 0),
+                                                 "inject": inject})
+            except Exception:
+                pass
+            if verbose:
+                print(f"  [Compound] single ({'none' if its is None else len(its)} intent; {inject})")
+            return None
+        gs = ground_intents(its, vocab, source_names=_source_names(profiles))
+        decision = plan_compound(its, gs, stats.get("segments") or [])
+        if decision == "single":
+            # several frames that are one question's clauses (a join): no one frame carries
+            # the whole question, so the SQL head extracts it itself
+            try:
+                tr.set("frame_path", front_door={"decision": "single", "n": len(its),
+                                                 "inject": "skipped:multi_frame_single"})
+            except Exception:
+                pass
+        try:
+            tr.set("compound", decision=decision, n=len(its), relation=its.relation,
+                   extract=stats, parts=[{"part": g.part, "kind": g.kind, "source_id": g.source_id,
+                                          "entity": g.entity_name or g.entity, "method": g.method,
+                                          "outcome": g.outcome, "depends_on": g.depends_on,
+                                          "evidence": {k: v for k, v in g.evidence.items()
+                                                       if k in ("doc", "name_hits", "coverage", "reason")}}
+                                         for g in gs])
+        except Exception:
+            pass
+        print(f"  [Compound] {decision}: {len(its)} intents "
+              + " | ".join(f"{g.kind or '?'}@{g.source_id or '-'}:{g.outcome}" for g in gs))
+        if decision != "compound":
+            return None
+        return _run_compound(query, its, gs, t0, verbose=verbose, on_event=on_event)
+    except Exception as e:
+        print(f"  [Compound] skipped: {type(e).__name__}: {str(e)[:160]}")
+        return None
+
+
+def _keep_front_door_frame(query, fr, g):
+    """Hold a single-intent frame for the SQL head (B.1) when it is a DATA frame grounded to a
+    source; returns the trace note. A document frame, a clarify (the entity names records in
+    two sources) or an ungrounded frame is not held — the head's own extraction, with its
+    richer prompt, handles those exactly as before."""
+    from veda.understanding.compound import GROUNDED
+    try:
+        from config import FRONT_DOOR_FRAME_REUSE
+    except Exception:
+        FRONT_DOOR_FRAME_REUSE = True
+    if not FRONT_DOOR_FRAME_REUSE:
+        return "skipped:reuse_off"
+    if g.kind not in ("sql", "tabular"):
+        return f"skipped:lane_{g.kind or 'none'}"
+    if g.outcome != GROUNDED:
+        return f"skipped:{g.outcome}"
+    fr.provenance["_front_door_single"] = True
+    _FRONT_DOOR_FRAME.set((query, fr))
+    return "held"
+
+
+def _budgets():
+    try:
+        from config import COMPOUND_PART_BUDGET_S, COMPOUND_TOTAL_BUDGET_S
+    except Exception:
+        COMPOUND_PART_BUDGET_S, COMPOUND_TOTAL_BUDGET_S = 30.0, 135.0
+    return float(COMPOUND_PART_BUDGET_S), float(COMPOUND_TOTAL_BUDGET_S)
+
+
+def _run_compound(query, its, gs, t0, verbose=False, on_event=None):
+    """Run every part SEQUENTIALLY in message order (one SLM host), each on its own source,
+    each under its own budget. A dependent part runs after its parent with the parent's
+    result attached. A part that fails, clarifies or overruns never fails the others."""
+    from query.multi_result import OUTCOME_TIMEOUT, OUTCOME_ERROR, OUTCOME_STATUS
+    part_budget, total_budget = _budgets()
+    deadline = t0 + total_budget
+    items = []
+    split_items = {}
+    n = len(its.intents)
+    for i, (fr, g) in enumerate(zip(its.intents, gs)):
+        remaining = deadline - time.time()
+        # keep room for the reply's summary line
+        b = min(part_budget, remaining - 5.0)
+        _emit(on_event, "sub_query", f"Answering part {i + 1} of {n}: {g.part}",
+              index=i + 1, total=n, sub_query=g.part)
+        print(f"\n  [Compound] ── part {i + 1}/{n} [{g.kind}@{g.source_id}] {g.part!r} "
+              f"(budget {max(0.0, b):.0f}s)")
+        if b <= 2.0:
+            items.append(SubResult(g.part, OUTCOME_STATUS[OUTCOME_TIMEOUT], g.kind or "none", None,
+                                   "time budget exhausted", part=g.part, outcome=OUTCOME_TIMEOUT,
+                                   lane=g.kind, source_id=g.source_id, depends_on=g.depends_on))
+            continue
+        parent = items[g.depends_on] if g.depends_on is not None and g.depends_on < len(items) else None
+        ts = time.time()
+        try:
+            item = _run_part_budgeted(fr, g, parent, b, verbose=verbose, on_event=on_event)
+        except Exception as e:
+            item = SubResult(g.part, OUTCOME_STATUS[OUTCOME_ERROR], g.kind or "none", None,
+                             f"{type(e).__name__}", part=g.part, outcome=OUTCOME_ERROR,
+                             lane=g.kind, source_id=g.source_id)
+        item.elapsed_ms = round((time.time() - ts) * 1000.0, 1)
+        print(f"  [Compound] part {i + 1} → {item.outcome} ({item.elapsed_ms / 1000:.1f}s)")
+        items.append(item)
+        _subs = _agent_split_parts(item.result)
+        if _subs:
+            # the planner agent read this part as several questions: they run now, as parts
+            # of their own, and are listed right after it (depends_on = this part)
+            split_items[i] = _mark_split(item, _run_split(_subs, deadline, verbose=verbose,
+                                                          on_event=on_event, parent_index=i))
+    items = _with_split_items(items, split_items)
+    mr = MultiResult(items=items, compound=True, relation=its.relation)
+    left = deadline - time.time()
+    mr.summary = _summarise_multi_answers(query, items, compound=True,
+                                          timeout=max(0, min(15, int(left) - 2)))
+    _emit(on_event, "answer", f"Answered {sum(1 for it in items if it.outcome == 'answered')} "
+                              f"of {n} parts")
+    return mr
+
+
+def _run_part_budgeted(fr, g, parent, budget_s, verbose=False, on_event=None):
+    """_run_part on a worker thread that carries this request's context (trace, timeline,
+    scope, profiles). Over budget → a typed `timeout` part; the worker's next SLM call
+    sees the expired deadline and stops (slm._call_slm.slm_deadline)."""
+    import contextvars
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as _FTO
+    from query.multi_result import OUTCOME_TIMEOUT, OUTCOME_STATUS
+    cx = contextvars.copy_context()
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="veda-part")
+    fut = ex.submit(cx.run, _run_part, fr, g, parent, time.time() + budget_s, verbose, on_event)
+    try:
+        return fut.result(timeout=budget_s)
+    except _FTO:
+        return SubResult(g.part, OUTCOME_STATUS[OUTCOME_TIMEOUT], g.kind or "none", None,
+                         f"part exceeded its {budget_s:.0f}s budget", part=g.part,
+                         outcome=OUTCOME_TIMEOUT, lane=g.kind, source_id=g.source_id,
+                         depends_on=g.depends_on)
+    finally:
+        ex.shutdown(wait=False)
+
+
+def _inherit_from_parent(fr, g, parent):
+    """A dependent part takes its parent's result: the rows' ids when it refers to them
+    ("…and for those, …"), and any value from the parent's top_values its own words name —
+    the same mechanism the chat delta uses."""
+    from veda.understanding.frame import FrameFilter
+    res = getattr(parent, "result", None)
+    if not isinstance(res, dict):
+        return
+    cols = list(res.get("cols") or [])
+    rows = res.get("rows") or []
+    table = (g.entity or "").split(".", 1)[-1] if g.entity else None
+    if "id" in cols and rows:
+        k = cols.index("id")
+        ids = [r[k] if not isinstance(r, dict) else r.get("id") for r in rows[:500]]
+        ids = [v for v in ids if v is not None]
+        if ids:
+            f = FrameFilter("id", "in", ids)
+            f.__dict__.update({"_inherited": True, "_table": table, "_producer": "values"})
+            fr.filters.append(f)
+    an = res.get("analytics") or {}
+    low = " " + (g.part or "").lower() + " "
+    for st in an.get("column_stats") or []:
+        for v in (st.get("top_values") or [])[:12]:
+            if isinstance(v, str) and len(v) > 2 and f" {v.lower()} " in low:
+                f = FrameFilter(st.get("name") or "", "=", v)
+                f.__dict__.update({"_table": table, "_producer": "values"})
+                fr.filters.append(f)
+
+
+def _run_part(fr, g, parent, deadline, verbose=False, on_event=None):
+    """One part on its own source. Runs inside a copied context, but the request scope is
+    still snapshot/restored around it (the §14 narrowing bug: a SINGLE route narrows the
+    ambient scope and the next part inherited it)."""
+    from query.multi_result import (OUTCOME_ANSWERED, OUTCOME_CLARIFY, OUTCOME_REFUSED,
+                                    OUTCOME_ERROR, OUTCOME_STATUS)
+    from veda.understanding.compound import CLARIFY, DEGRADE
+    from slm._call_slm import slm_deadline
+    part = g.part or fr.part or ""
+    lane = g.kind
+
+    def _item(outcome, route, result=None, reason=None):
+        return SubResult(part, OUTCOME_STATUS[outcome], route, result, reason, part=part,
+                         outcome=outcome, lane=lane, source_id=g.source_id,
+                         depends_on=g.depends_on)
+
+    _dl = slm_deadline.set(deadline)
+    _saved = None
+    try:
+        from veda_core.context import try_current as _tc
+        _saved = _tc()
+    except Exception:
+        _saved = None
+    try:
+        # the part's own words are the question — the whole message is not
+        _set_conv({"user_message": part})
+        if g.outcome == CLARIFY:
+            return _item(OUTCOME_CLARIFY, "clarify",
+                         {"ok": False, "status": "clarify", "answer": g.message,
+                          "feedback": {"why": g.message, "text": g.message}}, g.message)
+        if parent is not None and getattr(parent, "outcome", None) != OUTCOME_ANSWERED:
+            msg = (f"This part builds on part {g.depends_on + 1}, which couldn't be answered.")
+            return _item(OUTCOME_REFUSED, "none", {"ok": False, "status": "refuse", "answer": msg}, msg)
+        if g.outcome == DEGRADE or not g.source_id:
+            it = _run_sub(part, verbose=verbose, on_event=on_event)
+            oc = (OUTCOME_ANSWERED if it.status == STATUS_OK else
+                  OUTCOME_CLARIFY if isinstance(it.result, dict) and it.result.get("status") == "clarify"
+                  else OUTCOME_ERROR if it.status == STATUS_ERROR else OUTCOME_REFUSED)
+            lane = lane or it.route
+            return _item(oc, it.route, it.result, it.refuse_reason)
+        _constrain_scope_to(g.source_id)
+        if lane == "rag":
+            from query.rag_layer import run_rag_layer
+            q = part
+            extra = [t for t in (g.topics or []) if t and t.lower() not in part.lower()]
+            if extra:
+                q = f"{part} (about: {', '.join(extra[:3])})"
+            rag = run_rag_layer(q, source_ids=[str(g.source_id)], temporal_filter=_temporal(part),
+                                verbose=verbose, on_event=on_event)
+            if getattr(rag, "error", None):
+                return _item(OUTCOME_ERROR, "rag", rag, str(rag.error))
+            if getattr(rag, "no_answer", False):
+                return _item(OUTCOME_REFUSED, "rag", rag, "the documents do not answer this part")
+            return _item(OUTCOME_ANSWERED, "rag", rag)
+        # sql / tabular: the pipeline on THIS source, with the frame injected
+        sm, cols = _load_semantic_model()
+        if lane == "tabular":
+            _iso = None
+            try:
+                from config import SOURCE_ISOLATED_RETRIEVAL_ENABLED as _iso_on
+            except Exception:
+                _iso_on = False
+            if _iso_on:
+                _iso = _datalake_isolated_sm(g.source_id)
+            sm, cols = _iso if _iso is not None else _augment_sm_for_datalake(sm, cols, g.source_id)
+        if parent is not None:
+            _inherit_from_parent(fr, g, parent)
+        if g.entity and g.method in ("NAME", "NAME+COVERAGE", "INHERITED"):
+            fr.provenance["entity_table"] = g.entity
+        from veda.understanding.frame_path import inject_frame, reset_injected
+        from veda.pipeline import run_query
+        _tok = inject_frame(fr)
+        try:
+            res = run_query(part, sm, cols, return_result=True, on_event=on_event)
+        finally:
+            reset_injected(_tok)
+        if isinstance(res, dict) and "source_id" not in res:
+            res["source_id"] = g.source_id
+        _rag = _agent_rag_handoff(part, res, verbose=verbose, on_event=on_event)
+        if _rag is not None:
+            lane = "rag"
+            if getattr(_rag, "error", None):
+                return _item(OUTCOME_ERROR, "rag", _rag, str(_rag.error))
+            if getattr(_rag, "no_answer", False):
+                return _item(OUTCOME_REFUSED, "rag", _rag, "the documents do not answer this part")
+            return _item(OUTCOME_ANSWERED, "rag", _rag)
+        if _agent_split_parts(res):
+            return _item(OUTCOME_REFUSED, "agent_split", res, "split")   # _run_compound expands it
+        if isinstance(res, dict) and res.get("ok"):
+            return _item(OUTCOME_ANSWERED, "deterministic", res)
+        st = res.get("status") if isinstance(res, dict) else None
+        if st == "clarify":
+            return _item(OUTCOME_CLARIFY, "deterministic", res, "clarify")
+        if st in ("exec_error", "tier2_exec_error"):
+            return _item(OUTCOME_ERROR, "deterministic", res, st)
+        return _item(OUTCOME_REFUSED, "deterministic", res,
+                     str((res or {}).get("error") or st or "could not answer") if isinstance(res, dict) else "no result")
+    except TimeoutError as e:
+        from query.multi_result import OUTCOME_TIMEOUT
+        return _item(OUTCOME_TIMEOUT, lane or "none", None, str(e))
+    finally:
+        slm_deadline.reset(_dl)
+        if _saved is not None:
+            try:
+                from veda_core.context import set_context as _sc
+                _sc(_saved)
+            except Exception:
+                pass
+
+
+# ── planner-agent hand-offs (frame_path._agent_or): "split" and "agent_rag" ─────────────
+def _agent_split_parts(res):
+    """The sub-questions of a head result the planner agent SPLIT, else []."""
+    if isinstance(res, dict) and res.get("status") == "split":
+        return [str(p) for p in (res.get("split_parts") or []) if p]
+    return []
+
+
+def _agent_rag_handoff(query, res, verbose=False, on_event=None):
+    """A head result the planner agent read as a document question → the RAG layer over
+    the scope's document sources it named (source-scoped). None → not that hand-off."""
+    if not (isinstance(res, dict) and res.get("status") == "agent_rag"):
+        return None
+    sids = [str(s) for s in (res.get("rag_source_ids") or [])]
+    print(f"  [Agent] rag plan → RAG layer on source(s) {sids}")
+    try:
+        _cur_trace().set("agent_handoff", kind="rag", source_ids=sids)
+    except Exception:
+        pass
+    from query.rag_layer import run_rag_layer
+    return run_rag_layer(query, source_ids=sids or None, temporal_filter=_temporal(query),
+                         verbose=verbose, on_event=on_event)
+
+
+def _run_sub_budgeted(sq, budget_s, verbose=False, on_event=None):
+    """_run_sub on a worker thread under its own SLM deadline; over budget → a typed
+    `timeout` item at the deadline (the other sub-questions still run)."""
+    import contextvars
+    from concurrent.futures import TimeoutError as _FTO
+    from query.multi_result import OUTCOME_TIMEOUT, OUTCOME_STATUS
+
+    def _go():
+        from slm._call_slm import slm_deadline
+        tok = slm_deadline.set(time.time() + budget_s)
+        try:
+            return _run_sub(sq, verbose=verbose, on_event=on_event)
+        finally:
+            slm_deadline.reset(tok)
+    cx = contextvars.copy_context()
+    ex = ThreadPoolExecutor(max_workers=1, thread_name_prefix="veda-split")
+    fut = ex.submit(cx.run, _go)
+    try:
+        return fut.result(timeout=budget_s)
+    except _FTO:
+        return SubResult(sq, OUTCOME_STATUS[OUTCOME_TIMEOUT], "none", None,
+                         f"part exceeded its {budget_s:.0f}s budget", part=sq, outcome=OUTCOME_TIMEOUT)
+    finally:
+        ex.shutdown(wait=False)
+
+
+def _run_split(parts, deadline, verbose=False, on_event=None, parent_index=None):
+    """The sub-questions of an agent split, each as a part: the single path (_run_sub →
+    coordinator → dispatch) under min(COMPOUND_PART_BUDGET_S, what is left before
+    `deadline`), sequentially. The agent cannot split a sub-question again
+    (frame_path._SPLIT_DEPTH). depends_on = the split part's index (None for a message)."""
+    from query.multi_result import (OUTCOME_ANSWERED, OUTCOME_CLARIFY, OUTCOME_REFUSED,
+                                    OUTCOME_ERROR, OUTCOME_TIMEOUT, OUTCOME_STATUS)
+    from veda.understanding.frame_path import enter_split, exit_split
+    part_budget, _total = _budgets()
+    out = []
+    tok = enter_split()
+    try:
+        for k, sq in enumerate(parts):
+            b = min(part_budget, deadline - time.time() - 5.0)
+            print(f"\n  [Agent] ── split part {k + 1}/{len(parts)} {sq!r} (budget {max(0.0, b):.0f}s)")
+            if b <= 2.0:
+                out.append(SubResult(sq, OUTCOME_STATUS[OUTCOME_TIMEOUT], "none", None,
+                                     "time budget exhausted", part=sq, outcome=OUTCOME_TIMEOUT,
+                                     depends_on=parent_index))
+                continue
+            ts = time.time()
+            it = _run_sub_budgeted(sq, b, verbose=verbose, on_event=on_event)
+            if it.outcome is None:
+                it.outcome = (OUTCOME_ANSWERED if it.status == STATUS_OK else
+                              OUTCOME_CLARIFY if isinstance(it.result, dict)
+                              and it.result.get("status") == "clarify"
+                              else OUTCOME_ERROR if it.status == STATUS_ERROR else OUTCOME_REFUSED)
+            it.part, it.lane, it.depends_on = sq, it.lane or it.route, parent_index
+            if it.source_id is None and isinstance(it.result, dict):
+                it.source_id = it.result.get("source_id")
+            it.elapsed_ms = round((time.time() - ts) * 1000.0, 1)
+            out.append(it)
+    finally:
+        exit_split(tok)
+    try:
+        _cur_trace().set("agent_split", parent_index=parent_index, parts=list(parts),
+                         outcomes=[it.outcome for it in out])
+    except Exception:
+        pass
+    return out
+
+
+def _mark_split(item, subs):
+    """The split part keeps its place (later parts' depends_on stay valid); its outcome is
+    `split` and its answer names the sub-questions listed after it."""
+    item.outcome, item.route = "split", "agent_split"
+    item.status = STATUS_OK if any(s.outcome == "answered" for s in subs) else STATUS_REFUSED
+    if isinstance(item.result, dict):
+        item.result.setdefault("answer", item.result.get("msg"))
+    return subs
+
+
+def _with_split_items(items, split_items):
+    """Each split part followed by its sub-question parts; every depends_on re-pointed to
+    the final positions."""
+    if not split_items:
+        return items
+    pos, out = {}, []
+    for i, it in enumerate(items):
+        pos[i] = len(out)
+        out.append(it)
+        out.extend(split_items.get(i, []))
+    for it in out:
+        if it.depends_on is not None and it.depends_on in pos:
+            it.depends_on = pos[it.depends_on]
+    return out
+
+
+def _split_message(query, parts, verbose=False, on_event=None):
+    """A single-intent message the planner agent split: its sub-questions become the parts
+    of a compound reply, inside what is left of the message budget."""
+    _pb, total_budget = _budgets()
+    t0 = getattr(_cur_trace(), "_t0", None) or time.time()
+    deadline = min(t0, time.time()) + total_budget
+    items = _run_split(parts, deadline, verbose=verbose, on_event=on_event)
+    mr = MultiResult(items=items, compound=True, relation="independent")
+    mr.summary = _summarise_multi_answers(query, items, compound=True,
+                                          timeout=max(0, min(15, int(deadline - time.time()) - 2)))
+    _emit(on_event, "answer", f"Answered {sum(1 for it in items if it.outcome == 'answered')} "
+                              f"of {len(items)} parts")
+    return mr
 
 
 def _constrain_scope_to(source_id):
@@ -833,18 +1375,64 @@ from contextvars import ContextVar as _CtxVar
 # decomposer; read by run_hybrid_query to skip the legacy federate-first call (behaviour c)
 _COMPOUND_HANDOFF: "_CtxVar[bool]" = _CtxVar("veda_compound_handoff", default=False)
 
+# The compound front door's frame for a SINGLE-intent message, kept for the SQL head so the
+# frame path does not extract the same question a second time. (query, Frame) — consumed (and
+# cleared) by the first _dispatch_single_inner of THIS query; any other route leaves it unread
+# and the request entry resets it, so it never reaches Tier-2, a sub-query, or a later request.
+_FRONT_DOOR_FRAME: "_CtxVar[tuple | None]" = _CtxVar("veda_front_door_frame", default=None)
+
+# An authoritative SINGLE route to a DATALAKE source: its isolated / augmented semantic model,
+# (source_id, sm, cols), for the SQL head of the normal path the route falls through to.
+_ROUTED_SM: "_CtxVar[tuple | None]" = _CtxVar("veda_routed_sm", default=None)
+
+
+def _take_front_door_frame(query):
+    """The front door's frame when it was extracted for exactly `query`; always clears it."""
+    held = _FRONT_DOOR_FRAME.get()
+    if held is None:
+        return None
+    _FRONT_DOOR_FRAME.set(None)
+    q, fr = held
+    return fr if q == query else None
+
+
+def _head_semantic_model():
+    """The SQL head's model: the routed datalake model when an authoritative SINGLE narrowed
+    the scope to that source, else the scope's own model."""
+    routed = _ROUTED_SM.get()
+    if routed is not None:
+        ctx = _current_ctx()
+        if ctx is not None and [str(s) for s in (ctx.source_ids or ())] == [str(routed[0])]:
+            return routed[1], routed[2]
+    return _load_semantic_model()
+
+
+def _reset_request_state():
+    """Request-scoped B state, cleared at the request entry: a worker thread keeps its
+    context between requests, so nothing here may survive into the next one."""
+    _FRONT_DOOR_FRAME.set(None)
+    _ROUTED_SM.set(None)
+    try:
+        from query.source_coordinator import reset_evidence_cache
+        reset_evidence_cache()
+    except Exception:
+        pass
+
 
 def _run_coordinator(query, verbose=False, on_event=None):
     """Multi-source routing coordinator entry (Phase 3.6 + authoritative wiring).
 
-    Off  (MULTISOURCE_ROUTING_ENABLED=0)  → returns None, no work (prod byte-identical).
-    On + SHADOW                           → computes + traces a RoutingDecision, returns None
-                                            (answer path unchanged — observe only).
-    On + not SHADOW (authoritative)       → the decision DRIVES the answer:
-        NO_MATCH / CLARIFICATION_REQUIRED → a refusal MultiResult (NO answer is generated — closes
-                                            the 'no silent guessing' gap).
-        SINGLE                            → dispatch via the source agent, mapped to a MultiResult.
-        MULTI                             → returns None so the existing federated path handles it.
+    Off  (MULTISOURCE_ROUTING_ENABLED=0)  → returns None, no work.
+    On + SHADOW, ROUTING_AUTHORITATIVE_MODES empty
+                                          → only the permission pre-check runs; plan_route is
+                                            skipped (ROUTING_SHADOW_OBSERVE=1 computes + traces it).
+    On, and the decision is authoritative (SHADOW off, or its mode is in the set):
+        NO_MATCH / CLARIFICATION_REQUIRED → a refusal MultiResult (only with SHADOW off — they
+                                            are never a "mode" in the set).
+        SINGLE                            → narrows the request scope to the routed source and
+                                            returns None: the normal path (classify → head →
+                                            Tier-2) answers on that source.
+        MULTI                             → decomposer handoff / doc+data / federated / independent.
     Always best-effort: any failure returns None and the legacy path proceeds.
     """
     try:
@@ -883,7 +1471,6 @@ def _run_coordinator(query, verbose=False, on_event=None):
         except Exception:
             pass
         from query.source_coordinator import plan_route, execute_decision
-        _emit(on_event, "route", "Deciding which source can answer…")
 
         # Permission-aware routing pre-check (flag-gated, default OFF). Decide the best source over ALL
         # ready sources; if the strict winner is one the user has NO access to, refuse with a clear
@@ -1015,6 +1602,30 @@ def _run_coordinator(query, verbose=False, on_event=None):
             except Exception:
                 pass
 
+        # Nothing can be authoritative (SHADOW on, ROUTING_AUTHORITATIVE_MODES empty): the
+        # decision would be computed and thrown away — evidence retrieval, item prior and,
+        # at a boundary, an SLM call on every turn and every compound part for a trace line.
+        # Skip it; the permission pre-check above is the only live exit in that setting.
+        # ROUTING_SHADOW_OBSERVE=1 keeps the observe-only decision for routing evaluations.
+        try:
+            from config import ROUTING_AUTHORITATIVE_MODES as _auth_modes
+        except Exception:
+            _auth_modes = ()
+        try:
+            from config import ROUTING_SHADOW_OBSERVE as _observe
+        except Exception:
+            _observe = False
+        if MULTISOURCE_ROUTING_SHADOW and not _auth_modes and not _observe:
+            try:
+                _cur_trace().set("routing", plan_route_ran=False,
+                                 skipped="no_authoritative_modes", decision_consumed=False)
+            except Exception:
+                pass
+            if verbose:
+                print("  [routing] plan_route skipped (shadow, no authoritative modes)")
+            return None
+        _emit(on_event, "route", "Deciding which source can answer…")
+
         # OPEN the phase before the work, not only after it. `plan_route` is the
         # single longest silent stretch in a normal turn — measured at 5.85s of a
         # 16.5s turn with NO lifecycle event anywhere inside it — and because only
@@ -1081,10 +1692,6 @@ def _run_coordinator(query, verbose=False, on_event=None):
         # (config.ROUTING_AUTHORITATIVE_MODES), not a hardcoded "single and multi always
         # win". Default empty => SHADOW is a real kill switch again. See that constant's
         # comment for why the test this flip was justified by does not cover it.
-        try:
-            from config import ROUTING_AUTHORITATIVE_MODES as _auth_modes
-        except Exception:
-            _auth_modes = ()
         _mode_is_authoritative = (
             (decision.status == "ROUTED" and decision.mode in _auth_modes)
             if _auth_modes else False)
@@ -1108,7 +1715,9 @@ def _run_coordinator(query, verbose=False, on_event=None):
                 decision_method=decision.decision_method,
                 slm_consulted=_slm_used,
                 slm_decision_discarded=bool(_slm_used and _effective_shadow),
-                shadow=_effective_shadow, shadow_flag=bool(MULTISOURCE_ROUTING_SHADOW))
+                shadow=_effective_shadow, shadow_flag=bool(MULTISOURCE_ROUTING_SHADOW),
+                plan_route_ran=True, decision_consumed=not _effective_shadow,
+                shadow_discarded=_effective_shadow)
         except Exception:
             pass
         if verbose:
@@ -1126,26 +1735,25 @@ def _run_coordinator(query, verbose=False, on_event=None):
             return MultiResult.single(query, STATUS_REFUSED, route, refuse_reason=decision.reason)
 
         if decision.status == "ROUTED" and decision.mode == "SINGLE":
+            # An authoritative SINGLE is a SCOPE decision, not a separate engine: the request is
+            # narrowed to the routed source and the NORMAL path answers it — _maybe_federated is
+            # a no-op on one source, then _dispatch_single → classify → head → Tier-2. The old
+            # dispatch to query/agents.py ran run_query with no classify and no Tier-2, so a
+            # routed question lost the rescue the same question gets pinned (2026-09-10: the
+            # coordinator's evidence as a hard gate regressed single-source questions).
             _sid = decision.source_ids[0] if decision.source_ids else None
+            if not _sid:
+                return None
             _stype = str((_profiles.get(str(_sid), {}) or {}).get("source_type", "") or "").strip()
             _emit(on_event, "route",
                   f"Routing to the {_stype} source…" if _stype else "Routing to the matched source…",
                   source_ids=decision.source_ids, mode="single")
-            _is_dl = bool(_sid) and _is_datalake_source(_sid, decision, _profiles)
-            if _is_dl:
-                # Datalake SINGLE route: constrain retrieval to this source (so a datalake dataset
-                # whose name overlaps a relational concept — e.g. "maintenance" — does not bleed into
-                # DB tables and produce an impossible cross-source join), and make its parquet columns
-                # known to the SQL validator. See docs/multisource_routing/ANSWER_E2E_ROOTCAUSE.md.
-                _constrain_scope_to(_sid)
-            sm, cols = _load_semantic_model()
-            if _is_dl:
-                # Source isolation (flag-gated, default ON since config.py:604 — changed from the
-                # original OFF default after it proved safe): run over a DATALAKE-ONLY sm so
-                # retrieval/planning/validation/value-grounding see ONLY this source (no
-                # homzhub-table mixing, no shared-value collision). On OFF or any failure, fall
-                # back to the merge path below (_augment_sm_for_datalake) — byte-identical to the
-                # pre-isolation behaviour.
+            _constrain_scope_to(_sid)
+            if _is_datalake_source(_sid, decision, _profiles):
+                # a datalake's schema lives in column_embeddings_v2 + parquet, not the relational
+                # model: the head gets the DATALAKE-ONLY model (source isolation, flag-gated) or,
+                # failing that, the narrowed model with the datalake columns merged in
+                sm, cols = _load_semantic_model()
                 _iso = None
                 try:
                     from config import SOURCE_ISOLATED_RETRIEVAL_ENABLED as _iso_on
@@ -1153,22 +1761,13 @@ def _run_coordinator(query, verbose=False, on_event=None):
                     _iso_on = False
                 if _iso_on:
                     _iso = _datalake_isolated_sm(_sid)
-                if _iso is not None:
-                    sm, cols = _iso
-                else:
-                    sm, cols = _augment_sm_for_datalake(sm, cols, _sid)
-            out = execute_decision(decision, query, sm=sm, cols=cols, tenant=_tenant,
-                                   profiles=_profiles, on_event=on_event)
-            ar = (out or {}).get("result")
-            if ar is None:
-                # Authoritative SINGLE[s], but the source agent produced no result. Do NOT fall
-                # through to the cross-source federated path — it would answer from a DIFFERENT
-                # source (the src_5.amenities_catalog mis-execution). Constrain the scope to the
-                # routed source so only the single-source legacy path can answer.
-                if decision.source_ids:
-                    _constrain_scope_to(decision.source_ids[0])
-                return None
-            return MultiResult(items=[_agent_to_subresult(query, ar)])
+                sm, cols = _iso if _iso is not None else _augment_sm_for_datalake(sm, cols, _sid)
+                _ROUTED_SM.set((str(_sid), sm, cols))
+            try:
+                _cur_trace().set("routing", consumed_as="scope", scope=[str(_sid)])
+            except Exception:
+                pass
+            return None
 
         if decision.status == "ROUTED" and decision.mode == "MULTI":
             # Behaviour (c), 2026-09-18: a COMPOUND question over several sources ("how many
@@ -1539,51 +2138,6 @@ def _clean_refuse_on_empty_error(result) -> None:
             else:
                 it.result = {"ok": False, "status": "refused", "answer": _text,
                              "refuse_reason": _reason}
-    except Exception:
-        pass
-
-
-def _emit_terminal_lifecycle(timeline, final_status: str) -> None:
-    """Close the timeline with the phase that matches the actual outcome.
-
-    Only emitted for a terminal state we can describe safely: `answered` completes,
-    anything else is a warning on result_preparation rather than a failure, because
-    a refusal is a CORRECT outcome (the refuse-over-guess contract) and must not be
-    presented to the user as the system breaking."""
-    try:
-        from veda import lifecycle as lc
-        if not getattr(timeline, "enabled", False):
-            return
-        # EXP-B1: close any phase left OPEN (started, never resolved). Measured on the
-        # 10-query benchmark: access_check hung at "started" on 6 of 10 query types,
-        # because its completion lived on the deterministic SQL path only — document,
-        # hybrid and refusal paths never reach it, so the user watched a spinner that
-        # never finished. Resolving here means EVERY path closes it, whichever head ran.
-        #
-        # A phase already resolved NEGATIVELY is left alone: a real permission denial
-        # emits access_check=failed earlier (pipeline._feedback), and overwriting that
-        # with "verified" would be the contradiction this whole fix is about.
-        # Shared with veda/pipeline.py::_done, which sweeps FIRST so the persisted
-        # payload never records an unresolved phase. Idempotent, so running twice
-        # is harmless.
-        timeline.close_open_phases(failed=(final_status not in
-                                           ("answered", "refused", "clarify")))
-
-        if final_status == "answered":
-            timeline.completed(lc.PHASE_RESULT_PREPARATION)
-            timeline.completed(lc.PHASE_COMPLETED)
-        elif final_status in ("refused", "clarify"):
-            # WARNING, not completed. The message here was already honest ("could not
-            # answer") but the STATUS contradicted it, and the status is what the UI
-            # renders: a refusal came out as four green ticks above a reply saying the
-            # question could not be answered. A refusal is not a system failure — so
-            # not `failed` either. `warning` is the state that exists for exactly this.
-            timeline.warning(lc.PHASE_RESULT_PREPARATION,
-                             "Could not answer this from the available data")
-            timeline.completed(lc.PHASE_COMPLETED)
-        else:
-            timeline.failed(lc.PHASE_RESULT_PREPARATION,
-                            "Could not complete this question")
     except Exception:
         pass
 
@@ -2271,42 +2825,7 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     (zero added latency on the hot path). A non-deterministic head (RAG/hybrid/NoSQL)
     CANNOT cheaply self-certify — it could answer one clause of a compound query and
     silently drop the rest — so there we decompose FIRST. A deterministic refusal also
-    triggers decomposition (the utterance may have been several questions).
-
-    L0 — the NL simplifier runs HERE (flag-gated by NL_SIMPLIFIER_ENABLED) so every
-    consumer (CLI, inference API, demo) shares one simplification pass instead of each
-    caller applying it (or not) itself. Off by default → zero added hot-path latency."""
-    # L0 — NL simplifier (shared front-door step). No-op when the flag is off or the
-    # simplifier is unavailable, so the original query flows through unchanged.
-    # Its own call_slm() usage (purpose="nl_simplify") would otherwise never be
-    # captured — it runs before any collect_usage() scope opens below — so it
-    # gets its own small scope here, merged into whatever result is finally
-    # returned via _merge_l0_usage() at every return point past this.
-    _l0_calls = []
-    try:
-        from config import NL_SIMPLIFIER_ENABLED
-    except Exception:
-        NL_SIMPLIFIER_ENABLED = False
-    if NL_SIMPLIFIER_ENABLED:
-        try:
-            from query.nl_simplifier import run_nl_simplifier
-            with _collect_usage_l0() as _l0_usage:
-                _l0 = run_nl_simplifier(query, verbose=verbose)
-                _l0_calls = _l0_usage.calls()
-            if getattr(_l0, "was_simplified", False):
-                print(f"  [L0] Simplified: {_l0.simplified_query!r} ({_l0.duration_ms}ms)")
-                try:  # record the rewrite so downstream knows what retrieval actually got
-                    _cur_trace().set("query_understanding",
-                                 original_query=query,
-                                 effective_query=_l0.simplified_query,
-                                 rewrite_reason="nl_simplifier")
-                except Exception:
-                    pass
-                query = _l0.simplified_query
-        except Exception:
-            pass  # fall back to the original query silently
-    _l0_usage_totals = _usage_totals_l0(_l0_calls)
-
+    triggers decomposition (the utterance may have been several questions)."""
     # Runtime Context Provider (L0): pure system-value questions ("what's the
     # current date") need no table/SQL/LLM — answer directly before retrieval
     # ever runs, so a stray lexical match (e.g. "current" -> an is_current
@@ -2322,9 +2841,17 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
             # No on_event/"thinking" emit here — same as classify_node's smalltalk
             # fast path: an instant, deterministic answer has nothing to narrate.
             print(f"  [L0] Runtime context: {_rc['answer']!r}")
-            return _merge_extra_usage(
-                MultiResult(items=[_to_subresult(query, "runtime_context", _rc)]),
-                _l0_usage_totals)
+            return MultiResult(items=[_to_subresult(query, "runtime_context", _rc)])
+
+    # Front-door decomposition (FRAME_PATH_ENABLED): the message is split into its intents
+    # BEFORE anything routes. One intent → None, and the single path below runs exactly as
+    # before; several → each part runs on its own source and one reply is composed. This is
+    # not the old decomposer (QUERY_DECOMPOSE_ENABLED stays off): the split is a typed frame
+    # list grounded per source, and a part that fails never fails the others.
+    _reset_request_state()
+    _cmp = _maybe_compound(query, verbose=verbose, on_event=on_event)
+    if _cmp is not None:
+        return _cmp
 
     # Multi-source routing coordinator (docs/multisource_routing/). Flag-gated default-OFF; in shadow
     # it only traces (answer path byte-identical), and when authoritative it can drive the answer —
@@ -2333,7 +2860,7 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     _COMPOUND_HANDOFF.set(False)
     _routed = _run_coordinator(query, verbose=verbose, on_event=on_event)
     if _routed is not None:
-        return _merge_extra_usage(_routed, _l0_usage_totals)
+        return _routed
 
     # Cross-source federated route (MS-6): when the scope spans ≥2 sources and retrieval
     # selects columns from more than one, no single-DB head can join them — generate + run
@@ -2342,7 +2869,7 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # to the decomposer — federating first re-created the wrong "4 … average 10.88" answer.
     fed = None if _COMPOUND_HANDOFF.get() else _maybe_federated(query, verbose=verbose)
     if fed is not None:
-        return _merge_extra_usage(fed, _l0_usage_totals)
+        return fed
 
     try:
         from config import QUERY_DECOMPOSE_ENABLED
@@ -2355,8 +2882,10 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # decomposer produced ≥2 parts — so the handoff proceeds to the split regardless.
     if not QUERY_DECOMPOSE_ENABLED and not _COMPOUND_HANDOFF.get():
         route, res = _dispatch_single(query, verbose=verbose, on_event=on_event)
-        return _merge_extra_usage(
-            MultiResult(items=[_to_subresult(query, route, res)]), _l0_usage_totals)
+        _subs = _agent_split_parts(res)
+        if _subs:
+            return _split_message(query, _subs, verbose=verbose, on_event=on_event)
+        return MultiResult(items=[_to_subresult(query, route, res)])
 
     _emit(on_event, "classify", "Classifying query intent...")
     intent, _source_ids = classify(query, verbose=verbose)
@@ -2382,18 +2911,13 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
             _emit(on_event, "answer",
                   "Deterministic SQL answered the query" if det.get("ok")
                   else "Asked a clarifying question")
-            return _merge_extra_usage(
-                MultiResult(items=[_to_subresult(query, "deterministic", det)]),
-                _l0_usage_totals)
+            return MultiResult(items=[_to_subresult(query, "deterministic", det)])
         # Deterministic couldn't fully answer → maybe it was several questions.
-        return _merge_extra_usage(
-            _maybe_split(query, verbose=verbose, precomputed_sql=det,
-                        probe_trace=probe.getvalue(), on_event=on_event),
-            _l0_usage_totals)
+        return _maybe_split(query, verbose=verbose, precomputed_sql=det,
+                            probe_trace=probe.getvalue(), on_event=on_event)
 
     # RAG/hybrid/NoSQL self-certify nothing → decompose before dispatching (silent-drop guard).
-    return _merge_extra_usage(
-        _maybe_split(query, verbose=verbose, on_event=on_event), _l0_usage_totals)
+    return _maybe_split(query, verbose=verbose, on_event=on_event)
 
 
 def _maybe_split(query, verbose=False, precomputed_sql=None, probe_trace=None, on_event=None):
@@ -2680,13 +3204,14 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
     """The single-query pipeline: classify → best head → (Tier-2 for SQL). Returns
     (route, head_result). This is the UNCHANGED per-modality dispatch — every sub-query
     of a compound query runs through here exactly as a standalone query would."""
+    _fd_frame = _take_front_door_frame(query)     # cleared on every route; only sql reads it
     intent, source_ids = classify(query, verbose=verbose)
     print(f"\n  [Hybrid] intent = {intent}   sources = {source_ids or 'default'}")
     _emit(on_event, "route", f"Routed to {intent} engine", intent=intent)
 
     # ── SQL → DETERMINISTIC engine (the correctness brain) ────────────────────
     if intent == "sql":
-        sm, cols = _load_semantic_model()
+        sm, cols = _head_semantic_model()
 
         # Gate 1 shortcut: this request's primary source has NO queryable table at
         # all (RBAC narrowed it to zero relational tables — e.g. a role granted
@@ -2728,9 +3253,24 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
 
         from veda.pipeline import run_query
         _head_t0 = time.time()
-        res = precomputed_sql if isinstance(precomputed_sql, dict) \
-            else run_query(query, sm, cols, return_result=True, on_event=on_event)
+        if isinstance(precomputed_sql, dict):
+            res = precomputed_sql
+        else:
+            _fd_tok = None
+            if _fd_frame is not None:
+                # the front door already extracted this question's frame: the frame path
+                # uses it instead of a second extraction (one frame_extract call per turn)
+                from veda.understanding.frame_path import inject_frame, reset_injected
+                _fd_tok = inject_frame(_fd_frame)
+            try:
+                res = run_query(query, sm, cols, return_result=True, on_event=on_event)
+            finally:
+                if _fd_tok is not None:
+                    reset_injected(_fd_tok)
         _head_s = time.time() - _head_t0
+        _rag = _agent_rag_handoff(query, res, verbose=verbose, on_event=on_event)
+        if _rag is not None:
+            return "rag", _rag
         # Tier-2 fallback: if the deterministic head couldn't answer (refuse / dropped
         # qualifier / ungrounded / no table), let the LLM emit IR → deterministic
         # builder → GRAPH-GUARDED firewall → execute. Flag-gated (needs Ollama); the
@@ -2753,7 +3293,7 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
             try:
                 from config import TIER2_SKIP_IF_HEAD_OVER_S, TIER2_TIME_BUDGET_S
             except Exception:
-                TIER2_SKIP_IF_HEAD_OVER_S, TIER2_TIME_BUDGET_S = 60.0, 120.0
+                TIER2_SKIP_IF_HEAD_OVER_S, TIER2_TIME_BUDGET_S = 120.0, 120.0
             if TIER2_LLM_FALLBACK and _head_s > TIER2_SKIP_IF_HEAD_OVER_S:
                 print(f"  [Tier2] SKIPPED (head took {_head_s:.0f}s > "
                       f"{TIER2_SKIP_IF_HEAD_OVER_S:.0f}s budget) — refusal stands")
@@ -2856,7 +3396,7 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
     if intent == "hybrid":
         from veda.pipeline import run_query
         from query.rag_layer import run_hybrid_layer
-        sm, cols = _load_semantic_model()
+        sm, cols = _head_semantic_model()
         _emit(on_event, "hybrid", "Running SQL and document fusion...")
         # Run the DETERMINISTIC SQL head first and feed its EXECUTED rows into the
         # fusion (the correct-by-construction numbers), instead of letting the fusion
@@ -2950,17 +3490,17 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
         return "nosql", result
 
     # ── default safety net ────────────────────────────────────────────────────
-    sm, cols = _load_semantic_model()
+    sm, cols = _head_semantic_model()
     return "deterministic", run_query(query, sm, cols, return_result=True, on_event=on_event)
 
 
 def _merge_extra_usage(mr, extra_usage):
     """Fold token counts spent BEFORE any collect_usage() scope opened (currently
-    just L0's nl_simplify — see run_hybrid_query()) into the first sub-result's
-    "usage", so a query-wide token total is never silently short by whatever ran
-    at the very front door. No-op when extra_usage is zero or the first item's
-    result isn't dict-shaped (RAG/hybrid/NoSQL results are objects with no usage
-    key today — unaffected, not regressed)."""
+    the decomposer's own SLM calls in _maybe_split — see _collect_usage_dc) into the
+    first sub-result's "usage", so a query-wide token total is never silently short
+    by whatever ran at the very front door. No-op when extra_usage is zero or the
+    first item's result isn't dict-shaped (RAG/hybrid/NoSQL results are objects with
+    no usage key today — unaffected, not regressed)."""
     if not extra_usage.get("total_tokens") or not mr.items:
         return mr
     result = mr.items[0].result
@@ -3013,119 +3553,6 @@ def _print_rows(cols, rows, sql=None):
         for row in rows[:20]:
             cells = [("" if v is None else str(v))[:22] for v in row]
             print("    " + " | ".join(cells))
-
-
-def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_written, tf):
-    """The SAME correctness gates run_query applies (value_grounding + qualifier_completeness
-    + ir_equivalence), run on a Tier-2 candidate BEFORE execution. Tier-2 fires precisely
-    when the deterministic head REFUSED — often because a gate tripped — so re-answering
-    with only the AST firewall (as before) let dropped-filter / fabricated-value / unrequested-
-    semantics answers through. Returns (ok, reason). Mirrors veda/pipeline.py:579-619."""
-
-    cols_meta = sm.get("columns", {})
-    allowed_tables = set(allowed_tables)
-    amap = {}
-    try:
-        tree = sqlglot.parse_one(raw_sql, read="postgres")
-        for t in tree.find_all(exp.Table):
-            if t.alias:
-                amap[t.alias.lower()] = t.name
-    except Exception:
-        pass
-    _default_tbl = next(iter(allowed_tables)) if len(allowed_tables) == 1 else None
-
-    def _resolve(colexp):
-        if colexp.table:
-            return amap.get(colexp.table.lower())
-        owners = [t for t in allowed_tables if f"{t}.{colexp.name}" in cols_meta]
-        return owners[0] if len(owners) == 1 else _default_tbl
-
-    # The conversation this turn belongs to, read ONCE: the qualifier gate needs the user's
-    # own words (below), and the narrowing check further down needs its filters.
-    try:
-        from veda_core.context import current_conversation_context as _cur_conv
-        _cv = _cur_conv() or {}
-    except Exception:
-        _cv = {}
-    # M3 checkpoint 1: value grounding + STRICT qualifier completeness through the ONE
-    # firewall (veda.firewall) — same gates, same order, one implementation. RBAC and
-    # parameterisation already ran on this SQL before _tier2_validate is called, so
-    # only the semantic gates are requested here (run_rbac/ast are the caller's).
-    from veda.firewall import check as _fw_check, UNGROUNDED as _FW_UNGROUNDED
-    from veda.ir import partial as _ir_partial
-    _v = _fw_check(_ir_partial("tier2"), raw_sql, sm, query=query, allowed_tables=allowed_tables,
-                   allowed_columns=allowed_cols, resolve_table=_resolve, strict_qualifier=True,
-                   llm_generated=llm_written, tf=tf, run_alignment=False,
-                   run_ir_equivalence=False, run_rbac=False, head="tier2",
-                   trace=_cur_trace(), _semantic_only=True,
-                   user_message=_cv.get("user_message") or None)
-    if not _v.ok:
-        return False, (f"ungrounded value {_v.detail}" if _v.verdict == _FW_UNGROUNDED
-                       else f"dropped qualifier {_v.detail!r}")
-
-    # CONVERSATION STATE. Tier-2 fires precisely when the deterministic head refused, and
-    # it knows nothing about the conversation — so on a follow-up it can answer by widening
-    # the question back out. Measured 2026-09-24: after the conversation had narrowed to
-    # Nagpur, "only the gated ones" was refused by Tier-1 (the boolean would not ground),
-    # and Tier-2 answered `SELECT t1."is_gated" FROM assets_asset LIMIT 1000` — no filter,
-    # no grouping, delivered with full confidence, and the drill path was then wiped
-    # because memory keeps only levels still present in the answer's filters.
-    #
-    # Same rule Tier-1 applies: refuse only when the candidate is ON the conversation's own
-    # table and keeps NOT ONE remembered filter. Keeping some of them is a legitimate
-    # replacement, and a different table is a topic change. Not a firewall gate: the
-    # firewall is per-QUERY and this is the one check that needs the conversation.
-    _cv_filters = [f for f in (_cv.get("filters") or [])
-                   if isinstance(f, dict) and f.get("column")]
-    if _cv_filters and _cv.get("entity_table") in allowed_tables:
-        if not any(f'"{f["column"]}"' in raw_sql for f in _cv_filters):
-            _lost = ", ".join(sorted({str(f["column"]) for f in _cv_filters}))
-            return False, f"dropped the conversation's narrowing ({_lost})"
-
-    # Constraint-class check (2026-09-16, M1 close-out battery): "properties with more
-    # than 3 floors" came back as SELECT total_floors … LIMIT 1000 — the threshold was
-    # dropped, and qualifier_completeness can't see it because "3" is not a categorical
-    # value with a referent. A numeric threshold needs a comparison (or HAVING); a
-    # negation needs <> / NOT. Reason wording "dropped" feeds _repair_hint_for's existing
-    # "represent every condition" hint, so the IR loop gets a retry before refusing.
-    _ck = _constraint_kind(query)
-    if _ck and not _sql_keeps_constraint(raw_sql, _ck):
-        return False, f"dropped {_ck} constraint (no {'comparison' if _ck == 'threshold' else 'negation'} predicate in SQL)"
-    _tcols = ({k.split(".", 1)[1] for k, m in cols_meta.items()
-               if k.split(".", 1)[0] in allowed_tables
-               and (m or {}).get("semantic_type") == "TEMPORAL"}
-              if (tf and (getattr(tf, "start", None) or getattr(tf, "end", None))) else set())
-    ok_ir, ir_viol = validate_ir_equivalence(query, raw_sql, sm, allowed_tables=allowed_tables,
-                                             temporal_cols=_tcols, llm_generated=llm_written)
-    if not ok_ir:
-        return False, f"ir_mismatch: {'; '.join(ir_viol)}"
-
-    # ── Shared analytical-semantics check — the SAME generic, metadata-driven
-    # invariants Tier-1 uses (veda/semantic_validation.py). This is the common
-    # boundary for BOTH Tier-2 IR SQL and LangGraph SQL (run_langgraph_pipeline's
-    # output is validated through this same function). Advisory by default (logged);
-    # with SEMANTIC_VALIDATION_ENFORCE a hard operator-loss finding (the LLM ignored
-    # the requested AVG/SUM/…) drives the EXISTING repair/retry loop by returning a
-    # reason, instead of executing SQL that answers a different question. Never raises.
-    try:
-        from config import SEMANTIC_VALIDATION_ENABLED as _SV_ON, SEMANTIC_VALIDATION_ENFORCE as _SV_ENF
-    except Exception:
-        _SV_ON, _SV_ENF = False, False
-    if _SV_ON:
-        try:
-            from veda.semantic_validation import validate_analytical_semantics
-            _sv = validate_analytical_semantics(query, raw_sql, sm, graph=None)
-            _hard = [f for f in _sv if f.get("code") in
-                     ("operator_mismatch", "operator_dropped", "missing_group_by")]
-            if _sv:
-                print(f"  [Tier2] Semantics  {len(_sv)} finding(s): "
-                      f"{', '.join(sorted({f['code'] for f in _sv}))}"
-                      + (" (enforced)" if (_SV_ENF and _hard) else " (advisory)"))
-            if _SV_ENF and _hard:
-                return False, f"semantic: {_hard[0]['code']} — {_hard[0]['detail']}"
-        except Exception:
-            pass
-    return True, ""
 
 
 def _repair_hint_for(error: str) -> str:
@@ -3482,23 +3909,8 @@ def _constraint_kind(query):
     return ""
 
 
-def _sql_keeps_constraint(sql, kind):
-    """True when the SQL carries a predicate of that class: a comparison / BETWEEN / HAVING
-    for a threshold, a <> / NOT for a negation. Unparseable SQL → True (never refuse on a
-    parser hiccup; the AST firewall has already run)."""
-    try:
-        tree = sqlglot.parse_one(sql, read="postgres")
-    except Exception:
-        return True
-    if kind == "threshold":
-        kinds = (exp.GT, exp.GTE, exp.LT, exp.LTE, exp.Between, exp.Having)
-    else:
-        kinds = (exp.NEQ, exp.Not)
-    return any(tree.find(k) is not None for k in kinds)
-
-
 # ── E.2 note: Tier-2 and the strict qualifier gate ────────────────────────────────────
-# `_tier2_validate` and the two repair loops below run `firewall.check(...,
+# The two repair loops below run `firewall.check(...,
 # strict_qualifier=True)` — the SAME gate, with the same strictness, that refused Tier-1.
 # Tier-2 exists to answer what Tier-1 could not, but it is handed no IR DELTA describing
 # what it must satisfy differently, so for the whole class of questions whose Tier-1

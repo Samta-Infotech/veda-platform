@@ -8,6 +8,9 @@ Both may point at the same physical redis-stack instance (they do, by
 default) without coupling: different key prefixes, independent TTLs, and this
 store never touches LangGraph's own checkpoint keys.
 
+Every stored frame carries `written_at` (epoch seconds, set by write_frame) so a reader
+holding several sources' frames can tell which one the conversation is on.
+
 Keys (per docs/MEMORY_ARCHITECTURE.md §4):
     veda:mem:{tenant}:{session}:src:{source}:frame  STRING (JSON) — that source's QueryFrame
     veda:mem:{tenant}:{session}:src:{source}:stack  LIST  (JSON per element) — its DrillStack
@@ -28,9 +31,6 @@ the CLI, behave byte-identically to before. A scoped read falls back to the unsc
 when the scoped one is missing, so a session that was mid-conversation across the deploy
 keeps its memory; the legacy key is never written again and ages out on its own TTL.
 
-All TTL'd with a sliding idle window, refreshed on every read AND write — an
-expired/missing frame is treated identically to "no memory yet" (turn 1),
-never as corruption (see chatbot/nodes.py::memory_read_node).
 All TTL'd with a sliding idle window, refreshed on every read AND write — an
 expired/missing frame is treated identically to "no memory yet" (turn 1),
 never as corruption (see chatbot/nodes.py::memory_read_node).
@@ -312,6 +312,10 @@ class MemoryStore:
         only the NEXT turn's memory read is (correctly) whatever the
         winning concurrent writer left behind."""
         key = _k(tenant, session_id, "frame", source_id)
+        # When it was written: a turn scoped to several sources reads each one's frame
+        # and continues the NEWEST (nodes.py::_read_newest_frame). Per-source `version`s
+        # count writes to one key and cannot be compared across keys; a clock can.
+        frame = {**frame, "written_at": time.time()}
         try:
             c = _client()
             if expected_version is not None:

@@ -26,7 +26,8 @@ WRONG-SHAPED answer still fails. The gate is honest about what it doesn't cover.
 typed refusal/clarify — e.g. a filter value that does not exist in the data ("tickets with
 high priority" on a source whose priorities are LOW/MEDIUM only). An *answer* there is a
 silently unfiltered row list and FAILS (found live 2026-09-16: the shared planner answered
-it with the qualifier dropped before `_tier2_validate` was applied to that branch).
+it with the qualifier dropped before the strict-qualifier firewall check was applied to
+that branch).
 
 `xfail="..."` carries a documented, currently-failing case without blocking the gate: a
 FAIL becomes XFAIL (reported, counted separately, exit 0); an unexpected pass is reported
@@ -51,6 +52,8 @@ import time
 
 sys.path.insert(0, "/app")
 sys.path.insert(0, "/app/veda_core")
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import _flags  # noqa: E402
 
 
 def Q(q, route="sql", agg=False, group=False, filter=False, order=False, known_gap=None,
@@ -394,14 +397,18 @@ def run(source_ids):
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--sources", default="2,3,4,5")
+    _flags.add_expect_arg(ap)
     args = ap.parse_args()
     sids = [int(s) for s in args.sources.split(",") if s.strip()]
     os.chdir("/app/veda_core")
+    flags = _flags.effective_flags()
+    _flags.print_flags_header(flags, title="eval_per_source_battery: effective engine flags")
+    _flags.enforce_expect(flags, args.expect)
     total = sum(len(BATTERY.get(s, [])) for s in sids)
     failures, warns, xfails, xpass, ir_heads = run(sids)
     print(json.dumps({"summary": "FAIL" if failures else "OK", "questions": total,
                       "failures": failures, "known_gap_warns": warns,
-                      "xfail": xfails, "xpass": xpass,
+                      "xfail": xfails, "xpass": xpass, "flags": flags,
                       "ir_partial": sum(v[1] for v in ir_heads.values()),
                       "ir_partial_by_head": {h: f"{v[1]}/{v[0]}" for h, v in sorted(ir_heads.items())}}))
     return 1 if failures else 0
