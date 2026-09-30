@@ -403,6 +403,18 @@ def _classify_lane(query, verbose=False):
                   f"(remembered table {_conv['entity_table']})")
         return "sql", None, "continuity"
 
+    # The DOCUMENT half of the same continuity. A follow-up in a document conversation
+    # carries the document frame (entity_table = the document's name, route rag/hybrid);
+    # left to the word list below it was routed on whatever its own words suggested, and
+    # a money word ("late fee", "repair fee", "charges") sent it to a structured table —
+    # measured 2026-09-25, demo D1/D3b/X1. Same lane split as the doc-intent override.
+    if _conversation_document_lane():
+        intent = "hybrid" if _DB_AGG_RE.search(q) else "rag"
+        if verbose:
+            print(f"  [router] continuing the conversation's document lane "
+                  f"({_conv['entity_table']}) → {intent}")
+        return intent, None
+
     if _DOC_REF_RE.search(q) and _scope_has_doc_source():
         # Prefer the fast RAG lane (retrieve chunks + one synthesis call, ~6-8s). Only take
         # the heavier HYBRID lane (RAG ⊕ deterministic SQL head) when the utterance clearly
@@ -1419,6 +1431,41 @@ def _reset_request_state():
         pass
 
 
+def _conversation_document_lane() -> bool:
+    """Does this turn continue a remembered DOCUMENT conversation? True only when the
+    chatbot sent a document frame as context (a table-less entity with route rag/hybrid —
+    it sends none on a new topic) and the scope still has a document source to answer
+    from. The counterpart of _conversation_pinned_source for the document lane."""
+    try:
+        conv = _cur_conv() or {}
+    except Exception:
+        return False
+    if not conv.get("entity_table") or str(conv.get("route") or "") not in ("rag", "hybrid"):
+        return False
+    return _scope_has_doc_source()
+
+
+def _conversation_pinned_source(permitted_sids):
+    """The source a follow-up must stay on, or None to route normally.
+
+    Set only when the turn carries a remembered SQL conversation (entity_table + source_id,
+    not a document route — same test as _route_intent's lane continuation) AND that source
+    is still in the caller's permitted scope. A new topic carries no state, so it is never
+    pinned; a revoked grant is not in `permitted_sids`, so it falls through to normal
+    routing and its checks.
+    """
+    try:
+        conv = _cur_conv() or {}
+    except Exception:
+        return None
+    if not conv.get("entity_table") or str(conv.get("route") or "") in ("rag", "hybrid"):
+        return None
+    sid = conv.get("source_id")
+    if sid is None or str(sid) not in {str(s) for s in permitted_sids}:
+        return None
+    return str(sid)
+
+
 def _run_coordinator(query, verbose=False, on_event=None):
     """Multi-source routing coordinator entry (Phase 3.6 + authoritative wiring).
 
@@ -1472,6 +1519,17 @@ def _run_coordinator(query, verbose=False, on_event=None):
             pass
         from query.source_coordinator import plan_route, execute_decision
 
+        # A follow-up that continues a remembered SQL conversation stays on the source that
+        # conversation is about. The user's words now reach here unchanged ("go back", "only
+        # the Nagpur ones"), and scoring a bare fragment against every ready source let an
+        # inaccessible one win: measured 2026-09-24, a drill on assets_asset (source 2) was
+        # answered "You don't have permission to access this data" in 0.5s, and "go back"
+        # erased the path the same way. Same rule the lane router applies
+        # (_route_intent: "continuing the conversation's SQL lane"). Only a source still IN
+        # the caller's permitted scope is kept — a revoked grant falls through to normal
+        # routing, never past it.
+        _pinned = _conversation_pinned_source(sids)
+
         # Permission-aware routing pre-check (flag-gated, default OFF). Decide the best source over ALL
         # ready sources; if the strict winner is one the user has NO access to, refuse with a clear
         # permission message rather than mis-routing to a weaker permitted source. Only match SCORES of
@@ -1480,7 +1538,7 @@ def _run_coordinator(query, verbose=False, on_event=None):
             from config import ROUTING_PERMISSION_PRECHECK_ENABLED as _perm_pc
         except Exception:
             _perm_pc = False
-        if _perm_pc:
+        if _perm_pc and _pinned is None:
             try:
                 from query.source_coordinator import (all_ready_source_ids,
                                                       best_matching_scored)
@@ -1653,8 +1711,16 @@ def _run_coordinator(query, verbose=False, on_event=None):
                           "anchor": str(getattr(ctx, "session_anchor", "") or "") or None}
         except Exception:
             _prior = None
-        decision = plan_route(query, sids, profile_provider=lambda _s: _profiles,
-                              prior=_prior)
+        if _pinned is not None:
+            from query.routing_contracts import (RoutingDecision, METHOD_DETERMINISTIC,
+                                                 RC_CONVERSATION_SOURCE)
+            decision = RoutingDecision(
+                status="ROUTED", mode="SINGLE", source_ids=[_pinned],
+                decision_method=METHOD_DETERMINISTIC, reason_code=RC_CONVERSATION_SOURCE,
+                reason="Follow-up continues the conversation's source.")
+        else:
+            decision = plan_route(query, sids, profile_provider=lambda _s: _profiles,
+                                  prior=_prior)
         try:  # user-safe source-selection event, from the decision the router made
             from veda import lifecycle as _lc3
             _tl3 = _lc3.current_timeline()
@@ -2263,6 +2329,7 @@ def run_hybrid_query(query, verbose=False, on_event=None, trace_id=None,
             _mark_empty_results(result)
             _backfill_missing_explain(result)   # before the timeline refresh reads it
             _sync_reported_row_count(result)
+            _business_wording(result)
             _reconcile_access_check(result, _tl)
             _emit_terminal_lifecycle(_tl, _final_status)
             # The payload was built before the line above ran, so the PERSISTED
@@ -2502,6 +2569,16 @@ def _document_evidence(payload) -> dict:
         chunks = getattr(payload, "chunks", None)
         if chunks is not None:
             out["passages"] = len(chunks)
+        # The SAME top-chunk-similarity value run_rag_layer already computes (its
+        # own `RAGResult.confidence`, used upstream only to gate a >= 0.35 routing
+        # threshold and then discarded) — a document answer's `explain.confidence`
+        # was hardcoded `None` with no SQL path to compute one from, so every
+        # document answer read as equally certain whether the match was a strong
+        # 0.9 or a borderline 0.36. Read here rather than invented: not present at
+        # all unless the head actually reported a number.
+        conf = getattr(payload, "confidence", None)
+        if isinstance(conf, (int, float)):
+            out["confidence"] = round(float(conf), 3)
     except Exception:
         pass
     return out
@@ -2575,6 +2652,12 @@ def _apply_document_v1(explain: dict, ev: dict) -> dict:
                 bits.append(f"using {n} relevant passage{'' if n == 1 else 's'}")
             explain["understanding"] = {"summary": " ".join(bits) + ".",
                                         "breakdown": [o["summary"] for o in ops]}
+        # Only fills the None `build_explain(confidence=None, ...)` left for a
+        # document turn — never overwrites a real value another path already put
+        # here.
+        if explain.get("confidence") is None and isinstance(ev.get("confidence"),
+                                                             (int, float)):
+            explain["confidence"] = ev["confidence"]
     except Exception:
         pass
     return explain
@@ -2743,6 +2826,39 @@ def _sync_reported_row_count(result) -> None:
     except Exception:
         pass
 
+def _business_wording(result) -> None:
+    """Replace raw table/column names in each answer with plain language
+    (query/business_wording.py). Applied HERE, at the one exit every head passes
+    through, so Tier-1, Tier-2, federated and hybrid summaries follow one rule —
+    measured 2026-09-26: "The assets_asset_count ranges widely from 1 to 471".
+    Text only; rows, columns, SQL and explain are untouched. Any failure leaves the
+    answer exactly as it was."""
+    try:
+        from query.business_wording import business_wording
+        sm = None
+        for item in (getattr(result, "items", None) or []):
+            payload = getattr(item, "result", None)
+            get = payload.get if isinstance(payload, dict) else (
+                lambda k, d=None: getattr(payload, k, d))
+            answer = get("answer")
+            if not isinstance(answer, str) or "_" not in answer:
+                continue
+            if sm is None:
+                try:
+                    sm = _load_semantic_model()[0] or {}
+                except Exception:
+                    sm = {}
+            worded = business_wording(answer, list(get("cols") or get("columns") or []),
+                                      get("table"), sm)
+            if worded != answer:
+                if isinstance(payload, dict):
+                    payload["answer"] = worded
+                else:
+                    setattr(payload, "answer", worded)
+    except Exception:
+        pass
+
+
 def _refresh_persisted_timeline(result, timeline) -> None:
     """Re-read the timeline into the payload AFTER the terminal phase is emitted.
 
@@ -2869,7 +2985,34 @@ def _run_hybrid_query_inner(query, verbose=False, on_event=None):
     # a federated DuckDB query instead. Returns None (→ normal path) when not applicable.
     # Behaviour (c), 2026-09-18: NOT when the coordinator just handed a COMPOUND question
     # to the decomposer — federating first re-created the wrong "4 … average 10.88" answer.
-    fed = None if _COMPOUND_HANDOFF.get() else _maybe_federated(query, verbose=verbose)
+    #
+    # NOT for a follow-up that continues a remembered SQL conversation. The coordinator
+    # already pins such a turn to its conversation's source (_conversation_pinned_source),
+    # but it runs in SHADOW, so the answer path reached this opportunistic federation
+    # regardless: retrieval on a bare value spans sources whenever the value exists in
+    # more than one of them. Measured 2026-09-25: "distribution of properties by facing"
+    # then "Nagpur", context correctly carried (entity assets_asset, source 2), answered
+    # by the FEDERATED route on 1 run in 3 — the other 2 answered on assets_asset. Same
+    # rule, applied at the call site that actually decides. A new topic carries no state
+    # and is never pinned, so genuine cross-source questions are untouched.
+    _ctx_now = _current_ctx()
+    _scope_now = list(getattr(_ctx_now, "source_ids", ()) or ()) if _ctx_now is not None else []
+    _pinned_now = _conversation_pinned_source(_scope_now) if len(_scope_now) >= 2 else None
+    if _COMPOUND_HANDOFF.get():
+        fed = None
+    elif _pinned_now is not None:
+        if verbose:
+            print(f"  [federated] skipped — follow-up continues the conversation on "
+                  f"source {_pinned_now}")
+        fed = None
+    elif len(_scope_now) >= 2 and _conversation_document_lane():
+        # A document conversation's follow-up is answered from the documents (classify's
+        # document-lane continuity), not joined across structured sources.
+        if verbose:
+            print("  [federated] skipped — follow-up continues a document conversation")
+        fed = None
+    else:
+        fed = _maybe_federated(query, verbose=verbose)
     if fed is not None:
         return fed
 
@@ -3559,6 +3702,112 @@ def _print_rows(cols, rows, sql=None):
             print("    " + " | ".join(cells))
 
 
+def _tier2_validate(query, raw_sql, sm, allowed_tables, allowed_cols, llm_written, tf):
+    """The SAME correctness gates run_query applies (value_grounding + qualifier_completeness
+    + ir_equivalence), run on a Tier-2 candidate BEFORE execution. Tier-2 fires precisely
+    when the deterministic head REFUSED — often because a gate tripped — so re-answering
+    with only the AST firewall (as before) let dropped-filter / fabricated-value / unrequested-
+    semantics answers through. Returns (ok, reason). Mirrors veda/pipeline.py:579-619."""
+
+    cols_meta = sm.get("columns", {})
+    allowed_tables = set(allowed_tables)
+    amap = {}
+    try:
+        tree = sqlglot.parse_one(raw_sql, read="postgres")
+        for t in tree.find_all(exp.Table):
+            if t.alias:
+                amap[t.alias.lower()] = t.name
+    except Exception:
+        pass
+    _default_tbl = next(iter(allowed_tables)) if len(allowed_tables) == 1 else None
+
+    def _resolve(colexp):
+        if colexp.table:
+            return amap.get(colexp.table.lower())
+        owners = [t for t in allowed_tables if f"{t}.{colexp.name}" in cols_meta]
+        return owners[0] if len(owners) == 1 else _default_tbl
+
+    ok_val, bad = value_grounding(raw_sql, _resolve, cols_meta)
+    if not ok_val:
+        return False, f"ungrounded value {bad}"
+
+    # CONVERSATION STATE. Tier-2 fires precisely when the deterministic head refused, and
+    # it knows nothing about the conversation — so on a follow-up it can answer by widening
+    # the question back out. Measured 2026-09-24: after the conversation had narrowed to
+    # Nagpur, "only the gated ones" was refused by Tier-1 (the boolean would not ground),
+    # and Tier-2 answered `SELECT t1."is_gated" FROM assets_asset LIMIT 1000` — no filter,
+    # no grouping, delivered with full confidence, and the drill path was then wiped
+    # because memory keeps only levels still present in the answer's filters.
+    #
+    # Same rule Tier-1 applies: refuse only when the candidate is ON the conversation's own
+    # table and keeps NOT ONE remembered filter. Keeping some of them is a legitimate
+    # replacement, and a different table is a topic change.
+    try:
+        from veda_core.context import current_conversation_context as _cur_conv
+        _cv = _cur_conv() or {}
+    except Exception:
+        _cv = {}
+    _cv_filters = [f for f in (_cv.get("filters") or [])
+                   if isinstance(f, dict) and f.get("column")]
+    if _cv_filters and _cv.get("entity_table") in allowed_tables:
+        if not any(f'"{f["column"]}"' in raw_sql for f in _cv_filters):
+            _lost = ", ".join(sorted({str(f["column"]) for f in _cv_filters}))
+            return False, f"dropped the conversation's narrowing ({_lost})"
+    # STRICT: LLM-lane answers face the QSR-aware gate — an unaccounted token with a
+    # referent anywhere in the schema is a dropped qualifier, closing the wrong-table
+    # blind spot (SELECT * FROM assets_asset for "most expensive financial records").
+    # The words the user POINTED with ("the 3rd one from the earlier list") name a row they
+    # saw, not data — the same exemption Tier-1's gate applies (veda/pipeline.py, resolved
+    # terms held to words actually in the message). Measured 2026-09-26: Tier-1 exempted
+    # 'earlier', the turn fell through to Tier-2, and this gate refused it.
+    _pointed = {str(t).lower() for t in (_cv.get("resolved_terms") or []) if isinstance(t, str)}
+    _um = _cv.get("user_message") or query
+    _gate_words = (" ".join(w for w in _re_mod.findall(r"[A-Za-z0-9]+", _um)
+                            if w.lower() not in _pointed) if _pointed else None)
+    if _pointed and not (_gate_words or "").strip():
+        ok_q, missing = True, None          # nothing but pointer words (see pipeline.py)
+    else:
+        ok_q, missing = qualifier_completeness(query, raw_sql, sm, strict=True,
+                                               user_message=_gate_words)
+    if not ok_q:
+        return False, f"dropped qualifier {missing!r}"
+    _tcols = ({k.split(".", 1)[1] for k, m in cols_meta.items()
+               if k.split(".", 1)[0] in allowed_tables
+               and (m or {}).get("semantic_type") == "TEMPORAL"}
+              if (tf and (getattr(tf, "start", None) or getattr(tf, "end", None))) else set())
+    ok_ir, ir_viol = validate_ir_equivalence(query, raw_sql, sm, allowed_tables=allowed_tables,
+                                             temporal_cols=_tcols, llm_generated=llm_written)
+    if not ok_ir:
+        return False, f"ir_mismatch: {'; '.join(ir_viol)}"
+
+    # ── Shared analytical-semantics check — the SAME generic, metadata-driven
+    # invariants Tier-1 uses (veda/semantic_validation.py). This is the common
+    # boundary for BOTH Tier-2 IR SQL and LangGraph SQL (run_langgraph_pipeline's
+    # output is validated through this same function). Advisory by default (logged);
+    # with SEMANTIC_VALIDATION_ENFORCE a hard operator-loss finding (the LLM ignored
+    # the requested AVG/SUM/…) drives the EXISTING repair/retry loop by returning a
+    # reason, instead of executing SQL that answers a different question. Never raises.
+    try:
+        from config import SEMANTIC_VALIDATION_ENABLED as _SV_ON, SEMANTIC_VALIDATION_ENFORCE as _SV_ENF
+    except Exception:
+        _SV_ON, _SV_ENF = False, False
+    if _SV_ON:
+        try:
+            from veda.semantic_validation import validate_analytical_semantics
+            _sv = validate_analytical_semantics(query, raw_sql, sm, graph=None)
+            _hard = [f for f in _sv if f.get("code") in
+                     ("operator_mismatch", "operator_dropped", "missing_group_by")]
+            if _sv:
+                print(f"  [Tier2] Semantics  {len(_sv)} finding(s): "
+                      f"{', '.join(sorted({f['code'] for f in _sv}))}"
+                      + (" (enforced)" if (_SV_ENF and _hard) else " (advisory)"))
+            if _SV_ENF and _hard:
+                return False, f"semantic: {_hard[0]['code']} — {_hard[0]['detail']}"
+        except Exception:
+            pass
+    return True, ""
+
+
 def _repair_hint_for(error: str) -> str:
     """Turn a firewall/execution error into a corrective instruction appended to the SLM
     prompt on the NEXT IR attempt (execution-feedback self-repair, IR-level).
@@ -3860,6 +4109,13 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
                                           not_included=_cov_missing or None)
     except Exception:
         print("  [Tier2] explainability skipped")
+    try:  # row identity for conversation memory — beside explain, see business_explain.result_key
+        from veda.business_explain import result_key as _result_key
+        _rk = _result_key(sql or "", None, sm)
+        if _rk:
+            result["result_key"] = _rk
+    except Exception:
+        pass
     # business_intent (advisory): deterministic reading of the EXECUTED SQL
     # first (explain.understanding.summary — the source of truth); the SLM's
     # own advisory claim (`business_intent` param, from the Tier-2 IR envelope)

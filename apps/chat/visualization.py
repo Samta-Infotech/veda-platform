@@ -187,6 +187,45 @@ _LISTING_SHAPES = ("RANKING", "DETAIL_TABLE")
 _CONFIDENCE_THRESHOLD = 0.6
 
 
+# --- silent truncation disclosure (2026-09-30, merged from a parallel branch) -
+#
+# `analytics["is_truncated"]` (result_analyzer.compute_result_completeness,
+# same shared signal table_rendering.py's notice already reads) says `rows`
+# here is itself only a PAGE of a larger result the backend/SQL cut off. Every
+# chart branch below is built from that page; some already caption this
+# themselves (the row-listing, which knows its own more precise "first N of M"
+# count) — this is the SAFETY NET for every branch that doesn't: it only fills
+# in a caption where one is still missing, so a branch with its own, more
+# specific wording is never overwritten.
+def _result_truncated(analytics: Any) -> bool:
+    try:
+        return bool(analytics.get("is_truncated"))
+    except AttributeError:      # None, or an analytics payload that isn't a dict
+        return False
+
+
+def _partial_sub_title(shown: int, page: int) -> str:
+    """Caption for a chart drawn from a silently-truncated result. Says the two
+    things the reader needs: how much is on screen, and that the real result is
+    bigger. Deliberately NOT "First N of M rows" — that phrasing is what made
+    the page look like the population."""
+    if shown < page:
+        return (f"Partial data — first {shown} of the {page:,} rows returned; "
+                "the full result is larger")
+    return f"Partial data — the {page:,} rows returned; the full result is larger"
+
+
+def _disclose_truncation(specs: list, page_rows: int, truncated: bool) -> list:
+    """Caption every chart drawn from a truncated page that doesn't already
+    carry its own (more precise) sub_title."""
+    if not truncated:
+        return specs
+    for spec in specs:
+        if not spec.sub_title:
+            spec.sub_title = _partial_sub_title(page_rows, page_rows)
+    return specs
+
+
 class VisualizationRecommender:
     """Single responsibility: given the (cols, rows) already returned by the
     existing execution layer, recommend zero or more charts. Deterministic
@@ -216,6 +255,27 @@ class VisualizationRecommender:
     recommendation logic, no guessing."""
 
     def recommend(self, cols: list, rows: list, analytics: dict | None = None) -> list[VisualizationSpec]:
+        """Thin public wrapper around `_recommend_specs()` (2026-09-30, merged
+        from a parallel branch's independent truncation-disclosure work): a
+        defensive row-length guard (a row shorter than `cols` would raise
+        IndexError deep inside a builder — `services._build_visualizations`
+        has no try/except around this call, so one malformed row would take
+        down the whole chat turn, not just the chart) and the ONE choke point
+        that captions every returned chart drawn from a truncated page,
+        including the branches that don't already caption themselves. Kept
+        separate from `_recommend_specs` so that method's own early returns
+        stay simple — the caption is applied once here, after, not threaded
+        through every return point."""
+        rows = [row for row in rows if len(row) >= len(cols)]
+        if not rows:
+            return []
+        if not isinstance(analytics, dict):
+            analytics = None
+        truncated = _result_truncated(analytics)
+        specs = self._recommend_specs(cols, rows, analytics)
+        return _disclose_truncation(specs, len(rows), truncated)
+
+    def _recommend_specs(self, cols: list, rows: list, analytics: dict | None = None) -> list[VisualizationSpec]:
         """`analytics` (optional): the engine's own deterministic analysis
         (veda_core result_analyzer's analytics_summary, riding the result dict
         across the HTTP boundary). When present, its per-column kind/role is
@@ -516,12 +576,20 @@ class VisualizationRecommender:
 
         `analytics`: the engine's own analysis payload, same one `recommend` takes —
         its `measure_aggregates` is what tells this builder whether the measure may be
-        summed. Optional: without it the measure's name is the fallback signal."""
-        return self._category_numeric(cols, rows, cat_idx, val_idx, analytics)
+        summed, and its `is_truncated` drives the truncation caption below (2026-09-30,
+        merged from a parallel branch) — the suggestion/candidate fallbacks in
+        services.py reach this builder WITHOUT going through recommend()'s own
+        wrapper, and a chart is no less misleading for having been picked by the
+        query tier instead of by this module."""
+        specs = self._category_numeric(cols, rows, cat_idx, val_idx, analytics)
+        return _disclose_truncation(specs, len(rows), _result_truncated(analytics))
 
-    def build_line_spec(self, cols: list, rows: list, x_idx: int, y_idx: int) -> VisualizationSpec:
-        """The line chart for an (x, measure) pairing. Always returns one spec."""
-        return self._line(cols, rows, x_idx, y_idx)
+    def build_line_spec(self, cols: list, rows: list, x_idx: int, y_idx: int,
+                        analytics: dict | None = None) -> VisualizationSpec:
+        """The line chart for an (x, measure) pairing. Always returns one spec.
+        `analytics` is optional — see build_category_specs's own docstring."""
+        spec = self._line(cols, rows, x_idx, y_idx)
+        return _disclose_truncation([spec], len(rows), _result_truncated(analytics))[0]
 
     # --- chart builders ------------------------------------------------------
 
@@ -587,16 +655,24 @@ class VisualizationRecommender:
         # result-completeness — result_analyzer.compute_result_completeness).
         _fetch_capped = bool((analytics or {}).get("is_truncated"))
         _limit_exceeded = bool((analytics or {}).get("reason") == "FETCH_CAP_EXCEEDED")
-        if truncated and _limit_exceeded:
+        if _limit_exceeded:
             # A KNOWN, deterministic limitation ("top 1001" against a 1000-row
             # fetch cap) — distinct from the open-ended "more may exist" hedge
-            # below (2026-09-30, requested-limit gap).
+            # below (2026-09-30, requested-limit gap). Fires regardless of
+            # whether this chart's own bar cap also truncated the render.
             _sub = (f"You asked for the top {(analytics or {}).get('requested_limit'):,}, "
                    f"but only up to {(analytics or {}).get('fetch_limit'):,} rows can be "
                    f"fetched in a single result")
         elif truncated and _fetch_capped:
             _sub = (f"First {len(plotted)} of {len(rows)} rows fetched, in result "
                    f"order — more rows may exist beyond this fetch")
+        elif _fetch_capped:
+            # The backend's own fetch was capped upstream of this chart — even
+            # when the bar cap itself never kicks in (e.g. only 6 rows made it
+            # through the fetch), those 6 are still a PAGE, not the population
+            # (2026-09-30, shared result-completeness).
+            _sub = (f"Partial data — the {len(plotted)} row"
+                   f"{'s' if len(plotted) != 1 else ''} returned; the full result is larger")
         elif truncated:
             _sub = f"First {len(plotted)} of {len(rows)} rows, in result order"
         else:
@@ -716,6 +792,14 @@ class VisualizationRecommender:
         # net-change data) — bar handles negative values fine (a bar below the
         # axis), a pie cannot. Computed once, applied to every branch below.
         has_negative = any(value < 0 for _, value in pairs)
+        # A pie is a part-of-whole STATEMENT: its slices always sum to 100% of
+        # what's shown. On a silently truncated result (analytics["is_truncated"]
+        # — merged from a parallel branch, 2026-09-30) they sum to 100% of one
+        # PAGE (e.g. 1,000 of 7,814 true rows) — not merely incomplete, actually
+        # WRONG shares, and no caption undoes that the way it does for a bar (a
+        # bar claims no denominator, so it stays honest with a caption). Same
+        # suppression the negative-value guard already performs.
+        no_pie = has_negative or bool((analytics or {}).get("is_truncated"))
 
         title = f"{_fmt_axis(cols[val_idx])} by {_fmt_axis(cols[cat_idx])}"
         x_title, y_title = _fmt_axis(cols[cat_idx]), _fmt_axis(cols[val_idx])
@@ -726,7 +810,7 @@ class VisualizationRecommender:
                 type=ChartType.BAR, title=title, x_axis_title=x_title, y_axis_title=y_title,
                 chart_data={"labels": labels, "values": values}, confidence=0.9,
             )
-            if has_negative:
+            if no_pie:
                 return [bar]
             slices = [{"name": name, "value": value} for name, value in pairs]
             pie = VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
@@ -756,7 +840,7 @@ class VisualizationRecommender:
             # the chart is a subset, or it reads as the whole distribution.
             title = f"{title} (top {len(top)})"
 
-        if len(slices) <= _MAX_PIE_SLICES and not has_negative:
+        if len(slices) <= _MAX_PIE_SLICES and not no_pie:
             return [VisualizationSpec(type=ChartType.PIE, title=title, chart_data={"slices": slices},
                                       confidence=0.75)]
 

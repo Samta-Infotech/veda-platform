@@ -115,6 +115,31 @@ def test_a_turn_with_no_frame_is_untouched():
     assert out["resolved_query"] == "how many assets are there"
 
 
+# ── drill-up: root vs depth (VEDA_DRILLDOWN_10LEVEL_FEASIBILITY.md §K1) ───────────────
+_TWO = [{"field": "Furnishing", "column": "furnishing", "operator": "equals", "value": "FULL"},
+        {"field": "City", "column": "city_name", "operator": "equals", "value": "Nagpur"}]
+
+
+def test_drill_up_to_the_root_replays_the_original_question_with_no_context():
+    """Measured 2026-09-24: the root pop sent the base question WITH context, the engine
+    treated it as context-dependent, and it came back ungrouped where the first ask had
+    answered. Nothing remains to carry, so it goes out exactly as it did the first time."""
+    out = _run("go back", "drill_up", frame=_frame(filters=_TWO[:1]),
+               drill_stack=[{"dimension": "Furnishing", "value": "FULL"}])
+    assert out["resolved_query"] == BASE_Q
+    assert out["conversation_context"] == {"user_message": BASE_Q}
+
+
+def test_drill_up_with_levels_left_still_carries_them():
+    out = _run("go back", "drill_up", frame=_frame(filters=list(_TWO)),
+               drill_stack=[{"dimension": "Furnishing", "value": "FULL"},
+                            {"dimension": "City", "value": "Nagpur"}])
+    assert out["resolved_query"] == BASE_Q
+    ctx = out["conversation_context"]
+    assert [f["column"] for f in ctx["filters"]] == ["furnishing"]
+    assert ctx["entity_table"] == LEDGER
+
+
 if __name__ == "__main__":
     fns = [(k, v) for k, v in sorted(globals().items()) if k.startswith("test_") and callable(v)]
     failed = 0

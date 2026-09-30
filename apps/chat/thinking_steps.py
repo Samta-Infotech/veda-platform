@@ -521,13 +521,28 @@ class ThinkingStepTracker:
                 # changes nothing.
                 #
                 # A sub-check that opens a LATER step must also ADVANCE, closing the
-                # earlier ones. Measured live: the access check opens "Finding" but
-                # left `_current` on "Understanding", so Understanding kept accruing
-                # until the first non-sub-check Finding event and reported 71 s for
-                # work that takes ~3 s. The access check genuinely marks the start of
-                # looking for the information.
+                # earlier ones — but only once its timestamp actually shows the
+                # current step's work is over. Measured live: the access check
+                # opens "Finding" but left `_current` on "Understanding", so
+                # Understanding kept accruing until the first non-sub-check
+                # Finding event and reported 71 s for work that takes ~3 s. The
+                # access check genuinely marks the start of looking for the
+                # information — EXCEPT when it fires at the same instant as the
+                # current step's own start (access_check's scope-resolution
+                # `started` and `understanding`'s `started` are emitted back to
+                # back in veda_hybrid.py, same `timestamp_ms`): advancing there
+                # closed Understanding with a fabricated ~0 ms duration before
+                # its own `completed` event — carrying the real ~1 s of intent
+                # work — ever arrived. Requiring a genuine elapsed gap keeps the
+                # 71 s fix (any real gap still advances) while no longer
+                # flash-closing a step that hasn't actually run yet.
+                current_started = (
+                    self.steps[self._current].started_ms
+                    if self._current is not None else None
+                )
                 if (self._current is not None
-                        and STEP_ORDER.index(step_key) > STEP_ORDER.index(self._current)):
+                        and STEP_ORDER.index(step_key) > STEP_ORDER.index(self._current)
+                        and (current_started is None or now > current_started)):
                     self._advance_to(step_key, now)
                 else:
                     self._ensure_started(step_key, now)

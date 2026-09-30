@@ -64,6 +64,13 @@ _LIMIT_N = re.compile(r"\b(?:top|bottom|first|last)\s+(\d{1,4})\b", re.I)
 
 _ONLY = re.compile(r"\b(only|just|filter(?:ed)?\s+(?:to|by)|where|with|in|for)\b", re.I)
 
+# Closed grammar (like _STOP/_ANAPHORA above), never a business/entity word: signals the
+# user wants the UNFILTERED whole set, overriding whatever the conversation had narrowed
+# to. "all"/"every"/"any" are otherwise treated as pure noise (part of `_STOP`) — this is
+# the one place their meaning is read, and only to VETO an additive rule, never to invent
+# a value.
+_TOTALITY = re.compile(r"\b(all|every|any|overall|entire|whole)\b", re.I)
+
 # A message that OPENS with one of these is continuing the previous turn, whatever else
 # it contains. Distinct from _ONLY (which matches mid-sentence prepositions like "in"
 # that appear in ordinary standalone questions) — this is anchored at the start.
@@ -318,6 +325,26 @@ def _detect(message: str, entry: Optional[Dict[str, Any]],
     has_anaphora = bool(_ANAPHORA.search(msg))
     n_tokens = len(_tokens(msg))
 
+    # A TOTALITY quantifier ("all", "every", "overall", "entire", "whole") with no
+    # anaphora pointing at the current result means the user wants the UNFILTERED,
+    # ungrouped whole set — vetoes every rule below (change_order/group/filter/measure)
+    # the same way an unaccounted literal does, before any of them can read a false
+    # confident continuation. Checked here, ahead of the unaccounted-literal veto further
+    # down, because THAT veto sets `continuation: True` (a later SLM "new_topic" verdict
+    # would be overridden back to ambiguous) — measured 2026-09-30: "overall"/"entire"
+    # are not in `_STOP`, so they tripped unaccounted_literal (continuation=True) before
+    # ever reaching this check when it lived only in front of rule 6. "all"/"every"/"any"
+    # ARE in `_STOP` and were simply invisible to every rule, including that veto — so
+    # "what is the average carpet area of ALL properties?" mid-drill (Nagpur, FULL) still
+    # matched rule 6 on "carpet area" alone and stayed filtered+grouped, the opposite of
+    # what was asked. Deliberately closed, language-only grammar (no entity/customer
+    # words), the same kind `_STOP`/`_ANAPHORA` already are — never fires on the anaphoric
+    # case ("average rent of ALL of those" still means THIS set, rule "measure_word" as
+    # before).
+    if not has_anaphora and _TOTALITY.search(msg):
+        return {**out, "op": OP_AMBIGUOUS, "confidence": 0.0,
+                "rule": "totality_quantifier_no_anaphora"}
+
     # 3. change_order / limit — "top 3", "show the top 3 by amount".
     m_lim = _LIMIT_N.search(msg)
     if m_lim and (has_anaphora or n_tokens <= 6):
@@ -374,6 +401,7 @@ def _detect(message: str, entry: Optional[Dict[str, Any]],
     #    that second condition a standalone question that merely starts with "how many"
     #    ("how many properties are there" — a NEW topic on a different entity) was read as
     #    a measure change on the previous frame.
+    #
     mm = _match_measure(msg, measures)
     if mm:
         agg, col = mm

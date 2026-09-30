@@ -181,6 +181,11 @@ def entity_anchor_ok(query, sql, sm):
     if not _enabled() or not sql:
         return True, ""
     named = _named_measure_columns(query, sm)
+    # A measure the query names as a THRESHOLD ("carpet area above 1000") is a filter, not
+    # the figure to rank by — the SQL applies it as `"carpet_area" > 1000`. Measured
+    # 2026-09-26: that drill was refused here although the filter was in the SQL.
+    named = {(t, c) for (t, c) in named
+             if not re.search(rf'"{re.escape(c)}"\s*(?:>=|<=|>|<)', sql)}
     if not named:
         return True, ""                                  # query names no specific measure → cannot misalign
     facts = _facts(sql)
@@ -293,11 +298,21 @@ def _value_named_in_query(query, sm, sql_tables=None):
 
 
 def _boolean_flag_named(query, sm, sql_tables=None):
-    """A BOOLEAN/FLAG column whose own distinctive name-word the query uses, e.g. "gated" for
-    `is_gated`. Schema-driven (the column's words), no vocabulary list. `sql_tables` (2026-09-15):
-    only flags on tables the SQL actually reads count — a flag on some unrelated table cannot
-    be "the filter this SQL forgot" ("users created LAST month" used to match
-    users_userpreference.is_LAST_name_obfuscated and refuse a correct temporal query)."""
+    """A BOOLEAN/FLAG column the query NAMES, e.g. "gated" for `is_gated`. Schema-driven (the
+    column's words), no vocabulary list. `sql_tables` (2026-09-15): only flags on tables the SQL
+    actually reads count — a flag on some unrelated table cannot be "the filter this SQL forgot"
+    ("users created LAST month" used to match users_userpreference.is_LAST_name_obfuscated and
+    refuse a correct temporal query).
+
+    Two further conditions, both learned the hard way:
+      * a word that is ALSO a name-part of a NON-flag column on the same tables is explained by
+        that column, not by the flag: "total PAID amount" names paid_amount (a measure), not
+        is_paid — the guard used to refuse a correct grouped SUM as a "forgotten condition"
+        (2026-09-16, "total paid amount per currency").
+      * EVERY distinctive word of the column's name must be in the query ("city dependent"), not
+        any one of them (measured 2026-09-26): "What is the distribution of properties by city?"
+        was refused because the single word "city" matched
+        `services_valuebundlepricing.is_city_dependent` — a flag of an unrelated table."""
     ql = " " + re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()) + " "
     cols = (sm or {}).get("columns", {})
     # A word that is ALSO a name-part of a NON-flag column on the same tables is explained by
@@ -317,10 +332,10 @@ def _boolean_flag_named(query, sm, sql_tables=None):
             continue
         if sql_tables and k.split(".", 1)[0] not in sql_tables:
             continue
-        for w in k.split(".", 1)[1].lower().split("_"):
-            if (len(w) > 3 and w not in ("flag", "is", "has") and w not in _non_flag_words
-                    and (" " + w + " ") in ql):
-                return k
+        words = [w for w in k.split(".", 1)[1].lower().split("_")
+                 if len(w) > 3 and w not in ("flag", "is", "has") and w not in _non_flag_words]
+        if words and all((" " + w + " ") in ql for w in words):
+            return k
     return None
 
 

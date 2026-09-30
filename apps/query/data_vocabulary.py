@@ -54,7 +54,12 @@ things something anything everything nothing someone anyone everyone nobody
 hello hey yes okay sure thanks thank welcome bye goodbye please sorry
 life world song poem joke politics vacation weather cup won win sing write plan
 one two three four five six seven eight nine ten
+ones
 """.split())
+# "ones" (2026-09-25): "only the Nagpur ones" / "only the Upi ones" — the commonest drill
+# phrasing — carried "ones" as a CONTENT word, so names_only_values() could never say the
+# message names only a value, and a run where the model called it a new question lost the
+# conversation (demo chain C7: answered from the employee handbook). It names no data.
 
 _WORD_RE = re.compile(r"[^a-z0-9]+")
 _MIN_LEN = 3                 # shorter tokens carry no signal and collide with everything
@@ -88,6 +93,14 @@ def _forms(word: str) -> set[str]:
 def _load(source_ids: tuple[int, ...]) -> set[str]:
     """Read the vocabulary for these sources. Any failure yields an empty set, which
     disables the check rather than risking a wrong answer — see module docstring."""
+    structural, values = _load_split(source_ids)
+    return structural | values
+
+
+def _load_split(source_ids: tuple[int, ...]) -> tuple[set[str], set[str]]:
+    """The same substrate read as _load, kept as its two halves: STRUCTURAL words (table
+    and column names, both number forms) and VALUE words (sampled values, synonyms).
+    Both empty on any failure."""
     vocab: set[str] = set()
     structural: set[str] = set()
     try:
@@ -113,14 +126,13 @@ def _load(source_ids: tuple[int, ...]) -> set[str]:
     except Exception:
         logger.exception("data_vocabulary: load failed for sources=%s — the grounding "
                          "check stays disabled for this turn", source_ids)
-        return set()
+        return set(), set()
 
     # Number forms are generated only for the STRUCTURAL half. Sampled values are real
     # data ("Nagpur", "Tax Invoice"); inventing plurals of them would widen the
     # vocabulary with strings that exist nowhere.
-    vocab |= structural
-    vocab |= {form for word in structural for form in _forms(word)}
-    return vocab - _STOPWORDS
+    structural |= {form for word in structural for form in _forms(word)}
+    return structural - _STOPWORDS, vocab - _STOPWORDS
 
 
 def vocabulary_for(source_ids) -> list[str]:
@@ -165,3 +177,58 @@ def mentions_the_data(message: str, vocabulary) -> bool:
         return False
     lookup = vocabulary if isinstance(vocabulary, (set, frozenset)) else set(vocabulary)
     return any(form in lookup for word in content for form in _forms(word))
+
+
+_SPLIT_CACHE: dict = {}
+
+
+def _split_for(source_ids) -> tuple[frozenset, frozenset]:
+    """Cached (structural, values) for an authorised scope; both empty when unknown."""
+    try:
+        key = tuple(sorted(int(s) for s in (source_ids or [])))
+    except (TypeError, ValueError):
+        return frozenset(), frozenset()
+    if not key:
+        return frozenset(), frozenset()
+    entry = _SPLIT_CACHE.get(key)
+    if entry and (time.monotonic() - entry[0]) < _CACHE_TTL_SECS:
+        return entry[1]
+    with _LOCK:
+        entry = _SPLIT_CACHE.get(key)
+        if entry and (time.monotonic() - entry[0]) < _CACHE_TTL_SECS:
+            return entry[1]
+        st, vals = _load_split(key)
+        out = (frozenset(st), frozenset(vals))
+        _SPLIT_CACHE[key] = (time.monotonic(), out)
+        return out
+
+
+def names_only_values(message: str, source_ids) -> bool | None:
+    """Does the message name ONLY data values — "Nagpur", "EAST", "DEBIT" — and no table
+    or column at all?
+
+    Such a message has no subject of its own. With a conversation in progress it can only
+    be narrowing that conversation, whatever a classifier labels it (measured 2026-09-25:
+    after "distribution of properties by facing", a bare "Nagpur" was labelled a new
+    question on one run and a follow-up on the next — the new-question run grounded it on
+    a city/phone-code lookup table instead of the properties being discussed).
+
+    True only when every content word is a known VALUE and none is a table or column word
+    in either number form ("vendors" names a table: a subject, so False). None — never
+    False — when there is nothing to decide with: no vocabulary, or no content words.
+    Values and structure come from the tenant's own ingested substrate; nothing here is a
+    word list.
+    """
+    structural, values = _split_for(source_ids)
+    if not values:
+        return None
+    content = _content(message)
+    if not content:
+        return None
+    for word in content:
+        forms = _forms(word)
+        if forms & structural:
+            return False
+        if word not in values:
+            return False
+    return True

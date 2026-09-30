@@ -7,11 +7,16 @@ CLI smoke test:
 """
 from __future__ import annotations
 
+import json
+import logging
 from typing import Callable, Optional
 
 from .graph import get_graph
+from .telemetry import decision_record
 from .llm import collect_usage, usage_totals
 from .memory.store import session_turn_lock
+
+logger = logging.getLogger(__name__)
 
 
 def run_chat_turn(
@@ -28,6 +33,8 @@ def run_chat_turn(
     no_cache: bool = False,
     data_vocabulary: Optional[list] = None,
     message_mentions_data: Optional[bool] = None,
+    message_names_only_values: Optional[bool] = None,
+    user_id: Optional[str] = None,
 ) -> dict:
     """The ONE function a caller (apps/chat) invokes per user turn.
 
@@ -91,6 +98,8 @@ def run_chat_turn(
                 "no_cache": bool(no_cache),   # → call_engine_node → X-Veda-No-Cache
                 "data_vocabulary": data_vocabulary,
                 "message_mentions_data": message_mentions_data,
+                "message_names_only_values": message_names_only_values,
+                "user_id": user_id,
             },
             config={"configurable": {"thread_id": session_id, "on_event": on_event}},
         )
@@ -102,6 +111,16 @@ def run_chat_turn(
         _chat_calls = _chat_usage.calls()
 
     engine_result = dict(result.get("engine_result") or {})
+    # ONE decision record per turn (chatbot/telemetry.py): what memory held, how the turn
+    # was read and on what evidence, what was sent, whether it committed. Structured, keyed
+    # by request_id (which joins the engine trace and the audit row), and free of filter
+    # values, message text and SQL. Observability only — a failure here never costs the turn.
+    try:
+        _decision = decision_record(result, request_id=request_id)
+        logger.info("turn_decision %s", json.dumps(_decision, default=str, sort_keys=True))
+    except Exception:
+        logger.warning("turn_decision: could not build the record", exc_info=True)
+        _decision = None
     _chat_totals = usage_totals(_chat_calls)
     if _chat_totals["total_tokens"]:
         _engine_usage = engine_result.get("usage") or {
@@ -160,6 +179,7 @@ def run_chat_turn(
         "engine_unavailable": result.get("engine_unavailable", False),
         # A compound turn's parts (format_reply_node), in part order; None otherwise.
         "parts": result.get("parts"),
+        "decision": _decision,
         "engine_result": engine_result,
     }
 

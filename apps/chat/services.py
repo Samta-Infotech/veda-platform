@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
 import time
 from typing import Iterator
@@ -11,7 +12,7 @@ from .presentation_plan import build_presentation_plan
 from chatbot.run import run_chat_turn
 
 from apps.core.messages import MESSAGES
-from apps.query.data_vocabulary import mentions_the_data, vocabulary_for
+from apps.query.data_vocabulary import mentions_the_data, names_only_values, vocabulary_for
 
 from .models import ChatMessage, ChatSession, MessageType
 from .table_rendering import (
@@ -27,6 +28,18 @@ from .visualization import VisualizationRecommender
 logger = logging.getLogger(__name__)
 
 DEFAULT_CONVERSATION_TITLE = "New Chat"
+
+# A document answer's own SLM (rag_layer.py's _RAG_SYSTEM_PROMPT) is instructed to
+# write "Sources: (document name, page N)." as its final line — needed so
+# chatbot/memory/frame.py's `_cited_first` can tell which document the answer
+# actually drew on (already consumed upstream in the graph, before this text ever
+# reaches here). The SAME fact is already a structured field the client can
+# render with real confidence — `explainability.sources` / `data_used.datasets` —
+# so restating it as trailing prose in the chat bubble is the source of truth
+# appearing twice, once as a citation the reader cannot click or verify. Stripped
+# only from what is DISPLAYED; the raw text `_cited_first` reads is untouched.
+_TRAILING_SOURCES_RE = re.compile(
+    r"\n?\s*Sources:\s*(?:\([^)]*\)[\s,]*)+\.?\s*$", re.IGNORECASE)
 
 # User-facing error copy for the `error` SSE event / 502 body. Raw exception text
 # and tracebacks are NEVER sent to the client (they leak internals like connection
@@ -244,6 +257,16 @@ class ConversationQueryService:
             content=json.dumps(content_blocks), metadata=metadata,
         )
 
+    def _names_only_values(self, message: str) -> bool | None:
+        """Does the message name ONLY data values ("Nagpur", "EAST") and no table or
+        column? One bool, for the same reason as _mentions_the_data below: the vocabulary
+        itself must not travel through the checkpoint. None when it cannot be decided."""
+        try:
+            return names_only_values(message, self.source_ids)
+        except Exception:
+            logger.exception("_names_only_values: unavailable for this turn")
+            return None
+
     def _mentions_the_data(self, message: str) -> bool | None:
         """Does this message name ANYTHING in the scoped sources — a table, a column, a
         sampled value or a synonym? Returns None when the check cannot be made.
@@ -302,7 +325,9 @@ class ConversationQueryService:
                       data_scope=self.data_scope,
                       source_profiles=self.source_profiles,
                       no_cache=self.no_cache,
-                      message_mentions_data=self._mentions_the_data(message))
+                      message_mentions_data=self._mentions_the_data(message),
+                      message_names_only_values=self._names_only_values(message),
+                      user_id=str(getattr(self.user, "pk", "") or "") or None)
         # End-to-end wall clock for THIS turn — so latency_ms is ALWAYS reportable,
         # even when the engine result carries none (a refusal/clarify that never
         # reached _done(), or a path that returned no latency). Used as the fallback
@@ -493,7 +518,8 @@ class ConversationQueryService:
             "prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0, "latency_ms": 0}}
 
     def _terminal_step_frame(self, *, failed: bool, error_code: str | None = None,
-                             retryable: bool | None = None):
+                             retryable: bool | None = None,
+                             engine_bypassed: bool = False):
         """Freeze and emit the four steps once, at the real end of the turn.
 
         Shared by the normal reply path and the outage path so the two cannot drift:
@@ -517,16 +543,36 @@ class ConversationQueryService:
         _no_answer = bool(getattr(_ctx, "no_answer", False)) if _ctx is not None else False
         _steps.finish(failed=failed, error_code=error_code, retryable=retryable,
                       answered_without_result=_no_answer)
+        # "Finalizing the results..." is the right words for a turn that HAS results.
+        # A smalltalk turn has none — it was answered by a string constant — so on that
+        # turn the honest line is the plain fallback. Measured 2026-09-24: "okay" shipped
+        # `phase: completed, message: "Finalizing the results..."` after ~8s, narrating
+        # work on results that never existed. The canned greetings ("hi", "thanks") were
+        # already spared this by the has_progress() guard below; the smalltalk the canned
+        # patterns do NOT match ("okay", "hmm", "acha", "hola", a typo'd "helo") takes the
+        # classifier path, so a step legitimately starts and the guard does not fire.
         _frame = {"phase": "completed",
                   "status": "failed" if failed else "completed",
-                  "message": business_friendly_message("output", "Done")}
+                  "message": ("Done" if engine_bypassed and not failed
+                              else business_friendly_message("output", "Done"))}
         # A turn that bypassed the engine (a canned greeting, answered in ~100 ms)
         # has no progress to report. Emitting the four steps anyway put four empty
         # circles above a finished answer under a `completed` status — nothing had
         # completed. The legacy phase/message still goes out, so a client that only
         # reads those is unaffected.
         if _steps.has_progress():
-            _frame["steps"] = _steps.as_payload()
+            _payload = _steps.as_payload()
+            if engine_bypassed and not failed:
+                # `total_steps` is len(STEP_ORDER) — a constant that assumes every turn is
+                # a data turn with four stages to go through. On a smalltalk turn only
+                # "understanding" ever runs, so the client rendered "1 of 4" and three
+                # phantom stages that were never going to happen. The denominator is the
+                # count of stages this turn actually has, which here is what it reached.
+                # Scoped to the bypassed turn: a real query's denominator is unchanged,
+                # because a client showing "step 2 of 4" mid-stream still needs it.
+                _payload["total_steps"] = (len(_payload.get("steps") or [])
+                                           or _payload.get("total_steps"))
+            _frame["steps"] = _payload
         elif not failed:
             # NOTHING HAPPENED, so say nothing. A canned greeting never reaches the
             # engine, and this still shipped `phase: completed, message: "Finalizing
@@ -683,7 +729,8 @@ class ConversationQueryService:
                 # above is now only about the evidence the api tier contributes.
                 yield from self._terminal_step_frame(
                     failed=_failed, error_code=_err_code,
-                    retryable=(False if _err_code == ts_mod.ERROR_ACCESS_DENIED else None))
+                    retryable=(False if _err_code == ts_mod.ERROR_ACCESS_DENIED else None),
+                    engine_bypassed=(response.get("action") or "") == "smalltalk")
         except Exception:
             logger.exception("thinking/step model failed — answer unaffected "
                              "(chat turn continues without a progress frame)")
@@ -779,6 +826,25 @@ class ConversationQueryService:
         _explain0 = res0.get("explain")
         _bypassed = not (getattr(self, "_steps", None)
                          and self._steps.has_progress()) and not _explain0
+        # ...and the case that guard MISSES. It suppresses the empty payload only when NO
+        # progress was recorded, which is true of a canned greeting ("hi", "thanks") but
+        # false for the smalltalk the canned patterns do not match — "okay", "ok", "hmm",
+        # "acha", "hola", a typo'd "helo". Those take the classifier path, so a step
+        # legitimately starts, `has_progress()` is True, and the empty block shipped
+        # anyway. Measured 2026-09-24: "okay" emitted `understanding.summary: null`,
+        # `operations: []`, "No filters applied.", `validation.passed: null` — a "how this
+        # answer was generated" panel for an answer that was generated by a string
+        # constant. Those are among the most common things anyone types.
+        #
+        # `action` is the conversation layer's own record of which path answered the turn
+        # (chatbot/run.py returns it; "smalltalk" is the same value run.py keys its own
+        # status fallback on). Smalltalk never reaches the engine, so there is nothing to
+        # explain, whether or not a classify step happened to run first. Deliberately just
+        # this one action, not a list of every engine-bypassing path: refusals and clarify
+        # turns DO ship `_NO_EXPLAIN` today and a client may depend on the event arriving,
+        # so widening this is a wire-contract change and belongs with one.
+        if (response.get("action") or "") == "smalltalk":
+            _bypassed = True
         # POST-ANSWER OBSERVABILITY. `content` has already been yielded, so a failure
         # here cannot cost the reader the answer — but it would still escape into the
         # view's stream handler, which emits `error` and RETURNS, so the turn would
@@ -825,7 +891,7 @@ class ConversationQueryService:
             # is_summary marks this as the primary answer (vs. supporting content like
             # the table below) so callers can surface it distinctly without a second
             # LLM call or re-deriving which block "is" the summary.
-            summary = str(reply_text)
+            summary = _TRAILING_SOURCES_RE.sub("", str(reply_text)).rstrip()
             # Fold the Insight-Engine observations into the SAME summary block
             # instead of a separate "insights" event (2026-07-17): one block, not
             # two. res0["insights"] is List[str] (0-3 factual observations); only

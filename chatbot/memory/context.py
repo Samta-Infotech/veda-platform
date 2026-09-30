@@ -38,6 +38,7 @@ the new one together.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field as _dc_field
 from typing import Any, Dict, List, Optional
 
@@ -59,6 +60,24 @@ def _clean_strs(values: Any, cap: int = _MAX_LIST) -> List[str]:
         if len(out) >= cap:
             break
     return out
+
+
+def _known_operation(op: Optional[str]) -> str:
+    """The operation if it is one of the closed set, else "" — never a free string."""
+    from chatbot.prompts.delta_types import DELTA_TYPES
+    op = str(op or "").strip().lower()
+    return op if op in DELTA_TYPES else ""
+
+
+def _terms_in(terms: Optional[List[str]], message: str) -> List[str]:
+    """The resolved terms that really are words of the message — nothing else travels."""
+    words = {w.lower() for w in re.findall(r"[A-Za-z0-9]+", message or "")}
+    out: List[str] = []
+    for t in terms or []:
+        t = str(t or "").strip()
+        if t and t.lower() in words and t.lower() not in (o.lower() for o in out):
+            out.append(t[:32])
+    return out[:8]
 
 
 @dataclass(frozen=True)
@@ -85,18 +104,39 @@ class ConversationContext:
     # THIS turn's delta on the previous query, as the chat tier decided it (wire_delta) —
     # the engine's continuity lane applies it structurally (veda/understanding/continuity.py)
     delta: Optional[Dict[str, Any]] = None
+    # WHAT this turn does to the remembered state — the turn's delta, from the closed set
+    # in chatbot/prompts/delta_types.py. The engine needs it for exactly one decision it
+    # cannot otherwise make safely: whether the remembered shape is being REPLAYED. A
+    # drill-up replays the base question, whose own grouping words ("distribution ... by
+    # facing") look like a request for a NEW grouping; inferring the difference from the
+    # text meant matching column names against words, which broke the moment the planner
+    # grouped by a column the user never said (corner_property; measured 2026-09-25,
+    # depth 2 -> 1 came back as 1000 raw rows). Said once, by the layer that knows.
+    operation: str = ""
+    # Words of `user_message` this layer RESOLVED against memory — the "second" / "one" of
+    # "show the second one", which now travel as an id filter. They name a row the user
+    # saw, not data, so the engine's qualifier gate must not demand them in the SQL
+    # (measured 2026-09-25: "I couldn't map 'second' to any column or value"). Only words
+    # that actually occur in the message are ever sent.
+    resolved_terms: List[str] = _dc_field(default_factory=list)
 
     # ── construction ────────────────────────────────────────────────────────────────
     @classmethod
     def from_frame(cls, frame: Optional[Dict[str, Any]], user_message: str,
                    *, carry_state: bool = True,
-                   delta: Optional[Dict[str, Any]] = None) -> "ConversationContext":
+                   delta: Optional[Dict[str, Any]] = None,
+                   operation: Optional[str] = None,
+                   resolved_terms: Optional[List[str]] = None) -> "ConversationContext":
         """Build from the frame AS IT STANDS AFTER the delta was applied.
 
         `carry_state=False` is the new-topic case: the message is self-contained, so no
         remembered state travels with it — the same rule the previous rendering used when
-        it returned the message unchanged for `new_topic`/`ambiguous`.
-        """
+        it returned the message unchanged for `new_topic`/`ambiguous`. Also relied on by
+        `_root_replay` (chatbot/nodes.py): a remove/drill-up that empties out to the bare
+        base_query sends NOTHING, delta included — pinned by
+        tests/test_resolved_query_contract.py::test_drill_up_to_the_root_replays_the_
+        original_question_with_no_context (measured 2026-09-24: the root pop sent WITH
+        context, the engine treated it as context-dependent, and answered wrong)."""
         if not frame or not carry_state:
             return cls(user_message=user_message)
 
@@ -165,6 +205,8 @@ class ConversationContext:
             aggregation=str(frame.get("aggregation") or ""),
             route=str(frame.get("route") or ""),
             drill_depth=len(frame.get("drill_path") or []),
+            operation=_known_operation(operation),
+            resolved_terms=_terms_in(resolved_terms, user_message),
         )
 
     # ── transport ───────────────────────────────────────────────────────────────────
@@ -201,6 +243,10 @@ class ConversationContext:
             payload["agent_plan"] = dict(self.agent_plan)
             payload["agent_log"] = list(self.agent_log)
             payload["agent_question"] = self.agent_question
+        if self.operation:
+            payload["operation"] = self.operation
+        if self.resolved_terms:
+            payload["resolved_terms"] = list(self.resolved_terms)
         return payload
 
     def is_empty(self) -> bool:

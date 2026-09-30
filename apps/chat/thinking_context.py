@@ -614,10 +614,19 @@ class ThinkingContext:
         if self.source_names:
             for name in self.source_names[:6]:
                 _why = self.failed_sources.get(name)
-                rows.append(self._row(
-                    ts.DETAIL_SOURCE,
-                    f"{name} — {_why}" if _why else name,
-                    ts.STATE_WARNING if _why else ts.STATE_COMPLETED))
+                if _why:
+                    label = f"{name} — {_why}"
+                else:
+                    # How many rows THIS source actually returned, next to its own
+                    # name. Already computed (`contributions`) but only ever shown
+                    # when 2+ sources took part (Analyzing's "combined" block) — a
+                    # single-source turn, the overwhelming majority, named the
+                    # source with no more than a tick beside it.
+                    _n = self.contributions.get(name)
+                    label = f"{name} — {_n} row{'' if _n == 1 else 's'}" \
+                        if isinstance(_n, int) else name
+                rows.append(self._row(ts.DETAIL_SOURCE, label,
+                                     ts.STATE_WARNING if _why else ts.STATE_COMPLETED))
         # The DOCUMENTS, by name. "docs_contracts" is the connector; "msa green
         # tower" is what the reader recognises and can go and check.
         #

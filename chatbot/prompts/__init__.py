@@ -6,9 +6,14 @@
     followup.py          — resolve_followup_node's rewrite prompt (fallback path
                             only — see delta_classify.py / chatbot/memory/)
     standalone_check.py  — classify_node's second-opinion prompt (_depends_on_history)
+    carryover_check.py   — classify_node's back-reference second opinion
+                            (_carries_over_subject); see its docstring for the
+                            measurement that made it a separate prompt
     delta_classify.py    — chatbot/memory/classify.py's structured-memory
                             continuation classifier (see docs/MEMORY_ARCHITECTURE.md)
 """
+from .carryover_check import (CARRYOVER_CHECK_SYSTEM,
+                              build_carryover_check_user_prompt)
 from .common import today_str
 from .delta_classify import (
     DELTA_TYPES,
@@ -37,6 +42,8 @@ __all__ = [
     "build_followup_user_prompt",
     "STANDALONE_CHECK_SYSTEM",
     "build_standalone_check_user_prompt",
+    "CARRYOVER_CHECK_SYSTEM",
+    "build_carryover_check_user_prompt",
     "DELTA_TYPES",
     "build_delta_classify_system_prompt",
     "build_delta_classify_user_prompt",
