@@ -1,9 +1,30 @@
 """VEDA · L7 — read-only execution."""
-import os, re, sys, time, json, logging, threading
+import os, re, sys, time, json, logging, threading, contextvars
 from veda.runtime import get_db_config
 import importlib
 import psycopg2
 from psycopg2 import sql as _sql
+
+# 2026-09-30 (presentation-policy pass, shared result-completeness) — whether the
+# most recent execute_sql() call in THIS request hit EXECUTION_RESULT_LIMIT and
+# had to stop, as opposed to the query genuinely having exactly that many rows.
+# Before this, execute_sql() did a flat `fetchmany(EXECUTION_RESULT_LIMIT)` with
+# no way to tell the two apart — a 1000-row result and a 5,000-row result
+# truncated to 1000 were indistinguishable everywhere downstream (table, chart,
+# summary). Same request-scoped ContextVar pattern as veda/generation.py's
+# `last_was_deterministic()` — read-and-clear, so a later call never inherits a
+# stale value.
+_LAST_EXECUTION_TRUNCATED = contextvars.ContextVar("veda_execution_last_truncated",
+                                                    default=False)
+
+
+def last_execution_truncated() -> bool:
+    """True when the most recent execute_sql() in THIS request fetched exactly
+    EXECUTION_RESULT_LIMIT rows because there were AT LEAST that many — i.e. more
+    rows may exist beyond what was returned. Reading it clears it."""
+    v = _LAST_EXECUTION_TRUNCATED.get()
+    _LAST_EXECUTION_TRUNCATED.set(False)
+    return bool(v)
 
 
 def _scope_source_ids():
@@ -122,6 +143,11 @@ def _param_mismatch(sql, params):
 
 
 def execute_sql(sql, params=None, timeout_ms=None):
+    # Reset FIRST, unconditionally — every return path below (early refusal,
+    # DuckDB/tabular, connection failure, the psycopg2 success path) must leave
+    # this call's own truthful answer, never a previous call's leftover value
+    # from earlier in the same request context.
+    _LAST_EXECUTION_TRUNCATED.set(False)
     # Placeholder/param consistency FIRST — never hand psycopg2 (or DuckDB, after the
     # %s→? rewrite) SQL whose placeholders can't all bind. Degrade to a clean error.
     if _param_mismatch(sql, params):
@@ -177,7 +203,16 @@ def execute_sql(sql, params=None, timeout_ms=None):
             _t0 = _perf_counter()
             cur.execute(sql, params or [])   # parameterized — no value interpolation
             cols = [d[0] for d in cur.description]
-            rows = cur.fetchmany(EXECUTION_RESULT_LIMIT)
+            # Fetch ONE extra row beyond the limit purely to detect truncation
+            # (2026-09-30) — mirrors connectors/relational.py::execute_query's
+            # own long-standing +1-peek trick, applied here since THIS is the
+            # function the main pipeline actually calls. Trimmed back to the
+            # real limit before returning; the return CONTRACT (cols, rows, err)
+            # is unchanged — the extra fact rides the ContextVar getter above,
+            # not a 4th tuple element, so no caller needs to change.
+            rows = cur.fetchmany(EXECUTION_RESULT_LIMIT + 1)
+            _LAST_EXECUTION_TRUNCATED.set(len(rows) > EXECUTION_RESULT_LIMIT)
+            rows = rows[:EXECUTION_RESULT_LIMIT]
             _record_db_timing((_perf_counter() - _t0) * 1000.0, len(rows))
         return cols, rows, None
     except (IndexError, ValueError, TypeError):

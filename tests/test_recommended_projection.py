@@ -206,3 +206,76 @@ def test_high_importance_still_tops_up_thin_projections(monkeypatch):
     out = recommended_projection(table, allowed, [], sm, "payments overview")
     assert "amount" in out and "status" in out      # HIGH filler fired (picks were empty)
     assert "audit_id" not in out                     # LOW never enters via this signal
+
+
+# --- strict_alias_match (2026-09-28, table-display) ------------------------
+# Real bug found via the 151-query component-eval fixtures (RANK-10): a
+# generic single-word alias ("payment") shared by several columns of the same
+# table made a query merely naming the table's own domain noun "explicitly
+# name" every one of them, defeating table-display narrowing entirely.
+
+_GENERIC_TABLE = "accounts_paymenttransaction"
+_GENERIC_ALLOWED = ["paid_amount", "payment_signature", "payment_date", "other_payment_detail"]
+_GENERIC_SM = {"columns": {
+    f"{_GENERIC_TABLE}.paid_amount": {"importance_class": "LOW"},
+    # single generic word shared by 3 unrelated columns — the reported bug
+    f"{_GENERIC_TABLE}.payment_signature": {"importance_class": "LOW", "aliases": ["payment"]},
+    f"{_GENERIC_TABLE}.payment_date": {"importance_class": "LOW", "aliases": ["payment"]},
+    f"{_GENERIC_TABLE}.other_payment_detail": {"importance_class": "LOW", "aliases": ["payment"]},
+}}
+_GENERIC_QUERY = "Which payment transactions have the highest paid amount?"
+
+
+def test_default_behavior_unchanged_generic_alias_still_matches():
+    """strict_alias_match omitted (every existing caller) — today's behavior,
+    byte-identical: the shared generic alias still over-matches."""
+    out = recommended_projection(_GENERIC_TABLE, _GENERIC_ALLOWED, [], _GENERIC_SM,
+                                 _GENERIC_QUERY, must_include=["paid_amount"],
+                                 importance_floor=0)
+    assert set(out) == set(_GENERIC_ALLOWED)   # all 4 — the bug, unchanged for this caller
+
+
+def test_strict_alias_match_drops_generic_single_word_alias():
+    """strict_alias_match=True — the shared single-word alias no longer counts
+    as an explicit mention, so the unrelated columns are excluded."""
+    out = recommended_projection(_GENERIC_TABLE, _GENERIC_ALLOWED, [], _GENERIC_SM,
+                                 _GENERIC_QUERY, must_include=["paid_amount"],
+                                 importance_floor=0, strict_alias_match=True)
+    assert out == ["paid_amount"]
+    assert "payment_signature" not in out
+    assert "payment_date" not in out
+    assert "other_payment_detail" not in out
+
+
+def test_strict_alias_match_keeps_multi_word_alias():
+    """A genuinely specific (>=2-word) alias still counts even in strict mode —
+    it was never a candidate for the shared-single-word exclusion."""
+    sm = {"columns": {f"{_GENERIC_TABLE}.payment_signature":
+                      {"importance_class": "LOW", "aliases": ["digital signature"]}}}
+    out = recommended_projection(_GENERIC_TABLE, ["payment_signature"], [], sm,
+                                 "show the digital signature on this payment",
+                                 strict_alias_match=True)
+    assert "payment_signature" in out
+
+
+def test_strict_alias_match_keeps_own_column_name_even_as_single_word():
+    """The column's OWN full name still counts even as one word — only a
+    borrowed ALIAS must be specific; the name itself is what the query said."""
+    sm = {"columns": {f"{_GENERIC_TABLE}.status": {"importance_class": "LOW"}}}
+    out = recommended_projection(_GENERIC_TABLE, ["status", "paid_amount"], [], sm,
+                                 "what is the status", strict_alias_match=True)
+    assert "status" in out
+
+
+def test_strict_alias_match_keeps_a_single_word_alias_unique_to_one_column():
+    """Regression guard: a single-word alias is only "generic" when it's SHARED
+    by 2+ columns of the table. One that belongs to exactly one column
+    ("is_gated" -> "gated") is exactly as specific as a column name and must
+    still match — word-count alone (an earlier version of this fix) wrongly
+    dropped this case ("Which properties are gated?" lost is_gated)."""
+    table = "assets_asset"
+    sm = {"columns": {f"{table}.is_gated": {"importance_class": "LOW", "aliases": ["gated"]},
+                      f"{table}.project_name": {"importance_class": "HIGH"}}}
+    out = recommended_projection(table, ["is_gated", "project_name"], [], sm,
+                                 "which properties are gated?", strict_alias_match=True)
+    assert "is_gated" in out

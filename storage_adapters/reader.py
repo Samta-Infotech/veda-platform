@@ -333,10 +333,22 @@ def ann_search(mode: str, qvec: List[float], top_k: int) -> List[Any]:
         return rows
 
 
-def verified_cache_lookup(qvec: List[float], threshold: float = 0.85) -> Optional[dict]:
+def verified_cache_lookup(qvec: List[float], threshold: float = None) -> Optional[dict]:
     """Verified-query cache lookup (cosine >= threshold), §6.6. Scoped to the source
     SET: a query in a multi-source scope still hits a verified SQL cached for any of
-    its members. Writes stay keyed to the primary source (see save_verified_query)."""
+    its members. Writes stay keyed to the primary source (see save_verified_query).
+
+    `threshold=None` (2026-09-29) resolves to config.VERIFIED_CACHE_SIMILARITY_THRESHOLD
+    (default 0.85, unchanged) — lazy-imported so this Django-tier module doesn't gain a
+    hard veda_core.config dependency at import time; the actual production call path
+    (veda/cache.py, running in the inference container) already passes its own resolved
+    threshold explicitly and never hits this fallback — this is defense-in-depth for any
+    OTHER caller that invokes this function directly."""
+    if threshold is None:
+        try:
+            from config import VERIFIED_CACHE_SIMILARITY_THRESHOLD as threshold
+        except Exception:
+            threshold = 0.85
     source_ids, tenant = _scope_ids()
     vec = "[" + ",".join(str(float(x)) for x in qvec) + "]"
     with _connection().cursor() as cur:

@@ -1,8 +1,9 @@
-"""VEDA · Verified-query cache (file-based, cosine ≥ 0.85)."""
+"""VEDA · Verified-query cache (file-based, cosine >= config.VERIFIED_CACHE_SIMILARITY_THRESHOLD)."""
 import os, re, sys, time, json, logging, threading
 import numpy as np
 from veda.runtime import _encode_query, _get_bge
 from config import artifact_path as _artifact_path
+from config import VERIFIED_CACHE_SIMILARITY_THRESHOLD as _DEFAULT_THRESHOLD
 
 
 # Absolute (repo-root) path, not CWD-relative — else the verified-query store silently
@@ -24,7 +25,7 @@ _VERIFIED_WRITE_LOCK = threading.Lock()
 _VERIFIED_EMB = {"queries": [], "mat": None}   # stored-query strings + their stacked embeddings
 
 
-def verified_cache_lookup(query, threshold=0.85):
+def verified_cache_lookup(query, threshold=_DEFAULT_THRESHOLD):
     """Return (sql, similarity) if a near-identical verified query exists, else (None, sim)."""
     # Phase 6.6 rewire: when a request/task context is set (platform), route through the
     # storage_adapters seam → Django VerifiedQueryCache + pgvector cosine, tenant-scoped.

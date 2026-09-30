@@ -31,6 +31,7 @@ from config import (
     NL_SUMMARY_MAX_FINDINGS,
     NL_SUMMARY_NUMERIC_GUARD,
     INSIGHT_ENGINE_TIMEOUT_MS,
+    RESPONSE_TEXT_TEMPERATURE,
 )
 from utils.logger import get_logger
 from decimal import Decimal
@@ -54,6 +55,26 @@ class NLAnswerResult:
     # already phrased them) — avoids the double-statement the old unconditional
     # "Analysis:" suffix produced on SLM answers. See veda/pipeline.py L7b.
     slm_used:    bool = False
+    # 2026-09-29 (observability): a typed label over what was already true from
+    # `slm_used`/the row-count==0 early return, so a caller (or a log line) never
+    # has to re-derive it. Not a behavior change — every fallback/skip path this
+    # labels already existed; this only names it. One of:
+    #   "NOT_REQUIRED"          — zero rows, the SLM is never called (unchanged)
+    #   "GENERATED"             — the SLM produced the prose and it passed every
+    #                             fact-validation guard below
+    #   "VALIDATION_FAILED"     — the SLM answered, but an ungrounded number/
+    #                             extreme-claim/uncovered-entity guard rejected
+    #                             it, so the deterministic fallback was used
+    #                             instead (this IS "Fact Validation FAILED ->
+    #                             deterministic factual fallback")
+    #   "SLM_UNAVAILABLE"       — the SLM call itself errored/timed out/returned
+    #                             empty (not a validation failure — the model
+    #                             never produced a candidate to validate)
+    summary_status: str = "GENERATED"
+    # Human-readable reason, set only for VALIDATION_FAILED/SLM_UNAVAILABLE — the
+    # exact string already logged via logger.warning(...) at each guard site above,
+    # just also returned so a caller doesn't have to scrape logs for it (§12).
+    fallback_reason: Optional[str] = None
 
 
 def blend_patterns(answer: str, patterns: Optional[List[str]]) -> str:
@@ -725,7 +746,8 @@ def run_nl_answer(
     # waste (there is no data to summarize differently).
     if row_count == 0:
         return NLAnswerResult(answer="No results found.", row_count=0,
-                              duration_ms=round((time.time() - t0) * 1000, 2))
+                              duration_ms=round((time.time() - t0) * 1000, 2),
+                              summary_status="NOT_REQUIRED")
 
     # The ordering the SQL actually ran. Also fills in `rank_column` when the caller had
     # none — the fast path resolves its ranking inside the branch and did not pass one
@@ -854,12 +876,17 @@ def run_nl_answer(
 
     _slm_timeout = NL_SUMMARY_TIMEOUT_MS / 1000.0 if timeout is None else timeout
     slm_used = False
+    summary_status = "GENERATED"
+    fallback_reason = None
+    _validation_failed = False
     try:
         from slm import call_slm
         answer = call_slm(
             prompt,
             purpose="nl_answer",
-            temperature=0.1,
+            # 2026-09-29: was a hardcoded 0.1, independent of SLM_TEMPERATURE's
+            # 2026-09-23 fix — see config.RESPONSE_TEXT_TEMPERATURE's own docstring.
+            temperature=RESPONSE_TEXT_TEMPERATURE,
             # Mode-aware budget: an analytical narrative (3-5 sentences weaving several
             # verified findings) needs more room; a brief answer keeps the tighter cap.
             # Still bounded — this prevents essays, it does not license unbounded output.
@@ -880,6 +907,7 @@ def run_nl_answer(
         if NL_SUMMARY_NUMERIC_GUARD and not _answer_numbers_grounded(answer, facts, _pats):
             logger.warning("run_nl_answer: summary stated an ungrounded number — "
                            "falling back to deterministic answer. summary=%r", answer)
+            _validation_failed = True
             raise ValueError("ungrounded number in SLM summary")
         # Every number real, but one asserted as a min/max/range bound that is only the
         # sample's own floor or ceiling — a false statement about the result, so it gets
@@ -891,11 +919,13 @@ def run_nl_answer(
             logger.warning("run_nl_answer: summary claimed coverage of %r, which this "
                            "query does not measure — falling back to deterministic "
                            "answer. summary=%r", _claimed, answer)
+            _validation_failed = True
             raise ValueError(f"summary claimed uncovered entity {_claimed!r}")
         if NL_SUMMARY_NUMERIC_GUARD and not _extreme_claims_grounded(answer, facts):
             logger.warning("run_nl_answer: summary stated a SAMPLED value as a "
                            "minimum/maximum/range bound — falling back to deterministic "
                            "answer. summary=%r metrics=%r", answer, facts.get("metrics"))
+            _validation_failed = True
             raise ValueError("sampled value stated as an extreme in SLM summary")
         # Deterministic backstop: drop any currency symbol the model prefixed that
         # the data doesn't actually carry (7B doesn't always obey the prompt rule).
@@ -917,10 +947,18 @@ def run_nl_answer(
                        type(e).__name__, e)
         if verbose:
             print(f"  [ResultExplainer] SLM unavailable ({e}) — using fallback answer")
+        # 2026-09-29 (observability, §5/§12): _validation_failed is set immediately
+        # before each of the 3 fact-validation raises above — distinguishes "the SLM
+        # answered but a guard rejected it" from "the SLM never produced a candidate
+        # at all" (timeout/connection error/empty response). Both already fell back
+        # identically before this; this only labels which happened.
+        summary_status = "VALIDATION_FAILED" if _validation_failed else "SLM_UNAVAILABLE"
+        fallback_reason = str(e)
 
     duration_ms = round((time.time() - t0) * 1000, 2)
     return NLAnswerResult(answer=answer, row_count=row_count, duration_ms=duration_ms,
-                          slm_used=slm_used)
+                          slm_used=slm_used, summary_status=summary_status,
+                          fallback_reason=fallback_reason)
 
 
 # =============================================================================
@@ -1250,7 +1288,8 @@ def run_insight_engine(ctx, verbose: bool = False, timeout: Optional[float] = No
         raw = call_slm(
             prompt,
             purpose="insight_engine",
-            temperature=0.1,
+            # 2026-09-29: same fix as nl_answer above — see config.RESPONSE_TEXT_TEMPERATURE.
+            temperature=RESPONSE_TEXT_TEMPERATURE,
             num_predict=NL_SUMMARY_MAX_TOKENS + 120,   # room for insights/follow-ups beyond the summary
             json_format=True,
             timeout=_slm_timeout,

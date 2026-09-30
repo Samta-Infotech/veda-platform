@@ -3344,6 +3344,15 @@ def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_ev
     except Exception:
         _dr_rec = None
     cols, rows, err = execute_sql(param_sql, params)
+    # Read-and-clear immediately (2026-09-30) — execution.py's own docstring on
+    # last_execution_truncated() warns a later call in the same request context
+    # must never inherit a stale value; capturing it right here, once, is what
+    # guarantees that.
+    try:
+        from veda.execution import last_execution_truncated as _let
+        _fetch_capped = _let()
+    except Exception:
+        _fetch_capped = False
     try:
         if _dr_rec is not None:
             from veda import exec_records as _er3
@@ -3390,6 +3399,12 @@ def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_ev
     nl_answer_text = None
     _insight_extra = {}
     _summary_engine = None            # which summariser produced the prose (trace)
+    # §6/§12 observability (2026-09-29): GENERATED/VALIDATION_FAILED/SLM_UNAVAILABLE/
+    # NOT_REQUIRED — see query/result_explainer.py::NLAnswerResult's own docstring.
+    # None here means "run_nl_answer never ran this turn" (Insight Engine path used
+    # instead, or summarise=False) — a real, different case from any of the above.
+    _summary_status = None
+    _summary_fallback_reason = None
     if NL_ANSWER_ENABLED and cols is not None:
         row_dicts = [dict(zip(cols, r)) for r in rows]
         # F6: don't block on the SLM prose call. Compute the safe fallback now;
@@ -3420,7 +3435,26 @@ def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_ev
                                    table=str(primary), max_rows=RESULT_ANALYZER_MAX_ROWS,
                                    query_intent=intent, confidence_inputs=_conf_inputs,
                                    params=params)
-            _insight_extra["analytics"] = analytics_summary(_ictx)
+            _analytics = analytics_summary(_ictx)
+            # Shared result-completeness truth (2026-09-30) — table/chart previously had
+            # NO truncation signal at all (only the summary path computed one, separately,
+            # further down). See result_analyzer.compute_result_completeness's own
+            # docstring for why total_count is None (never guessed) when truncated.
+            from veda.result_analyzer import compute_result_completeness
+            # requested_limit (2026-09-30): the user's own explicit "top N" ask
+            # (parse_ranking — already imported/used elsewhere in this file), NOT
+            # the SQL's own generated LIMIT clause (which may just be an internal
+            # default like 100). Distinguishes "you asked for more than we can
+            # ever serve" (requested_limit > EXECUTION_RESULT_LIMIT) from
+            # "there happens to be more data than fit in the generic fetch".
+            try:
+                _requested_limit = parse_ranking(query).top_n
+            except Exception:
+                _requested_limit = None
+            _analytics.update(compute_result_completeness(
+                param_sql, rows, fetch_capped=_fetch_capped,
+                requested_limit=_requested_limit))
+            _insight_extra["analytics"] = _analytics
         except Exception as _ae:
             print(f"  [L7b] Analytics    (skipped: {type(_ae).__name__}: {_ae})")
 
@@ -3469,12 +3503,15 @@ def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_ev
         _slm_wove_patterns = False   # did a summary SLM already phrase the findings?
         # Did this result fill its fetch limit? If so row_count is a FLOOR, and the
         # summariser must say "at least N" instead of presenting the cap as the total.
-        # Read off the executed SQL's own AST — deterministic, no LLM, no extra query.
+        # Same shared completeness check the analytics block above already ran
+        # (result_analyzer.compute_result_completeness) — reused, not recomputed,
+        # so table/chart/summary can never disagree about it.
         _truncated, _fetch_limit = False, None
         try:
             from veda.business_explain import extract_sql_facts as _esf
+            from veda.result_analyzer import compute_result_completeness as _crc
             _fetch_limit = (_esf(param_sql or "") or {}).get("limit")
-            _truncated = bool(_fetch_limit and len(rows) >= int(_fetch_limit))
+            _truncated = _crc(param_sql, rows, fetch_capped=_fetch_capped)["is_truncated"]
         except Exception:
             _truncated, _fetch_limit = False, None
 
@@ -3522,6 +3559,8 @@ def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_ev
                                    analytical_context=_analytical_ctx,
                                    truncated=_truncated, fetch_limit=_fetch_limit,
                                    not_covered=_coverage.get("terms"))
+                _summary_status = getattr(nl, "summary_status", None)
+                _summary_fallback_reason = getattr(nl, "fallback_reason", None)
                 if getattr(nl, "answer", None):
                     nl_answer_text = nl.answer
                     # run_nl_answer wove the patterns only when the SLM actually ran;
@@ -3555,7 +3594,9 @@ def _run_query(query, sm, all_cols, return_result=False, anchor_hint=None, on_ev
                 engine=_summary_engine, cols=list(cols), row_count=len(rows),
                 truncated=_truncated, ictx=_ictx, answer=nl_answer_text,
                 summary_model=_nl_model, summary_ok=bool(_summary_engine),
-                visualization=_insight_extra.get("visualization"))
+                visualization=_insight_extra.get("visualization"),
+                summary_status=_summary_status,
+                summary_fallback_reason=_summary_fallback_reason)
             # PROJECTION funnel (Tier-1): the SQL SELECT columns actually produced,
             # against what retrieval surfaced — reveals where extra columns entered.
             tr.set("projection", sql_selected=list(cols)[:30],

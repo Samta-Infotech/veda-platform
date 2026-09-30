@@ -11,6 +11,7 @@ from veda.result_analyzer import infer_column_kind
 from veda.result_analyzer import analyze_result
 from veda.result_analyzer import classify_column_role
 from veda.result_analyzer import chart_confidence
+from veda.result_analyzer import compute_result_completeness
 
 
 # ---------------------------------------------------------------------------
@@ -53,8 +54,125 @@ def test_infer_kind_categorical():
     assert infer_column_kind("status", ["active", "inactive"]) == "categorical"
 
 
+def test_completeness_not_truncated_when_fetched_less_than_limit():
+    """SQL asked for LIMIT 100, only 40 rows exist — 40 IS the true total."""
+    sql = "SELECT * FROM t LIMIT 100"
+    rows = [{}] * 40
+    c = compute_result_completeness(sql, rows)
+    assert c["fetched_count"] == 40
+    assert c["is_truncated"] is False
+    assert c["total_count"] == 40
+    assert c["total_count_known"] is True
+
+
+def test_completeness_truncated_when_fetched_equals_limit():
+    """SQL's LIMIT was fully filled — more rows may exist beyond it; the true
+    total must NEVER be guessed as the fetch count."""
+    sql = "SELECT * FROM t LIMIT 100"
+    rows = [{}] * 100
+    c = compute_result_completeness(sql, rows)
+    assert c["fetched_count"] == 100
+    assert c["is_truncated"] is True
+    assert c["total_count"] is None
+    assert c["total_count_known"] is False
+
+
+def test_completeness_no_limit_in_sql_is_never_truncated():
+    sql = "SELECT * FROM t"
+    rows = [{}] * 1000
+    c = compute_result_completeness(sql, rows)
+    assert c["is_truncated"] is False
+    assert c["total_count"] == 1000
+
+
+def test_completeness_handles_empty_or_missing_sql():
+    assert compute_result_completeness("", [])["is_truncated"] is False
+    assert compute_result_completeness(None, [{}])["total_count"] == 1
+
+
+def test_completeness_fetch_capped_overrides_when_sql_has_no_limit():
+    """2026-09-30 fix, live-confirmed bug: a query with NO SQL-level LIMIT that
+    still hit the backend's own fetch safety cap (veda/execution.py::
+    last_execution_truncated()) must be reported as truncated — the SQL-LIMIT
+    heuristic alone missed this exact case (reported is_truncated=False for a
+    1000-row fetch-capped, un-LIMITed result)."""
+    sql = "SELECT building_name FROM assets_asset"   # no LIMIT clause at all
+    rows = [{}] * 1000
+    c = compute_result_completeness(sql, rows, fetch_capped=True)
+    assert c["is_truncated"] is True
+    assert c["total_count"] is None
+    assert c["total_count_known"] is False
+
+
+def test_completeness_fetch_capped_false_is_a_noop():
+    sql = "SELECT * FROM t LIMIT 100"
+    rows = [{}] * 40
+    c = compute_result_completeness(sql, rows, fetch_capped=False)
+    assert c["is_truncated"] is False
+
+
+def test_requested_limit_at_or_below_fetch_cap_is_not_exceeded():
+    """top 500 and top 1000 (== the cap) — normal, no FETCH_CAP_EXCEEDED."""
+    for n in (500, 1000):
+        c = compute_result_completeness("SELECT * FROM t LIMIT %d" % n, [{}] * n,
+                                        requested_limit=n)
+        assert c["limit_exceeds_fetch_cap"] is False, n
+        assert c["reason"] is None, n
+        assert c["fetch_limit"] == 1000
+
+
+def test_requested_limit_above_fetch_cap_is_flagged():
+    """top 1001 — the user asked for MORE than the backend can ever serve in
+    one fetch. Must never look like a successful 1001-row (or even 1000-row)
+    result: is_truncated=True, total_count=None, reason=FETCH_CAP_EXCEEDED."""
+    rows = [{}] * 1000   # backend cap trims to 1000 regardless of the 1001 ask
+    c = compute_result_completeness("SELECT * FROM t LIMIT 1001", rows, requested_limit=1001)
+    assert c["limit_exceeds_fetch_cap"] is True
+    assert c["reason"] == "FETCH_CAP_EXCEEDED"
+    assert c["is_truncated"] is True
+    assert c["total_count"] is None
+    assert c["requested_limit"] == 1001
+    assert c["fetch_limit"] == 1000
+
+
+def test_no_explicit_limit_is_unaffected_by_the_new_param():
+    """The default (requested_limit=None, every existing caller) behaves
+    exactly as before this fix — byte-identical."""
+    c = compute_result_completeness("SELECT * FROM t", [{}] * 50)
+    assert c["requested_limit"] is None
+    assert c["limit_exceeds_fetch_cap"] is False
+    assert c["reason"] is None
+    assert c["is_truncated"] is False
+
+
+def test_last_execution_truncated_read_and_clear():
+    from veda.execution import last_execution_truncated, _LAST_EXECUTION_TRUNCATED
+    _LAST_EXECUTION_TRUNCATED.set(True)
+    assert last_execution_truncated() is True
+    assert last_execution_truncated() is False   # cleared by the first read
+
+
 def test_infer_kind_empty_values_defaults_categorical():
     assert infer_column_kind("mystery", [None, None]) == "categorical"
+
+
+def test_infer_kind_does_not_false_positive_on_substring_of_hint_word():
+    """Regression guard (2026-09-28, live-confirmed bug): "expected_monthly_
+    rent" contains "month" as a raw substring of "monthly" but is a rent
+    AMOUNT, not a date. A plain `hint in name` search misclassified it as
+    temporal, which cascaded into a wrong result_shape (TREND) and a wrong
+    chart (the measure charted as the X-axis dimension against two unrelated
+    columns) — reproduced via a real live query ("highest expected monthly
+    rent")."""
+    assert infer_column_kind("expected_monthly_rent", [582288888.0, 15000000.0]) == "numeric"
+    assert infer_column_kind("annual_rent_increment_percentage", [0.0, 10.0]) == "numeric"
+
+
+def test_infer_kind_still_matches_a_genuine_temporal_token():
+    """The token-based fix must not lose real matches — "date"/"month" as a
+    whole, underscore-separated token still counts."""
+    assert infer_column_kind("created_date", ["not-a-date"]) == "temporal"
+    assert infer_column_kind("report_month", ["not-a-date"]) == "temporal"
 
 
 # ---------------------------------------------------------------------------
@@ -137,6 +255,27 @@ def test_column_stats_avg_and_median():
     stat = ctx.column_stats[0]
     assert stat.avg == 200.0
     assert stat.median == 200
+
+
+def test_analyze_result_query_relevant_columns_empty_when_flag_off():
+    """TABLE_QUERY_COLUMN_FILTER_ENABLED defaults OFF — query_relevant_columns
+    stays empty (byte-identical analytics_summary output) unless enabled."""
+    ctx = analyze_result("show accounts", "SELECT account_id, customer_name, amount FROM ledger",
+                         ["account_id", "customer_name", "amount"],
+                         [{"account_id": 1, "customer_name": "Rahul", "amount": 100}],
+                         sm=None, table="ledger")
+    assert ctx.query_relevant_columns == []
+
+
+def test_analyze_result_query_relevant_columns_must_include_when_flag_on(monkeypatch):
+    """When enabled, the SQL's own aggregate/GROUP BY column (must_include) is
+    always in the recomputed projection, even with no semantic model at all."""
+    import config
+    monkeypatch.setattr(config, "TABLE_QUERY_COLUMN_FILTER_ENABLED", True)
+    sql = "SELECT city, SUM(amount) AS total FROM ledger GROUP BY city"
+    ctx = analyze_result("total amount by city", sql, ["city", "total"],
+                         [{"city": "Pune", "total": 500}], sm=None, table="ledger")
+    assert set(["city", "total"]).issubset(set(ctx.query_relevant_columns))
 
 
 def test_analyze_result_passthrough_metadata_defaults():

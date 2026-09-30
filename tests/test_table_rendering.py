@@ -84,6 +84,40 @@ def test_project_preserves_original_column_order():
     assert out_rows == [[98400, "Rahul"]]
 
 
+def test_project_narrows_further_with_query_relevant_columns():
+    """TABLE_QUERY_COLUMN_FILTER_ENABLED path: query_relevant_columns further
+    trims what the identifier-strip already kept, down to what the query
+    actually asked about — the reported bug (too many unused columns)."""
+    cols = ["account_id", "customer_name", "city", "amount", "payment_status_id"]
+    rows = [[1, "Rahul", "Pune", 98400, 3], [2, "Priya", "Mumbai", 5000, 1]]
+    display_columns = ["customer_name", "city", "amount"]   # identifiers already stripped
+    query_relevant_columns = ["customer_name", "amount"]    # the question only asked about these
+    out_cols, out_rows = project_display_columns(cols, rows, display_columns,
+                                                  query_relevant_columns)
+    assert out_cols == ["customer_name", "amount"]
+    assert out_rows == [["Rahul", 98400], ["Priya", 5000]]
+
+
+def test_project_query_relevant_columns_never_widens_or_empties():
+    """An empty intersection (the two signals disagree, or a name mismatch)
+    must never drop every column — keep the identifier-only projection."""
+    cols = ["customer_name", "amount"]
+    rows = [[  "Rahul", 98400]]
+    out_cols, out_rows = project_display_columns(
+        cols, rows, ["customer_name", "amount"], ["totally_unrelated_col"])
+    assert out_cols == cols and out_rows == rows
+
+
+def test_project_query_relevant_columns_defaults_to_off():
+    """Omitting query_relevant_columns (existing callers, flag off) is
+    byte-identical to today's identifier-only behavior."""
+    cols = ["account_id", "customer_name", "amount"]
+    rows = [[1, "Rahul", 98400]]
+    out_cols, out_rows = project_display_columns(cols, rows, ["customer_name", "amount"])
+    assert out_cols == ["customer_name", "amount"]
+    assert out_rows == [["Rahul", 98400]]
+
+
 def test_project_fails_safe_when_display_columns_absent():
     cols = ["id", "amount"]
     rows = [[1, 100]]
@@ -150,6 +184,37 @@ def test_truncation_note_appears_when_over_limit():
     rows = [[i] for i in range(25)]
     out = rows_to_markdown_table(cols, rows, limit=20)
     assert "Showing 20 of 25 rows" in out
+
+
+def test_truncation_note_default_is_byte_identical_when_is_truncated_omitted():
+    """Every existing caller (no `is_truncated` kwarg) gets today's exact wording —
+    2026-09-30's completeness-aware message is opt-in, not a silent rewording."""
+    cols = ["n"]
+    rows = [[i] for i in range(25)]
+    out = rows_to_markdown_table(cols, rows, limit=20)
+    assert out.rstrip().endswith("_Showing 20 of 25 rows._")
+
+
+def test_truncation_note_distinct_message_when_requested_limit_exceeds_fetch_cap():
+    """2026-09-30: "top 1001" against a 1000-row fetch cap gets a distinct,
+    KNOWN-limitation message, not the open-ended "more may exist" hedge."""
+    cols = ["n"]
+    rows = [[i] for i in range(1000)]
+    out = rows_to_markdown_table(cols, rows, limit=20, is_truncated=True,
+                                 requested_limit=1001, fetch_limit_cap=1000)
+    assert "asked for the top 1,001" in out
+    assert "up to 1,000 rows" in out
+
+
+def test_truncation_note_hedges_when_upstream_fetch_was_itself_capped():
+    """2026-09-30 (shared result-completeness): `rows` here is itself only what
+    the backend fetched — if THAT was already capped, "of 25" must not be
+    presented as if 25 were the true total."""
+    cols = ["n"]
+    rows = [[i] for i in range(25)]
+    out = rows_to_markdown_table(cols, rows, limit=20, is_truncated=True)
+    assert "Showing 20 of 25 rows fetched" in out
+    assert "more rows may exist" in out
 
 
 def test_no_truncation_note_when_within_limit():

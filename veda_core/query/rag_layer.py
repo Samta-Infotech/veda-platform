@@ -35,6 +35,7 @@ from config import (
     SLM_TEMPERATURE,
     SLM_MAX_TOKENS,
     SLM_TIMEOUT_SECS,
+    SLM_SEED,
     RAG_TOP_K,
     HYBRID_RRF_K,
     HYBRID_SQL_WEIGHT,
@@ -331,6 +332,7 @@ def _call_ollama(system_prompt: str, user_message: str) -> str:
         system=system_prompt,
         purpose="rag_synthesis",
         temperature=SLM_TEMPERATURE,
+        seed=SLM_SEED,
         num_predict=SLM_MAX_TOKENS,
         timeout=SLM_TIMEOUT_SECS,
     ).strip())

@@ -57,7 +57,8 @@ def fmt_header(c) -> str:
     return str(c).replace("_", " ").strip().title()
 
 
-def project_display_columns(cols: list, rows: list, display_columns: list | None) -> tuple[list, list]:
+def project_display_columns(cols: list, rows: list, display_columns: list | None,
+                            query_relevant_columns: list | None = None) -> tuple[list, list]:
     """Drop non-business-relevant columns (2026-07-17) — e.g. internal ids/FK
     columns SQL needed for a join but that add no value in the rendered table —
     using the engine's OWN deterministic column-role classification
@@ -65,6 +66,17 @@ def project_display_columns(cols: list, rows: list, display_columns: list | None
     computed server-side and excludes identifier-role columns; the same signal
     apps/chat/visualization.py's recommender already trusts for chart axes).
     Never re-derives roles here — purely a projection over an existing signal.
+
+    `query_relevant_columns` (2026-09-28, TABLE_QUERY_COLUMN_FILTER_ENABLED):
+    an optional further narrowing — the engine's recommended_projection()
+    recomputed against THIS query's actual (table, columns, question), with
+    must_include seeded from the SQL's own measures/dimensions/orderings so a
+    column the query's own aggregate/GROUP BY/ORDER BY used can never be
+    dropped. Only ever narrows `display_columns`, never widens it (a column
+    the identifier-strip already excluded stays excluded), and only when the
+    intersection is non-empty — an empty intersection means the two signals
+    disagree (or the caller passed nothing, e.g. the flag is off), so the
+    identifier-only projection is kept rather than risking an empty table.
 
     `rows` must be POSITIONAL (index-aligned with `cols`) — see
     apps/chat/services.py's _positional_rows, called before this.
@@ -76,6 +88,10 @@ def project_display_columns(cols: list, rows: list, display_columns: list | None
     if not display_columns:
         return cols, rows
     keep = set(display_columns)
+    if query_relevant_columns:
+        narrowed = keep & set(query_relevant_columns)
+        if narrowed:
+            keep = narrowed
     idx = [i for i, c in enumerate(cols) if c in keep]
     if not idx or len(idx) == len(cols):
         return cols, rows
@@ -103,7 +119,43 @@ def _is_numeric_column(rows: list, col_idx: int) -> bool:
     return saw_value
 
 
-def rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
+def rows_to_markdown_table(cols: list, rows: list, limit: int = 20,
+                           is_truncated: bool = False,
+                           requested_limit: int | None = None,
+                           fetch_limit_cap: int | None = None) -> str:
+    """`is_truncated` (2026-09-30, shared result-completeness — see
+    result_analyzer.compute_result_completeness): whether `rows` itself is
+    already a PARTIAL fetch (the backend's own safety cap was hit), as opposed
+    to being the true, complete result. Distinguishes two genuinely different
+    situations this notice was previously conflating:
+    - `len(rows)` IS the true total (is_truncated=False, the default — every
+      existing caller keeps today's exact wording): "Showing 20 of 240 rows."
+    - `len(rows)` is itself only what got FETCHED, more may exist beyond it
+      (is_truncated=True): the notice says so instead of presenting the fetch
+      cap as if it were the whole result ("Showing 20 of 1000 rows" read as
+      "there are 1000 rows total" when the true count could be 5,000).
+
+    `requested_limit`/`fetch_limit_cap` (2026-09-30, second gap): when the user
+    explicitly asked for MORE than the backend can ever serve in one fetch
+    ("top 1001" against a 1000-row fetch cap — result_analyzer.
+    compute_result_completeness's `limit_exceeds_fetch_cap`), that is a KNOWN,
+    deterministic limitation, not an open-ended "more may exist" hedge — silently
+    showing 1000 rows for a "top 1001" ask would read as a successful 1001-row
+    answer. Both None (the default) skips this and falls back to the plain
+    `is_truncated` wording above."""
+    if requested_limit is not None and fetch_limit_cap is not None and requested_limit > fetch_limit_cap:
+        shown = rows[:limit]
+        aligns = [_is_numeric_column(shown, i) for i in range(len(cols))]
+        header = "| " + " | ".join(fmt_header(c) for c in cols) + " |"
+        sep = "| " + " | ".join("---:" if numeric else "---" for numeric in aligns) + " |"
+        body_lines = [
+            "| " + " | ".join(fmt_cell(v) for v in row[:len(cols)]) + " |" for row in shown
+        ]
+        lines = [header, sep, *body_lines,
+                f"\n_You asked for the top {requested_limit:,}, but only up to "
+                f"{fetch_limit_cap:,} rows can be fetched in a single result — "
+                f"showing {min(limit, len(rows)):,} of the {fetch_limit_cap:,} available._"]
+        return "\n".join(lines)
     shown = rows[:limit]
     # Right-align numeric columns (markdown's ":---:"/"---:" alignment syntax) so
     # figures compare the way a spreadsheet reads them, instead of every column
@@ -117,5 +169,9 @@ def rows_to_markdown_table(cols: list, rows: list, limit: int = 20) -> str:
     lines = [header, sep, *body_lines]
     if len(rows) > limit:
         # Silent truncation previously gave no signal that more rows existed.
-        lines.append(f"\n_Showing {limit} of {len(rows)} rows._")
+        if is_truncated:
+            lines.append(f"\n_Showing {limit} of {len(rows)} rows fetched — "
+                         f"more rows may exist beyond this fetch._")
+        else:
+            lines.append(f"\n_Showing {limit} of {len(rows)} rows._")
     return "\n".join(lines)

@@ -14,6 +14,24 @@ from query.join_planner import _adjacency, _shortest_path
 from collections import Counter as _Counter
 
 
+def _ranking_tie_break(group_col: str | None) -> str:
+    """Deterministic secondary ORDER BY key for a GROUPED ranking (2026-09-29,
+    SQL_RANKING_TIE_BREAK_ENABLED, default OFF) — see the config flag's own
+    docstring for the full reasoning. Returns "" (no-op) when the flag is off or
+    there is no group column to safely reuse; else `, t0."{group_col}" ASC`, which
+    is always valid SQL here because `group_col` is already in this same query's
+    own SELECT list and GROUP BY clause."""
+    if not group_col:
+        return ""
+    try:
+        from config import SQL_RANKING_TIE_BREAK_ENABLED
+    except Exception:
+        SQL_RANKING_TIE_BREAK_ENABLED = False
+    if not SQL_RANKING_TIE_BREAK_ENABLED:
+        return ""
+    return f', t0."{group_col}" ASC'
+
+
 def existence_mode(query):
     """Classify a query as an existence operation (semi/anti-join), or None if it's
     a full join / grouped aggregate. These are query-grammar operators (with/without/
@@ -291,8 +309,9 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
         if group_col:
             _dir = "ASC" if direction == "asc" else "DESC"
             _lim = f" LIMIT {int(top_n)}" if top_n else " LIMIT 100"
+            _tie = _ranking_tie_break(group_col)
             return (f'SELECT t0."{group_col}", {expr} AS {alias} FROM "{anchor}" t0{_w} '
-                    f'GROUP BY t0."{group_col}" ORDER BY {alias} {_dir}{_lim}', {anchor})
+                    f'GROUP BY t0."{group_col}" ORDER BY {alias} {_dir}{_tie}{_lim}', {anchor})
         return f'SELECT {expr} AS {alias} FROM "{anchor}" t0{_w}', {anchor}
 
     ctes, joins, selects, tables = [], [], [], {anchor}
@@ -363,12 +382,13 @@ def build_aggregate_sql(anchor, child_specs, sm, threshold=None, op=">",
     # returns the biggest 5 instead of the smallest 5.
     _order_dir = "ASC" if direction == "asc" else "DESC"
     tail = f' GROUP BY t0."{group_col}"' if group_col else ""
+    _tie = _ranking_tie_break(group_col)
     if top_n is not None and metrics:
-        tail += f" ORDER BY {metrics[0]} {_order_dir} LIMIT {int(top_n)}"
+        tail += f" ORDER BY {metrics[0]} {_order_dir}{_tie} LIMIT {int(top_n)}"
     elif ranked and metrics:
         # A ranking word ("highest"/"most") with NO explicit number still means sort
         # by the metric — just without a hard cap beyond the default LIMIT.
-        tail += f" ORDER BY {metrics[0]} {_order_dir} LIMIT 100"
+        tail += f" ORDER BY {metrics[0]} {_order_dir}{_tie} LIMIT 100"
     else:
         tail += " LIMIT 100"
     sql = (f"WITH {', '.join(ctes)} "

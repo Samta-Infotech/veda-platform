@@ -15,7 +15,7 @@ import json
 import urllib.request
 
 from config import (SLM_MODEL_NAME, SLM_OLLAMA_BASE_URL, SLM_TIMEOUT_SECS,
-                    SLM_IR_MAX_TOKENS, SLM_NUM_CTX, SEMANTIC_MODEL_FILE)
+                    SLM_IR_MAX_TOKENS, SLM_NUM_CTX, SEMANTIC_MODEL_FILE, SLM_SEED)
 
 _SYSTEM = """You convert a database question into ONE intent envelope (JSON). You do NOT write SQL.
 Choose exactly ONE intent by MEANING (not keywords), then fill only the fields that intent needs, using ONLY the given handles.
@@ -125,6 +125,7 @@ def emit_envelope(query, sel_columns, verbose=False):
             system=_SYSTEM,
             purpose="envelope",
             temperature=0.0,
+            seed=SLM_SEED,
             num_predict=SLM_IR_MAX_TOKENS,
             num_ctx=SLM_NUM_CTX,
             json_format=True,

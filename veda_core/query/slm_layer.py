@@ -34,6 +34,7 @@ from config import (
     SLM_MODEL_NAME,
     SLM_OLLAMA_BASE_URL,
     SLM_TEMPERATURE,
+    SLM_SEED,
     SLM_TIMEOUT_SECS,
     SLM_MAX_RETRIES,
     SLM_AMBIGUOUS_LOG_PATH,
@@ -594,6 +595,7 @@ def _call_ollama(user_message: str) -> str:
         system=_SYSTEM_PROMPT,
         purpose="ir_emit",
         temperature=SLM_TEMPERATURE,
+        seed=SLM_SEED,
         num_predict=_IR_CAP,        # IR JSON is small; smaller decode → lower latency
         num_ctx=SLM_NUM_CTX,
         timeout=SLM_TIMEOUT_SECS,
@@ -1270,6 +1272,7 @@ def _call_ollama_decompose(query: str) -> str:
         system=_DECOMPOSE_SYSTEM_PROMPT,
         purpose="decompose",
         temperature=0.0,               # deterministic split decision
+        seed=SLM_SEED,
         num_predict=256,
         num_ctx=SLM_NUM_CTX,
         timeout=SLM_TIMEOUT_SECS,

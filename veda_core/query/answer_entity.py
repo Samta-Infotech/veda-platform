@@ -30,7 +30,7 @@ from __future__ import annotations
 import re
 from typing import Callable, Dict, List, Optional
 
-from config import ANSWER_ENTITY_LLM_FALLBACK_ENABLED
+from config import ANSWER_ENTITY_LLM_FALLBACK_ENABLED, SLM_SEED
 from query.lg_prompts import ANSWER_ENTITY_RELATION_PROMPT
 
 try:
@@ -113,6 +113,7 @@ def _llm_relation_word(query: str) -> Optional[str]:
             system=ANSWER_ENTITY_RELATION_PROMPT,
             purpose="answer_entity_relation",
             temperature=0.0,
+            seed=SLM_SEED,
             num_predict=8,
             timeout=8,
         )

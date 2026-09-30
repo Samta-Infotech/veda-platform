@@ -81,7 +81,41 @@ def main() -> int:
     print("[2] non-identity weights change the fusion  ✓")
 
     print("\n✓ WP6 WEIGHTED-FUSION CHECKS PASSED")
+
+    _check_tie_break_deterministic()
+    print("\n✓ TIE-BREAK DETERMINISM CHECK PASSED")
     return 0
+
+
+def _check_tie_break_deterministic():
+    """2026-09-29 fix — two candidates tied at the exact same fused score must sort
+    identically regardless of the order they were discovered in (previously fell back
+    to `set()` iteration order, which is PYTHONHASHSEED-dependent across process
+    restarts). Two columns with IDENTICAL rank-1 dense hits and nothing else tie
+    exactly; the fix must always put the alphabetically-earlier col_id first."""
+    m = RRFMerger(k=K)
+    # Both at dense rank 1 is impossible in one list, so give each its OWN rank-1 hit
+    # via two separate signals that individually rank each of them first — same total
+    # score either way (1/(k+1) once each), a genuine tie.
+    tied = m.merge(
+        semantic_ranking=[("zeta.col", 0.9)],
+        sparse_ranking=[("alpha.col", 0.9)],
+        fk_signals={}, subgraph_signals={}, value_signals={}, top_k=10,
+    )
+    scores = {cid: score for cid, score in tied}
+    assert abs(scores["zeta.col"] - scores["alpha.col"]) < 1e-12, "fixture must be a real tie"
+    order = [cid for cid, _ in tied]
+    assert order == sorted(order), f"tie-break must be alphabetical by col_id, got {order}"
+    # Run again — must be byte-identical (this is the actual regression: a set-driven
+    # order isn't reproducible run-to-run within a hash-randomized process either, if
+    # the candidates are constructed via any non-list-derived path).
+    tied2 = m.merge(
+        semantic_ranking=[("zeta.col", 0.9)],
+        sparse_ranking=[("alpha.col", 0.9)],
+        fk_signals={}, subgraph_signals={}, value_signals={}, top_k=10,
+    )
+    assert tied == tied2, "identical inputs must produce byte-identical output"
+    print("[3] tied candidates sort deterministically (alphabetical col_id)  ✓")
 
 
 if __name__ == "__main__":

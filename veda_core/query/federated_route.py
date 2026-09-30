@@ -25,6 +25,7 @@ from query.federated_executor import catalog_name
 from utils.logger import get_logger
 from collections import deque
 from slm._call_slm import call_slm
+from config import SLM_SEED
 import json
 from collections import Counter as _Counter
 
@@ -387,7 +388,7 @@ def _generate_federated_plan(query: str, schema_text: str, join_text: str,
     # came from (§6.6) is about unbounded TAIL LATENCY; the timeout below closes that
     # without touching what the model emits.
     raw = call_slm(user, system=system, purpose="federated_plan", temperature=0.0,
-                   json_format=True, timeout=60)
+                   seed=SLM_SEED, json_format=True, timeout=60)
     plan = _extract_json(raw)
     if not isinstance(plan, dict):
         return None
@@ -527,7 +528,7 @@ def _generate_structured_plan(query: str, schema_text: str, join_text: str) -> O
     # came from (§6.6) is about unbounded TAIL LATENCY; the timeout below closes that
     # without touching what the model emits.
     plan = _extract_json(call_slm(user, system=system, purpose="federated_struct_plan",
-                                  temperature=0.0, json_format=True, timeout=60))
+                                  temperature=0.0, seed=SLM_SEED, json_format=True, timeout=60))
     if not isinstance(plan, dict):
         return None
     if not (plan.get("group_table") and plan.get("group_col") and plan.get("group_alias")):

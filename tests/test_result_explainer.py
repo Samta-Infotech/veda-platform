@@ -121,6 +121,8 @@ def test_slm_timeout_falls_back_to_deterministic(monkeypatch):
     result = re_mod.run_nl_answer("list top customers", columns, rows)
 
     assert result.answer.startswith("Returned 3 row(s).")
+    assert result.summary_status == "SLM_UNAVAILABLE"
+    assert "timed out" in result.fallback_reason
 
 
 def test_slm_invalid_empty_response_falls_back(monkeypatch):
@@ -129,6 +131,37 @@ def test_slm_invalid_empty_response_falls_back(monkeypatch):
     result = re_mod.run_nl_answer("list top customers", columns, rows)
 
     assert result.answer.startswith("Returned 3 row(s).")
+    assert result.summary_status == "SLM_UNAVAILABLE"
+
+
+def test_summary_status_generated_when_slm_answer_passes_validation(monkeypatch):
+    monkeypatch.setattr(slm, "call_slm",
+                        lambda prompt, **kwargs: "Three rows were returned, amounts from 1 to 3.")
+    columns, rows = _multi_row_args()
+    result = re_mod.run_nl_answer("list top customers", columns, rows)
+
+    assert result.slm_used is True
+    assert result.summary_status == "GENERATED"
+    assert result.fallback_reason is None
+
+
+def test_summary_status_validation_failed_on_ungrounded_number(monkeypatch):
+    """2026-09-29 — labels the pre-existing fact-validation fallback (an invented
+    number the SLM stated with no basis in the facts) instead of only logging it."""
+    monkeypatch.setattr(slm, "call_slm",
+                        lambda prompt, **kwargs: "There are 9999999 customers in total.")
+    columns, rows = _multi_row_args()
+    result = re_mod.run_nl_answer("list top customers", columns, rows)
+
+    assert result.slm_used is False
+    assert result.summary_status == "VALIDATION_FAILED"
+    assert "ungrounded" in result.fallback_reason
+
+
+def test_summary_status_not_required_on_empty_result():
+    result = re_mod.run_nl_answer("how many users", ["count"], [])
+    assert result.summary_status == "NOT_REQUIRED"
+    assert result.slm_used is False
 
 
 def test_semantic_metadata_enriches_prompt(monkeypatch):

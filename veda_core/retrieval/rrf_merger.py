@@ -144,8 +144,19 @@ class RRFMerger:
 
             rrf_scores[col_id] = score
 
-        # Sort by RRF score
-        ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        # Sort by RRF score — deterministic secondary tie-break (2026-09-29 fix): two
+        # candidates at the EXACT same fused score previously fell back to
+        # `rrf_scores`' own iteration order, which is `all_candidates` set-iteration
+        # order — randomized per process by PYTHONHASHSEED (a Python 3.3+ security
+        # default, never pinned anywhere in this repo's .env/compose files). Within one
+        # continuously-running process this was stable, but any restart (redeploy, the
+        # dev containers' own DEV_AUTORELOAD, a scale-out worker) got a fresh seed, so a
+        # tie could swap relative rank across restarts and change which table/column
+        # got shown to the SQL head. `col_id` (a stable, meaningful string) as the
+        # secondary key makes ties reproducible without touching any non-tied ranking —
+        # `-x[1]` keeps the primary sort descending while letting the secondary sort on
+        # `x[0]` stay a plain ascending string compare.
+        ranked = sorted(rrf_scores.items(), key=lambda x: (-x[1], x[0]))
 
         logger.info(f"✓ RRF merged {len(all_candidates)} candidates (6-signal weighted)")
 

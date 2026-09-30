@@ -25,6 +25,21 @@ from veda.business_explain import extract_sql_facts
 # ---------------------------------------------------------------------------
 _DATE_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?")
 _TEMPORAL_NAME_HINTS = ("date", "month", "year", "week", "day", "time", "period", "quarter")
+_NAME_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _has_temporal_name_hint(name_lower: str) -> bool:
+    """Whole-TOKEN match, not a raw substring search (2026-09-28 fix): a plain
+    `hint in name_lower` check treated "month" as present in "expected_MONTHly_
+    rent" (a rent AMOUNT, not a date) — live-confirmed: it misclassified the
+    measure as temporal, which cascaded into a wrong result_shape (TREND) and a
+    wrong chart (the measure charted as the X-axis dimension). Splitting on
+    non-alphanumeric runs (matching the tokenization convention already used by
+    veda/routing.py's own name-matching) means "monthly" tokenizes to
+    ["monthly"] — no exact "month" token — while "created_date" still tokenizes
+    to ["created", "date"], an exact match, so genuine date columns are
+    unaffected."""
+    return any(t in _TEMPORAL_NAME_HINTS for t in _NAME_TOKEN_RE.split(name_lower))
 
 
 def _is_numeric(v: Any) -> bool:
@@ -58,7 +73,7 @@ def _looks_like_date(v: Any) -> bool:
 def infer_column_kind(col_name: str, values: List[Any]) -> str:
     """'temporal' | 'numeric' | 'categorical' — structural inference only."""
     name_lower = str(col_name).lower()
-    if any(hint in name_lower for hint in _TEMPORAL_NAME_HINTS):
+    if _has_temporal_name_hint(name_lower):
         return "temporal"
     sample = [v for v in values[:20] if v is not None]
     if not sample:
@@ -204,14 +219,30 @@ def detect_result_shape(result_type: str, dimensions: List[str], measures: List[
     if result_type != "multi_row":
         return "SCALAR"
     kinds = {s.name: s.kind for s in column_stats}
+    roles = {s.name: s.role for s in column_stats}
     # An ALL-NULL column cannot be a time axis — there is no series to plot along it.
     # `booking_amount_grace_period` (a duration, never populated) is read as temporal by
     # name alone, and that alone was enough to classify a plain "cheapest properties"
     # listing as a TREND — which then had the api tier chart it as a time series
     # (2026-09-11). distinct_count is 0 exactly when every sampled value was NULL.
+    #
+    # role != "measure" (2026-09-28 fix, live-confirmed): a semantic-model role of
+    # "measure" outranks a structural kind of "temporal" everywhere else in this
+    # module (apps/chat/visualization.py's own _kind() reorder) — this was the one
+    # place that still trusted the bare structural kind alone. "expected_monthly_
+    # rent" (role=measure, a rent AMOUNT) has kind=="temporal" purely from the
+    # temporal-name-hint substring bug ("month" inside "monthly") for columns like
+    # "minimum_lease_period" where "period" is a real token match; without this
+    # guard a plain "highest expected monthly rent" ranking got classified TREND
+    # instead of DETAIL_TABLE/RANKING, and charted the measure itself as the time
+    # axis against two unrelated columns.
     _plottable = {s.name for s in column_stats if (s.distinct_count or 0) > 0}
-    has_temporal = any(kinds.get(d) == "temporal" and d in _plottable for d in dimensions) or \
-        any(s.kind == "temporal" and s.name in _plottable for s in column_stats)
+
+    def _is_real_temporal(name: str) -> bool:
+        return kinds.get(name) == "temporal" and name in _plottable and roles.get(name) != "measure"
+
+    has_temporal = any(_is_real_temporal(d) for d in dimensions) or \
+        any(_is_real_temporal(s.name) for s in column_stats)
     has_numeric_measure = bool(measures) or any(k == "numeric" for k in kinds.values())
     agg_funcs = {f for f, _ in (aggregations or [])}
     is_count_only = bool(agg_funcs) and agg_funcs <= {"COUNT"}
@@ -281,6 +312,12 @@ class InsightContext:
     # long-tail "Other" bucket and a duplicate-row roll-up are both sums, and summing
     # averages/rates/shares yields a meaningless number (apps/chat/visualization.py).
     measure_aggregates:   Dict[str, str] = field(default_factory=dict)
+    # Query-driven column relevance (TABLE_QUERY_COLUMN_FILTER_ENABLED, 2026-09-28) —
+    # veda/routing.py::recommended_projection() recomputed post-execution against the
+    # columns this SQL actually returned, must_include-seeded from measures/dimensions/
+    # orderings so a column the query's own aggregate/GROUP BY/ORDER BY used can never
+    # be dropped. Empty when the flag is off (default) or the signal couldn't be computed.
+    query_relevant_columns: List[str] = field(default_factory=list)
 
 
 def _column_stats(columns: List[str], rows: List[dict], max_rows: int,
@@ -554,6 +591,95 @@ def compute_chart_candidates(result_shape: str, column_stats: List[ColumnStat],
     return out
 
 
+def compute_result_completeness(sql: Optional[str], rows: list,
+                                fetch_capped: bool = False,
+                                requested_limit: Optional[int] = None) -> dict:
+    """Shared result-completeness truth (2026-09-30) — table, chart, and summary
+    must all read the SAME truncation/count signal instead of each re-deriving
+    their own. Before this, only the summary path (query/result_explainer.py's
+    `_sql_truncated`) computed anything like it; `analytics_summary()` (what
+    table_rendering.py and visualization.py actually consume) carried NO
+    completeness signal at all, which is why a table could say "Showing 20 of
+    1000 rows" with no way to say whether 1000 IS the whole result or just the
+    backend's safety-fetch cap.
+
+    Deterministic, no DB call, no new query — combines THREE independent
+    signals, any one of which alone can miss a real truncation:
+      1. the SQL's own explicit LIMIT (read off its AST via the same
+         `extract_sql_facts` every other deterministic gate already uses),
+         compared to how many rows came back — catches "the user's/planner's
+         own LIMIT N got fully hit".
+      2. `fetch_capped` — the caller's own knowledge that the BACKEND's fetch
+         safety cap (independent of any SQL-level LIMIT) is what actually
+         stopped the read (e.g. veda/execution.py::last_execution_truncated()).
+         Without this, a query with NO LIMIT clause at all that still hit the
+         database's own EXECUTION_RESULT_LIMIT looked identical to a query that
+         genuinely had exactly that many rows — confirmed live (2026-09-30): a
+         1000-row fetch-capped result reported is_truncated=False under signal
+         1 alone, because the SQL itself never declared a LIMIT to compare against.
+      3. `requested_limit` (2026-09-30, second live-reported gap) — what the
+         USER explicitly asked for ("top 1001"), which can EXCEED the backend's
+         own hard fetch cap (`config.EXECUTION_RESULT_LIMIT`) entirely. This is
+         NOT the same situation as signals 1/2: those describe "more rows exist
+         than we happened to fetch" (an honest, open-ended hedge); this one is a
+         KNOWN, deterministic limitation — the system CAN'T fetch what was asked,
+         at all, regardless of what the true total turns out to be. Silently
+         returning 1000 rows for a "top 1001" ask would look like a successful
+         1001-row answer that just happens to show 1000; `limit_exceeds_fetch_
+         cap`/`reason` make that distinction explicit instead of folding it into
+         the same generic `is_truncated` hedge signals 1/2 use.
+
+    Returns:
+      fetched_count           — rows actually available to this call (post any
+                                upstream DB-fetch safety cap).
+      is_truncated             — the result count reached the SQL's own LIMIT,
+                                the backend's fetch cap fired, OR the user's
+                                own requested_limit exceeded the fetch cap — in
+                                every case, more rows may exist / were asked for
+                                than got returned.
+      total_count              — the TRUE total, only when it's actually
+                                knowable (== fetched_count, exactly when not
+                                truncated). None when truncated — deliberately
+                                never guessed.
+      total_count_known        — same information as a plain bool, for a caller
+                                that wants "do we know the true total" without
+                                re-deriving it from `total_count is not None`.
+      requested_limit           — echoed back verbatim (None if not given).
+      fetch_limit               — the backend's own hard fetch cap
+                                (config.EXECUTION_RESULT_LIMIT), always present,
+                                so a caller can compare requested vs. available
+                                without importing config itself.
+      limit_exceeds_fetch_cap   — True exactly when `requested_limit` is known
+                                AND exceeds `fetch_limit` — the specific,
+                                nameable case signal 3 above describes.
+      reason                    — "FETCH_CAP_EXCEEDED" for that case, else None.
+                                A structured code (not just a bool) so a caller
+                                can grow more reasons later without another
+                                field.
+    """
+    from config import EXECUTION_RESULT_LIMIT as _fetch_limit_cap
+    fetched_count = len(rows)
+    sql_limit = None
+    try:
+        sql_limit = (extract_sql_facts(sql or "") or {}).get("limit")
+    except Exception:
+        sql_limit = None
+    limit_exceeds_fetch_cap = bool(requested_limit is not None
+                                   and int(requested_limit) > int(_fetch_limit_cap))
+    is_truncated = (bool(sql_limit and fetched_count >= int(sql_limit))
+                    or bool(fetch_capped) or limit_exceeds_fetch_cap)
+    return {
+        "fetched_count": fetched_count,
+        "is_truncated": is_truncated,
+        "total_count": (fetched_count if not is_truncated else None),
+        "total_count_known": not is_truncated,
+        "requested_limit": requested_limit,
+        "fetch_limit": _fetch_limit_cap,
+        "limit_exceeds_fetch_cap": limit_exceeds_fetch_cap,
+        "reason": ("FETCH_CAP_EXCEEDED" if limit_exceeds_fetch_cap else None),
+    }
+
+
 def analytics_summary(ctx: "InsightContext") -> dict:
     """JSON-safe projection of the deterministic analytics — the piece of the
     InsightContext that crosses the inference→api HTTP boundary (attached to
@@ -578,6 +704,10 @@ def analytics_summary(ctx: "InsightContext") -> dict:
         "available_measures":   list(ctx.available_measures),
         "available_dimensions": list(ctx.available_dimensions),
         "display_columns":      [s.name for s in ctx.column_stats if s.role != "identifier"],
+        # Query-driven narrowing of the above (TABLE_QUERY_COLUMN_FILTER_ENABLED) — see
+        # InsightContext.query_relevant_columns. Empty when the flag is off; the api
+        # tier only narrows display_columns further when this is non-empty.
+        "query_relevant_columns": list(ctx.query_relevant_columns),
         # top_values (M4): the actual values each dimension took in THIS result. The chat
         # tier's deterministic delta layer matches a follow-up's literal ("only the Kochi
         # ones") against these before it will call the classifier SLM, so without them the
@@ -657,6 +787,25 @@ def analyze_result(
                                dimensions=dimensions)
     chart_candidates = compute_chart_candidates(result_shape, stats, dimensions, measures)
 
+    query_relevant_columns: List[str] = []
+    try:
+        from config import (TABLE_QUERY_COLUMN_FILTER_ENABLED,
+                            TABLE_QUERY_COLUMN_FILTER_IMPORTANCE_FLOOR)
+    except Exception:
+        TABLE_QUERY_COLUMN_FILTER_ENABLED = False
+        TABLE_QUERY_COLUMN_FILTER_IMPORTANCE_FLOOR = 0
+    if TABLE_QUERY_COLUMN_FILTER_ENABLED and table and columns:
+        try:
+            from veda.routing import recommended_projection
+            order_cols = [c for c, _asc in (facts.get("orderings") or [])]
+            must = list(dict.fromkeys([*measures, *dimensions, *order_cols]))
+            query_relevant_columns = recommended_projection(
+                table, list(columns), [], sm, question, must_include=must,
+                importance_floor=TABLE_QUERY_COLUMN_FILTER_IMPORTANCE_FLOOR,
+                strict_alias_match=True)
+        except Exception:
+            query_relevant_columns = []
+
     return InsightContext(
         question=question, sql=sql or "", table=table,
         result_type=result_type, row_count=row_count, columns=list(columns),
@@ -671,6 +820,7 @@ def analyze_result(
         patterns=patterns, chart_candidates=chart_candidates,
         measure_aggregates={alias: func for alias, (func, _c)
                             in (facts.get("alias_aggs") or {}).items()},
+        query_relevant_columns=query_relevant_columns,
     )
 
 

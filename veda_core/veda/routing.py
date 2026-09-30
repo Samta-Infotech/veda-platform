@@ -464,7 +464,8 @@ def _name_toks(table_name, sm=None):
                 if len(tok) > 2 and tok not in _NAME_CONNECTIVES}
 
 
-def recommended_projection(primary, allowed_columns, results, sm, query, must_include=None):
+def recommended_projection(primary, allowed_columns, results, sm, query, must_include=None,
+                           importance_floor=None, strict_alias_match=False):
     """Deterministic, LLM-free business-facing SELECT list for `primary` —
     composes THREE signals VEDA already computes elsewhere, never re-ranking
     columns from scratch:
@@ -498,6 +499,38 @@ def recommended_projection(primary, allowed_columns, results, sm, query, must_in
       b. a column the user's query literally names (by column name or a
          known business alias).
 
+    `importance_floor`: overrides config.RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR
+    (signal 3 below) for THIS call only — every existing SQL-generation-time
+    caller omits it and keeps today's behavior unchanged. The post-execution
+    TABLE-display caller (result_analyzer.analyze_result,
+    TABLE_QUERY_COLUMN_FILTER_ENABLED) passes 0: at SQL-generation time a
+    filler floor gives the LLM reasonable SELECT breadth to work with, but at
+    display time the goal is the opposite — show only what the query actually
+    asked about — so the filler that widens the SQL-gen projection must not
+    also widen what gets displayed.
+
+    `strict_alias_match` (2026-09-28, table-display only — every existing
+    caller omits it, default False, unchanged behavior): the query-named
+    safety override (b, below) also matches a column's `aliases` metadata,
+    and ingestion sometimes derives a generic single WORD alias from a
+    column's own name ("payment_signature" → alias "payment"). At SQL-
+    generation time that's harmless — an extra column in an LLM prompt hint
+    costs nothing. At table-DISPLAY time it's a real bug: a query merely
+    mentioning the table's own domain noun ("Which PAYMENT transactions have
+    the highest paid amount?") then "explicitly names" every other column
+    whose alias happens to share that one generic word (payment_date,
+    payment_signature, other_payment_detail, ...), defeating the narrowing
+    entirely for tables whose columns share a common domain-word alias
+    (confirmed: RANK-10, 10/10 columns survived on this exact query before
+    this fix). True disqualifies a single-word alias only when it is SHARED
+    by 2+ of this table's own columns — that collision is the actual
+    signature of the bug (a generic domain-word shorthand copied onto every
+    column of a table), not the word being one token. A single-word alias
+    that belongs to exactly one column ("is_gated" → "gated") is exactly as
+    specific as the column's own name and still counts; only genuinely
+    generic, table-wide shorthands are dropped. A column's own full name is
+    never affected either way — it always counts, even as one word.
+
     `allowed_columns` (the validation allow-list) is read-only input here and
     is NEVER itself modified — this function only decides what to SELECT,
     never what SQL is allowed to reference. Every candidate is intersected
@@ -510,6 +543,8 @@ def recommended_projection(primary, allowed_columns, results, sm, query, must_in
     produce a degraded (or empty) SELECT list."""
     from config import (RECOMMENDED_PROJECTION_MAX_COLS,
                         RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR)
+    if importance_floor is not None:
+        RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR = importance_floor
 
     allowed = list(allowed_columns or [])
     allowed_set = set(allowed)
@@ -533,9 +568,26 @@ def recommended_projection(primary, allowed_columns, results, sm, query, must_in
     # matching scheme.
     query_l = (query or "").lower()
     if query_l:
+        # Collision map for strict mode: a single-word alias shared by 2+ of
+        # this table's own columns is a generic domain shorthand ("payment"
+        # copied onto payment_date/payment_signature/...), not a specific
+        # mention of any one of them — see strict_alias_match's docstring.
+        _shared_single_word_aliases = set()
+        if strict_alias_match:
+            _alias_owners: dict = {}
+            for c in allowed:
+                for a in ((cols_meta.get(f"{primary}.{c}", {}) or {}).get("aliases") or []):
+                    al = str(a).lower()
+                    if len(al.split()) == 1:
+                        _alias_owners.setdefault(al, set()).add(c)
+            _shared_single_word_aliases = {al for al, owners in _alias_owners.items()
+                                           if len(owners) > 1}
         for c in allowed:
             meta = cols_meta.get(f"{primary}.{c}", {}) or {}
-            names = [c.replace("_", " ")] + [str(a).lower() for a in (meta.get("aliases") or [])]
+            alias_names = [str(a).lower() for a in (meta.get("aliases") or [])]
+            if strict_alias_match:
+                alias_names = [n for n in alias_names if n not in _shared_single_word_aliases]
+            names = [c.replace("_", " ")] + alias_names
             if any(len(n) > 3 and n in query_l for n in names):
                 _add(c)
 

@@ -7,7 +7,7 @@ import queue
 import threading
 import time
 from typing import Iterator
-
+from .presentation_plan import build_presentation_plan
 from chatbot.run import run_chat_turn
 
 from apps.core.messages import MESSAGES
@@ -747,6 +747,20 @@ class ConversationQueryService:
             # etc. instead. Order is preserved — vizzes[0] is still today's
             # single-chart choice (see visualization.py's own docstring).
             yield {"event": "visualization", "data": {"visualizations": vizzes}}
+        # Formal PresentationPlan (2026-09-29) — a NEW, additive event, not a
+        # replacement for the "content"/"visualization" events above: those still
+        # carry the actual table/chart a client renders today, unchanged. This
+        # event only makes the ALREADY-MADE decision observable/typed (§8 of the
+        # consistency audit) — an existing client that doesn't read this event
+        # type sees no behavior change at all. Best-effort: a failure here must
+        # never cost the turn its actual answer, same as the observability block
+        # below it.
+        try: 
+            _cols0, _rows0 = res0.get("cols"), res0.get("rows")
+            _plan = build_presentation_plan(_cols0, _rows0, res0.get("analytics"), vizzes)
+            yield {"event": "presentation_plan", "data": _plan.to_dict()}
+        except Exception:
+            logger.exception("presentation_plan build failed — answer/table/chart unaffected")
         # veda_core (veda/business_explain.py) builds this deterministically from the
         # final validated SQL + semantic model — never from retrieval/routing internals
         # (those live only in res0["trace"], for our own debugging, never sent over SSE).
@@ -831,11 +845,16 @@ class ConversationQueryService:
                 if p.get("outcome") != "answered" or not pc or not prw:
                     continue
                 prw = _positional_rows(pc, prw)
-                tc, tr = _project_display_columns(pc, prw, (pr.get("analytics") or {}).get("display_columns"))
+                p_analytics = pr.get("analytics") or {}
+                tc, tr = _project_display_columns(pc, prw, p_analytics.get("display_columns"),
+                                                  p_analytics.get("query_relevant_columns"))
                 label = str(p.get("part") or "").strip().rstrip("?.")
                 blocks.append({"type": "markdown", "part_index": p.get("index"),
                                "content": f"**{(p.get('index') or 0) + 1}. {label}**\n\n"
-                                          + _rows_to_markdown_table(tc, tr)})
+                                          + _rows_to_markdown_table(
+                                              tc, tr, is_truncated=bool(p_analytics.get("is_truncated")),
+                                              requested_limit=p_analytics.get("requested_limit"),
+                                              fetch_limit_cap=p_analytics.get("fetch_limit"))})
             return blocks
         cols, rows = res0.get("cols"), res0.get("rows")
         if cols and rows:
@@ -844,10 +863,16 @@ class ConversationQueryService:
             # table — the engine's own display_columns already excludes
             # identifier-role columns (see project_display_columns's docstring).
             # Fails safe to the original cols/rows when analytics is absent.
-            display_cols = (res0.get("analytics") or {}).get("display_columns")
-            table_cols, table_rows = _project_display_columns(cols, rows, display_cols)
+            analytics0 = res0.get("analytics") or {}
+            display_cols = analytics0.get("display_columns")
+            table_cols, table_rows = _project_display_columns(
+                cols, rows, display_cols, analytics0.get("query_relevant_columns"))
             blocks.append({"type": "markdown",
-                           "content": _rows_to_markdown_table(table_cols, table_rows)})
+                           "content": _rows_to_markdown_table(
+                               table_cols, table_rows,
+                               is_truncated=bool(analytics0.get("is_truncated")),
+                               requested_limit=analytics0.get("requested_limit"),
+                               fetch_limit_cap=analytics0.get("fetch_limit"))})
         if not blocks:
             blocks.append({"type": "markdown", "content": "No response could be generated."})
         return blocks

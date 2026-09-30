@@ -527,6 +527,53 @@ VLLM_MODEL_NAME      = __import__("os").environ.get("VLLM_MODEL_NAME", "") or No
 # line in .env yields "", which _env_present maps to the default instead of raising float("")
 # at import; and the read is RECORDED, which is what tests/test_env_wiring.py asserts against.
 SLM_TEMPERATURE      = _env_float("SLM_TEMPERATURE", 0.0)
+# Response/summary-TEXT temperature (2026-09-29, consistency audit) — separate from
+# SLM_TEMPERATURE above on purpose: that knob governs SQL-generation/IR-emit
+# determinism (fixed 2026-09-23); this one governs query/result_explainer.py's NL
+# answer + Insight Engine narrative calls, which independently hardcoded
+# `temperature=0.1` and were never touched by the SQL-side fix — confirmed live: the
+# same verified numbers can come back as "There are 5 properties" vs. "I found five
+# properties" on repeated identical questions. Defaulted to 0 (2026-09-29, explicit
+# enterprise-consistency instruction) — was 0.1 for one day while this was being
+# assessed as a product trade-off; the fact-grounding guards (_answer_numbers_
+# grounded/_extreme_claims_grounded, same file) already constrain WHAT the model may
+# state regardless of temperature, so 0 here loses only word-choice diversity, not
+# correctness. Env-overridable if some deployment wants that diversity back.
+RESPONSE_TEXT_TEMPERATURE = _env_float("RESPONSE_TEXT_TEMPERATURE", 0.0)
+# Verified-query cache similarity threshold (2026-09-29, consistency audit §13) — was a
+# hardcoded 0.85 literal in veda/cache.py's function signature. Audit finding: this
+# cache's key is embedding cosine similarity, NOT exact text match, and 3 real production
+# incidents are already documented (in the read-time demotion guards, veda/pipeline.py)
+# of two DIFFERENT questions colliding above 0.85 and replaying the wrong cached SQL
+# (e.g. sim=0.86-0.88 pairs that turned out to ask for a different filter/shape/LIMIT).
+# Those demotion guards catch the SPECIFIC failure shapes already seen (missing
+# qualifier, wrong shape, wrong LIMIT) — they are a reactive backstop, not a preventive
+# one, so a NOVEL collision still replays once before a matching guard could exist.
+# Default kept at the EXISTING 0.85 (byte-identical) — raising this is the "Conservative"
+# mitigation option (restrict fuzzy reuse to closer matches) without removing fuzzy
+# matching or touching the demotion guards. Env-overridable per deployment.
+VERIFIED_CACHE_SIMILARITY_THRESHOLD = _env_float("VERIFIED_CACHE_SIMILARITY_THRESHOLD", 0.85)
+# Fixed decode seed (2026-09-29, consistency audit gap #3) — `generation.py`'s two
+# SQL-generation calls already pass `seed=0` (temperature=0 + a fixed seed = greedy,
+# reproducible decoding); every OTHER SLM call site (RAG synthesis, IR-emit,
+# LangGraph, entity/envelope/federated routing) ran at temperature=0 but with NO
+# seed, so a backend serving concurrent/batched requests isn't formally guaranteed
+# bit-identical output even at temperature=0. Same value as generation.py's existing
+# literal, now named so every site can share it instead of each hardcoding its own.
+SLM_SEED = _env_int("SLM_SEED", 0)
+# ORDER BY tie-break for GROUPED rankings (2026-09-29, consistency audit gap #5,
+# flag-gated OFF per the standing "must not hamper existing implementation" rule).
+# `planning.py`'s grouped-aggregate ranking builders emit `GROUP BY t0.col ORDER BY
+# {agg} {dir} LIMIT n` with no secondary key — two groups tied at the exact same
+# aggregate value are not guaranteed the same relative order across repeated runs
+# (Postgres does not promise stable sort for equal ORDER BY keys). Deliberately
+# NARROW in scope: only applied when a GROUP BY column already exists (appending it
+# again in ORDER BY is always valid SQL, since it's already in the SELECT/GROUP BY
+# list) — the ungrouped per-row ranking case is NOT touched here, because the only
+# generically-safe secondary key there would be a primary key this function has no
+# reliable, per-table-verified way to name blindly (see the audit report's own
+# explicit warning against inventing an arbitrary tie-break column).
+SQL_RANKING_TIE_BREAK_ENABLED = _env_bool("SQL_RANKING_TIE_BREAK_ENABLED", False)
 # 2026-09-23 (benchmark finding §6.7): was 240 — TWICE nginx's proxy_read_timeout of
 # 120s (docker/nginx.conf:66), so a single SLM call was allowed to outlive the client
 # connection that was waiting for it. The ladder is now innermost-tightest:
@@ -1701,6 +1748,27 @@ RECOMMENDED_PROJECTION_MAX_COLS = 12
 # restore the old fill-to-cap behaviour.
 RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR = int(__import__("os").environ.get(
     "RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR", "6"))
+# Post-execution TABLE column filter (2026-09-28): recommended_projection() is
+# already computed at SQL-generation time and handed to the LLM as a prompt
+# HINT — the SLM is free to ignore it and add "just in case" columns (join
+# keys, grouping helpers, unrelated business columns) to its SELECT, and
+# nothing downstream trimmed the SELECT back down; apps/chat/table_rendering.py
+# only ever stripped identifier-role columns, so any such extra column sailed
+# straight through to the rendered table. When this flag is ON,
+# result_analyzer.analyze_result() recomputes the SAME recommended_projection
+# signal from the ACTUAL executed (table, columns, question) — with
+# must_include seeded from the SQL's own measures/dimensions/orderings, so a
+# column the query's own aggregate/GROUP BY/ORDER BY actually used can never
+# be dropped — and table_rendering narrows the displayed columns to it.
+# Default OFF: every existing response is byte-identical until enabled.
+TABLE_QUERY_COLUMN_FILTER_ENABLED = __import__("os").environ.get(
+    "TABLE_QUERY_COLUMN_FILTER_ENABLED", "0") == "1"
+# Deliberately 0, NOT RECOMMENDED_PROJECTION_IMPORTANCE_FLOOR's default (6): that
+# floor exists to give the LLM reasonable SELECT breadth at SQL-generation time,
+# which is the opposite goal of the table filter above (show only what was asked).
+# Env-overridable for a deployment that wants a little display breadth back.
+TABLE_QUERY_COLUMN_FILTER_IMPORTANCE_FLOOR = int(__import__("os").environ.get(
+    "TABLE_QUERY_COLUMN_FILTER_IMPORTANCE_FLOOR", "0"))
 # Heavy-lane time budgets (Phase C): skip Tier-2 when the deterministic head already
 # overspent (retrieval/grounding struggled — Tier-2 rarely rescues those), and give
 # Tier-2 a hard deadline enforced between SLM rounds. Measured 2026-07-12: without

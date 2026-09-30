@@ -691,7 +691,8 @@ def summarize_explain_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
 
 def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=False,
                          ictx=None, answer=None, summary_model=None, summary_ok=None,
-                         visualization=None, explain_payload=None) -> None:
+                         visualization=None, explain_payload=None,
+                         summary_status=None, summary_fallback_reason=None) -> None:
     """Record the shared post-execution stages — execution / result_analysis /
     summary / visualization / explainability — into the current trace, reading ONLY
     values the pipeline already computed (the InsightContext, the summary text, the
@@ -762,7 +763,16 @@ def record_result_stages(*, engine=None, cols=None, row_count=None, truncated=Fa
                    model=_mdl,
                    model_requested=summary_model,
                    success=_ok,
-                   answer_chars=(len(answer) if isinstance(answer, str) else None))
+                   answer_chars=(len(answer) if isinstance(answer, str) else None),
+                   # §6/§12 observability (2026-09-29) — GENERATED/VALIDATION_FAILED/
+                   # SLM_UNAVAILABLE/NOT_REQUIRED (query/result_explainer.py's
+                   # NLAnswerResult.summary_status), plus the reason string for the
+                   # fallback cases. NOT_APPLICABLE-style states are never reported as
+                   # failures — only VALIDATION_FAILED/SLM_UNAVAILABLE represent an
+                   # actual fallback, and NOT_REQUIRED/None are as legitimate as
+                   # GENERATED for this counter's purposes.
+                   status=summary_status,
+                   fallback_reason=summary_fallback_reason)
     except Exception:
         pass
     try:  # visualization — deterministic candidates on the ctx + the selected chart

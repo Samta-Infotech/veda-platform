@@ -85,6 +85,18 @@ def _is_numeric(v: Any) -> bool:
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}(-\d{2})?")
 _TEMPORAL_NAME_HINTS = ("date", "month", "year", "week", "day", "time", "period", "quarter")
+_NAME_TOKEN_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _has_temporal_name_hint(name_lower: str) -> bool:
+    """Whole-TOKEN match, not a raw substring search (2026-09-28 fix, mirrors
+    result_analyzer.py's identical fix — see that copy's docstring): a plain
+    `hint in name_lower` check treated "month" as present in "expected_MONTHly_
+    rent" (a rent amount), misclassifying it as temporal. "monthly" tokenizes
+    to ["monthly"] (no match); "created_date" still tokenizes to ["created",
+    "date"] (still matches)."""
+    return any(t in _TEMPORAL_NAME_HINTS for t in _NAME_TOKEN_RE.split(name_lower))
+
 
 # Identifier detection — a self-contained copy of the same heuristic
 # veda_core/veda/result_analyzer.py's classify_column_role() uses (which
@@ -233,14 +245,24 @@ class VisualizationRecommender:
                 # never override stronger metadata (Phase-5 invariant).
                 role = st.get("role")
                 kind = st.get("kind")
+                # role checked FIRST for every case it covers (2026-09-28 fix) —
+                # previously `kind == "temporal"` was checked ahead of
+                # role == "dimension"/"measure", so a structural false-positive
+                # (infer_column_kind's temporal-name-hint substring match, e.g.
+                # "expected_MONTHly_rent" containing "month") silently overrode a
+                # CORRECT role == "measure" from the semantic model — the exact
+                # contradiction this comment already claimed didn't happen. Live-
+                # confirmed: "highest expected monthly rent" charted the measure
+                # itself as the X-axis dimension against two unrelated columns.
+                # `kind`/`date` are now only consulted once role has had its say.
                 if role == "text":
                     return "text"
-                if role == "date" or kind == "temporal":
-                    return "temporal"
                 if role == "dimension":
                     return "categorical"
                 if role == "measure":
                     return "numeric"
+                if role == "date" or kind == "temporal":
+                    return "temporal"
                 if kind in ("temporal", "numeric", "categorical"):
                     return kind
             return self._infer_kind(cols[i], [row[i] for row in rows])
@@ -259,7 +281,69 @@ class VisualizationRecommender:
         numeric_idx = [i for i, k in enumerate(kinds) if k == "numeric" and not is_id[i]]
         temporal_idx = [i for i, k in enumerate(kinds) if k == "temporal" and not is_id[i]]
         categorical_idx = [i for i, k in enumerate(kinds) if k == "categorical" and not is_id[i]]
-        dimension_idx = temporal_idx[:1] or categorical_idx[:1]
+
+        # Query-relevance reordering (2026-09-28, TABLE_QUERY_COLUMN_FILTER_ENABLED):
+        # every `[0]`-picking branch below takes "the first candidate in SELECT
+        # order" as the chart axis — which is exactly the same over-selection bug
+        # the table view had (an unrelated column the SQL kept "just in case"
+        # sorts ahead of the one the question actually named, e.g. cols=
+        # [is_gated, project_name, corner_property, ...building_name, carpet_area]
+        # for "show properties where is gated is true" charted on the WHERE
+        # predicate's own boolean instead of the entity's display column). Reusing
+        # result_analyzer's own `query_relevant_columns` (analyze_result's
+        # recommended_projection recompute, same signal the table narrowing
+        # uses) to REORDER — never filter — each pool: a query-relevant
+        # candidate goes first when one exists, the full pool is kept
+        # otherwise so an un-flagged/empty signal (flag off, federated result)
+        # leaves this a no-op and every candidate remains chartable.
+        _relevant = set((analytics or {}).get("query_relevant_columns") or ())
+
+        def _prefer_relevant(idx_list: list) -> list:
+            if not _relevant:
+                return idx_list
+            preferred = [i for i in idx_list if cols[i] in _relevant]
+            return preferred + [i for i in idx_list if i not in preferred] if preferred else idx_list
+
+        numeric_idx = _prefer_relevant(numeric_idx)
+        temporal_idx = _prefer_relevant(temporal_idx)
+        categorical_idx = _prefer_relevant(categorical_idx)
+
+        # A MEASURE (the numeric axis specifically — what actually gets summed/
+        # plotted) must be query-relevant when a relevance signal exists at all;
+        # a dimension mismatch is more forgivable, but a chart whose VALUE axis
+        # is something nobody asked about is the misleading case (2026-09-30,
+        # no hardcoded column names — purely reusing query_relevant_columns).
+        # Real observed bugs this closes, across every branch that reads
+        # numeric_idx (combo/TREND/GROUPED all check it — one shared fix, not
+        # four patched separately): "possession status of each project" (only
+        # numeric column: longitude) charted "Longitude by Possession"; "show
+        # properties that have power backup" (only numeric column: carpet_area)
+        # charted "Carpet Area by Power Backup". Only fires when `_relevant` is
+        # non-empty AND genuinely none of the candidates match it — a pool with
+        # no signal at all (flag off, federated result) is completely
+        # unaffected, same as `_prefer_relevant` above.
+        if _relevant and numeric_idx and not any(cols[i] in _relevant for i in numeric_idx):
+            numeric_idx = []
+
+        # Temporal-over-categorical priority is only safe to keep UNCONDITIONAL
+        # when there's no relevance signal to check it against (2026-09-30, real
+        # observed bug — no hardcoded column names anywhere in this fix, purely
+        # reusing the SAME query_relevant_columns signal the reordering above
+        # already trusts): "What is the convenience fee for EACH PAYMENT TYPE?"
+        # (cols: convenience_fee, name, id, created_by_id, created_at) charted
+        # "Convenience Fee over Created At" — a temporal column NOBODY asked
+        # about (created_at isn't query-relevant) outranked the categorical
+        # column the query's own wording named (payment type -> "name", the
+        # table's resolved display column, which IS query-relevant). A
+        # query-relevant categorical only overrides a NON-relevant temporal —
+        # when neither or both are relevant, or there's no signal at all
+        # (flag off / federated), today's temporal-first default is unchanged.
+        _temporal_not_relevant = bool(_relevant and temporal_idx and cols[temporal_idx[0]] not in _relevant)
+        _categorical_is_relevant = bool(_relevant and categorical_idx and cols[categorical_idx[0]] in _relevant)
+        _prefer_categorical_dimension = _temporal_not_relevant and _categorical_is_relevant
+
+        dimension_idx = (categorical_idx[:1] if _prefer_categorical_dimension
+                        else (temporal_idx[:1] or categorical_idx[:1]))
 
         # A listing (RANKING / DETAIL_TABLE) is charted row-per-row, BEFORE any of
         # the aggregating branches below can touch it. Those branches exist for
@@ -281,7 +365,7 @@ class VisualizationRecommender:
             if combo is not None and combo.confidence >= _CONFIDENCE_THRESHOLD:
                 return [combo]
 
-        if temporal_idx and numeric_idx and len(rows) > 1:
+        if temporal_idx and numeric_idx and len(rows) > 1 and not _prefer_categorical_dimension:
             line_spec = self._line(cols, rows, temporal_idx[0], numeric_idx[0])
             if line_spec.confidence >= _CONFIDENCE_THRESHOLD:
                 # Bar-over-time is an equally valid read of the SAME (labels,
@@ -296,8 +380,26 @@ class VisualizationRecommender:
                 return [line_spec, bar_spec]
 
         if categorical_idx and numeric_idx:
-            specs = self._category_numeric(cols, rows, categorical_idx[0], numeric_idx[0],
-                                           analytics)
+            # Try each (dimension, measure) pairing in pool order until one
+            # actually charts (2026-09-28) — a pairing legitimately produces no
+            # chart when the dimension has a single value/no real breakdown
+            # (_category_numeric's own "never force a chart" rule). Previously
+            # only categorical_idx[0]/numeric_idx[0] was ever tried, so an
+            # unchartable first candidate silently gave up on a result that a
+            # later candidate could chart fine. This never picks a WORSE chart
+            # than before (the [0][0] pairing, when chartable, is still tried
+            # first) — it only adds a fallback where there was none, which the
+            # new query-relevance reordering above needs: a query-relevant
+            # column now goes first, and must not regress a result that used
+            # to chart via a later, non-relevant column.
+            specs: list[VisualizationSpec] = []
+            for _cat_i in categorical_idx:
+                for _num_i in numeric_idx:
+                    specs = self._category_numeric(cols, rows, _cat_i, _num_i, analytics)
+                    if specs:
+                        break
+                if specs:
+                    break
             # A RANKING (top/bottom-N) is NOT a part-of-whole: a pie of the top N
             # misrepresents proportions (the N don't sum to the whole). When the engine
             # classified the shape as RANKING, lead with the bar (its canonical chart,
@@ -342,7 +444,7 @@ class VisualizationRecommender:
 
     def _infer_kind(self, col_name: str, values: list) -> str:
         name_lower = col_name.lower()
-        if any(hint in name_lower for hint in _TEMPORAL_NAME_HINTS):
+        if _has_temporal_name_hint(name_lower):
             return "temporal"
         sample = [v for v in values[:20] if v is not None]
         if not sample:
@@ -450,8 +552,20 @@ class VisualizationRecommender:
         plotted = [row for row in rows if _is_numeric(row[measure_idx])]
         if len(plotted) < 2:
             return None
-        truncated = len(plotted) > _MAX_ROW_BARS
-        plotted = plotted[:_MAX_ROW_BARS]          # head, not top-N: keeps the ORDER BY's own answer
+        # Respect an explicit user ask (2026-09-30, presentation-policy pass): the
+        # SQL's own LIMIT (analytics["limit"], from the executed statement's own
+        # AST) reflects what the query actually asked for — "top 30" must not get
+        # silently cut to 25 bars just because that happens to be this module's
+        # generic readability default. Bounded at 100 regardless (hundreds of bars
+        # is unreadable no matter how explicit the ask), and never LOWERS today's
+        # default — a query with no meaningful LIMIT (None, or one <= the default)
+        # behaves exactly as before.
+        _row_cap = _MAX_ROW_BARS
+        _explicit_limit = (analytics or {}).get("limit")
+        if isinstance(_explicit_limit, int) and _MAX_ROW_BARS < _explicit_limit <= 100:
+            _row_cap = _explicit_limit
+        truncated = len(plotted) > _row_cap
+        plotted = plotted[:_row_cap]          # head, not top-N: keeps the ORDER BY's own answer
 
         # Two rows can legitimately carry the same label (same building, same
         # project). They stay SEPARATE bars; the suffix only keeps the axis
@@ -467,10 +581,29 @@ class VisualizationRecommender:
             labels.append(label)
 
         title = f"{_fmt_axis(cols[measure_idx])} by {_fmt_axis(cols[label_idx])}"
+        # `len(rows)` in the sub_title below is itself only the FETCHED count — if
+        # the fetch was already capped (analytics["is_truncated"]), say so instead
+        # of presenting that number as the true total (2026-09-30, shared
+        # result-completeness — result_analyzer.compute_result_completeness).
+        _fetch_capped = bool((analytics or {}).get("is_truncated"))
+        _limit_exceeded = bool((analytics or {}).get("reason") == "FETCH_CAP_EXCEEDED")
+        if truncated and _limit_exceeded:
+            # A KNOWN, deterministic limitation ("top 1001" against a 1000-row
+            # fetch cap) — distinct from the open-ended "more may exist" hedge
+            # below (2026-09-30, requested-limit gap).
+            _sub = (f"You asked for the top {(analytics or {}).get('requested_limit'):,}, "
+                   f"but only up to {(analytics or {}).get('fetch_limit'):,} rows can be "
+                   f"fetched in a single result")
+        elif truncated and _fetch_capped:
+            _sub = (f"First {len(plotted)} of {len(rows)} rows fetched, in result "
+                   f"order — more rows may exist beyond this fetch")
+        elif truncated:
+            _sub = f"First {len(plotted)} of {len(rows)} rows, in result order"
+        else:
+            _sub = None
         return VisualizationSpec(
             type=ChartType.BAR, title=title,
-            sub_title=(f"First {len(plotted)} of {len(rows)} rows, in result order"
-                       if truncated else None),
+            sub_title=_sub,
             x_axis_title=_fmt_axis(cols[label_idx]),
             y_axis_title=_fmt_axis(cols[measure_idx]),
             chart_data={"labels": labels,
@@ -482,8 +615,19 @@ class VisualizationRecommender:
     def _listing_measure(cols: list, kinds: list, is_id: list, analytics: dict | None) -> int | None:
         """The measure a listing is ABOUT is the one its ORDER BY ranked on — the
         engine ships the SQL's own orderings in analytics, so this is read, not
-        guessed. Falls back to the first real numeric column only when the result
-        carries no usable ordering (e.g. a federated result with no analytics)."""
+        guessed. Falls back to a query-relevant numeric column when the result
+        carries no usable ordering; NEVER to an arbitrary first-numeric-column
+        guess (2026-09-30, real observed bug, no hardcoded column names) —
+        "Show properties that have power backup" (cols: power_backup,
+        project_name, address, corner_property, building_name, carpet_area; no
+        ORDER BY at all) charted "Carpet Area by Project Name": carpet_area is a
+        real, structurally-numeric column, just one nobody asked about. A
+        misleading chart is worse than no chart, so with no ordering AND no
+        query-relevant numeric candidate, this returns None (no chart) rather
+        than guessing. When `query_relevant_columns` itself is absent (flag off,
+        federated result — no signal to check against at all), the old
+        numeric[0] fallback is unchanged, so this never regresses a result that
+        had nothing better to go on."""
         numeric = [i for i, k in enumerate(kinds) if k == "numeric" and not is_id[i]]
         if not numeric:
             return None
@@ -493,7 +637,13 @@ class VisualizationRecommender:
             i = by_name.get(str(name).lower().split(".")[-1])
             if i is not None and i in numeric:
                 return i
-        return numeric[0]
+        _relevant = set((analytics or {}).get("query_relevant_columns") or ())
+        if not _relevant:
+            return numeric[0]
+        for i in numeric:
+            if cols[i] in _relevant:
+                return i
+        return None
 
     @staticmethod
     def _listing_label(cols: list, rows: list, kinds: list, is_id: list,
@@ -540,6 +690,24 @@ class VisualizationRecommender:
             totals[name] = totals.get(name, 0) + _to_number(row[val_idx])
         if duplicates and not additive:
             return []  # no honest way to combine an average/rate across rows — no chart
+        # Never present a client-side roll-up of TRUNCATED raw data as a complete
+        # breakdown (2026-09-30, presentation-policy pass §7 — the highest-priority
+        # correctness rule in that spec). `duplicates` already means the SAME
+        # category appeared on more than one raw row — i.e. the SQL did NOT group
+        # by this category server-side, so this function is doing the summing
+        # itself, over whatever rows the backend's fetch cap happened to return.
+        # If that fetch was ALSO truncated (analytics["is_truncated"] — shared
+        # result-completeness, result_analyzer.compute_result_completeness), these
+        # per-category totals are a sum over an arbitrary PARTIAL slice of the true
+        # data, not the real totals — e.g. 5,000 true rows, only the first 1,000
+        # fetched, "Revenue by Category" quietly computed from just those 1,000.
+        # Refusing the chart here (rather than rendering it with a caveat) matches
+        # the spec's own preference: "prefer not rendering the chart if the
+        # aggregation cannot be trusted." A properly GROUP-BY'd result (no
+        # `duplicates` at all — the server already aggregated over the FULL data
+        # before any fetch cap applied) is unaffected regardless of is_truncated.
+        if duplicates and (analytics or {}).get("is_truncated"):
+            return []
         pairs = list(totals.items())
         if len(pairs) < 2:
             return []  # a single category isn't a chart — never force one

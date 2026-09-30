@@ -140,8 +140,11 @@ def _depends_on_history(message: str, history: list) -> bool:
     Fails closed to False (trust the original "smalltalk" verdict) on any error,
     since this is only a second-opinion check, not the primary classifier."""
     user_prompt = build_standalone_check_user_prompt(message, history)
+    # 2026-09-29 determinism fix: a boolean verdict, same reasoning as classify_node's
+    # own pin above — no legitimate use for sampling diversity on a yes/no check.
     verdict = call_slm(STANDALONE_CHECK_SYSTEM, user_prompt, max_tokens=5,
-                       model=CHATBOT_CLASSIFY_MODEL, purpose="standalone_check")
+                       model=CHATBOT_CLASSIFY_MODEL, purpose="standalone_check",
+                       temperature=0)
     return bool(verdict) and "dependent" in verdict.strip().lower()
 
 # Deterministic fast path for the overwhelming majority of smalltalk: pure
@@ -1063,6 +1066,17 @@ def classify_node(state: ChatState, config: RunnableConfig) -> dict:
             build_supervisor_user_prompt(message, history),
             model=CHATBOT_CLASSIFY_MODEL,
             purpose="classify",
+            # 2026-09-29 determinism fix: this is a JSON action/delta_type
+            # CLASSIFICATION, not prose generation — call_slm's own default
+            # (temperature=0.1) let the identical follow-up wording classify
+            # differently run-to-run (e.g. "answer" vs "followup", or which
+            # delta_type). chatbot/memory/classify.py's own standalone fallback
+            # classifier already pins temperature=0 for the same reason; this
+            # merged call (the more common path — see the docstring above) had
+            # been missed. Classification tasks have no legitimate use for
+            # sampling diversity, so this is a straight correctness fix, not a
+            # product trade-off.
+            temperature=0,
         )
         action = "answer"
         if raw:

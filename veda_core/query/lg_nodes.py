@@ -12,6 +12,7 @@ from config import (
     SLM_MODEL_NAME,
     SLM_NUM_CTX,
     SLM_TEMPERATURE,
+    SLM_SEED,
     SLM_TIMEOUT_SECS,
 )
 from query.lg_prompts import (
@@ -124,6 +125,7 @@ def _call_node(system_prompt: str, user_msg: str,
             system=system_prompt,
             purpose=purpose,
             temperature=SLM_TEMPERATURE,
+            seed=SLM_SEED,
             num_predict=256,
             num_ctx=SLM_NUM_CTX,
             timeout=SLM_TIMEOUT_SECS,

@@ -504,3 +504,263 @@ def test_grouped_breakdown_still_aggregates_unchanged():
     labels = specs[0].chart_data["labels"]
     assert "Other" in labels                              # long-tail bucketing intact
     assert 1010 in specs[0].chart_data["values"]          # per-category totals intact
+
+
+# ---------------------------------------------------------------------------
+# query_relevant_columns axis reordering (2026-09-28) — the SAME over-
+# selection bug the table view had ("show me X" chart on an unrelated column
+# the SQL kept "just in case") also picked the chart's axis by SELECT-order
+# alone. result_analyzer's query_relevant_columns (TABLE_QUERY_COLUMN_FILTER_
+# ENABLED) is reused here to reorder, never filter, each candidate pool.
+# ---------------------------------------------------------------------------
+
+_MULTI_CAND_COLS = ["alt_label", "furnishing", "count"]
+_MULTI_CAND_ROWS = [
+    ["Alpha", "FULL", 10],
+    ["Beta", "SEMI", 20],
+]
+
+
+def test_query_relevant_columns_reorders_categorical_axis():
+    """alt_label is first in SELECT order, but the query only named
+    "furnishing" — the chart must use the query-relevant column, not
+    whichever categorical column the SQL happened to list first. (specs[0] is
+    the pie, which carries no separate axis titles — checked via .title,
+    same string both bar and pie share.) "count" is also marked relevant here
+    (2026-09-30) since the measure-relevance requirement added that pass would
+    otherwise correctly block this chart too — this test isolates the
+    categorical-axis-reordering behavior specifically; the measure-relevance
+    rule itself has its own dedicated tests below."""
+    analytics = {"query_relevant_columns": ["furnishing", "count"]}
+    specs = _recommender().recommend(_MULTI_CAND_COLS, _MULTI_CAND_ROWS, analytics)
+    assert specs
+    assert specs[0].title == "Count by Furnishing"
+
+
+def test_query_relevant_columns_absent_is_byte_identical_noop():
+    """Without the signal (flag off, or absent for this result), the original
+    first-in-SELECT-order behavior is unchanged."""
+    specs = _recommender().recommend(_MULTI_CAND_COLS, _MULTI_CAND_ROWS, {})
+    assert specs
+    assert specs[0].title == "Count by Alt Label"
+
+
+def test_query_relevant_columns_reorders_numeric_measure_in_combo_chart():
+    """Two numeric candidates (carpet_area, count) + one dimension triggers the
+    line_histogram combo chart — the query-relevant measure must lead
+    (histogram_title), not whichever numeric column SQL listed first."""
+    cols = ["furnishing", "carpet_area", "count"]
+    rows = [["FULL", 1200, 10], ["SEMI", 900, 20], ["FULL", 1100, 15]]
+    analytics = {"query_relevant_columns": ["count"]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert specs and specs[0].type.value == "line_histogram"
+    assert specs[0].histogram_title == "Count"        # not "Carpet Area"
+
+
+def test_role_measure_outranks_structural_temporal_kind():
+    """Live-confirmed bug (RANK-03, "Which lease listings have the highest
+    expected monthly rent?"): the semantic model correctly said role=measure
+    for expected_monthly_rent, but the structural `kind` (from the temporal-
+    hint substring bug) said "temporal", and kind won — so the chart used the
+    measure itself as the X-axis dimension against two unrelated numeric
+    columns, instead of charting it as a measure at all. role must outrank a
+    structural kind of "temporal" exactly as it already does for "numeric"/
+    "categorical" (the Phase-5 invariant this code already claimed to hold)."""
+    cols = ["expected_monthly_rent", "furnishing"]
+    rows = [[1234567890.0, "FULL"], [582288888.0, "NONE"], [15000000.0, "NONE"]]
+    analytics = {"column_stats": [
+        {"name": "expected_monthly_rent", "kind": "temporal", "role": "measure"},
+        {"name": "furnishing", "kind": "categorical", "role": "dimension"},
+    ]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert specs
+    # Charted as a measure BY furnishing (the dimension) — before this fix,
+    # kind=="temporal" won and there was no numeric measure left at all to
+    # pair with a dimension, so this returned [] (no chart, silently wrong).
+    assert specs[0].title == "Expected Monthly Rent by Furnishing"
+
+
+def test_query_relevant_columns_measure_must_be_relevant_no_misleading_fallback():
+    """SUPERSEDES this test's original 2026-09-28 expectation (2026-09-30,
+    real observed bug + explicit policy): "carpet_area" is not query-relevant
+    here, and the ONLY numeric candidate — charting it just because SOME
+    number was available (the old pairing-fallback behavior) is exactly the
+    "Carpet Area by Project Name" / "Longitude by Possession" class of
+    misleading chart found live. A missing/unchartable RELEVANT candidate
+    ("status" has only one distinct value) must now return NO CHART, never
+    fall back to an irrelevant measure just to produce something."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["status", "furnishing", "carpet_area"]
+    rows = [["ACTIVE", "FULL", 1200], ["ACTIVE", "SEMI", 900]]
+    analytics = {"query_relevant_columns": ["status"]}
+    specs = VisualizationRecommender().recommend(cols, rows, analytics)
+    assert specs == []
+
+
+def test_query_relevant_columns_measure_relevant_dimension_not_still_charts():
+    """The asymmetry is deliberate: a MEASURE must be relevant (or no signal),
+    but a dimension mismatch alone doesn't block the chart — "furnishing" isn't
+    flagged relevant here, but it's the only categorical candidate and the
+    measure (carpet_area) IS relevant, so this still charts."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["furnishing", "carpet_area"]
+    rows = [["FULL", 1200], ["SEMI", 900]]
+    analytics = {"query_relevant_columns": ["carpet_area"]}
+    specs = VisualizationRecommender().recommend(cols, rows, analytics)
+    assert specs
+    assert specs[0].title == "Carpet Area by Furnishing"
+
+
+# ---------------------------------------------------------------------------
+# Result-completeness (2026-09-30, presentation-policy pass) — a grouped chart
+# must never present a client-side sum over TRUNCATED raw data as a complete
+# breakdown; a row-listing chart must respect an explicit user LIMIT instead of
+# always capping at _MAX_ROW_BARS.
+# ---------------------------------------------------------------------------
+
+def test_category_chart_blocked_when_duplicates_and_truncated():
+    """Same category on 2+ raw rows (SQL never grouped server-side) + the fetch
+    itself was capped (is_truncated) = the totals are a sum over an arbitrary
+    partial slice, not real totals. Must refuse the chart, not render it."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["city", "amount"]
+    rows = [["Pune", 100], ["Pune", 50], ["Mumbai", 200]]   # "Pune" appears twice -> duplicates
+    analytics = {"is_truncated": True}
+    specs = VisualizationRecommender().build_category_specs(cols, rows, 0, 1, analytics)
+    assert specs == []
+
+
+def test_category_chart_allowed_when_duplicates_but_not_truncated():
+    """Same duplicates, but the fetch was NOT truncated — rows is the true,
+    complete result, so summing it is honest."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["city", "amount"]
+    rows = [["Pune", 100], ["Pune", 50], ["Mumbai", 200]]
+    analytics = {"is_truncated": False}
+    specs = VisualizationRecommender().build_category_specs(cols, rows, 0, 1, analytics)
+    assert specs != []
+
+
+def test_category_chart_allowed_when_truncated_but_already_grouped():
+    """No duplicates (SQL already GROUP-BY'd server-side over the FULL data
+    before any fetch cap applied) — is_truncated alone must not block it."""
+    from apps.chat.visualization import VisualizationRecommender
+    cols = ["city", "amount"]
+    rows = [["Pune", 100], ["Mumbai", 200]]   # each city appears once — no duplicates
+    analytics = {"is_truncated": True}
+    specs = VisualizationRecommender().build_category_specs(cols, rows, 0, 1, analytics)
+    assert specs != []
+
+
+def test_row_listing_respects_explicit_limit_above_default_cap():
+    """SQL's own LIMIT (an explicit "top 30") must not be silently cut to the
+    generic 25-bar readability default."""
+    cols = ["name", "price"]
+    rows = [[f"P{i}", 1000 - i] for i in range(30)]
+    analytics = {"result_shape": "RANKING", "orderings": [["price", True]], "limit": 30}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert len(specs) == 1
+    assert len(specs[0].chart_data["values"]) == 30
+    assert specs[0].sub_title is None   # nothing was actually cut
+
+
+def test_row_listing_still_caps_at_default_when_no_explicit_limit():
+    cols = ["name", "price"]
+    rows = [[f"P{i}", 1000 - i] for i in range(40)]
+    analytics = {"result_shape": "RANKING", "orderings": [["price", True]]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert len(specs[0].chart_data["values"]) == 25   # unchanged default
+
+
+def test_row_listing_never_expands_beyond_the_100_safety_ceiling():
+    cols = ["name", "price"]
+    rows = [[f"P{i}", 1000 - i] for i in range(150)]
+    analytics = {"result_shape": "RANKING", "orderings": [["price", True]], "limit": 150}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert len(specs[0].chart_data["values"]) == 25   # 150 > 100 ceiling -> default, not 150
+
+
+def test_row_listing_sub_title_distinct_when_requested_limit_exceeds_fetch_cap():
+    cols = ["name", "price"]
+    rows = [[f"P{i}", 1000 - i] for i in range(40)]
+    analytics = {"result_shape": "RANKING", "orderings": [["price", True]],
+                "is_truncated": True, "reason": "FETCH_CAP_EXCEEDED",
+                "requested_limit": 1001, "fetch_limit": 1000}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert "asked for the top 1,001" in specs[0].sub_title
+    assert "up to 1,000 rows" in specs[0].sub_title
+
+
+def test_row_listing_sub_title_hedges_when_fetch_itself_was_capped():
+    cols = ["name", "price"]
+    rows = [[f"P{i}", 1000 - i] for i in range(40)]
+    analytics = {"result_shape": "RANKING", "orderings": [["price", True]], "is_truncated": True}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert "more rows may exist" in specs[0].sub_title
+
+
+# ---------------------------------------------------------------------------
+# Measure-relevance rule (2026-09-30) — "a misleading chart is worse than no
+# chart": a numeric MEASURE column must be query-relevant (when a relevance
+# signal exists) or the chart is skipped entirely, across every branch that
+# reads numeric_idx (row-listing/combo/TREND/GROUPED — one shared fix). No
+# hardcoded column names anywhere — purely reuses query_relevant_columns.
+# Regression tests for the 4 real, live-observed misleading charts.
+# ---------------------------------------------------------------------------
+
+def test_no_chart_when_only_numeric_candidates_are_geo_coordinates():
+    """"What are the names of all projects?" — real live bug: charted
+    "Latitude by Name". latitude/longitude are real numeric columns, just not
+    what anyone asked about."""
+    cols = ["name", "location", "latitude", "longitude"]
+    rows = [["Proj A", "Pune", 18.5, 73.8], ["Proj B", "Mumbai", 19.0, 72.8]]
+    analytics = {"result_shape": "DETAIL_TABLE", "query_relevant_columns": ["name"]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert specs == []
+
+
+def test_categorical_dimension_wins_over_irrelevant_temporal_when_relevant():
+    """"What is the convenience fee for each payment type?" — real live bug:
+    charted "Convenience Fee over Created At" (a TREND chart nobody asked for)
+    instead of the categorical breakdown the question's own wording named."""
+    cols = ["convenience_fee", "name", "id", "created_by_id", "created_at"]
+    rows = [[0.5, "Rent", 1, 9, "2024-01-01"], [2.5, "Society Maintenance", 2, 9, "2024-02-01"],
+            [0.0, "Deposit", 3, 9, "2024-03-01"]]
+    analytics = {"result_shape": "DETAIL_TABLE",
+                "query_relevant_columns": ["convenience_fee", "name"]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert specs
+    assert specs[0].title == "Convenience Fee by Name"
+
+
+def test_no_chart_when_only_numeric_candidate_is_an_unrelated_coordinate():
+    """"Show the possession status of each project." — real live bug: charted
+    "Longitude over Created At", entirely unrelated to possession status."""
+    cols = ["possession", "name", "id", "location", "created_at", "created_by_id", "longitude"]
+    rows = [["READY", "Proj A", 1, "Pune", "2024-01-01", 9, 73.8],
+            ["UNDER_CONSTRUCTION", "Proj B", 2, "Mumbai", "2024-02-01", 9, 72.8]]
+    analytics = {"result_shape": "DETAIL_TABLE",
+                "query_relevant_columns": ["possession", "name"]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert specs == []
+
+
+def test_no_chart_when_only_numeric_candidate_is_unrelated_to_boolean_filter_query():
+    """"Show properties that have power backup." — real live bug: charted
+    "Carpet Area by Project Name" (carpet_area is real, just irrelevant here)."""
+    cols = ["power_backup", "project_name", "address", "corner_property",
+            "building_name", "carpet_area"]
+    rows = [[True, "P1", "Addr1", False, "B1", 1200], [False, "P2", "Addr2", True, "B2", 1500]]
+    analytics = {"result_shape": "DETAIL_TABLE",
+                "query_relevant_columns": ["power_backup", "project_name"]}
+    specs = _recommender().recommend(cols, rows, analytics)
+    assert specs == []
+
+
+def test_measure_relevance_rule_is_a_noop_without_a_relevance_signal():
+    """No query_relevant_columns at all (flag off / federated result) — the
+    old numeric[0] behavior is completely unchanged."""
+    cols = ["name", "latitude", "longitude"]
+    rows = [["Proj A", 18.5, 73.8], ["Proj B", 19.0, 72.8]]
+    specs = _recommender().recommend(cols, rows, {"result_shape": "DETAIL_TABLE"})
+    assert specs   # unaffected — still charts something, exactly as before this fix

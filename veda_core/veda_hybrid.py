@@ -38,7 +38,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from query.multi_result import (
     MultiResult, SubResult, STATUS_OK, STATUS_REFUSED, STATUS_ERROR,
 )
-
+from veda.result_analyzer import analyze_result, analytics_summary, compute_result_completeness
 try:
     from utils.logger import get_logger
     logger = get_logger(__name__)
@@ -1987,12 +1987,14 @@ def _maybe_federated(query, verbose=False, strict=False):
         # column stats, result shape, chart candidates and detected patterns all
         # work off (cols, rows) alone. Same "Analysis:" fold-in as Tier-1/Tier-2.
         try:
-            from veda.result_analyzer import analyze_result, analytics_summary
+            
             _fc, _fr = result.get("cols") or [], result.get("rows") or []
             if _fc and _fr:
                 _frd = [row if isinstance(row, dict) else dict(zip(_fc, row)) for row in _fr]
                 _fctx = analyze_result(query, sql, list(_fc), _frd)
-                result["analytics"] = analytics_summary(_fctx)
+                _fanalytics = analytics_summary(_fctx)
+                _fanalytics.update(compute_result_completeness(sql, _fr))
+                result["analytics"] = _fanalytics
                 if _fctx.patterns:
                     from query.result_explainer import blend_patterns
                     result["answer"] = blend_patterns(result.get("answer") or "",
@@ -3461,13 +3463,15 @@ def _dispatch_single_inner(query, verbose=False, precomputed_sql=None, on_event=
             # analysis; works off the already-attached cols/rows). Best-effort: a
             # failure here must never sink the hybrid answer.
             try:
-                from veda.result_analyzer import analyze_result, analytics_summary
+                from veda.result_analyzer import analyze_result, analytics_summary, compute_result_completeness
                 if hy.cols and hy.rows:
                     _hrd = [row if isinstance(row, dict) else dict(zip(hy.cols, row))
                             for row in hy.rows]
                     _hctx = analyze_result(query, sqlres.get("sql") or "", list(hy.cols),
                                            _hrd, sm=sm, table=sqlres.get("table"))
-                    hy.analytics = analytics_summary(_hctx)
+                    _hanalytics = analytics_summary(_hctx)
+                    _hanalytics.update(compute_result_completeness(sqlres.get("sql") or "", hy.rows))
+                    hy.analytics = _hanalytics
                     if _hctx.patterns:
                         from query.result_explainer import blend_patterns
                         hy.answer = blend_patterns(hy.answer or "",
@@ -3697,10 +3701,14 @@ def _tier2_finish(query, sm, cols, rows, sql, source, business_intent=None):
         # consumers read one computation. Only the SLM narrative below stays
         # gated behind INSIGHT_ENGINE_ENABLED.
         try:
-            from veda.result_analyzer import analyze_result, analytics_summary
+            from veda.result_analyzer import analyze_result, analytics_summary, compute_result_completeness
             _ictx = analyze_result(query, sql, list(cols), row_dicts, sm=sm, table=table,
                                    max_rows=RESULT_ANALYZER_MAX_ROWS)
-            result["analytics"] = analytics_summary(_ictx)
+            _analytics_t2 = analytics_summary(_ictx)
+            # Shared result-completeness truth (2026-09-30) — same signal Tier-1
+            # (veda/pipeline.py) attaches, so table/chart never disagree by tier.
+            _analytics_t2.update(compute_result_completeness(sql, rows))
+            result["analytics"] = _analytics_t2
         except Exception as _ae:
             print(f"  [Tier2] Analytics (skipped: {type(_ae).__name__}: {_ae})")
         # Safe default FIRST, same as veda/pipeline.py's L7b (the Tier-1 path) —
@@ -4349,11 +4357,16 @@ def _run_nosql(query, source_ids, verbose=False, on_event=None):
             # all work off (cols, rows) alone. Best-effort: never sink the answer.
             if cols and rows:
                 try:
-                    from veda.result_analyzer import analyze_result, analytics_summary
+                    from veda.result_analyzer import analyze_result, analytics_summary, compute_result_completeness
                     _nrd = [r if isinstance(r, dict) else dict(zip(cols, r)) for r in rows]
                     _nctx = analyze_result(query, "", list(cols), _nrd,
                                            connector_type="nosql")
-                    res.analytics = analytics_summary(_nctx)
+                    _nanalytics = analytics_summary(_nctx)
+                    # No SQL LIMIT to read for a document store — compute_result_
+                    # completeness correctly falls back to "not truncated, total known"
+                    # (fetch_limit is None) rather than guessing.
+                    _nanalytics.update(compute_result_completeness("", rows))
+                    res.analytics = _nanalytics
                     if _nctx.patterns:
                         from query.result_explainer import blend_patterns
                         res.answer = blend_patterns(getattr(res, "answer", None) or "",
