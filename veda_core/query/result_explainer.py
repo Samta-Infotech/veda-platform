@@ -705,6 +705,17 @@ def _extract_facts(columns: List[str], rows: List[dict], rank_column: Optional[s
         facts = {"row_count": row_count, "sample_rows": sample}
         if row_count > len(sample):
             facts["note"] = f"showing {len(sample)} of {row_count} rows"
+            # Reinforced RIGHT NEXT TO the data it warns about, not only in a prose NOTE
+            # paragraph appended after the whole JSON — a 7B model reading top-to-bottom
+            # has already seen and tokenized sample_rows by the time a later paragraph
+            # says not to trust it for extremes. Measured 2026-10-01: the same instruction,
+            # present only as a distant NOTE, was still ignored (a mid-sample pair called
+            # "the lowest, tied" when the true minimum — in `metrics` — was a different,
+            # untied value). Redundant with sample_line below on purpose: two independent
+            # reminders, one inline and one in prose, cost nothing and only need one to land.
+            facts["sample_rows_warning"] = (
+                "partial + UNSORTED by value — never read a minimum, maximum, tie or range "
+                "from these rows; use `metrics` for every one of those")
     if truncated:
         # Two key names on purpose, one truth: `truncated`/`fetch_limit` is what the
         # prompt builder reads, `result_truncated`/`rows_shown` is what
@@ -1154,7 +1165,12 @@ def run_nl_answer(
     if not rank_column and _ord_col:
         rank_column = _ord_col
     facts = _extract_facts(columns, rows, rank_column=rank_column,
-                           truncated=truncated or _sql_truncated(sql, len(rows), query),
+                           # The caller's flag (result_analyzer.compute_result_completeness)
+                           # counts a filled SQL LIMIT as truncation without knowing the
+                           # USER chose that LIMIT; _user_asked_for_n_rows is the existing
+                           # exemption _sql_truncated already applies, so apply it here too.
+                           truncated=((truncated and not _user_asked_for_n_rows(query, len(rows)))
+                                      or _sql_truncated(sql, len(rows), query)),
                            fetch_limit=fetch_limit, order_dir=_ord_dir)
     glossary = _column_glossary(columns, table, semantic_model)
     # What the values were ACTUALLY read from — put in front of the model (so it
@@ -1209,7 +1225,11 @@ def run_nl_answer(
         _pats = _kept
     _pats = _pats[:_max_findings]
     findings_line = ("\n\nVerified findings already computed (narrate the decision-relevant "
-                     "ones as insight; do not restate as a bare list): "
+                     "ones as insight; do not restate as a bare list). These are the ONLY "
+                     "highest/lowest/tie/range claims you may make — do not identify your "
+                     "own extreme, minimum, maximum or tie from sample_rows or anywhere else, "
+                     "even if one looks obvious; if the finding you need isn't listed here, "
+                     "don't state it: "
                      + "; ".join(_pats)) if _pats else ""
 
     ctx_line = _analytical_context_block(analytical_context)
@@ -1408,8 +1428,19 @@ def run_nl_answer(
         # Deterministic fallback: blend the findings in ourselves (naturally, not a
         # bolted-on "Analysis:" suffix) since the SLM prose that would have woven
         # them never arrived.
-        answer = template_answer(query, columns, rows) or \
-            deterministic_fallback_answer(query, columns, rows)
+        #
+        # When there IS a verified finding to blend in, lead with a plain row-count
+        # instead of deterministic_fallback_answer's raw "First: col=val, col=val"
+        # field dump — the finding already states the lead fact in natural language
+        # (e.g. "hello has the highest amount at 20,000,000"), so the field dump was
+        # pure redundant noise ahead of it ("Returned 10 row(s). First: amount=
+        # 20000000.000, label=hello, receiver_name= — hello has the highest amount
+        # at 20000000, ..."). Only falls back to the field dump when there is no
+        # finding to lead with, so a bare result still carries SOME content.
+        answer = template_answer(query, columns, rows)
+        if answer is None:
+            answer = (f"Returned {row_count} row(s)." if _pats else
+                      deterministic_fallback_answer(query, columns, rows))
         answer = blend_patterns(answer, _pats)
         # Unconditional (not gated behind verbose=True, which neither pipeline.py's
         # L7b nor veda_hybrid.py's _tier2_finish ever pass) — previously a raw/
